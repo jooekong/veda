@@ -1,0 +1,40 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/veda-types",
+    "crates/veda-core",
+    "crates/veda-store",
+    "crates/veda-pipeline",
+    "crates/veda-sql",
+    "crates/veda-server",
+    "crates/veda-cli",
+]
+exclude = [
+    "crates/veda-fuse",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+
+[workspace.dependencies]
+veda-types = { path = "crates/veda-types" }
+veda-core = { path = "crates/veda-core" }
+veda-store = { path = "crates/veda-store" }
+veda-pipeline = { path = "crates/veda-pipeline" }
+veda-sql = { path = "crates/veda-sql" }
+
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+anyhow = "1"
+tokio = { version = "1", features = ["full"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+uuid = { version = "1", features = ["v4", "serde"] }
+chrono = { version = "0.4", features = ["serde"] }
+async-trait = "0.1"
+sha2 = "0.10"
+reqwest = { version = "0.12", features = ["json"] }
+toml = "0.8"

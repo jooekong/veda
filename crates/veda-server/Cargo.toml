@@ -1,0 +1,33 @@
+[package]
+name = "veda-server"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "veda-server"
+path = "src/main.rs"
+
+[dependencies]
+veda-types.workspace = true
+veda-core.workspace = true
+veda-store.workspace = true
+veda-pipeline.workspace = true
+veda-sql.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+anyhow.workspace = true
+uuid.workspace = true
+chrono.workspace = true
+axum = "0.8"
+tower = "0.5"
+tower-http = { version = "0.6", features = ["cors", "trace"] }
+tokio-util = "0.7"
+jsonwebtoken = "9"
+argon2 = "0.5"
+toml = "0.8"
+metrics = "0.24"
+metrics-exporter-prometheus = "0.16"

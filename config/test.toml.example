@@ -1,0 +1,13 @@
+[mysql]
+database_url = "mysql://user:password@localhost:3306/veda"
+
+[milvus]
+url = "http://localhost:19530"
+token = ""
+db = "default"
+
+[embedding]
+api_url = "https://api.openai.com/v1/embeddings"
+api_key = "sk-xxx"
+model = "text-embedding-3-small"
+dimension = 1024

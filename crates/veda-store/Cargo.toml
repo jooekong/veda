@@ -1,0 +1,30 @@
+[package]
+name = "veda-store"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+veda-types.workspace = true
+veda-core.workspace = true
+async-trait.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+uuid.workspace = true
+chrono.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+anyhow.workspace = true
+reqwest.workspace = true
+sqlx = { version = "0.8", features = ["runtime-tokio-rustls", "mysql", "chrono", "json", "uuid"] }
+
+[dev-dependencies]
+tokio = { workspace = true }
+toml = "0.8"
+veda-core.workspace = true
+veda-types.workspace = true
+uuid.workspace = true
+chrono.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sqlx = { version = "0.8", features = ["runtime-tokio-rustls", "mysql"] }
