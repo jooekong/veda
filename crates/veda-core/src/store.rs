@@ -36,6 +36,11 @@ pub trait MetadataTx: Send {
         file_id: &str,
     ) -> Result<()>;
     async fn delete_dentry(&mut self, workspace_id: &str, path: &str) -> Result<u64>;
+    async fn list_dentries_under(
+        &mut self,
+        workspace_id: &str,
+        path_prefix: &str,
+    ) -> Result<Vec<Dentry>>;
     async fn delete_dentries_under(
         &mut self,
         workspace_id: &str,
@@ -60,6 +65,7 @@ pub trait MetadataTx: Send {
         size_bytes: i64,
         checksum: &str,
         line_count: Option<i32>,
+        storage_type: StorageType,
     ) -> Result<()>;
     async fn decrement_ref_count(&mut self, file_id: &str) -> Result<i32>;
     async fn increment_ref_count(&mut self, file_id: &str) -> Result<()>;

@@ -5,7 +5,7 @@ use veda_types::*;
 use crate::store::{EmbeddingService, MetadataStore, VectorStore};
 
 pub struct SearchService {
-    meta: Arc<dyn MetadataStore>,
+    _meta: Arc<dyn MetadataStore>,
     vector: Arc<dyn VectorStore>,
     embedding: Arc<dyn EmbeddingService>,
 }
@@ -17,7 +17,7 @@ impl SearchService {
         embedding: Arc<dyn EmbeddingService>,
     ) -> Self {
         Self {
-            meta,
+            _meta: meta,
             vector,
             embedding,
         }

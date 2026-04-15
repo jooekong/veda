@@ -149,6 +149,20 @@ impl MetadataTx for MockTx {
         Ok((before - st.dentries.len()) as u64)
     }
 
+    async fn list_dentries_under(
+        &mut self,
+        workspace_id: &str,
+        path_prefix: &str,
+    ) -> Result<Vec<Dentry>> {
+        let st = self.state.lock().unwrap();
+        Ok(st
+            .dentries
+            .iter()
+            .filter(|d| d.workspace_id == workspace_id && d.path.starts_with(&format!("{path_prefix}/")))
+            .cloned()
+            .collect())
+    }
+
     async fn delete_dentries_under(
         &mut self,
         workspace_id: &str,
@@ -201,6 +215,7 @@ impl MetadataTx for MockTx {
         size_bytes: i64,
         checksum: &str,
         line_count: Option<i32>,
+        storage_type: StorageType,
     ) -> Result<()> {
         let mut st = self.state.lock().unwrap();
         if let Some(f) = st.files.iter_mut().find(|f| f.id == file_id) {
@@ -208,6 +223,7 @@ impl MetadataTx for MockTx {
             f.size_bytes = size_bytes;
             f.checksum_sha256 = checksum.to_string();
             f.line_count = line_count;
+            f.storage_type = storage_type;
             f.updated_at = chrono::Utc::now();
         }
         Ok(())
@@ -282,42 +298,3 @@ impl MetadataTx for MockTx {
     }
 }
 
-// ── Mock TaskQueue ─────────────────────────────────────
-
-pub struct MockTaskQueue {
-    pub state: Arc<Mutex<MockState>>,
-}
-
-impl MockTaskQueue {
-    pub fn new(state: Arc<Mutex<MockState>>) -> Self {
-        Self { state }
-    }
-}
-
-#[async_trait]
-impl TaskQueue for MockTaskQueue {
-    async fn enqueue(&self, event: &OutboxEvent) -> Result<()> {
-        let mut st = self.state.lock().unwrap();
-        st.outbox.push(event.clone());
-        Ok(())
-    }
-
-    async fn claim(&self, batch_size: usize) -> Result<Vec<OutboxEvent>> {
-        let st = self.state.lock().unwrap();
-        Ok(st
-            .outbox
-            .iter()
-            .filter(|e| e.status == OutboxStatus::Pending)
-            .take(batch_size)
-            .cloned()
-            .collect())
-    }
-
-    async fn complete(&self, _task_id: i64) -> Result<()> {
-        Ok(())
-    }
-
-    async fn fail(&self, _task_id: i64, _error: &str) -> Result<()> {
-        Ok(())
-    }
-}

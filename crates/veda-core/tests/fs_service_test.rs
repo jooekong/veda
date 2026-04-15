@@ -7,8 +7,7 @@ use veda_types::*;
 fn make_service() -> (FsService, Arc<std::sync::Mutex<mock_store::MockState>>) {
     let store = mock_store::MockMetadataStore::new();
     let state = Arc::clone(&store.state);
-    let tq = mock_store::MockTaskQueue::new(Arc::clone(&state));
-    let svc = FsService::new(Arc::new(store), Arc::new(tq));
+    let svc = FsService::new(Arc::new(store));
     (svc, state)
 }
 
@@ -233,4 +232,56 @@ async fn workspace_isolation() {
 
     let result = svc.read_file("ws2", "/secret.txt").await;
     assert!(matches!(result, Err(VedaError::NotFound(_))));
+}
+
+#[tokio::test]
+async fn delete_dir_cleans_up_child_files() {
+    let (svc, state) = make_service();
+    svc.write_file("ws1", "/docs/a.txt", "aaa").await.unwrap();
+    svc.write_file("ws1", "/docs/b.txt", "bbb").await.unwrap();
+
+    svc.delete("ws1", "/docs").await.unwrap();
+
+    let st = state.lock().unwrap();
+    assert!(st.files.is_empty(), "child files should be cleaned up");
+    assert!(
+        st.file_contents.is_empty(),
+        "child file contents should be cleaned up"
+    );
+    let delete_events: Vec<_> = st
+        .outbox
+        .iter()
+        .filter(|e| e.event_type == OutboxEventType::ChunkDelete)
+        .collect();
+    assert_eq!(
+        delete_events.len(),
+        2,
+        "should emit ChunkDelete for each child file"
+    );
+}
+
+#[tokio::test]
+async fn copy_overwrite_decrements_old_ref_count() {
+    let (svc, state) = make_service();
+    svc.write_file("ws1", "/a.txt", "content_a").await.unwrap();
+    svc.write_file("ws1", "/b.txt", "content_b").await.unwrap();
+
+    let old_file_id = {
+        let st = state.lock().unwrap();
+        st.dentries
+            .iter()
+            .find(|d| d.path == "/b.txt")
+            .unwrap()
+            .file_id
+            .clone()
+            .unwrap()
+    };
+
+    svc.copy_file("ws1", "/a.txt", "/b.txt").await.unwrap();
+
+    let st = state.lock().unwrap();
+    assert!(
+        !st.files.iter().any(|f| f.id == old_file_id),
+        "old file should be cleaned up when ref_count reaches 0"
+    );
 }

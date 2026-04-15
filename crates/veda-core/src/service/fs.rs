@@ -6,19 +6,18 @@ use veda_types::*;
 
 use crate::checksum::sha256_hex;
 use crate::path;
-use crate::store::{MetadataStore, TaskQueue};
+use crate::store::MetadataStore;
 
 const INLINE_THRESHOLD: i64 = 256 * 1024;
 const CHUNK_SIZE: usize = 256 * 1024;
 
 pub struct FsService {
     meta: Arc<dyn MetadataStore>,
-    task_queue: Arc<dyn TaskQueue>,
 }
 
 impl FsService {
-    pub fn new(meta: Arc<dyn MetadataStore>, task_queue: Arc<dyn TaskQueue>) -> Self {
-        Self { meta, task_queue }
+    pub fn new(meta: Arc<dyn MetadataStore>) -> Self {
+        Self { meta }
     }
 
     pub async fn write_file(
@@ -54,11 +53,18 @@ impl FsService {
                     }
 
                     let new_rev = f.revision + 1;
+                    let new_storage_type = if size <= INLINE_THRESHOLD {
+                        StorageType::Inline
+                    } else {
+                        StorageType::Chunked
+                    };
                     tx.delete_file_content(fid).await?;
                     tx.delete_file_chunks(fid).await?;
                     write_content(&mut *tx, fid, content, size).await?;
-                    tx.update_file_revision(fid, new_rev, size, &checksum, line_count)
-                        .await?;
+                    tx.update_file_revision(
+                        fid, new_rev, size, &checksum, line_count, new_storage_type,
+                    )
+                    .await?;
 
                     let outbox = make_outbox(workspace_id, OutboxEventType::ChunkSync, fid);
                     tx.insert_outbox(&outbox).await?;
@@ -179,7 +185,37 @@ impl FsService {
         start: i32,
         end: i32,
     ) -> Result<String> {
-        let content = self.read_file(workspace_id, raw_path).await?;
+        let norm = path::normalize(raw_path)?;
+        let dentry = self
+            .meta
+            .get_dentry(workspace_id, &norm)
+            .await?
+            .ok_or_else(|| VedaError::NotFound(norm.clone()))?;
+        if dentry.is_dir {
+            return Err(VedaError::InvalidPath(format!("{norm} is a directory")));
+        }
+        let file_id = dentry
+            .file_id
+            .as_deref()
+            .ok_or_else(|| VedaError::NotFound(norm.clone()))?;
+        let file = self
+            .meta
+            .get_file(file_id)
+            .await?
+            .ok_or_else(|| VedaError::NotFound(file_id.to_string()))?;
+
+        let content = match file.storage_type {
+            StorageType::Inline => self
+                .meta
+                .get_file_content(file_id)
+                .await?
+                .ok_or_else(|| VedaError::NotFound(format!("content for {file_id}")))?,
+            StorageType::Chunked => {
+                let chunks = self.meta.get_file_chunks(file_id, None, Some(end)).await?;
+                chunks.into_iter().map(|c| c.content).collect::<String>()
+            }
+        };
+
         let lines: Vec<&str> = content.lines().collect();
         let s = (start - 1).max(0) as usize;
         let e = (end as usize).min(lines.len());
@@ -268,19 +304,30 @@ impl FsService {
             .await?
             .ok_or_else(|| VedaError::NotFound(norm.clone()))?;
 
+        let mut file_ids_to_cleanup: Vec<String> = Vec::new();
+
         if dentry.is_dir {
+            let children = tx.list_dentries_under(workspace_id, &norm).await?;
+            for child in &children {
+                if let Some(ref fid) = child.file_id {
+                    file_ids_to_cleanup.push(fid.clone());
+                }
+            }
             tx.delete_dentries_under(workspace_id, &norm).await?;
         }
 
         tx.delete_dentry(workspace_id, &norm).await?;
 
         if let Some(ref fid) = dentry.file_id {
+            file_ids_to_cleanup.push(fid.clone());
+        }
+
+        for fid in &file_ids_to_cleanup {
             let remaining = tx.decrement_ref_count(fid).await?;
             if remaining <= 0 {
                 tx.delete_file_content(fid).await?;
                 tx.delete_file_chunks(fid).await?;
-                let outbox =
-                    make_outbox(workspace_id, OutboxEventType::ChunkDelete, fid);
+                let outbox = make_outbox(workspace_id, OutboxEventType::ChunkDelete, fid);
                 tx.insert_outbox(&outbox).await?;
                 tx.delete_file(fid).await?;
             }
@@ -371,6 +418,19 @@ impl FsService {
                 return Err(VedaError::AlreadyExists(format!(
                     "{dst} is a directory"
                 )));
+            }
+            if let Some(ref old_fid) = d.file_id {
+                if old_fid != file_id {
+                    let remaining = tx.decrement_ref_count(old_fid).await?;
+                    if remaining <= 0 {
+                        tx.delete_file_content(old_fid).await?;
+                        tx.delete_file_chunks(old_fid).await?;
+                        let outbox =
+                            make_outbox(workspace_id, OutboxEventType::ChunkDelete, old_fid);
+                        tx.insert_outbox(&outbox).await?;
+                        tx.delete_file(old_fid).await?;
+                    }
+                }
             }
             tx.update_dentry_file_id(workspace_id, &dst, file_id)
                 .await?;

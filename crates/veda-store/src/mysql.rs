@@ -503,6 +503,25 @@ impl MetadataTx for MysqlMetadataTx {
         Ok(r.rows_affected())
     }
 
+    async fn list_dentries_under(&mut self, workspace_id: &str, path_prefix: &str) -> Result<Vec<Dentry>> {
+        let t = self.tx_mut()?;
+        let like = format!("{path_prefix}/%");
+        let rows = sqlx::query(
+            r#"SELECT id, workspace_id, parent_path, name, path, file_id, is_dir, created_at, updated_at
+               FROM veda_dentries WHERE workspace_id = ? AND path LIKE ?"#,
+        )
+        .bind(workspace_id)
+        .bind(&like)
+        .fetch_all(t.as_mut())
+        .await
+        .map_err(storage_err)?;
+        let mut out = Vec::with_capacity(rows.len());
+        for r in &rows {
+            out.push(row_to_dentry(r)?);
+        }
+        Ok(out)
+    }
+
     async fn delete_dentries_under(&mut self, workspace_id: &str, parent_path: &str) -> Result<u64> {
         let t = self.tx_mut()?;
         let r = if parent_path == "/" {
@@ -586,16 +605,18 @@ impl MetadataTx for MysqlMetadataTx {
         size_bytes: i64,
         checksum: &str,
         line_count: Option<i32>,
+        storage_type: StorageType,
     ) -> Result<()> {
         let t = self.tx_mut()?;
         sqlx::query(
-            r#"UPDATE veda_files SET revision = ?, size_bytes = ?, checksum_sha256 = ?, line_count = ?
+            r#"UPDATE veda_files SET revision = ?, size_bytes = ?, checksum_sha256 = ?, line_count = ?, storage_type = ?
                WHERE id = ?"#,
         )
         .bind(revision)
         .bind(size_bytes)
         .bind(checksum)
         .bind(line_count)
+        .bind(storage_type_str(storage_type))
         .bind(file_id)
         .execute(t.as_mut())
         .await
@@ -631,16 +652,6 @@ impl MetadataTx for MysqlMetadataTx {
 
     async fn delete_file(&mut self, file_id: &str) -> Result<()> {
         let t = self.tx_mut()?;
-        sqlx::query(r#"DELETE FROM veda_file_chunks WHERE file_id = ?"#)
-            .bind(file_id)
-            .execute(t.as_mut())
-            .await
-            .map_err(storage_err)?;
-        sqlx::query(r#"DELETE FROM veda_file_contents WHERE file_id = ?"#)
-            .bind(file_id)
-            .execute(t.as_mut())
-            .await
-            .map_err(storage_err)?;
         sqlx::query(r#"DELETE FROM veda_files WHERE id = ?"#)
             .bind(file_id)
             .execute(t.as_mut())
