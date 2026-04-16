@@ -1,0 +1,149 @@
+use axum::extract::FromRequestParts;
+use axum::http::request::Parts;
+use axum::http::StatusCode;
+use axum::response::{IntoResponse, Response};
+use axum::Json;
+use chrono::{Duration, Utc};
+use jsonwebtoken::{DecodingKey, EncodingKey, Header, Validation, decode, encode};
+use serde::{Deserialize, Serialize};
+use std::sync::Arc;
+use veda_types::ApiResponse;
+
+use crate::state::AppState;
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct JwtClaims {
+    pub sub: String,
+    pub workspace_id: String,
+    pub account_id: String,
+    pub exp: i64,
+}
+
+pub fn create_jwt(
+    secret: &str,
+    workspace_id: &str,
+    account_id: &str,
+    ttl_hours: i64,
+) -> anyhow::Result<(String, chrono::DateTime<Utc>)> {
+    let expires_at = Utc::now() + Duration::hours(ttl_hours);
+    let claims = JwtClaims {
+        sub: workspace_id.to_string(),
+        workspace_id: workspace_id.to_string(),
+        account_id: account_id.to_string(),
+        exp: expires_at.timestamp(),
+    };
+    let token = encode(
+        &Header::default(),
+        &claims,
+        &EncodingKey::from_secret(secret.as_bytes()),
+    )?;
+    Ok((token, expires_at))
+}
+
+pub fn verify_jwt(secret: &str, token: &str) -> Option<JwtClaims> {
+    decode::<JwtClaims>(
+        token,
+        &DecodingKey::from_secret(secret.as_bytes()),
+        &Validation::default(),
+    )
+    .ok()
+    .map(|d| d.claims)
+}
+
+pub struct AuthAccount {
+    pub account_id: String,
+}
+
+impl FromRequestParts<Arc<AppState>> for AuthAccount {
+    type Rejection = Response;
+
+    fn from_request_parts(
+        parts: &mut Parts,
+        state: &Arc<AppState>,
+    ) -> impl std::future::Future<Output = Result<Self, Self::Rejection>> + Send {
+        let state = state.clone();
+        let auth_header = parts
+            .headers
+            .get("authorization")
+            .and_then(|v| v.to_str().ok())
+            .map(|s| s.to_string());
+        async move {
+            let token = auth_header
+                .as_deref()
+                .and_then(|s| s.strip_prefix("Bearer "))
+                .ok_or_else(auth_err)?;
+
+            let key_hash = veda_core::checksum::sha256_hex(token.as_bytes());
+            let key = state
+                .auth_store
+                .get_api_key_by_hash(&key_hash)
+                .await
+                .map_err(|_| auth_err())?
+                .ok_or_else(auth_err)?;
+
+            Ok(AuthAccount {
+                account_id: key.account_id,
+            })
+        }
+    }
+}
+
+pub struct AuthWorkspace {
+    pub workspace_id: String,
+    pub _account_id: String,
+    pub read_only: bool,
+}
+
+impl FromRequestParts<Arc<AppState>> for AuthWorkspace {
+    type Rejection = Response;
+
+    fn from_request_parts(
+        parts: &mut Parts,
+        state: &Arc<AppState>,
+    ) -> impl std::future::Future<Output = Result<Self, Self::Rejection>> + Send {
+        let state = state.clone();
+        let auth_header = parts
+            .headers
+            .get("authorization")
+            .and_then(|v| v.to_str().ok())
+            .map(|s| s.to_string());
+        async move {
+            let token = auth_header
+                .as_deref()
+                .and_then(|s| s.strip_prefix("Bearer "))
+                .ok_or_else(auth_err)?;
+
+            if let Some(claims) = verify_jwt(&state.jwt_secret, token) {
+                return Ok(AuthWorkspace {
+                    workspace_id: claims.workspace_id,
+                    _account_id: claims.account_id,
+                    read_only: false,
+                });
+            }
+
+            let key_hash = veda_core::checksum::sha256_hex(token.as_bytes());
+            if let Some(wk) = state
+                .auth_store
+                .get_workspace_key_by_hash(&key_hash)
+                .await
+                .map_err(|_| auth_err())?
+            {
+                return Ok(AuthWorkspace {
+                    workspace_id: wk.workspace_id,
+                    _account_id: String::new(),
+                    read_only: wk.permission == veda_types::KeyPermission::Read,
+                });
+            }
+
+            Err(auth_err())
+        }
+    }
+}
+
+fn auth_err() -> Response {
+    (
+        StatusCode::UNAUTHORIZED,
+        Json(ApiResponse::<()>::err("unauthorized")),
+    )
+        .into_response()
+}

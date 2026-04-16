@@ -3,10 +3,10 @@
 use async_trait::async_trait;
 use reqwest::header::{AUTHORIZATION, CONTENT_TYPE, HeaderMap, HeaderValue};
 use serde_json::{json, Value};
-use veda_core::store::VectorStore;
+use veda_core::store::{CollectionVectorStore, VectorStore};
 use veda_types::{
-    ChunkWithEmbedding, HybridSearchRequest, Result, SearchHit, SearchMode, SearchRequest,
-    VedaError,
+    ChunkWithEmbedding, FieldDefinition, HybridSearchRequest, Result, SearchHit, SearchMode,
+    SearchRequest, VedaError,
 };
 
 const COLLECTION: &str = "veda_chunks";
@@ -473,5 +473,164 @@ impl VectorStore for MilvusStore {
         )
         .await?;
         Ok(())
+    }
+}
+
+// ── CollectionVectorStore ──────────────────────────────
+
+fn field_to_milvus_type(ft: &str) -> &str {
+    match ft {
+        "int" | "int32" | "integer" => "Int32",
+        "int64" | "bigint" | "long" => "Int64",
+        "float" | "float32" => "Float",
+        "float64" | "double" => "Double",
+        "bool" | "boolean" => "Bool",
+        _ => "VarChar",
+    }
+}
+
+#[async_trait]
+impl CollectionVectorStore for MilvusStore {
+    async fn create_dynamic_collection(
+        &self,
+        name: &str,
+        fields: &[FieldDefinition],
+        embedding_dim: u32,
+    ) -> Result<()> {
+        let mut schema_fields = vec![
+            json!({
+                "fieldName": "id",
+                "dataType": "VarChar",
+                "isPrimary": true,
+                "elementTypeParams": { "max_length": 64 }
+            }),
+            json!({
+                "fieldName": "workspace_id",
+                "dataType": "VarChar",
+                "elementTypeParams": { "max_length": 64 }
+            }),
+        ];
+
+        for f in fields {
+            let dt = field_to_milvus_type(&f.field_type);
+            let mut field = json!({
+                "fieldName": f.name,
+                "dataType": dt,
+            });
+            if dt == "VarChar" {
+                field["elementTypeParams"] = json!({ "max_length": 65535 });
+            }
+            schema_fields.push(field);
+        }
+
+        schema_fields.push(json!({
+            "fieldName": "vector",
+            "dataType": "FloatVector",
+            "elementTypeParams": { "dim": embedding_dim as i64 }
+        }));
+
+        let body = json!({
+            "collectionName": name,
+            "schema": {
+                "enableDynamicField": false,
+                "fields": schema_fields,
+            }
+        });
+        self.post_v2("/v2/vectordb/collections/create", body).await?;
+
+        let idx = json!({
+            "collectionName": name,
+            "indexParams": [{
+                "index_type": "AUTOINDEX",
+                "metricType": "COSINE",
+                "fieldName": "vector",
+                "indexName": "vector"
+            }]
+        });
+        match self.post_v2("/v2/vectordb/indexes/create", idx).await {
+            Ok(_) => {}
+            Err(e) => {
+                let m = e.to_string();
+                if !m.contains("same index name")
+                    && !m.contains("IndexAlreadyExists")
+                    && !m.contains("index already exist")
+                {
+                    return Err(e);
+                }
+            }
+        }
+
+        self.post_v2(
+            "/v2/vectordb/collections/load",
+            json!({ "collectionName": name }),
+        )
+        .await?;
+        Ok(())
+    }
+
+    async fn drop_dynamic_collection(&self, name: &str) -> Result<()> {
+        self.post_v2(
+            "/v2/vectordb/collections/drop",
+            json!({ "collectionName": name }),
+        )
+        .await?;
+        Ok(())
+    }
+
+    async fn insert_collection_rows(
+        &self,
+        collection_name: &str,
+        workspace_id: &str,
+        rows: &[serde_json::Value],
+    ) -> Result<()> {
+        if rows.is_empty() {
+            return Ok(());
+        }
+        let data: Vec<Value> = rows
+            .iter()
+            .map(|r| {
+                let mut row = r.clone();
+                if let Some(obj) = row.as_object_mut() {
+                    obj.entry("workspace_id")
+                        .or_insert_with(|| Value::String(workspace_id.to_string()));
+                }
+                row
+            })
+            .collect();
+        let body = json!({
+            "collectionName": collection_name,
+            "data": data
+        });
+        self.post_v2("/v2/vectordb/entities/insert", body).await?;
+        let _ = self
+            .post_v2(
+                "/v2/vectordb/collections/flush",
+                json!({ "collectionName": collection_name }),
+            )
+            .await;
+        Ok(())
+    }
+
+    async fn search_collection(
+        &self,
+        collection_name: &str,
+        workspace_id: &str,
+        vector: &[f32],
+        limit: usize,
+    ) -> Result<Vec<serde_json::Value>> {
+        let ws = milvus_quote(workspace_id);
+        let filter = format!("workspace_id == {ws}");
+        let lim = limit.min(16_383).max(1);
+        let body = json!({
+            "collectionName": collection_name,
+            "data": [vector],
+            "annsField": "vector",
+            "filter": filter,
+            "limit": lim,
+            "outputFields": ["*"],
+            "searchParams": { "metricType": "COSINE" }
+        });
+        let v = self.post_v2("/v2/vectordb/entities/search", body).await?;
+        Ok(flatten_entity_rows(v.get("data")))
     }
 }

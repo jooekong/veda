@@ -216,8 +216,13 @@ impl FsService {
             }
         };
 
+        if start < 1 || end < start {
+            return Err(VedaError::InvalidInput(format!(
+                "invalid line range {start}..{end}"
+            )));
+        }
         let lines: Vec<&str> = content.lines().collect();
-        let s = (start - 1).max(0) as usize;
+        let s = (start - 1) as usize;
         let e = (end as usize).min(lines.len());
         if s >= lines.len() {
             return Ok(String::new());
@@ -389,6 +394,12 @@ impl FsService {
         let src = path::normalize(src_path)?;
         let dst = path::normalize(dst_path)?;
 
+        if src == dst {
+            return Err(VedaError::InvalidInput(
+                "source and destination are the same".to_string(),
+            ));
+        }
+
         let src_dentry = self
             .meta
             .get_dentry(workspace_id, &src)
@@ -494,6 +505,19 @@ impl FsService {
             return Err(VedaError::AlreadyExists(dst));
         }
 
+        if src_dentry.is_dir && dst.starts_with(&format!("{src}/")) {
+            tx.rollback().await?;
+            return Err(VedaError::InvalidInput(
+                "cannot move a directory into itself".to_string(),
+            ));
+        }
+
+        let children = if src_dentry.is_dir {
+            tx.list_dentries_under(workspace_id, &src).await?
+        } else {
+            Vec::new()
+        };
+
         ensure_parents(&mut *tx, workspace_id, &dst).await?;
 
         tx.rename_dentry(
@@ -504,6 +528,19 @@ impl FsService {
             path::filename(&dst),
         )
         .await?;
+
+        for child in &children {
+            let new_child_path = format!("{dst}{}", &child.path[src.len()..]);
+            let new_parent = path::parent(&new_child_path).to_string();
+            tx.rename_dentry(
+                workspace_id,
+                &child.path,
+                &new_child_path,
+                &new_parent,
+                &child.name,
+            )
+            .await?;
+        }
 
         let evt = make_fs_event(
             workspace_id,

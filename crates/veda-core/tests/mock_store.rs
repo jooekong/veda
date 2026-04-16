@@ -94,6 +94,19 @@ impl MetadataStore for MockMetadataStore {
             .cloned())
     }
 
+    async fn get_dentry_path_by_file_id(
+        &self,
+        workspace_id: &str,
+        file_id: &str,
+    ) -> Result<Option<String>> {
+        let st = self.state.lock().unwrap();
+        Ok(st
+            .dentries
+            .iter()
+            .find(|d| d.workspace_id == workspace_id && d.file_id.as_deref() == Some(file_id))
+            .map(|d| d.path.clone()))
+    }
+
     async fn begin_tx(&self) -> Result<Box<dyn MetadataTx>> {
         Ok(Box::new(MockTx {
             state: Arc::clone(&self.state),

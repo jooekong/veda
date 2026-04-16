@@ -21,6 +21,11 @@ pub trait MetadataStore: Send + Sync {
         workspace_id: &str,
         checksum: &str,
     ) -> Result<Option<FileRecord>>;
+    async fn get_dentry_path_by_file_id(
+        &self,
+        workspace_id: &str,
+        file_id: &str,
+    ) -> Result<Option<String>>;
     async fn begin_tx(&self) -> Result<Box<dyn MetadataTx>>;
 }
 
@@ -107,6 +112,75 @@ pub trait TaskQueue: Send + Sync {
     async fn claim(&self, batch_size: usize) -> Result<Vec<OutboxEvent>>;
     async fn complete(&self, task_id: i64) -> Result<()>;
     async fn fail(&self, task_id: i64, error: &str) -> Result<()>;
+}
+
+// ── Collection Meta Store ──────────────────────────────
+
+#[async_trait]
+pub trait CollectionMetaStore: Send + Sync {
+    async fn create_collection_schema(&self, schema: &CollectionSchema) -> Result<()>;
+    async fn get_collection_schema(
+        &self,
+        workspace_id: &str,
+        name: &str,
+    ) -> Result<Option<CollectionSchema>>;
+    async fn get_collection_schema_by_id(&self, id: &str) -> Result<Option<CollectionSchema>>;
+    async fn list_collection_schemas(&self, workspace_id: &str) -> Result<Vec<CollectionSchema>>;
+    async fn delete_collection_schema(&self, id: &str) -> Result<()>;
+}
+
+// ── Collection Vector Store ────────────────────────────
+
+#[async_trait]
+pub trait CollectionVectorStore: Send + Sync {
+    async fn create_dynamic_collection(
+        &self,
+        name: &str,
+        fields: &[FieldDefinition],
+        embedding_dim: u32,
+    ) -> Result<()>;
+    async fn drop_dynamic_collection(&self, name: &str) -> Result<()>;
+    async fn insert_collection_rows(
+        &self,
+        collection_name: &str,
+        workspace_id: &str,
+        rows: &[serde_json::Value],
+    ) -> Result<()>;
+    async fn search_collection(
+        &self,
+        collection_name: &str,
+        workspace_id: &str,
+        vector: &[f32],
+        limit: usize,
+    ) -> Result<Vec<serde_json::Value>>;
+}
+
+// ── Auth Store ─────────────────────────────────────────
+
+#[async_trait]
+pub trait AuthStore: Send + Sync {
+    // account
+    async fn create_account(&self, account: &Account) -> Result<()>;
+    async fn get_account(&self, id: &str) -> Result<Option<Account>>;
+    async fn get_account_by_email(&self, email: &str) -> Result<Option<Account>>;
+
+    // api key
+    async fn create_api_key(&self, key: &ApiKeyRecord) -> Result<()>;
+    async fn get_api_key_by_hash(&self, key_hash: &str) -> Result<Option<ApiKeyRecord>>;
+    async fn list_api_keys(&self, account_id: &str) -> Result<Vec<ApiKeyRecord>>;
+    async fn revoke_api_key(&self, id: &str) -> Result<()>;
+
+    // workspace
+    async fn create_workspace(&self, workspace: &Workspace) -> Result<()>;
+    async fn get_workspace(&self, id: &str) -> Result<Option<Workspace>>;
+    async fn list_workspaces(&self, account_id: &str) -> Result<Vec<Workspace>>;
+    async fn delete_workspace(&self, id: &str) -> Result<()>;
+
+    // workspace key
+    async fn create_workspace_key(&self, key: &WorkspaceKey) -> Result<()>;
+    async fn get_workspace_key_by_hash(&self, key_hash: &str) -> Result<Option<WorkspaceKey>>;
+    async fn list_workspace_keys(&self, workspace_id: &str) -> Result<Vec<WorkspaceKey>>;
+    async fn revoke_workspace_key(&self, id: &str) -> Result<()>;
 }
 
 // ── Embedding Service ──────────────────────────────────

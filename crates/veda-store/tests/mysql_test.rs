@@ -5,11 +5,12 @@ use std::path::PathBuf;
 use chrono::Utc;
 use serde::Deserialize;
 use uuid::Uuid;
-use veda_core::store::{MetadataStore, TaskQueue};
+use veda_core::store::{AuthStore, CollectionMetaStore, MetadataStore, TaskQueue};
 use veda_store::MysqlStore;
 use veda_types::{
-    Dentry, FileChunk, FileRecord, OutboxEvent, OutboxEventType, OutboxStatus, SourceType,
-    StorageType,
+    Account, AccountStatus, ApiKeyRecord, CollectionSchema, CollectionStatus, CollectionType,
+    Dentry, FileChunk, FileRecord, KeyPermission, KeyStatus, OutboxEvent, OutboxEventType,
+    OutboxStatus, SourceType, StorageType, Workspace, WorkspaceKey, WorkspaceStatus,
 };
 
 #[derive(Debug, Deserialize)]
@@ -70,6 +71,26 @@ async fn cleanup_workspace(store: &MysqlStore, workspace_id: &str) {
         .await;
     let _ = sqlx::query(r#"DELETE FROM veda_fs_events WHERE workspace_id = ?"#)
         .bind(workspace_id)
+        .execute(pool)
+        .await;
+}
+
+async fn cleanup_account(store: &MysqlStore, account_id: &str) {
+    let pool = store.pool();
+    let _ = sqlx::query(r#"DELETE FROM veda_workspace_keys WHERE workspace_id IN (SELECT id FROM veda_workspaces WHERE account_id = ?)"#)
+        .bind(account_id)
+        .execute(pool)
+        .await;
+    let _ = sqlx::query(r#"DELETE FROM veda_workspaces WHERE account_id = ?"#)
+        .bind(account_id)
+        .execute(pool)
+        .await;
+    let _ = sqlx::query(r#"DELETE FROM veda_api_keys WHERE account_id = ?"#)
+        .bind(account_id)
+        .execute(pool)
+        .await;
+    let _ = sqlx::query(r#"DELETE FROM veda_accounts WHERE id = ?"#)
+        .bind(account_id)
         .execute(pool)
         .await;
 }
@@ -180,6 +201,16 @@ async fn mysql_task_queue_enqueue_claim_complete() {
     let store = MysqlStore::new(&url).await.expect("connect");
     store.migrate().await.expect("migrate");
     let ws = Uuid::new_v4().to_string();
+    // drain stale pending entries from previous test runs
+    loop {
+        let batch = store.claim(100).await.expect("drain");
+        if batch.is_empty() {
+            break;
+        }
+        for e in &batch {
+            let _ = store.complete(e.id).await;
+        }
+    }
     let ev = OutboxEvent {
         id: 0,
         workspace_id: ws.clone(),
@@ -242,4 +273,269 @@ async fn mysql_checksum_lookup_and_delete_file() {
     Box::new(tx).commit().await.unwrap();
     assert!(store.get_file(&fid).await.unwrap().is_none());
     cleanup_workspace(&store, &ws).await;
+}
+
+// ── Auth CRUD tests ────────────────────────────────────
+
+#[tokio::test]
+#[ignore]
+async fn mysql_account_crud() {
+    let url = load_mysql_url();
+    let store = MysqlStore::new(&url).await.expect("connect");
+    store.migrate().await.expect("migrate");
+
+    let acct_id = Uuid::new_v4().to_string();
+    let now = Utc::now();
+    let acct = Account {
+        id: acct_id.clone(),
+        name: "test-user".into(),
+        email: Some(format!("{}@test.com", &acct_id[..8])),
+        password_hash: Some("argon2hash".into()),
+        status: AccountStatus::Active,
+        created_at: now,
+        updated_at: now,
+    };
+    store.create_account(&acct).await.unwrap();
+
+    let got = store.get_account(&acct_id).await.unwrap().unwrap();
+    assert_eq!(got.name, "test-user");
+    assert_eq!(got.status, AccountStatus::Active);
+
+    let by_email = store
+        .get_account_by_email(acct.email.as_deref().unwrap())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(by_email.id, acct_id);
+
+    let missing = store
+        .get_account_by_email("nonexistent@x.com")
+        .await
+        .unwrap();
+    assert!(missing.is_none());
+
+    cleanup_account(&store, &acct_id).await;
+}
+
+#[tokio::test]
+#[ignore]
+async fn mysql_api_key_crud() {
+    let url = load_mysql_url();
+    let store = MysqlStore::new(&url).await.expect("connect");
+    store.migrate().await.expect("migrate");
+
+    let acct_id = Uuid::new_v4().to_string();
+    let now = Utc::now();
+    store
+        .create_account(&Account {
+            id: acct_id.clone(),
+            name: "key-test".into(),
+            email: Some(format!("{}@test.com", &acct_id[..8])),
+            password_hash: None,
+            status: AccountStatus::Active,
+            created_at: now,
+            updated_at: now,
+        })
+        .await
+        .unwrap();
+
+    let key_id = Uuid::new_v4().to_string();
+    let key_hash = "sha256_of_key_abc123";
+    let ak = ApiKeyRecord {
+        id: key_id.clone(),
+        account_id: acct_id.clone(),
+        name: "default".into(),
+        key_hash: key_hash.into(),
+        status: KeyStatus::Active,
+        created_at: now,
+    };
+    store.create_api_key(&ak).await.unwrap();
+
+    let got = store.get_api_key_by_hash(key_hash).await.unwrap().unwrap();
+    assert_eq!(got.id, key_id);
+    assert_eq!(got.account_id, acct_id);
+
+    let keys = store.list_api_keys(&acct_id).await.unwrap();
+    assert_eq!(keys.len(), 1);
+
+    store.revoke_api_key(&key_id).await.unwrap();
+    let revoked = store.get_api_key_by_hash(key_hash).await.unwrap();
+    assert!(revoked.is_none(), "revoked key should not be found");
+
+    cleanup_account(&store, &acct_id).await;
+}
+
+#[tokio::test]
+#[ignore]
+async fn mysql_workspace_crud() {
+    let url = load_mysql_url();
+    let store = MysqlStore::new(&url).await.expect("connect");
+    store.migrate().await.expect("migrate");
+
+    let acct_id = Uuid::new_v4().to_string();
+    let now = Utc::now();
+    store
+        .create_account(&Account {
+            id: acct_id.clone(),
+            name: "ws-test".into(),
+            email: Some(format!("{}@test.com", &acct_id[..8])),
+            password_hash: None,
+            status: AccountStatus::Active,
+            created_at: now,
+            updated_at: now,
+        })
+        .await
+        .unwrap();
+
+    let ws_id = Uuid::new_v4().to_string();
+    let ws = Workspace {
+        id: ws_id.clone(),
+        account_id: acct_id.clone(),
+        name: "my-project".into(),
+        status: WorkspaceStatus::Active,
+        created_at: now,
+        updated_at: now,
+    };
+    store.create_workspace(&ws).await.unwrap();
+
+    let got = store.get_workspace(&ws_id).await.unwrap().unwrap();
+    assert_eq!(got.name, "my-project");
+
+    let list = store.list_workspaces(&acct_id).await.unwrap();
+    assert_eq!(list.len(), 1);
+
+    store.delete_workspace(&ws_id).await.unwrap();
+    let archived = store.get_workspace(&ws_id).await.unwrap().unwrap();
+    assert_eq!(archived.status, WorkspaceStatus::Archived);
+
+    let list_after = store.list_workspaces(&acct_id).await.unwrap();
+    assert!(list_after.is_empty(), "archived workspace not in active list");
+
+    cleanup_account(&store, &acct_id).await;
+}
+
+#[tokio::test]
+#[ignore]
+async fn mysql_workspace_key_crud() {
+    let url = load_mysql_url();
+    let store = MysqlStore::new(&url).await.expect("connect");
+    store.migrate().await.expect("migrate");
+
+    let acct_id = Uuid::new_v4().to_string();
+    let ws_id = Uuid::new_v4().to_string();
+    let now = Utc::now();
+    store
+        .create_account(&Account {
+            id: acct_id.clone(),
+            name: "wk-test".into(),
+            email: Some(format!("{}@test.com", &acct_id[..8])),
+            password_hash: None,
+            status: AccountStatus::Active,
+            created_at: now,
+            updated_at: now,
+        })
+        .await
+        .unwrap();
+    store
+        .create_workspace(&Workspace {
+            id: ws_id.clone(),
+            account_id: acct_id.clone(),
+            name: "ws-for-keys".into(),
+            status: WorkspaceStatus::Active,
+            created_at: now,
+            updated_at: now,
+        })
+        .await
+        .unwrap();
+
+    let wk_id = Uuid::new_v4().to_string();
+    let wk_hash = "sha256_of_workspace_key_xyz";
+    let wk = WorkspaceKey {
+        id: wk_id.clone(),
+        workspace_id: ws_id.clone(),
+        name: "ci-key".into(),
+        key_hash: wk_hash.into(),
+        permission: KeyPermission::ReadWrite,
+        status: KeyStatus::Active,
+        created_at: now,
+    };
+    store.create_workspace_key(&wk).await.unwrap();
+
+    let got = store
+        .get_workspace_key_by_hash(wk_hash)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(got.id, wk_id);
+    assert_eq!(got.permission, KeyPermission::ReadWrite);
+
+    let keys = store.list_workspace_keys(&ws_id).await.unwrap();
+    assert_eq!(keys.len(), 1);
+
+    store.revoke_workspace_key(&wk_id).await.unwrap();
+    let revoked = store.get_workspace_key_by_hash(wk_hash).await.unwrap();
+    assert!(revoked.is_none());
+
+    cleanup_account(&store, &acct_id).await;
+}
+
+// ── Collection Schema tests ────────────────────────────
+
+#[tokio::test]
+#[ignore]
+async fn mysql_collection_schema_crud() {
+    let url = load_mysql_url();
+    let store = MysqlStore::new(&url).await.expect("connect");
+    store.migrate().await.expect("migrate");
+
+    let ws_id = Uuid::new_v4().to_string();
+    let coll_id = Uuid::new_v4().to_string();
+    let now = Utc::now();
+
+    let schema = CollectionSchema {
+        id: coll_id.clone(),
+        workspace_id: ws_id.clone(),
+        name: "articles".into(),
+        collection_type: CollectionType::Structured,
+        schema_json: serde_json::json!([
+            {"name": "title", "field_type": "string", "index": true, "embed": false},
+            {"name": "content", "field_type": "string", "index": false, "embed": true}
+        ]),
+        embedding_source: Some("content".into()),
+        embedding_dim: Some(1024),
+        status: CollectionStatus::Active,
+        created_at: now,
+        updated_at: now,
+    };
+    store.create_collection_schema(&schema).await.unwrap();
+
+    let got = store
+        .get_collection_schema(&ws_id, "articles")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(got.name, "articles");
+    assert_eq!(got.collection_type, CollectionType::Structured);
+    assert_eq!(got.embedding_source.as_deref(), Some("content"));
+
+    let by_id = store
+        .get_collection_schema_by_id(&coll_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(by_id.name, "articles");
+
+    let list = store.list_collection_schemas(&ws_id).await.unwrap();
+    assert_eq!(list.len(), 1);
+
+    store.delete_collection_schema(&coll_id).await.unwrap();
+    let deleted = store.get_collection_schema(&ws_id, "articles").await.unwrap();
+    assert!(deleted.is_none());
+
+    // cleanup
+    let pool = store.pool();
+    let _ = sqlx::query(r#"DELETE FROM veda_collection_schemas WHERE workspace_id = ?"#)
+        .bind(&ws_id)
+        .execute(pool)
+        .await;
 }

@@ -23,7 +23,7 @@
 - [x] `veda-core`: EmbeddingService trait
 - [x] `veda-core`: FsService 业务逻辑（write/read/list/delete/copy/rename/mkdir）
 - [x] `veda-core`: SearchService 业务逻辑
-- [ ] `veda-core`: CollectionService 业务逻辑
+- [x] `veda-core`: CollectionService 业务逻辑
 - [x] `veda-core`: path normalization + validation
 - [x] `veda-core`: SHA256 checksum utility
 - [x] 单元测试：用 mock trait 测试 FsService（去重、COW、分层存储）
@@ -38,10 +38,10 @@
 - [x] `veda-store/mysql`: MetadataStore 实现
 - [x] `veda-store/mysql`: MetadataTx 实现
 - [x] `veda-store/mysql`: TaskQueue 实现
-- [ ] `veda-store/mysql`: Account/Workspace/Key CRUD
+- [x] `veda-store/mysql`: Account/Workspace/Key CRUD
 - [x] `veda-store/milvus`: Milvus REST v2 client
 - [x] `veda-store/milvus`: VectorStore 实现
-- [ ] `veda-store/milvus`: Collection 动态 schema 管理
+- [x] `veda-store/milvus`: Collection 动态 schema 管理
 - [x] 集成测试：真实 MySQL + Milvus（config/test.toml 驱动）
 
 ---
@@ -60,50 +60,49 @@
 
 ---
 
-## Phase 4: HTTP 层（veda-server）
+## Phase 4: HTTP 层（veda-server）✅
 
 > 目标：Axum 路由、认证中间件、WebSocket。
 
-- [ ] Config 加载（TOML + env override）
-- [ ] JWT 签发 / 验证中间件
-- [ ] API Key / Workspace Key 验证中间件
-- [ ] Account routes（注册、登录）
-- [ ] Workspace routes（CRUD、key 管理、token 换取）
-- [ ] File routes（PUT/GET/HEAD/DELETE/COPY/RENAME）
-- [ ] Search route
-- [ ] Collection routes（CRUD、insert、search）
-- [ ] SQL route
+- [x] Config 加载（TOML + env override）
+- [x] JWT 签发 / 验证中间件
+- [x] API Key / Workspace Key 验证中间件
+- [x] Account routes（注册、登录）
+- [x] Workspace routes（CRUD、key 管理、token 换取）
+- [x] File routes（PUT/GET/HEAD/DELETE/COPY/RENAME）
+- [x] Search route
+- [x] Collection routes（CRUD、insert、search）
+- [x] SQL route
 - [ ] WebSocket events endpoint
-- [ ] Worker 启动 + graceful shutdown
+- [x] Worker 启动 + graceful shutdown
 - [ ] Reconciler
 - [ ] Prometheus metrics
 
 ---
 
-## Phase 5: SQL 引擎（veda-sql）
+## Phase 5: SQL 引擎（veda-sql）✅
 
 > 目标：DataFusion 集成，支持 SQL 查询文件和 collection。
 
-- [ ] DataFusion session 管理
-- [ ] File table provider（从 MySQL 加载）
-- [ ] Collection table provider（从 Milvus 加载）
+- [x] DataFusion session 管理
+- [x] File table provider（从 MySQL 加载）
+- [x] Collection table provider（从 Milvus 加载）
 - [ ] `embedding()` UDF
 - [ ] `search()` UDTF
 
 ---
 
-## Phase 6: CLI（veda-cli）
+## Phase 6: CLI（veda-cli）✅
 
 > 目标：完整的命令行客户端。
 
-- [ ] account create / login
-- [ ] workspace create / list / use
-- [ ] cp / cat / ls / mv / rm / mkdir
-- [ ] search
-- [ ] collection create / insert / search
-- [ ] sql
-- [ ] config show / set
-- [ ] status
+- [x] account create / login
+- [x] workspace create / list / use
+- [x] cp / cat / ls / mv / rm / mkdir
+- [x] search
+- [x] collection create / insert / search
+- [x] sql
+- [x] config show / set
 
 ---
 

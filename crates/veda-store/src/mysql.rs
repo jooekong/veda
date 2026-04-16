@@ -3,10 +3,12 @@
 use async_trait::async_trait;
 use sqlx::{MySqlPool, Row, Transaction};
 use sqlx::types::Json;
-use veda_core::store::{MetadataStore, MetadataTx, TaskQueue};
+use veda_core::store::{AuthStore, CollectionMetaStore, MetadataStore, MetadataTx, TaskQueue};
 use veda_types::{
-    Dentry, FileChunk, FileRecord, FsEvent, FsEventType, OutboxEvent, OutboxEventType,
-    OutboxStatus, Result, SourceType, StorageType, VedaError,
+    Account, AccountStatus, ApiKeyRecord, CollectionSchema, CollectionStatus, CollectionType,
+    Dentry, FileChunk, FileRecord, FsEvent, FsEventType, KeyPermission, KeyStatus, OutboxEvent,
+    OutboxEventType, OutboxStatus, Result, SourceType, StorageType, VedaError, Workspace,
+    WorkspaceKey, WorkspaceStatus,
 };
 
 fn storage_err(e: impl ToString) -> VedaError {
@@ -90,6 +92,166 @@ fn fs_event_type_str(t: FsEventType) -> &'static str {
         FsEventType::Delete => "delete",
         FsEventType::Move => "move",
     }
+}
+
+fn parse_account_status(s: &str) -> Result<AccountStatus> {
+    match s {
+        "active" => Ok(AccountStatus::Active),
+        "suspended" => Ok(AccountStatus::Suspended),
+        _ => Err(storage_err(format!("unknown account_status: {s}"))),
+    }
+}
+
+fn account_status_str(s: AccountStatus) -> &'static str {
+    match s {
+        AccountStatus::Active => "active",
+        AccountStatus::Suspended => "suspended",
+    }
+}
+
+fn parse_workspace_status(s: &str) -> Result<WorkspaceStatus> {
+    match s {
+        "active" => Ok(WorkspaceStatus::Active),
+        "archived" => Ok(WorkspaceStatus::Archived),
+        _ => Err(storage_err(format!("unknown workspace_status: {s}"))),
+    }
+}
+
+fn workspace_status_str(s: WorkspaceStatus) -> &'static str {
+    match s {
+        WorkspaceStatus::Active => "active",
+        WorkspaceStatus::Archived => "archived",
+    }
+}
+
+fn parse_key_status(s: &str) -> Result<KeyStatus> {
+    match s {
+        "active" => Ok(KeyStatus::Active),
+        "revoked" => Ok(KeyStatus::Revoked),
+        _ => Err(storage_err(format!("unknown key_status: {s}"))),
+    }
+}
+
+fn key_status_str(s: KeyStatus) -> &'static str {
+    match s {
+        KeyStatus::Active => "active",
+        KeyStatus::Revoked => "revoked",
+    }
+}
+
+fn parse_key_permission(s: &str) -> Result<KeyPermission> {
+    match s {
+        "read" => Ok(KeyPermission::Read),
+        "readwrite" => Ok(KeyPermission::ReadWrite),
+        _ => Err(storage_err(format!("unknown key_permission: {s}"))),
+    }
+}
+
+fn key_permission_str(s: KeyPermission) -> &'static str {
+    match s {
+        KeyPermission::Read => "read",
+        KeyPermission::ReadWrite => "readwrite",
+    }
+}
+
+fn parse_collection_type(s: &str) -> Result<CollectionType> {
+    match s {
+        "structured" => Ok(CollectionType::Structured),
+        "raw" => Ok(CollectionType::Raw),
+        _ => Err(storage_err(format!("unknown collection_type: {s}"))),
+    }
+}
+
+fn collection_type_str(s: CollectionType) -> &'static str {
+    match s {
+        CollectionType::Structured => "structured",
+        CollectionType::Raw => "raw",
+    }
+}
+
+fn parse_collection_status(s: &str) -> Result<CollectionStatus> {
+    match s {
+        "active" => Ok(CollectionStatus::Active),
+        "deleting" => Ok(CollectionStatus::Deleting),
+        _ => Err(storage_err(format!("unknown collection_status: {s}"))),
+    }
+}
+
+fn collection_status_str(s: CollectionStatus) -> &'static str {
+    match s {
+        CollectionStatus::Active => "active",
+        CollectionStatus::Deleting => "deleting",
+    }
+}
+
+fn row_to_collection_schema(row: &sqlx::mysql::MySqlRow) -> Result<CollectionSchema> {
+    let ct: String = row.try_get("collection_type").map_err(storage_err)?;
+    let st: String = row.try_get("status").map_err(storage_err)?;
+    let Json(schema_json): Json<serde_json::Value> =
+        row.try_get("schema_json").map_err(storage_err)?;
+    Ok(CollectionSchema {
+        id: row.try_get("id").map_err(storage_err)?,
+        workspace_id: row.try_get("workspace_id").map_err(storage_err)?,
+        name: row.try_get("name").map_err(storage_err)?,
+        collection_type: parse_collection_type(&ct)?,
+        schema_json,
+        embedding_source: row.try_get("embedding_source").map_err(storage_err)?,
+        embedding_dim: row.try_get("embedding_dim").map_err(storage_err)?,
+        status: parse_collection_status(&st)?,
+        created_at: row.try_get("created_at").map_err(storage_err)?,
+        updated_at: row.try_get("updated_at").map_err(storage_err)?,
+    })
+}
+
+fn row_to_account(row: &sqlx::mysql::MySqlRow) -> Result<Account> {
+    let st: String = row.try_get("status").map_err(storage_err)?;
+    Ok(Account {
+        id: row.try_get("id").map_err(storage_err)?,
+        name: row.try_get("name").map_err(storage_err)?,
+        email: row.try_get("email").map_err(storage_err)?,
+        password_hash: row.try_get("password_hash").map_err(storage_err)?,
+        status: parse_account_status(&st)?,
+        created_at: row.try_get("created_at").map_err(storage_err)?,
+        updated_at: row.try_get("updated_at").map_err(storage_err)?,
+    })
+}
+
+fn row_to_workspace(row: &sqlx::mysql::MySqlRow) -> Result<Workspace> {
+    let st: String = row.try_get("status").map_err(storage_err)?;
+    Ok(Workspace {
+        id: row.try_get("id").map_err(storage_err)?,
+        account_id: row.try_get("account_id").map_err(storage_err)?,
+        name: row.try_get("name").map_err(storage_err)?,
+        status: parse_workspace_status(&st)?,
+        created_at: row.try_get("created_at").map_err(storage_err)?,
+        updated_at: row.try_get("updated_at").map_err(storage_err)?,
+    })
+}
+
+fn row_to_api_key(row: &sqlx::mysql::MySqlRow) -> Result<ApiKeyRecord> {
+    let st: String = row.try_get("status").map_err(storage_err)?;
+    Ok(ApiKeyRecord {
+        id: row.try_get("id").map_err(storage_err)?,
+        account_id: row.try_get("account_id").map_err(storage_err)?,
+        name: row.try_get("name").map_err(storage_err)?,
+        key_hash: row.try_get("key_hash").map_err(storage_err)?,
+        status: parse_key_status(&st)?,
+        created_at: row.try_get("created_at").map_err(storage_err)?,
+    })
+}
+
+fn row_to_workspace_key(row: &sqlx::mysql::MySqlRow) -> Result<WorkspaceKey> {
+    let st: String = row.try_get("status").map_err(storage_err)?;
+    let perm: String = row.try_get("permission").map_err(storage_err)?;
+    Ok(WorkspaceKey {
+        id: row.try_get("id").map_err(storage_err)?,
+        workspace_id: row.try_get("workspace_id").map_err(storage_err)?,
+        name: row.try_get("name").map_err(storage_err)?,
+        key_hash: row.try_get("key_hash").map_err(storage_err)?,
+        permission: parse_key_permission(&perm)?,
+        status: parse_key_status(&st)?,
+        created_at: row.try_get("created_at").map_err(storage_err)?,
+    })
 }
 
 fn row_to_dentry(row: &sqlx::mysql::MySqlRow) -> Result<Dentry> {
@@ -229,6 +391,59 @@ impl MysqlStore {
     file_id VARCHAR(36),
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     INDEX idx_ws_poll (workspace_id, id)
+)"#,
+            r#"CREATE TABLE IF NOT EXISTS veda_accounts (
+    id VARCHAR(36) PRIMARY KEY,
+    name VARCHAR(128) NOT NULL,
+    email VARCHAR(256),
+    password_hash VARCHAR(128),
+    status VARCHAR(16) DEFAULT 'active',
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    UNIQUE INDEX idx_email (email)
+)"#,
+            r#"CREATE TABLE IF NOT EXISTS veda_api_keys (
+    id VARCHAR(36) PRIMARY KEY,
+    account_id VARCHAR(36) NOT NULL,
+    name VARCHAR(128) NOT NULL,
+    key_hash VARCHAR(64) NOT NULL,
+    status VARCHAR(16) DEFAULT 'active',
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE INDEX idx_key_hash (key_hash),
+    INDEX idx_account (account_id)
+)"#,
+            r#"CREATE TABLE IF NOT EXISTS veda_workspaces (
+    id VARCHAR(36) PRIMARY KEY,
+    account_id VARCHAR(36) NOT NULL,
+    name VARCHAR(128) NOT NULL,
+    status VARCHAR(16) DEFAULT 'active',
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    UNIQUE INDEX idx_account_name (account_id, name)
+)"#,
+            r#"CREATE TABLE IF NOT EXISTS veda_workspace_keys (
+    id VARCHAR(36) PRIMARY KEY,
+    workspace_id VARCHAR(36) NOT NULL,
+    name VARCHAR(128) NOT NULL,
+    key_hash VARCHAR(64) NOT NULL,
+    permission VARCHAR(16) DEFAULT 'readwrite',
+    status VARCHAR(16) DEFAULT 'active',
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE INDEX idx_key_hash (key_hash),
+    INDEX idx_workspace (workspace_id)
+)"#,
+            r#"CREATE TABLE IF NOT EXISTS veda_collection_schemas (
+    id VARCHAR(36) PRIMARY KEY,
+    workspace_id VARCHAR(36) NOT NULL,
+    name VARCHAR(128) NOT NULL,
+    collection_type VARCHAR(16) NOT NULL DEFAULT 'structured',
+    schema_json JSON NOT NULL,
+    embedding_source VARCHAR(128),
+    embedding_dim INT,
+    status VARCHAR(16) DEFAULT 'active',
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    UNIQUE INDEX idx_ws_name (workspace_id, name)
 )"#,
         ];
         for s in stmts {
@@ -420,6 +635,22 @@ impl MetadataStore for MysqlStore {
         .await
         .map_err(storage_err)?;
         row.map(|r| row_to_file(&r)).transpose()
+    }
+
+    async fn get_dentry_path_by_file_id(
+        &self,
+        workspace_id: &str,
+        file_id: &str,
+    ) -> Result<Option<String>> {
+        let row: Option<(String,)> = sqlx::query_as(
+            "SELECT path FROM veda_dentries WHERE workspace_id = ? AND file_id = ? LIMIT 1",
+        )
+        .bind(workspace_id)
+        .bind(file_id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(storage_err)?;
+        Ok(row.map(|r| r.0))
     }
 
     async fn begin_tx(&self) -> Result<Box<dyn MetadataTx>> {
@@ -869,6 +1100,286 @@ impl TaskQueue for MysqlStore {
             .await
             .map_err(storage_err)?;
         }
+        Ok(())
+    }
+}
+
+// ── AuthStore ──────────────────────────────────────────
+
+#[async_trait]
+impl AuthStore for MysqlStore {
+    async fn create_account(&self, account: &Account) -> Result<()> {
+        sqlx::query(
+            r#"INSERT INTO veda_accounts (id, name, email, password_hash, status, created_at, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?)"#,
+        )
+        .bind(&account.id)
+        .bind(&account.name)
+        .bind(&account.email)
+        .bind(&account.password_hash)
+        .bind(account_status_str(account.status))
+        .bind(account.created_at.naive_utc())
+        .bind(account.updated_at.naive_utc())
+        .execute(&self.pool)
+        .await
+        .map_err(storage_err)?;
+        Ok(())
+    }
+
+    async fn get_account(&self, id: &str) -> Result<Option<Account>> {
+        let row = sqlx::query(
+            r#"SELECT id, name, email, password_hash, status, created_at, updated_at
+               FROM veda_accounts WHERE id = ?"#,
+        )
+        .bind(id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(storage_err)?;
+        row.map(|r| row_to_account(&r)).transpose()
+    }
+
+    async fn get_account_by_email(&self, email: &str) -> Result<Option<Account>> {
+        let row = sqlx::query(
+            r#"SELECT id, name, email, password_hash, status, created_at, updated_at
+               FROM veda_accounts WHERE email = ?"#,
+        )
+        .bind(email)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(storage_err)?;
+        row.map(|r| row_to_account(&r)).transpose()
+    }
+
+    async fn create_api_key(&self, key: &ApiKeyRecord) -> Result<()> {
+        sqlx::query(
+            r#"INSERT INTO veda_api_keys (id, account_id, name, key_hash, status, created_at)
+               VALUES (?, ?, ?, ?, ?, ?)"#,
+        )
+        .bind(&key.id)
+        .bind(&key.account_id)
+        .bind(&key.name)
+        .bind(&key.key_hash)
+        .bind(key_status_str(key.status))
+        .bind(key.created_at.naive_utc())
+        .execute(&self.pool)
+        .await
+        .map_err(storage_err)?;
+        Ok(())
+    }
+
+    async fn get_api_key_by_hash(&self, key_hash: &str) -> Result<Option<ApiKeyRecord>> {
+        let row = sqlx::query(
+            r#"SELECT id, account_id, name, key_hash, status, created_at
+               FROM veda_api_keys WHERE key_hash = ? AND status = 'active'"#,
+        )
+        .bind(key_hash)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(storage_err)?;
+        row.map(|r| row_to_api_key(&r)).transpose()
+    }
+
+    async fn list_api_keys(&self, account_id: &str) -> Result<Vec<ApiKeyRecord>> {
+        let rows = sqlx::query(
+            r#"SELECT id, account_id, name, key_hash, status, created_at
+               FROM veda_api_keys WHERE account_id = ? ORDER BY created_at"#,
+        )
+        .bind(account_id)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(storage_err)?;
+        rows.iter().map(|r| row_to_api_key(r)).collect()
+    }
+
+    async fn revoke_api_key(&self, id: &str) -> Result<()> {
+        sqlx::query(r#"UPDATE veda_api_keys SET status = 'revoked' WHERE id = ?"#)
+            .bind(id)
+            .execute(&self.pool)
+            .await
+            .map_err(storage_err)?;
+        Ok(())
+    }
+
+    async fn create_workspace(&self, workspace: &Workspace) -> Result<()> {
+        sqlx::query(
+            r#"INSERT INTO veda_workspaces (id, account_id, name, status, created_at, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?)"#,
+        )
+        .bind(&workspace.id)
+        .bind(&workspace.account_id)
+        .bind(&workspace.name)
+        .bind(workspace_status_str(workspace.status))
+        .bind(workspace.created_at.naive_utc())
+        .bind(workspace.updated_at.naive_utc())
+        .execute(&self.pool)
+        .await
+        .map_err(storage_err)?;
+        Ok(())
+    }
+
+    async fn get_workspace(&self, id: &str) -> Result<Option<Workspace>> {
+        let row = sqlx::query(
+            r#"SELECT id, account_id, name, status, created_at, updated_at
+               FROM veda_workspaces WHERE id = ?"#,
+        )
+        .bind(id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(storage_err)?;
+        row.map(|r| row_to_workspace(&r)).transpose()
+    }
+
+    async fn list_workspaces(&self, account_id: &str) -> Result<Vec<Workspace>> {
+        let rows = sqlx::query(
+            r#"SELECT id, account_id, name, status, created_at, updated_at
+               FROM veda_workspaces WHERE account_id = ? AND status = 'active' ORDER BY name"#,
+        )
+        .bind(account_id)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(storage_err)?;
+        rows.iter().map(|r| row_to_workspace(r)).collect()
+    }
+
+    async fn delete_workspace(&self, id: &str) -> Result<()> {
+        sqlx::query(r#"UPDATE veda_workspaces SET status = 'archived' WHERE id = ?"#)
+            .bind(id)
+            .execute(&self.pool)
+            .await
+            .map_err(storage_err)?;
+        Ok(())
+    }
+
+    async fn create_workspace_key(&self, key: &WorkspaceKey) -> Result<()> {
+        sqlx::query(
+            r#"INSERT INTO veda_workspace_keys (id, workspace_id, name, key_hash, permission, status, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?)"#,
+        )
+        .bind(&key.id)
+        .bind(&key.workspace_id)
+        .bind(&key.name)
+        .bind(&key.key_hash)
+        .bind(key_permission_str(key.permission))
+        .bind(key_status_str(key.status))
+        .bind(key.created_at.naive_utc())
+        .execute(&self.pool)
+        .await
+        .map_err(storage_err)?;
+        Ok(())
+    }
+
+    async fn get_workspace_key_by_hash(&self, key_hash: &str) -> Result<Option<WorkspaceKey>> {
+        let row = sqlx::query(
+            r#"SELECT id, workspace_id, name, key_hash, permission, status, created_at
+               FROM veda_workspace_keys WHERE key_hash = ? AND status = 'active'"#,
+        )
+        .bind(key_hash)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(storage_err)?;
+        row.map(|r| row_to_workspace_key(&r)).transpose()
+    }
+
+    async fn list_workspace_keys(&self, workspace_id: &str) -> Result<Vec<WorkspaceKey>> {
+        let rows = sqlx::query(
+            r#"SELECT id, workspace_id, name, key_hash, permission, status, created_at
+               FROM veda_workspace_keys WHERE workspace_id = ? ORDER BY created_at"#,
+        )
+        .bind(workspace_id)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(storage_err)?;
+        rows.iter().map(|r| row_to_workspace_key(r)).collect()
+    }
+
+    async fn revoke_workspace_key(&self, id: &str) -> Result<()> {
+        sqlx::query(r#"UPDATE veda_workspace_keys SET status = 'revoked' WHERE id = ?"#)
+            .bind(id)
+            .execute(&self.pool)
+            .await
+            .map_err(storage_err)?;
+        Ok(())
+    }
+}
+
+// ── CollectionMetaStore ────────────────────────────────
+
+#[async_trait]
+impl CollectionMetaStore for MysqlStore {
+    async fn create_collection_schema(&self, schema: &CollectionSchema) -> Result<()> {
+        let schema_str = serde_json::to_string(&schema.schema_json)
+            .map_err(|e| storage_err(e.to_string()))?;
+        sqlx::query(
+            r#"INSERT INTO veda_collection_schemas
+               (id, workspace_id, name, collection_type, schema_json, embedding_source, embedding_dim, status, created_at, updated_at)
+               VALUES (?, ?, ?, ?, CAST(? AS JSON), ?, ?, ?, ?, ?)"#,
+        )
+        .bind(&schema.id)
+        .bind(&schema.workspace_id)
+        .bind(&schema.name)
+        .bind(collection_type_str(schema.collection_type))
+        .bind(&schema_str)
+        .bind(&schema.embedding_source)
+        .bind(schema.embedding_dim)
+        .bind(collection_status_str(schema.status))
+        .bind(schema.created_at.naive_utc())
+        .bind(schema.updated_at.naive_utc())
+        .execute(&self.pool)
+        .await
+        .map_err(storage_err)?;
+        Ok(())
+    }
+
+    async fn get_collection_schema(
+        &self,
+        workspace_id: &str,
+        name: &str,
+    ) -> Result<Option<CollectionSchema>> {
+        let row = sqlx::query(
+            r#"SELECT id, workspace_id, name, collection_type, schema_json, embedding_source,
+                      embedding_dim, status, created_at, updated_at
+               FROM veda_collection_schemas WHERE workspace_id = ? AND name = ? AND status = 'active'"#,
+        )
+        .bind(workspace_id)
+        .bind(name)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(storage_err)?;
+        row.map(|r| row_to_collection_schema(&r)).transpose()
+    }
+
+    async fn get_collection_schema_by_id(&self, id: &str) -> Result<Option<CollectionSchema>> {
+        let row = sqlx::query(
+            r#"SELECT id, workspace_id, name, collection_type, schema_json, embedding_source,
+                      embedding_dim, status, created_at, updated_at
+               FROM veda_collection_schemas WHERE id = ?"#,
+        )
+        .bind(id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(storage_err)?;
+        row.map(|r| row_to_collection_schema(&r)).transpose()
+    }
+
+    async fn list_collection_schemas(&self, workspace_id: &str) -> Result<Vec<CollectionSchema>> {
+        let rows = sqlx::query(
+            r#"SELECT id, workspace_id, name, collection_type, schema_json, embedding_source,
+                      embedding_dim, status, created_at, updated_at
+               FROM veda_collection_schemas WHERE workspace_id = ? AND status = 'active' ORDER BY name"#,
+        )
+        .bind(workspace_id)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(storage_err)?;
+        rows.iter().map(|r| row_to_collection_schema(r)).collect()
+    }
+
+    async fn delete_collection_schema(&self, id: &str) -> Result<()> {
+        sqlx::query(r#"DELETE FROM veda_collection_schemas WHERE id = ?"#)
+            .bind(id)
+            .execute(&self.pool)
+            .await
+            .map_err(storage_err)?;
         Ok(())
     }
 }

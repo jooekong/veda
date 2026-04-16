@@ -17,3 +17,7 @@ datafusion = "53"
 arrow = { version = "58", features = ["json"] }
 arrow-csv = "58"
 arrow-json = "58"
+
+[dev-dependencies]
+uuid.workspace = true
+chrono.workspace = true

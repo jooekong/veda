@@ -6,9 +6,11 @@ use std::time::Duration;
 
 use serde::Deserialize;
 use uuid::Uuid;
-use veda_core::store::VectorStore;
+use veda_core::store::{CollectionVectorStore, VectorStore};
 use veda_store::MilvusStore;
-use veda_types::{ChunkWithEmbedding, HybridSearchRequest, SearchMode, SearchRequest};
+use veda_types::{
+    ChunkWithEmbedding, FieldDefinition, HybridSearchRequest, SearchMode, SearchRequest,
+};
 
 #[derive(Debug, Deserialize)]
 struct MilvusSection {
@@ -67,9 +69,16 @@ async fn milvus_init_upsert_search_delete() {
         path_prefix: None,
         query_vector: Some(vec.clone()),
     };
-    let hits = store.search(&req).await.expect("search");
-    assert!(!hits.is_empty());
-    assert!(hits.iter().any(|h| h.file_id == fid));
+    let mut found = false;
+    for _ in 0..10 {
+        let hits = store.search(&req).await.expect("search");
+        if hits.iter().any(|h| h.file_id == fid) {
+            found = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(300)).await;
+    }
+    assert!(found, "upserted chunk should be searchable");
 
     let hy = HybridSearchRequest {
         workspace_id: ws.clone(),
@@ -96,4 +105,62 @@ async fn milvus_init_upsert_search_delete() {
         }
     }
     assert!(gone, "vector rows for file_id should disappear after delete");
+}
+
+#[tokio::test]
+#[ignore]
+async fn milvus_dynamic_collection_crud() {
+    let (url, token, db) = load_milvus();
+    let store = MilvusStore::new(&url, token, db);
+
+    let coll_name = format!("veda_test_{}", Uuid::new_v4().to_string().replace('-', "_"));
+    let fields = vec![
+        FieldDefinition {
+            name: "title".into(),
+            field_type: "string".into(),
+            index: true,
+            embed: false,
+        },
+        FieldDefinition {
+            name: "content".into(),
+            field_type: "string".into(),
+            index: false,
+            embed: true,
+        },
+    ];
+
+    let dim = 8u32;
+    store
+        .create_dynamic_collection(&coll_name, &fields, dim)
+        .await
+        .expect("create dynamic collection");
+
+    let ws = format!("ws_{}", Uuid::new_v4());
+    let vec1: Vec<f32> = (0..dim).map(|i| (i as f32) * 0.1).collect();
+    let rows = vec![serde_json::json!({
+        "id": Uuid::new_v4().to_string(),
+        "title": "Test Article",
+        "content": "This is a test article about Rust programming.",
+        "vector": vec1,
+    })];
+    store
+        .insert_collection_rows(&coll_name, &ws, &rows)
+        .await
+        .expect("insert rows");
+
+    let results = store
+        .search_collection(&coll_name, &ws, &vec1, 5)
+        .await
+        .expect("search collection");
+    assert!(!results.is_empty());
+    let first = &results[0];
+    assert_eq!(
+        first.get("title").and_then(|v| v.as_str()),
+        Some("Test Article")
+    );
+
+    store
+        .drop_dynamic_collection(&coll_name)
+        .await
+        .expect("drop collection");
 }

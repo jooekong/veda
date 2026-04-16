@@ -29,5 +29,10 @@ tokio-util = "0.7"
 jsonwebtoken = "9"
 argon2 = "0.5"
 toml = "0.8"
+arrow = { version = "58", features = ["json"] }
 metrics = "0.24"
 metrics-exporter-prometheus = "0.16"
+
+[dev-dependencies]
+reqwest = { version = "0.12", features = ["json"] }
+toml = "0.8"

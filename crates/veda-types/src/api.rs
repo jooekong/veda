@@ -117,7 +117,7 @@ pub struct CollectionSearchRequest {
 
 #[derive(Debug, Deserialize)]
 pub struct SqlRequest {
-    pub query: String,
+    pub sql: String,
 }
 
 #[derive(Debug, Serialize)]

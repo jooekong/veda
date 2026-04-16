@@ -5,7 +5,7 @@ use veda_types::*;
 use crate::store::{EmbeddingService, MetadataStore, VectorStore};
 
 pub struct SearchService {
-    _meta: Arc<dyn MetadataStore>,
+    meta: Arc<dyn MetadataStore>,
     vector: Arc<dyn VectorStore>,
     embedding: Arc<dyn EmbeddingService>,
 }
@@ -17,7 +17,7 @@ impl SearchService {
         embedding: Arc<dyn EmbeddingService>,
     ) -> Self {
         Self {
-            _meta: meta,
+            meta,
             vector,
             embedding,
         }
@@ -33,7 +33,7 @@ impl SearchService {
     ) -> Result<Vec<SearchHit>> {
         let limit = if limit == 0 { 10 } else { limit };
 
-        match mode {
+        let mut hits = match mode {
             SearchMode::Semantic => {
                 let vectors = self.embedding.embed(&[query.to_string()]).await?;
                 let query_vector = vectors.into_iter().next().ok_or_else(|| {
@@ -47,7 +47,7 @@ impl SearchService {
                     path_prefix: path_prefix.map(|s| s.to_string()),
                     query_vector: Some(query_vector),
                 };
-                self.vector.search(&req).await
+                self.vector.search(&req).await?
             }
             SearchMode::Fulltext => {
                 let req = SearchRequest {
@@ -58,7 +58,7 @@ impl SearchService {
                     path_prefix: path_prefix.map(|s| s.to_string()),
                     query_vector: None,
                 };
-                self.vector.search(&req).await
+                self.vector.search(&req).await?
             }
             SearchMode::Hybrid => {
                 let vectors = self.embedding.embed(&[query.to_string()]).await?;
@@ -72,8 +72,26 @@ impl SearchService {
                     mode: SearchMode::Hybrid,
                     limit,
                 };
-                self.vector.hybrid_search(&req).await
+                self.vector.hybrid_search(&req).await?
+            }
+        };
+
+        for hit in &mut hits {
+            if hit.path.is_none() {
+                hit.path = self
+                    .meta
+                    .get_dentry_path_by_file_id(workspace_id, &hit.file_id)
+                    .await
+                    .unwrap_or(None);
             }
         }
+
+        if let Some(prefix) = path_prefix {
+            hits.retain(|h| {
+                h.path.as_ref().map_or(false, |p| p.starts_with(prefix))
+            });
+        }
+
+        Ok(hits)
     }
 }
