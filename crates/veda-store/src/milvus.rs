@@ -633,4 +633,23 @@ impl CollectionVectorStore for MilvusStore {
         let v = self.post_v2("/v2/vectordb/entities/search", body).await?;
         Ok(flatten_entity_rows(v.get("data")))
     }
+
+    async fn query_collection(
+        &self,
+        collection_name: &str,
+        workspace_id: &str,
+        limit: usize,
+    ) -> Result<Vec<serde_json::Value>> {
+        let ws = milvus_quote(workspace_id);
+        let filter = format!("workspace_id == {ws}");
+        let lim = limit.min(16_383).max(1);
+        let body = json!({
+            "collectionName": collection_name,
+            "filter": filter,
+            "limit": lim,
+            "outputFields": ["*"]
+        });
+        let v = self.post_v2("/v2/vectordb/entities/query", body).await?;
+        Ok(flatten_entity_rows(v.get("data")))
+    }
 }

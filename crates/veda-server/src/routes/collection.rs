@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use axum::extract::{Path, State};
-use axum::routing::{delete, post};
+use axum::routing::{get, post};
 use axum::{Json, Router};
 use veda_types::api::{CollectionSearchRequest, CreateCollectionRequest, InsertRowsRequest};
 use veda_types::{ApiResponse, CollectionSchema, CollectionType, VedaError};
@@ -13,7 +13,7 @@ use crate::state::AppState;
 pub fn routes() -> Router<Arc<AppState>> {
     Router::new()
         .route("/v1/collections", post(create_collection).get(list_collections))
-        .route("/v1/collections/{name}", delete(delete_collection))
+        .route("/v1/collections/{name}", get(describe_collection).delete(delete_collection))
         .route("/v1/collections/{name}/rows", post(insert_rows))
         .route("/v1/collections/{name}/search", post(search_collection))
 }
@@ -40,6 +40,15 @@ async fn list_collections(
 ) -> Result<Json<ApiResponse<Vec<CollectionSchema>>>, AppError> {
     let list = state.collection_service.list(&auth.workspace_id).await?;
     Ok(Json(ApiResponse::ok(list)))
+}
+
+async fn describe_collection(
+    State(state): State<Arc<AppState>>,
+    auth: AuthWorkspace,
+    Path(name): Path<String>,
+) -> Result<Json<ApiResponse<CollectionSchema>>, AppError> {
+    let schema = state.collection_service.get(&auth.workspace_id, &name).await?;
+    Ok(Json(ApiResponse::ok(schema)))
 }
 
 async fn delete_collection(

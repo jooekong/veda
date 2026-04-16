@@ -153,6 +153,12 @@ pub trait CollectionVectorStore: Send + Sync {
         vector: &[f32],
         limit: usize,
     ) -> Result<Vec<serde_json::Value>>;
+    async fn query_collection(
+        &self,
+        collection_name: &str,
+        workspace_id: &str,
+        limit: usize,
+    ) -> Result<Vec<serde_json::Value>>;
 }
 
 // ── Auth Store ─────────────────────────────────────────

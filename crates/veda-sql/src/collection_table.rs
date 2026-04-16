@@ -77,14 +77,10 @@ impl TableProvider for CollectionTable {
         _filters: &[Expr],
         _limit: Option<usize>,
     ) -> Result<Arc<dyn ExecutionPlan>> {
-        let dim = self.collection.embedding_dim.unwrap_or(1536) as usize;
-        let zero_vec = vec![0.0f32; dim];
-
         let rows = self.coll_vector
-            .search_collection(
+            .query_collection(
                 &self.milvus_name,
                 &self.workspace_id,
-                &zero_vec,
                 16384,
             )
             .await

@@ -154,6 +154,13 @@ impl Client {
         Self::check(resp).await
     }
 
+    pub async fn describe_collection(&self, ws_key: &str, name: &str) -> Result<serde_json::Value> {
+        let resp = self.http.get(format!("{}/v1/collections/{name}", self.base))
+            .bearer_auth(ws_key)
+            .send().await?;
+        Self::check(resp).await
+    }
+
     pub async fn delete_collection(&self, ws_key: &str, name: &str) -> Result<serde_json::Value> {
         let resp = self.http.delete(format!("{}/v1/collections/{name}", self.base))
             .bearer_auth(ws_key)

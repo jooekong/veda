@@ -134,6 +134,8 @@ enum CollectionCmd {
     },
     /// List collections
     List,
+    /// Describe a collection (show schema details)
+    Desc { name: String },
     /// Delete a collection
     Delete { name: String },
     /// Insert rows (JSON array from stdin or argument)
@@ -277,6 +279,26 @@ async fn main() -> anyhow::Result<()> {
                 if let Some(arr) = resp["data"].as_array() {
                     for coll in arr {
                         println!("{}\t{}", coll["name"].as_str().unwrap_or(""), coll["status"].as_str().unwrap_or(""));
+                    }
+                }
+            }
+            CollectionCmd::Desc { name } => {
+                let resp = c.describe_collection(cfg.ws_key()?, &name).await?;
+                let data = &resp["data"];
+                println!("Name:       {}", data["name"].as_str().unwrap_or(""));
+                println!("ID:         {}", data["id"].as_str().unwrap_or(""));
+                println!("Type:       {}", data["collection_type"].as_str().unwrap_or(""));
+                println!("Status:     {}", data["status"].as_str().unwrap_or(""));
+                println!("Embed Src:  {}", data["embedding_source"].as_str().unwrap_or("-"));
+                println!("Embed Dim:  {}", data["embedding_dim"].as_i64().map(|d| d.to_string()).unwrap_or("-".into()));
+                if let Some(fields) = data["schema_json"].as_array() {
+                    println!("Fields:");
+                    for f in fields {
+                        let fname = f["name"].as_str().unwrap_or("?");
+                        let ftype = f["field_type"].as_str().or_else(|| f["type"].as_str()).unwrap_or("?");
+                        let idx = if f["index"].as_bool().unwrap_or(false) { " [indexed]" } else { "" };
+                        let emb = if f["embed"].as_bool().unwrap_or(false) { " [embed]" } else { "" };
+                        println!("  - {fname}: {ftype}{idx}{emb}");
                     }
                 }
             }

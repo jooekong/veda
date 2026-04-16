@@ -228,6 +228,7 @@ pub struct CollectionSchema {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FieldDefinition {
     pub name: String,
+    #[serde(alias = "type")]
     pub field_type: String,
     #[serde(default)]
     pub index: bool,

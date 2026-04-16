@@ -6,3 +6,4 @@
 .env
 veda-server.toml
 config/test.toml
+config/server.toml

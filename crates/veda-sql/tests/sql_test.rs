@@ -84,6 +84,9 @@ impl CollectionVectorStore for MockCollVector {
     async fn search_collection(&self, name: &str, _ws: &str, _vec: &[f32], _limit: usize) -> Result<Vec<serde_json::Value>> {
         Ok(self.data.lock().unwrap().get(name).cloned().unwrap_or_default())
     }
+    async fn query_collection(&self, name: &str, _ws: &str, _limit: usize) -> Result<Vec<serde_json::Value>> {
+        Ok(self.data.lock().unwrap().get(name).cloned().unwrap_or_default())
+    }
 }
 
 // ── Mock EmbeddingService ─────────────────────────────

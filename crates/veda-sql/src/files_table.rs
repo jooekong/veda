@@ -1,4 +1,5 @@
 use std::any::Any;
+use std::collections::HashMap;
 use std::fmt::{self, Debug, Formatter};
 use std::sync::Arc;
 
@@ -17,8 +18,9 @@ use datafusion::physical_plan::{
     DisplayAs, DisplayFormatType, ExecutionPlan, Partitioning, PlanProperties,
     SendableRecordBatchStream, project_schema,
 };
+use tracing::warn;
 use veda_core::store::MetadataStore;
-use veda_types::Dentry;
+use veda_types::{Dentry, FileRecord};
 
 fn files_schema() -> SchemaRef {
     Arc::new(Schema::new(vec![
@@ -86,11 +88,25 @@ impl TableProvider for FilesTable {
             all.extend(children);
         }
 
+        // Batch-load FileRecords for all non-dir dentries
+        let mut file_map: HashMap<String, FileRecord> = HashMap::new();
+        for d in &all {
+            if let Some(ref fid) = d.file_id {
+                if !d.is_dir {
+                    match self.meta.get_file(fid).await {
+                        Ok(Some(fr)) => { file_map.insert(fid.clone(), fr); }
+                        Ok(None) => {}
+                        Err(e) => warn!(file_id = %fid, error = %e, "failed to load file record"),
+                    }
+                }
+            }
+        }
+
         let schema = files_schema();
         let projected = project_schema(&schema, projection)?;
         Ok(Arc::new(FilesExec::new(
             all,
-            self.meta.clone(),
+            file_map,
             schema,
             projected,
         )))
@@ -100,8 +116,7 @@ impl TableProvider for FilesTable {
 #[derive(Clone)]
 struct FilesExec {
     dentries: Vec<Dentry>,
-    #[allow(dead_code)]
-    meta: Arc<dyn MetadataStore>,
+    file_map: HashMap<String, FileRecord>,
     full_schema: SchemaRef,
     projected_schema: SchemaRef,
     cache: Arc<PlanProperties>,
@@ -118,7 +133,7 @@ impl Debug for FilesExec {
 impl FilesExec {
     fn new(
         dentries: Vec<Dentry>,
-        meta: Arc<dyn MetadataStore>,
+        file_map: HashMap<String, FileRecord>,
         full_schema: SchemaRef,
         projected_schema: SchemaRef,
     ) -> Self {
@@ -128,7 +143,7 @@ impl FilesExec {
             EmissionType::Incremental,
             Boundedness::Bounded,
         );
-        Self { dentries, meta, full_schema, projected_schema, cache: Arc::new(cache) }
+        Self { dentries, file_map, full_schema, projected_schema, cache: Arc::new(cache) }
     }
 }
 
@@ -166,10 +181,21 @@ impl ExecutionPlan for FilesExec {
             path_b.append_value(&d.path);
             name_b.append_value(&d.name);
             is_dir_b.append_value(d.is_dir);
-            size_b.append_null();
-            mime_b.append_null();
-            rev_b.append_null();
-            cksum_b.append_null();
+            let fr = d.file_id.as_ref().and_then(|fid| self.file_map.get(fid));
+            match fr {
+                Some(f) => {
+                    size_b.append_value(f.size_bytes);
+                    mime_b.append_value(&f.mime_type);
+                    rev_b.append_value(f.revision);
+                    cksum_b.append_value(&f.checksum_sha256);
+                }
+                None => {
+                    size_b.append_null();
+                    mime_b.append_null();
+                    rev_b.append_null();
+                    cksum_b.append_null();
+                }
+            }
         }
 
         let batch = RecordBatch::try_new(
