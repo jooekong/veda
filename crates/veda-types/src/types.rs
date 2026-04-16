@@ -232,8 +232,6 @@ pub struct FieldDefinition {
     pub field_type: String,
     #[serde(default)]
     pub index: bool,
-    #[serde(default)]
-    pub embed: bool,
 }
 
 // ── Search ─────────────────────────────────────────────

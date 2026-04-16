@@ -31,6 +31,7 @@ impl CollectionService {
         name: &str,
         collection_type: CollectionType,
         fields: &[FieldDefinition],
+        embed_source: Option<&str>,
     ) -> Result<CollectionSchema> {
         let existing = self.meta.get_collection_schema(workspace_id, name).await?;
         if existing.is_some() {
@@ -39,8 +40,7 @@ impl CollectionService {
             )));
         }
 
-        let embed_field = fields.iter().find(|f| f.embed);
-        let embedding_source = embed_field.map(|f| f.name.clone());
+        let embedding_source = embed_source.map(|s| s.to_string());
         let embedding_dim = Some(self.embedding.dimension() as i32);
 
         let id = Uuid::new_v4().to_string();

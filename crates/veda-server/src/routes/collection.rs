@@ -29,7 +29,7 @@ async fn create_collection(
     let ct = req.collection_type.unwrap_or(CollectionType::Structured);
     let schema = state
         .collection_service
-        .create(&auth.workspace_id, &req.name, ct, &req.fields)
+        .create(&auth.workspace_id, &req.name, ct, &req.fields, req.embedding_source.as_deref())
         .await?;
     Ok(Json(ApiResponse::ok(schema)))
 }

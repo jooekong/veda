@@ -99,6 +99,7 @@ pub struct CreateCollectionRequest {
     pub name: String,
     pub collection_type: Option<CollectionType>,
     pub fields: Vec<FieldDefinition>,
+    pub embedding_source: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
