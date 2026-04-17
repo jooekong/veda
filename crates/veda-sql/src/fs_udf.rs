@@ -52,7 +52,7 @@ pub fn register_all(ctx: &datafusion::prelude::SessionContext, fs_ctx: Arc<FsUdf
     ctx.register_udf(ScalarUDF::from(FsScalarUdf::new("veda_mkdir", 1, DataType::Boolean, fs_ctx)));
 }
 
-fn block_on<F: std::future::Future<Output: Send> + Send>(f: F) -> F::Output {
+pub(crate) fn block_on<F: std::future::Future<Output: Send> + Send>(f: F) -> F::Output {
     let handle = tokio::runtime::Handle::current();
     match handle.runtime_flavor() {
         tokio::runtime::RuntimeFlavor::MultiThread => {

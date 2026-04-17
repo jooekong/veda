@@ -300,6 +300,49 @@ impl FsService {
             .collect())
     }
 
+    /// Recursively list all dentries under a directory.
+    pub async fn list_dir_recursive(
+        &self,
+        workspace_id: &str,
+        raw_path: &str,
+    ) -> Result<Vec<Dentry>> {
+        let norm = path::normalize(raw_path)?;
+        let mut all = Vec::new();
+        let top = self.meta.list_dentries(workspace_id, &norm).await?;
+        let mut queue: Vec<String> = Vec::new();
+        for d in top {
+            if d.is_dir {
+                queue.push(d.path.clone());
+            }
+            all.push(d);
+        }
+        while let Some(dir) = queue.pop() {
+            let children = self.meta.list_dentries(workspace_id, &dir).await?;
+            for c in children {
+                if c.is_dir {
+                    queue.push(c.path.clone());
+                }
+                all.push(c);
+            }
+        }
+        Ok(all)
+    }
+
+    /// Match files using a glob pattern. Returns matching dentries.
+    /// Pattern supports `*` (any chars except `/`), `?` (single char), `**` (recursive).
+    pub async fn glob_files(
+        &self,
+        workspace_id: &str,
+        pattern: &str,
+    ) -> Result<Vec<Dentry>> {
+        let prefix = glob_fixed_prefix(pattern);
+        let all = self.list_dir_recursive(workspace_id, &prefix).await?;
+        Ok(all
+            .into_iter()
+            .filter(|d| !d.is_dir && glob_match(pattern, &d.path))
+            .collect())
+    }
+
     pub async fn stat(
         &self,
         workspace_id: &str,
@@ -774,5 +817,102 @@ fn make_fs_event(
         path: path.to_string(),
         file_id: file_id.map(|s| s.to_string()),
         created_at: Utc::now(),
+    }
+}
+
+/// Extract the longest fixed (non-glob) directory prefix from a glob pattern.
+/// e.g. `/logs/*.jsonl` → `/logs`, `/data/**/*.csv` → `/data`
+fn glob_fixed_prefix(pattern: &str) -> String {
+    let mut parts: Vec<&str> = Vec::new();
+    for part in pattern.split('/') {
+        if part.contains('*') || part.contains('?') || part.contains('[') {
+            break;
+        }
+        parts.push(part);
+    }
+    let joined = parts.join("/");
+    if joined.is_empty() {
+        "/".to_string()
+    } else {
+        joined
+    }
+}
+
+/// Simple glob matching: `*` matches any chars except `/`, `**` matches anything including `/`,
+/// `?` matches a single char.
+fn glob_match(pattern: &str, path: &str) -> bool {
+    glob_match_inner(pattern.as_bytes(), path.as_bytes())
+}
+
+fn glob_match_inner(pat: &[u8], s: &[u8]) -> bool {
+    let (mut pi, mut si) = (0, 0);
+    let (mut star_pi, mut star_si) = (usize::MAX, 0);
+    let (mut dstar_pi, mut dstar_si) = (usize::MAX, 0);
+
+    while si < s.len() {
+        if pi + 1 < pat.len() && pat[pi] == b'*' && pat[pi + 1] == b'*' {
+            dstar_pi = pi;
+            dstar_si = si;
+            pi += 2;
+            if pi < pat.len() && pat[pi] == b'/' {
+                pi += 1;
+            }
+            continue;
+        }
+        if pi < pat.len() && pat[pi] == b'*' {
+            star_pi = pi;
+            star_si = si;
+            pi += 1;
+            continue;
+        }
+        if pi < pat.len() && (pat[pi] == b'?' || pat[pi] == s[si]) {
+            pi += 1;
+            si += 1;
+            continue;
+        }
+        if star_pi != usize::MAX && s[star_si] != b'/' {
+            star_si += 1;
+            si = star_si;
+            pi = star_pi + 1;
+            continue;
+        }
+        if dstar_pi != usize::MAX {
+            dstar_si += 1;
+            si = dstar_si;
+            pi = dstar_pi + 2;
+            if pi < pat.len() && pat[pi] == b'/' {
+                pi += 1;
+            }
+            continue;
+        }
+        return false;
+    }
+    while pi < pat.len() && pat[pi] == b'*' {
+        pi += 1;
+    }
+    pi == pat.len()
+}
+
+#[cfg(test)]
+mod glob_tests {
+    use super::*;
+
+    #[test]
+    fn test_glob_fixed_prefix() {
+        assert_eq!(glob_fixed_prefix("/logs/*.jsonl"), "/logs");
+        assert_eq!(glob_fixed_prefix("/data/**/*.csv"), "/data");
+        assert_eq!(glob_fixed_prefix("/*.txt"), "/");
+        assert_eq!(glob_fixed_prefix("/a/b/c.txt"), "/a/b/c.txt");
+    }
+
+    #[test]
+    fn test_glob_match() {
+        assert!(glob_match("/logs/*.jsonl", "/logs/app.jsonl"));
+        assert!(!glob_match("/logs/*.jsonl", "/logs/sub/app.jsonl"));
+        assert!(glob_match("/data/**/*.csv", "/data/a/b/c.csv"));
+        assert!(glob_match("/data/**/*.csv", "/data/test.csv"));
+        assert!(!glob_match("/data/**/*.csv", "/data/test.tsv"));
+        assert!(glob_match("/?.txt", "/a.txt"));
+        assert!(!glob_match("/?.txt", "/ab.txt"));
     }
 }

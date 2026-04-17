@@ -9,6 +9,7 @@ use veda_types::VedaError;
 use crate::collection_table::CollectionTable;
 use crate::files_table::FilesTable;
 use crate::fs_udf::{self, FsUdfContext};
+use crate::fs_table::VedaFsTableFactory;
 
 pub struct VedaSqlEngine {
     meta: Arc<dyn MetadataStore>,
@@ -58,6 +59,11 @@ impl VedaSqlEngine {
             read_only: false,
         });
         fs_udf::register_all(&ctx, fs_ctx);
+
+        ctx.register_udtf("veda_fs", Arc::new(VedaFsTableFactory {
+            workspace_id: workspace_id.to_string(),
+            fs_service: self.fs_service.clone(),
+        }));
 
         let df = ctx.sql(sql).await
             .map_err(|e| VedaError::Storage(e.to_string()))?;
