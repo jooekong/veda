@@ -3,6 +3,7 @@
 use async_trait::async_trait;
 use reqwest::header::{AUTHORIZATION, CONTENT_TYPE, HeaderMap, HeaderValue};
 use serde_json::{json, Value};
+use tracing::warn;
 use veda_core::store::{CollectionVectorStore, VectorStore};
 use veda_types::{
     ChunkWithEmbedding, FieldDefinition, HybridSearchRequest, Result, SearchHit, SearchMode,
@@ -306,7 +307,10 @@ impl MilvusStore {
                 let rows = flatten_entity_rows(v.get("data"));
                 Ok(Some(Self::rows_to_hits(&rows, req.limit)))
             }
-            Err(_) => Ok(None),
+            Err(e) => {
+                warn!(err = %e, "hybrid_search_remote failed, falling back to ANN search");
+                Ok(None)
+            }
         }
     }
 
@@ -396,12 +400,15 @@ impl VectorStore for MilvusStore {
             "data": data
         });
         self.post_v2("/v2/vectordb/entities/insert", body).await?;
-        let _ = self
+        if let Err(e) = self
             .post_v2(
                 "/v2/vectordb/collections/flush",
                 json!({ "collectionName": COLLECTION }),
             )
-            .await;
+            .await
+        {
+            warn!(err = %e, "milvus flush failed after upsert");
+        }
         Ok(())
     }
 
@@ -414,12 +421,15 @@ impl VectorStore for MilvusStore {
             "filter": filter
         });
         self.post_v2("/v2/vectordb/entities/delete", body).await?;
-        let _ = self
+        if let Err(e) = self
             .post_v2(
                 "/v2/vectordb/collections/flush",
                 json!({ "collectionName": COLLECTION }),
             )
-            .await;
+            .await
+        {
+            warn!(err = %e, "milvus flush failed after delete");
+        }
         Ok(())
     }
 

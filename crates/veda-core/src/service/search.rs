@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use tracing::warn;
 use veda_types::*;
 
 use crate::store::{EmbeddingService, MetadataStore, VectorStore};
@@ -32,6 +33,7 @@ impl SearchService {
         path_prefix: Option<&str>,
     ) -> Result<Vec<SearchHit>> {
         let limit = if limit == 0 { 10 } else { limit };
+        let fetch_limit = if path_prefix.is_some() { limit * 3 } else { limit };
 
         let mut hits = match mode {
             SearchMode::Semantic => {
@@ -43,7 +45,7 @@ impl SearchService {
                     workspace_id: workspace_id.to_string(),
                     query: query.to_string(),
                     mode: SearchMode::Semantic,
-                    limit,
+                    limit: fetch_limit,
                     path_prefix: path_prefix.map(|s| s.to_string()),
                     query_vector: Some(query_vector),
                 };
@@ -54,7 +56,7 @@ impl SearchService {
                     workspace_id: workspace_id.to_string(),
                     query: query.to_string(),
                     mode: SearchMode::Fulltext,
-                    limit,
+                    limit: fetch_limit,
                     path_prefix: path_prefix.map(|s| s.to_string()),
                     query_vector: None,
                 };
@@ -70,7 +72,7 @@ impl SearchService {
                     query_vector,
                     query_text: Some(query.to_string()),
                     mode: SearchMode::Hybrid,
-                    limit,
+                    limit: fetch_limit,
                 };
                 self.vector.hybrid_search(&req).await?
             }
@@ -78,11 +80,16 @@ impl SearchService {
 
         for hit in &mut hits {
             if hit.path.is_none() {
-                hit.path = self
+                match self
                     .meta
                     .get_dentry_path_by_file_id(workspace_id, &hit.file_id)
                     .await
-                    .unwrap_or(None);
+                {
+                    Ok(p) => hit.path = p,
+                    Err(e) => {
+                        warn!(file_id = %hit.file_id, err = %e, "failed to resolve path for search hit");
+                    }
+                }
             }
         }
 
@@ -92,6 +99,7 @@ impl SearchService {
             });
         }
 
+        hits.truncate(limit);
         Ok(hits)
     }
 }

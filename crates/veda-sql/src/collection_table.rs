@@ -2,7 +2,9 @@ use std::any::Any;
 use std::fmt::{self, Debug, Formatter};
 use std::sync::Arc;
 
-use arrow::array::{RecordBatch, StringBuilder};
+use arrow::array::{
+    BooleanBuilder, Float64Builder, Int64Builder, RecordBatch, StringBuilder,
+};
 use arrow::datatypes::{DataType, Field, Schema, SchemaRef};
 use async_trait::async_trait;
 use datafusion::catalog::Session;
@@ -24,8 +26,9 @@ fn build_schema(fields: &[FieldDefinition]) -> SchemaRef {
     let mut arrow_fields = vec![Field::new("id", DataType::Utf8, false)];
     for fd in fields {
         let dt = match fd.field_type.as_str() {
-            "int" | "int64" => DataType::Utf8,
-            "float" | "float64" => DataType::Utf8,
+            "int" | "int32" | "integer" | "int64" | "bigint" | "long" => DataType::Int64,
+            "float" | "float32" | "float64" | "double" => DataType::Float64,
+            "bool" | "boolean" => DataType::Boolean,
             _ => DataType::Utf8,
         };
         arrow_fields.push(Field::new(&fd.name, dt, true));
@@ -51,7 +54,7 @@ impl CollectionTable {
             collection.schema_json.clone(),
         ).unwrap_or_default();
         let schema = build_schema(&fields);
-        let milvus_name = format!("veda_coll_{}", collection.id.replace('-', "_"));
+        let milvus_name = collection.milvus_name();
         Self { coll_vector, workspace_id, collection, milvus_name, schema }
     }
 }
@@ -141,31 +144,67 @@ impl ExecutionPlan for CollectionExec {
         _context: Arc<TaskContext>,
     ) -> Result<SendableRecordBatchStream> {
         let n = self.rows.len();
-        let field_count = self.full_schema.fields().len();
-        let mut builders: Vec<StringBuilder> = (0..field_count)
-            .map(|_| StringBuilder::with_capacity(n, n * 32))
-            .collect();
 
-        for row in &self.rows {
-            let obj = row.as_object();
-            for (i, field) in self.full_schema.fields().iter().enumerate() {
-                let val = obj
-                    .and_then(|o| o.get(field.name()))
-                    .map(|v| match v {
-                        serde_json::Value::String(s) => s.clone(),
-                        other => other.to_string(),
-                    });
-                match val {
-                    Some(s) => builders[i].append_value(&s),
-                    None => builders[i].append_null(),
+        let mut arrays: Vec<Arc<dyn arrow::array::Array>> = Vec::new();
+        for field in self.full_schema.fields() {
+            match field.data_type() {
+                DataType::Int64 => {
+                    let mut b = Int64Builder::with_capacity(n);
+                    for row in &self.rows {
+                        match row.as_object().and_then(|o| o.get(field.name())) {
+                            Some(v) => match v.as_i64() {
+                                Some(i) => b.append_value(i),
+                                None => b.append_null(),
+                            },
+                            None => b.append_null(),
+                        }
+                    }
+                    arrays.push(Arc::new(b.finish()));
+                }
+                DataType::Float64 => {
+                    let mut b = Float64Builder::with_capacity(n);
+                    for row in &self.rows {
+                        match row.as_object().and_then(|o| o.get(field.name())) {
+                            Some(v) => match v.as_f64() {
+                                Some(f) => b.append_value(f),
+                                None => b.append_null(),
+                            },
+                            None => b.append_null(),
+                        }
+                    }
+                    arrays.push(Arc::new(b.finish()));
+                }
+                DataType::Boolean => {
+                    let mut b = BooleanBuilder::with_capacity(n);
+                    for row in &self.rows {
+                        match row.as_object().and_then(|o| o.get(field.name())) {
+                            Some(v) => match v.as_bool() {
+                                Some(bv) => b.append_value(bv),
+                                None => b.append_null(),
+                            },
+                            None => b.append_null(),
+                        }
+                    }
+                    arrays.push(Arc::new(b.finish()));
+                }
+                _ => {
+                    let mut b = StringBuilder::with_capacity(n, n * 32);
+                    for row in &self.rows {
+                        match row.as_object().and_then(|o| o.get(field.name())) {
+                            Some(v) => {
+                                let s = match v {
+                                    serde_json::Value::String(s) => s.clone(),
+                                    other => other.to_string(),
+                                };
+                                b.append_value(&s);
+                            }
+                            None => b.append_null(),
+                        }
+                    }
+                    arrays.push(Arc::new(b.finish()));
                 }
             }
         }
-
-        let arrays: Vec<Arc<dyn arrow::array::Array>> = builders
-            .iter_mut()
-            .map(|b| Arc::new(b.finish()) as Arc<dyn arrow::array::Array>)
-            .collect();
 
         let batch = RecordBatch::try_new(self.full_schema.clone(), arrays)?;
 

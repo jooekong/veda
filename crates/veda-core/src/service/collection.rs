@@ -44,7 +44,6 @@ impl CollectionService {
         let embedding_dim = Some(self.embedding.dimension() as i32);
 
         let id = Uuid::new_v4().to_string();
-        let milvus_name = format!("veda_coll_{}", id.replace('-', "_"));
         let now = Utc::now();
         let schema_json = serde_json::to_value(fields)
             .map_err(|e| VedaError::Internal(e.to_string()))?;
@@ -62,6 +61,7 @@ impl CollectionService {
             updated_at: now,
         };
 
+        let milvus_name = cs.milvus_name();
         self.vector
             .create_dynamic_collection(&milvus_name, fields, self.embedding.dimension() as u32)
             .await?;
@@ -91,8 +91,7 @@ impl CollectionService {
 
     pub async fn delete(&self, workspace_id: &str, name: &str) -> Result<()> {
         let schema = self.get(workspace_id, name).await?;
-        let milvus_name = format!("veda_coll_{}", schema.id.replace('-', "_"));
-        self.vector.drop_dynamic_collection(&milvus_name).await?;
+        self.vector.drop_dynamic_collection(&schema.milvus_name()).await?;
         self.meta.delete_collection_schema(&schema.id).await?;
         Ok(())
     }
@@ -109,7 +108,7 @@ impl CollectionService {
             return Ok(0);
         }
         let schema = self.get(workspace_id, name).await?;
-        let milvus_name = format!("veda_coll_{}", schema.id.replace('-', "_"));
+        let milvus_name = schema.milvus_name();
 
         let texts: Vec<String> = rows
             .iter()
@@ -153,7 +152,7 @@ impl CollectionService {
         limit: usize,
     ) -> Result<Vec<serde_json::Value>> {
         let schema = self.get(workspace_id, name).await?;
-        let milvus_name = format!("veda_coll_{}", schema.id.replace('-', "_"));
+        let milvus_name = schema.milvus_name();
 
         let vectors = self.embedding.embed(&[query.to_string()]).await?;
         let vector = vectors.into_iter().next().ok_or_else(|| {

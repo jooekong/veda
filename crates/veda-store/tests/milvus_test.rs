@@ -119,13 +119,11 @@ async fn milvus_dynamic_collection_crud() {
             name: "title".into(),
             field_type: "string".into(),
             index: true,
-            embed: false,
         },
         FieldDefinition {
             name: "content".into(),
             field_type: "string".into(),
             index: false,
-            embed: true,
         },
     ];
 

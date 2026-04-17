@@ -114,6 +114,8 @@ impl Worker {
             }
         };
 
+        self.vector.delete_chunks(workspace_id, file_id).await?;
+
         let sem_chunks = semantic_chunk(&content, 2048);
         if sem_chunks.is_empty() {
             return Ok(());
@@ -135,7 +137,6 @@ impl Worker {
             })
             .collect();
 
-        self.vector.delete_chunks(workspace_id, file_id).await?;
         self.vector.upsert_chunks(&chunks_with_emb).await?;
         Ok(())
     }
