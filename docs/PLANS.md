@@ -87,8 +87,8 @@
 - [x] DataFusion session 管理
 - [x] File table provider（从 MySQL 加载）
 - [x] Collection table provider（从 Milvus 加载）
-- [ ] `embedding()` UDF
-- [ ] `search()` UDTF
+- [x] `embedding()` UDF（文本 → JSON 向量字符串）
+- [x] `search()` UDTF（hybrid/semantic/fulltext，返回 file_id/chunk_index/content/score/path）
 
 ---
 
@@ -106,7 +106,19 @@
 
 ---
 
-## Phase 7: 稳定化
+## Phase 7: FUSE 挂载（veda-fuse）✅
+
+> 目标：将 Veda workspace 挂载为本地文件系统。
+
+- [x] Cargo.toml + clap CLI 入口
+- [x] blocking HTTP client（stat/read/write/list/delete/mkdir/rename）
+- [x] InodeTable（inode ↔ path 双向映射 + attr TTL 缓存）
+- [x] fuser::Filesystem 实现（lookup/getattr/readdir/read/write/create/mkdir/unlink/rmdir/rename/setattr/flush/release）
+- [x] 写缓冲机制（open → buffer → flush/release 时 PUT）
+
+---
+
+## Phase 8: 稳定化
 
 - [ ] 端到端测试
 - [ ] 文档完善

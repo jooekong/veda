@@ -65,6 +65,7 @@ async fn main() -> anyhow::Result<()> {
 
     let sql_engine = veda_sql::VedaSqlEngine::new(
         mysql.clone(),
+        milvus.clone(),
         mysql.clone(),
         milvus.clone(),
         embedding.clone(),

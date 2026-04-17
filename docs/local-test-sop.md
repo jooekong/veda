@@ -206,6 +206,7 @@ veda sql "SELECT is_dir, COUNT(*) AS cnt, SUM(CASE WHEN size_bytes IS NOT NULL T
 ```
 
 预期结果：
+
 - 4 个目录 + 5 个文件 = 9 条 dentry
 - 文件行 `size_bytes`、`mime_type` 非 null；目录行为 null
 - `/project/src/%` 过滤只返回 `main.rs`, `lib.rs`
@@ -256,6 +257,7 @@ veda sql "SELECT 'files' AS source, COUNT(*) AS cnt FROM files UNION ALL SELECT 
 ```
 
 预期结果：
+
 - `articles` 5 行，`authors` 3 行
 - `topic` 聚合：database=3, distributed=1, ml=1
 - JOIN 返回 5 行，每篇文章附带作者国家
@@ -292,6 +294,7 @@ veda collection search kb "data structures used in computer systems" --limit 6
 ```
 
 预期结果：
+
 - 每个查询的 top-1 应与意图对应的 domain 匹配
 - 跨领域查询返回多个 domain 的结果
 
@@ -324,6 +327,7 @@ veda collection search by_body "sorting algorithm" --limit 2
 ```
 
 预期结果：
+
 - `by_title` 搜 "sorting algorithm" → top-1 是 "Quick Sort Algorithm"
 - `by_body` 搜 "sorting algorithm" → top-1 是 "Shanghai Restaurants"（因为它的 body 才是排序内容）
 - 证明 `embed-source` 字段选择直接决定语义搜索方向
@@ -346,6 +350,7 @@ veda sql "SELECT key, value FROM full_embed"
 ```
 
 预期结果：
+
 - 搜索 "red fruit" 时 "color:red" 和 "fruit:apple" 排名靠前
 - SQL 返回 3 行
 
@@ -374,6 +379,7 @@ veda search "PostgreSQL" --mode fulltext --limit 3
 ```
 
 预期结果：
+
 - 语义搜 "memory safety without GC" → 命中 rust-intro.md
 - 语义搜 "relational database with JSON support" → 命中 postgres-intro.md
 - 全文搜 "PostgreSQL" → 精确命中 postgres-intro.md
@@ -411,6 +417,7 @@ veda sql "SELECT veda_read('/append/demo.txt') AS content"
 ```
 
 预期结果：
+
 - `veda cat` 最终包含 `hello world !!! [sql]`
 - `veda_append` 返回追加字节数（`appended_bytes`）
 
@@ -431,6 +438,7 @@ veda sql "SELECT veda_exists('/sql_udf/a.txt') AS exists_after_remove"
 ```
 
 预期结果：
+
 - `content` 为 `alpha beta`
 - `exists_flag=true`，删除后 `exists_after_remove=false`
 - `size_bytes`、`mtime` 为非 null
@@ -462,6 +470,7 @@ veda sql "SELECT _path, COUNT(*) AS lines FROM veda_fs('/tf/logs/*.txt') GROUP B
 ```
 
 预期结果：
+
 - 目录模式返回 `path/name/type/size_bytes/mtime`
 - `notes.txt` 返回 3 行，`_line_number` 从 1 开始
 - CSV 返回列 `name/age`，JSONL 返回 `line`（每行一个 JSON 字符串）
@@ -489,6 +498,7 @@ veda sql "SELECT * FROM veda_fs_events('oops')"
 ```
 
 预期结果：
+
 - 查询结果按 `id` 递增，可看到 `/events/` 下 create/delete 事件
 - `limit=-1` 报错：`limit must be non-negative`
 - `'oops'` 报错：`arg 1 (since_id) must be INT`
@@ -502,6 +512,7 @@ veda sql "SELECT total_files, total_directories, total_bytes FROM veda_storage_s
 ```
 
 预期结果：
+
 - 返回 1 行
 - 三列都为非负数，`total_bytes` 在有文件时应大于 0
 
@@ -529,6 +540,7 @@ veda workspace use <WORKSPACE_ID>
 ```
 
 预期结果：
+
 - `veda_read` 正常
 - `veda_write` / `cp` 报 `permission denied`
 
@@ -552,6 +564,7 @@ veda collection desc schema_field_type_demo
 ```
 
 预期结果：
+
 - 两个 collection 都创建成功
 - `desc` 都能正确显示字段类型
 
@@ -576,6 +589,7 @@ cat /tmp/veda-2mb.txt | veda append /quota/base.txt -
 ```
 
 预期结果：
+
 - 两个超限请求都返回 `quota exceeded`
 
 ### 11.9 自动化回归命令（建议每次本地测都跑）
@@ -600,14 +614,14 @@ cargo test -p veda-sql read_only_rejects_write_udf
 ## 常见问题
 
 
-| 问题                            | 原因                        | 解决                                                                               |
-| ----------------------------- | ------------------------- | -------------------------------------------------------------------------------- |
-| `vector dimension mismatch`   | Milvus 旧 collection 维度不匹配 | 删除旧 collection 后重启 server                                                        |
-| `file xxx not found` (Worker) | outbox 中残留指向已删除文件的任务      | `UPDATE veda_outbox SET status='completed' WHERE status IN ('pending','failed')` |
-| `unexpected argument --data`  | `data` 是位置参数              | 去掉 `--data`，直接跟 JSON                                                             |
-| JSON 解析报 control character    | JSON 字符串跨行了               | 确保 JSON 写在一行内                                                                    |
-| `permission denied`（写请求）      | 使用了只读 workspace key       | 用 `veda workspace use <WORKSPACE_ID>` 重新生成读写 key                                  |
-| `veda_fs_events ... must be INT` | `veda_fs_events` 参数类型不对 | 按位置参数传：`(since_id:int, path_prefix:string, limit:int)`                           |
-| `glob matches files of mixed formats` | glob 同时匹配了 txt/csv/jsonl | 用更精确 pattern（例如 `*.txt` / `*.csv`），同一次 `veda_fs()` 尽量只查一种格式                       |
+| 问题                                    | 原因                        | 解决                                                                               |
+| ------------------------------------- | ------------------------- | -------------------------------------------------------------------------------- |
+| `vector dimension mismatch`           | Milvus 旧 collection 维度不匹配 | 删除旧 collection 后重启 server                                                        |
+| `file xxx not found` (Worker)         | outbox 中残留指向已删除文件的任务      | `UPDATE veda_outbox SET status='completed' WHERE status IN ('pending','failed')` |
+| `unexpected argument --data`          | `data` 是位置参数              | 去掉 `--data`，直接跟 JSON                                                             |
+| JSON 解析报 control character            | JSON 字符串跨行了               | 确保 JSON 写在一行内                                                                    |
+| `permission denied`（写请求）              | 使用了只读 workspace key       | 用 `veda workspace use <WORKSPACE_ID>` 重新生成读写 key                                 |
+| `veda_fs_events ... must be INT`      | `veda_fs_events` 参数类型不对   | 按位置参数传：`(since_id:int, path_prefix:string, limit:int)`                           |
+| `glob matches files of mixed formats` | glob 同时匹配了 txt/csv/jsonl  | 用更精确 pattern（例如 `*.txt` / `*.csv`），同一次 `veda_fs()` 尽量只查一种格式                      |
 
 

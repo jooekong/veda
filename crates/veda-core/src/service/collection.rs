@@ -40,8 +40,14 @@ impl CollectionService {
             )));
         }
 
+        let dim = self.embedding.dimension();
+        if dim == 0 {
+            return Err(VedaError::InvalidInput(
+                "embedding dimension not available; configure dimension or embed at least once first".into(),
+            ));
+        }
         let embedding_source = embed_source.map(|s| s.to_string());
-        let embedding_dim = Some(self.embedding.dimension() as i32);
+        let embedding_dim = Some(dim as i32);
 
         let id = Uuid::new_v4().to_string();
         let now = Utc::now();
@@ -63,7 +69,7 @@ impl CollectionService {
 
         let milvus_name = cs.milvus_name();
         self.vector
-            .create_dynamic_collection(&milvus_name, fields, self.embedding.dimension() as u32)
+            .create_dynamic_collection(&milvus_name, fields, dim as u32)
             .await?;
 
         if let Err(e) = self.meta.create_collection_schema(&cs).await {

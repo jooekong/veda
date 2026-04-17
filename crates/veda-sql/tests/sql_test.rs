@@ -146,7 +146,21 @@ fn make_full_engine(meta: Arc<MockMetaFull>) -> VedaSqlEngine {
     let meta_store: Arc<dyn MetadataStore> = meta;
     let fs_service = Arc::new(veda_core::service::fs::FsService::new(meta_store.clone()));
     VedaSqlEngine::new(
-        meta_store,
+        meta_store.clone(),
+        Arc::new(MockVector::new(vec![])),
+        Arc::new(MockCollMeta::new(vec![])),
+        Arc::new(MockCollVector::new()),
+        Arc::new(MockEmbed),
+        fs_service,
+    )
+}
+
+fn make_full_engine_with_vector(meta: Arc<MockMetaFull>, vector: Arc<MockVector>) -> VedaSqlEngine {
+    let meta_store: Arc<dyn MetadataStore> = meta;
+    let fs_service = Arc::new(veda_core::service::fs::FsService::new(meta_store.clone()));
+    VedaSqlEngine::new(
+        meta_store.clone(),
+        vector,
         Arc::new(MockCollMeta::new(vec![])),
         Arc::new(MockCollVector::new()),
         Arc::new(MockEmbed),
@@ -186,6 +200,31 @@ impl MetadataStore for MockMeta {
     async fn query_fs_events(&self, _ws: &str, _since: i64, _prefix: Option<&str>, _limit: usize) -> Result<Vec<FsEvent>> { Ok(vec![]) }
     async fn storage_stats(&self, _ws: &str) -> Result<StorageStats> { Ok(StorageStats { total_files: 0, total_directories: 0, total_bytes: 0 }) }
     async fn begin_tx(&self) -> Result<Box<dyn MetadataTx>> { unreachable!() }
+}
+
+// ── Mock VectorStore ──────────────────────────────────
+
+struct MockVector {
+    hits: Mutex<Vec<SearchHit>>,
+}
+
+impl MockVector {
+    fn new(hits: Vec<SearchHit>) -> Self {
+        Self { hits: Mutex::new(hits) }
+    }
+}
+
+#[async_trait]
+impl VectorStore for MockVector {
+    async fn upsert_chunks(&self, _chunks: &[ChunkWithEmbedding]) -> Result<()> { Ok(()) }
+    async fn delete_chunks(&self, _ws: &str, _fid: &str) -> Result<()> { Ok(()) }
+    async fn search(&self, _req: &SearchRequest) -> Result<Vec<SearchHit>> {
+        Ok(self.hits.lock().unwrap().clone())
+    }
+    async fn hybrid_search(&self, _req: &HybridSearchRequest) -> Result<Vec<SearchHit>> {
+        Ok(self.hits.lock().unwrap().clone())
+    }
+    async fn init_collections(&self, _dim: u32) -> Result<()> { Ok(()) }
 }
 
 // ── Mock CollectionMetaStore ──────────────────────────
@@ -279,7 +318,8 @@ fn make_engine(
     let meta: Arc<dyn MetadataStore> = Arc::new(MockMeta::new(dentries));
     let fs_service = Arc::new(veda_core::service::fs::FsService::new(meta.clone()));
     VedaSqlEngine::new(
-        meta,
+        meta.clone(),
+        Arc::new(MockVector::new(vec![])),
         Arc::new(MockCollMeta::new(schemas)),
         coll_vector,
         Arc::new(MockEmbed),
@@ -790,4 +830,144 @@ async fn read_only_allows_read_udf() {
         .await.unwrap();
     let arr = batches[0].column(0).as_any().downcast_ref::<arrow::array::StringArray>().unwrap();
     assert_eq!(arr.value(0), "data");
+}
+
+// ── embedding() UDF Tests ─────────────────────────────
+
+#[tokio::test]
+async fn embedding_returns_json_vector() {
+    let meta = Arc::new(MockMetaFull::new());
+    let engine = make_full_engine(meta);
+
+    let batches = engine
+        .execute("ws1", false, "SELECT embedding('hello world') as vec")
+        .await.unwrap();
+    assert_eq!(batches.len(), 1);
+    assert_eq!(batches[0].num_rows(), 1);
+
+    let arr = batches[0].column(0).as_any().downcast_ref::<arrow::array::StringArray>().unwrap();
+    let json_str = arr.value(0);
+    let parsed: Vec<f32> = serde_json::from_str(json_str).expect("should be valid JSON float array");
+    assert_eq!(parsed.len(), 128, "mock embedding dimension is 128");
+}
+
+#[tokio::test]
+async fn embedding_with_column_arg() {
+    let meta = Arc::new(MockMetaFull::new());
+    let engine = make_full_engine(meta);
+
+    engine.execute("ws1", false, "SELECT veda_write('/doc.txt', 'some text')").await.unwrap();
+
+    let batches = engine
+        .execute("ws1", false, "SELECT path, embedding(veda_read(path)) as vec FROM files WHERE is_dir = false")
+        .await.unwrap();
+    let total: usize = batches.iter().map(|b| b.num_rows()).sum();
+    assert_eq!(total, 1);
+
+    let arr = batches[0].column(1).as_any().downcast_ref::<arrow::array::StringArray>().unwrap();
+    let parsed: Vec<f32> = serde_json::from_str(arr.value(0)).unwrap();
+    assert_eq!(parsed.len(), 128);
+}
+
+// ── search() UDTF Tests ───────────────────────────────
+
+#[tokio::test]
+async fn search_returns_results() {
+    let hits = vec![
+        SearchHit {
+            file_id: "f1".into(),
+            chunk_index: 0,
+            content: "chunk about deployment".into(),
+            score: 0.95,
+            path: Some("/docs/deploy.md".into()),
+        },
+        SearchHit {
+            file_id: "f2".into(),
+            chunk_index: 1,
+            content: "another chunk".into(),
+            score: 0.80,
+            path: None,
+        },
+    ];
+    let vector = Arc::new(MockVector::new(hits));
+    let meta = Arc::new(MockMetaFull::new());
+    let engine = make_full_engine_with_vector(meta, vector);
+
+    let batches = engine
+        .execute("ws1", false, "SELECT file_id, score, content, path FROM search('deployment')")
+        .await.unwrap();
+    let total: usize = batches.iter().map(|b| b.num_rows()).sum();
+    assert_eq!(total, 2);
+
+    let score_arr = batches[0].column(1).as_any().downcast_ref::<arrow::array::Float64Array>().unwrap();
+    assert!((score_arr.value(0) - 0.95).abs() < 0.001);
+
+    let path_arr = batches[0].column(3).as_any().downcast_ref::<arrow::array::StringArray>().unwrap();
+    assert_eq!(path_arr.value(0), "/docs/deploy.md");
+    assert!(path_arr.is_null(1));
+}
+
+#[tokio::test]
+async fn search_with_mode_and_limit() {
+    let hits = vec![
+        SearchHit {
+            file_id: "f1".into(),
+            chunk_index: 0,
+            content: "result".into(),
+            score: 0.9,
+            path: Some("/a.md".into()),
+        },
+    ];
+    let vector = Arc::new(MockVector::new(hits));
+    let meta = Arc::new(MockMetaFull::new());
+    let engine = make_full_engine_with_vector(meta, vector);
+
+    let batches = engine
+        .execute("ws1", false, "SELECT * FROM search('query', 'semantic', 5)")
+        .await.unwrap();
+    let total: usize = batches.iter().map(|b| b.num_rows()).sum();
+    assert_eq!(total, 1);
+}
+
+#[tokio::test]
+async fn search_empty_results() {
+    let vector = Arc::new(MockVector::new(vec![]));
+    let meta = Arc::new(MockMetaFull::new());
+    let engine = make_full_engine_with_vector(meta, vector);
+
+    let batches = engine
+        .execute("ws1", false, "SELECT * FROM search('nothing')")
+        .await.unwrap();
+    let total: usize = batches.iter().map(|b| b.num_rows()).sum();
+    assert_eq!(total, 0);
+}
+
+#[tokio::test]
+async fn search_invalid_mode_errors() {
+    let meta = Arc::new(MockMetaFull::new());
+    let engine = make_full_engine(meta);
+
+    let result = engine
+        .execute("ws1", false, "SELECT * FROM search('q', 'badmode')")
+        .await;
+    assert!(result.is_err());
+    let msg = result.unwrap_err().to_string();
+    assert!(msg.contains("unknown mode"), "error should mention unknown mode: {msg}");
+}
+
+#[tokio::test]
+async fn search_with_where_filter() {
+    let hits = vec![
+        SearchHit { file_id: "f1".into(), chunk_index: 0, content: "high".into(), score: 0.95, path: Some("/a.md".into()) },
+        SearchHit { file_id: "f2".into(), chunk_index: 0, content: "low".into(), score: 0.30, path: Some("/b.md".into()) },
+    ];
+    let vector = Arc::new(MockVector::new(hits));
+    let meta = Arc::new(MockMetaFull::new());
+    let engine = make_full_engine_with_vector(meta, vector);
+
+    let batches = engine
+        .execute("ws1", false, "SELECT path, score FROM search('test') WHERE score > 0.5")
+        .await.unwrap();
+    let total: usize = batches.iter().map(|b| b.num_rows()).sum();
+    assert_eq!(total, 1);
 }

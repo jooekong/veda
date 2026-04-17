@@ -1,0 +1,75 @@
+use std::collections::HashMap;
+use std::time::{Duration, Instant};
+
+use fuser::FileAttr;
+
+pub const ROOT_INO: u64 = 1;
+const ATTR_TTL: Duration = Duration::from_secs(5);
+
+pub struct InodeTable {
+    next_ino: u64,
+    ino_to_path: HashMap<u64, String>,
+    path_to_ino: HashMap<String, u64>,
+    attr_cache: HashMap<u64, (FileAttr, Instant)>,
+}
+
+impl InodeTable {
+    pub fn new() -> Self {
+        let mut t = Self {
+            next_ino: 2,
+            ino_to_path: HashMap::new(),
+            path_to_ino: HashMap::new(),
+            attr_cache: HashMap::new(),
+        };
+        t.ino_to_path.insert(ROOT_INO, "/".to_string());
+        t.path_to_ino.insert("/".to_string(), ROOT_INO);
+        t
+    }
+
+    pub fn get_or_create_ino(&mut self, path: &str) -> u64 {
+        if let Some(&ino) = self.path_to_ino.get(path) {
+            return ino;
+        }
+        let ino = self.next_ino;
+        self.next_ino += 1;
+        self.ino_to_path.insert(ino, path.to_string());
+        self.path_to_ino.insert(path.to_string(), ino);
+        ino
+    }
+
+    pub fn get_path(&self, ino: u64) -> Option<&str> {
+        self.ino_to_path.get(&ino).map(|s| s.as_str())
+    }
+
+    pub fn get_cached_attr(&self, ino: u64) -> Option<FileAttr> {
+        if let Some((attr, ts)) = self.attr_cache.get(&ino) {
+            if ts.elapsed() < ATTR_TTL {
+                return Some(*attr);
+            }
+        }
+        None
+    }
+
+    pub fn set_cached_attr(&mut self, ino: u64, attr: FileAttr) {
+        self.attr_cache.insert(ino, (attr, Instant::now()));
+    }
+
+    pub fn invalidate(&mut self, ino: u64) {
+        self.attr_cache.remove(&ino);
+    }
+
+    pub fn remove_path(&mut self, path: &str) {
+        if let Some(ino) = self.path_to_ino.remove(path) {
+            self.ino_to_path.remove(&ino);
+            self.attr_cache.remove(&ino);
+        }
+    }
+
+    pub fn rename_path(&mut self, old: &str, new: &str) {
+        if let Some(ino) = self.path_to_ino.remove(old) {
+            self.ino_to_path.insert(ino, new.to_string());
+            self.path_to_ino.insert(new.to_string(), ino);
+            self.attr_cache.remove(&ino);
+        }
+    }
+}

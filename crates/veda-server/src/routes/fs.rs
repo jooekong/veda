@@ -28,6 +28,7 @@ pub fn routes() -> Router<Arc<AppState>> {
 struct FsQuery {
     list: Option<String>,
     lines: Option<String>,
+    stat: Option<String>,
 }
 
 async fn write_file(
@@ -71,6 +72,11 @@ async fn read_file(
     Query(q): Query<FsQuery>,
 ) -> Result<Response, AppError> {
     let path = format!("/{path}");
+
+    if q.stat.is_some() {
+        let info = state.fs_service.stat(&auth.workspace_id, &path).await?;
+        return Ok(Json(ApiResponse::ok(info)).into_response());
+    }
 
     if q.list.is_some() {
         let entries = state
