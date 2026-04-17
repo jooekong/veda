@@ -26,6 +26,14 @@ pub trait MetadataStore: Send + Sync {
         workspace_id: &str,
         file_id: &str,
     ) -> Result<Option<String>>;
+    async fn query_fs_events(
+        &self,
+        workspace_id: &str,
+        since_id: i64,
+        path_prefix: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<FsEvent>>;
+    async fn storage_stats(&self, workspace_id: &str) -> Result<StorageStats>;
     async fn begin_tx(&self) -> Result<Box<dyn MetadataTx>>;
 }
 

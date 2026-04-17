@@ -225,6 +225,12 @@ pub struct CollectionSchema {
     pub updated_at: DateTime<Utc>,
 }
 
+impl CollectionSchema {
+    pub fn milvus_name(&self) -> String {
+        format!("veda_coll_{}", self.id.replace('-', "_"))
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FieldDefinition {
     pub name: String,
@@ -302,4 +308,13 @@ pub struct FsEvent {
     pub path: String,
     pub file_id: Option<String>,
     pub created_at: DateTime<Utc>,
+}
+
+// ── Storage Stats ──────────────────────────────────────
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StorageStats {
+    pub total_files: i64,
+    pub total_directories: i64,
+    pub total_bytes: i64,
 }

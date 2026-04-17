@@ -7,12 +7,18 @@ use veda_core::store::{AuthStore, CollectionMetaStore, MetadataStore, MetadataTx
 use veda_types::{
     Account, AccountStatus, ApiKeyRecord, CollectionSchema, CollectionStatus, CollectionType,
     Dentry, FileChunk, FileRecord, FsEvent, FsEventType, KeyPermission, KeyStatus, OutboxEvent,
-    OutboxEventType, OutboxStatus, Result, SourceType, StorageType, VedaError, Workspace,
-    WorkspaceKey, WorkspaceStatus,
+    OutboxEventType, OutboxStatus, Result, SourceType, StorageStats, StorageType, VedaError,
+    Workspace, WorkspaceKey, WorkspaceStatus,
 };
 
 fn storage_err(e: impl ToString) -> VedaError {
     VedaError::Storage(e.to_string())
+}
+
+fn escape_like(s: &str) -> String {
+    s.replace('\\', "\\\\")
+        .replace('%', "\\%")
+        .replace('_', "\\_")
 }
 
 fn parse_storage_type(s: &str) -> Result<StorageType> {
@@ -92,6 +98,28 @@ fn fs_event_type_str(t: FsEventType) -> &'static str {
         FsEventType::Delete => "delete",
         FsEventType::Move => "move",
     }
+}
+
+fn parse_fs_event_type(s: &str) -> Result<FsEventType> {
+    match s {
+        "create" => Ok(FsEventType::Create),
+        "update" => Ok(FsEventType::Update),
+        "delete" => Ok(FsEventType::Delete),
+        "move" => Ok(FsEventType::Move),
+        _ => Err(storage_err(format!("unknown fs_event_type: {s}"))),
+    }
+}
+
+fn row_to_fs_event(row: &sqlx::mysql::MySqlRow) -> Result<FsEvent> {
+    let et: String = row.try_get("event_type").map_err(storage_err)?;
+    Ok(FsEvent {
+        id: row.try_get("id").map_err(storage_err)?,
+        workspace_id: row.try_get("workspace_id").map_err(storage_err)?,
+        event_type: parse_fs_event_type(&et)?,
+        path: row.try_get("path").map_err(storage_err)?,
+        file_id: row.try_get("file_id").map_err(storage_err)?,
+        created_at: row.try_get("created_at").map_err(storage_err)?,
+    })
 }
 
 fn parse_account_status(s: &str) -> Result<AccountStatus> {
@@ -335,11 +363,12 @@ impl MysqlStore {
     parent_path VARCHAR(4096) NOT NULL,
     name VARCHAR(255) NOT NULL,
     path VARCHAR(4096) NOT NULL,
+    path_hash VARCHAR(64) AS (SHA2(path, 256)) STORED,
     file_id VARCHAR(36),
     is_dir BOOLEAN NOT NULL DEFAULT FALSE,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-    UNIQUE INDEX idx_ws_path (workspace_id, path(255)),
+    UNIQUE INDEX idx_ws_path (workspace_id, path_hash),
     INDEX idx_parent (workspace_id, parent_path(255))
 )"#,
             r#"CREATE TABLE IF NOT EXISTS veda_files (
@@ -653,6 +682,71 @@ impl MetadataStore for MysqlStore {
         Ok(row.map(|r| r.0))
     }
 
+    async fn query_fs_events(
+        &self,
+        workspace_id: &str,
+        since_id: i64,
+        path_prefix: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<FsEvent>> {
+        let limit_i64 = i64::try_from(limit).unwrap_or(10_000);
+        let rows = match path_prefix {
+            Some(prefix) => {
+                let like = format!("{}%", escape_like(prefix));
+                sqlx::query(
+                    r#"SELECT id, workspace_id, event_type, path, file_id, created_at
+                       FROM veda_fs_events
+                       WHERE workspace_id = ? AND id > ? AND path LIKE ? ESCAPE '\\'
+                       ORDER BY id ASC LIMIT ?"#,
+                )
+                .bind(workspace_id)
+                .bind(since_id)
+                .bind(&like)
+                .bind(limit_i64)
+                .fetch_all(&self.pool)
+                .await
+                .map_err(storage_err)?
+            }
+            None => {
+                sqlx::query(
+                    r#"SELECT id, workspace_id, event_type, path, file_id, created_at
+                       FROM veda_fs_events
+                       WHERE workspace_id = ? AND id > ?
+                       ORDER BY id ASC LIMIT ?"#,
+                )
+                .bind(workspace_id)
+                .bind(since_id)
+                .bind(limit_i64)
+                .fetch_all(&self.pool)
+                .await
+                .map_err(storage_err)?
+            }
+        };
+        rows.iter().map(|r| row_to_fs_event(r)).collect()
+    }
+
+    async fn storage_stats(&self, workspace_id: &str) -> Result<StorageStats> {
+        let row = sqlx::query(
+            r#"SELECT
+                COUNT(CASE WHEN d.is_dir = false THEN 1 END) AS total_files,
+                COUNT(CASE WHEN d.is_dir = true THEN 1 END) AS total_directories,
+                COALESCE(SUM(f.size_bytes), 0) AS total_bytes
+               FROM veda_dentries d
+               LEFT JOIN veda_files f ON d.file_id = f.id
+               WHERE d.workspace_id = ?"#,
+        )
+        .bind(workspace_id)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(storage_err)?;
+
+        Ok(StorageStats {
+            total_files: row.try_get::<i64, _>("total_files").unwrap_or(0),
+            total_directories: row.try_get::<i64, _>("total_directories").unwrap_or(0),
+            total_bytes: row.try_get::<i64, _>("total_bytes").unwrap_or(0),
+        })
+    }
+
     async fn begin_tx(&self) -> Result<Box<dyn MetadataTx>> {
         let tx = self
             .pool
@@ -736,10 +830,10 @@ impl MetadataTx for MysqlMetadataTx {
 
     async fn list_dentries_under(&mut self, workspace_id: &str, path_prefix: &str) -> Result<Vec<Dentry>> {
         let t = self.tx_mut()?;
-        let like = format!("{path_prefix}/%");
+        let like = format!("{}/%", escape_like(path_prefix));
         let rows = sqlx::query(
             r#"SELECT id, workspace_id, parent_path, name, path, file_id, is_dir, created_at, updated_at
-               FROM veda_dentries WHERE workspace_id = ? AND path LIKE ?"#,
+               FROM veda_dentries WHERE workspace_id = ? AND path LIKE ? ESCAPE '\\'"#,
         )
         .bind(workspace_id)
         .bind(&like)
@@ -763,8 +857,8 @@ impl MetadataTx for MysqlMetadataTx {
             .execute(t.as_mut())
             .await
         } else {
-            let like = format!("{parent_path}/%");
-            sqlx::query(r#"DELETE FROM veda_dentries WHERE workspace_id = ? AND path LIKE ?"#)
+            let like = format!("{}/%", escape_like(parent_path));
+            sqlx::query(r#"DELETE FROM veda_dentries WHERE workspace_id = ? AND path LIKE ? ESCAPE '\\'"#)
                 .bind(workspace_id)
                 .bind(like)
                 .execute(t.as_mut())
@@ -1015,7 +1109,8 @@ impl TaskQueue for MysqlStore {
             r#"SELECT id, workspace_id, event_type, payload, status, retry_count, max_retries,
                       available_at, lease_until, created_at
                FROM veda_outbox
-               WHERE status = 'pending' AND available_at <= UTC_TIMESTAMP()
+               WHERE (status = 'pending' AND available_at <= UTC_TIMESTAMP())
+                  OR (status = 'processing' AND lease_until IS NOT NULL AND lease_until <= UTC_TIMESTAMP())
                ORDER BY id ASC
                LIMIT ?
                FOR UPDATE SKIP LOCKED"#,

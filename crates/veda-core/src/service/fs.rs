@@ -52,6 +52,53 @@ impl FsService {
                         });
                     }
 
+                    if f.ref_count > 1 {
+                        // COW: fork a new file record instead of mutating the shared one
+                        let new_file_id = Uuid::new_v4().to_string();
+                        let new_storage_type = if size <= INLINE_THRESHOLD {
+                            StorageType::Inline
+                        } else {
+                            StorageType::Chunked
+                        };
+                        let now = Utc::now();
+                        let new_file = FileRecord {
+                            id: new_file_id.clone(),
+                            workspace_id: workspace_id.to_string(),
+                            size_bytes: size,
+                            mime_type: f.mime_type.clone(),
+                            storage_type: new_storage_type,
+                            source_type: f.source_type,
+                            line_count,
+                            checksum_sha256: checksum.clone(),
+                            revision: f.revision + 1,
+                            ref_count: 1,
+                            created_at: now,
+                            updated_at: now,
+                        };
+                        tx.insert_file(&new_file).await?;
+                        write_content(&mut *tx, &new_file_id, content, size).await?;
+                        tx.decrement_ref_count(fid).await?;
+                        tx.update_dentry_file_id(workspace_id, &norm, &new_file_id)
+                            .await?;
+
+                        let outbox =
+                            make_outbox(workspace_id, OutboxEventType::ChunkSync, &new_file_id);
+                        tx.insert_outbox(&outbox).await?;
+                        let evt = make_fs_event(
+                            workspace_id,
+                            FsEventType::Update,
+                            &norm,
+                            Some(&new_file_id),
+                        );
+                        tx.insert_fs_event(&evt).await?;
+                        tx.commit().await?;
+                        return Ok(api::WriteFileResponse {
+                            file_id: new_file_id,
+                            revision: new_file.revision,
+                            content_unchanged: false,
+                        });
+                    }
+
                     let new_rev = f.revision + 1;
                     let new_storage_type = if size <= INLINE_THRESHOLD {
                         StorageType::Inline
@@ -185,6 +232,12 @@ impl FsService {
         start: i32,
         end: i32,
     ) -> Result<String> {
+        if start < 1 || end < start {
+            return Err(VedaError::InvalidInput(format!(
+                "invalid line range {start}..{end}"
+            )));
+        }
+
         let norm = path::normalize(raw_path)?;
         let dentry = self
             .meta
@@ -211,16 +264,14 @@ impl FsService {
                 .await?
                 .ok_or_else(|| VedaError::NotFound(format!("content for {file_id}")))?,
             StorageType::Chunked => {
-                let chunks = self.meta.get_file_chunks(file_id, None, Some(end)).await?;
+                let chunks = self
+                    .meta
+                    .get_file_chunks(file_id, None, Some(end))
+                    .await?;
                 chunks.into_iter().map(|c| c.content).collect::<String>()
             }
         };
 
-        if start < 1 || end < start {
-            return Err(VedaError::InvalidInput(format!(
-                "invalid line range {start}..{end}"
-            )));
-        }
         let lines: Vec<&str> = content.lines().collect();
         let s = (start - 1) as usize;
         let e = (end as usize).min(lines.len());
@@ -293,11 +344,12 @@ impl FsService {
         })
     }
 
+    /// Delete a file or directory. Returns the number of deleted dentries.
     pub async fn delete(
         &self,
         workspace_id: &str,
         raw_path: &str,
-    ) -> Result<()> {
+    ) -> Result<u64> {
         let norm = path::normalize(raw_path)?;
         if norm == "/" {
             return Err(VedaError::InvalidPath("cannot delete root".to_string()));
@@ -310,9 +362,11 @@ impl FsService {
             .ok_or_else(|| VedaError::NotFound(norm.clone()))?;
 
         let mut file_ids_to_cleanup: Vec<String> = Vec::new();
+        let mut deleted_count: u64 = 1; // the target dentry itself
 
         if dentry.is_dir {
             let children = tx.list_dentries_under(workspace_id, &norm).await?;
+            deleted_count += children.len() as u64;
             for child in &children {
                 if let Some(ref fid) = child.file_id {
                     file_ids_to_cleanup.push(fid.clone());
@@ -346,7 +400,7 @@ impl FsService {
         );
         tx.insert_fs_event(&evt).await?;
         tx.commit().await?;
-        Ok(())
+        Ok(deleted_count)
     }
 
     pub async fn mkdir(&self, workspace_id: &str, raw_path: &str) -> Result<()> {
@@ -355,8 +409,11 @@ impl FsService {
             return Ok(());
         }
 
-        let existing = self.meta.get_dentry(workspace_id, &norm).await?;
+        let mut tx = self.meta.begin_tx().await?;
+
+        let existing = tx.get_dentry(workspace_id, &norm).await?;
         if let Some(d) = existing {
+            tx.commit().await?;
             if d.is_dir {
                 return Ok(());
             }
@@ -365,7 +422,6 @@ impl FsService {
             )));
         }
 
-        let mut tx = self.meta.begin_tx().await?;
         ensure_parents(&mut *tx, workspace_id, &norm).await?;
 
         let now = Utc::now();
@@ -380,9 +436,17 @@ impl FsService {
             created_at: now,
             updated_at: now,
         };
-        tx.insert_dentry(&dentry).await?;
-        tx.commit().await?;
-        Ok(())
+        match tx.insert_dentry(&dentry).await {
+            Ok(()) => {
+                tx.commit().await?;
+                Ok(())
+            }
+            Err(VedaError::Storage(msg)) if msg.contains("Duplicate entry") => {
+                tx.rollback().await.ok();
+                Ok(())
+            }
+            Err(e) => Err(e),
+        }
     }
 
     pub async fn copy_file(
@@ -418,29 +482,43 @@ impl FsService {
             .ok_or_else(|| VedaError::NotFound(src.clone()))?;
 
         let mut tx = self.meta.begin_tx().await?;
-        tx.increment_ref_count(file_id).await?;
-
-        ensure_parents(&mut *tx, workspace_id, &dst).await?;
 
         let existing_dst = tx.get_dentry(workspace_id, &dst).await?;
-        if let Some(d) = existing_dst {
+        if let Some(ref d) = existing_dst {
             if d.is_dir {
                 tx.rollback().await?;
                 return Err(VedaError::AlreadyExists(format!(
                     "{dst} is a directory"
                 )));
             }
+            if d.file_id.as_deref() == Some(file_id) {
+                tx.commit().await?;
+                let file = self
+                    .meta
+                    .get_file(file_id)
+                    .await?
+                    .ok_or_else(|| VedaError::NotFound(file_id.to_string()))?;
+                return Ok(api::WriteFileResponse {
+                    file_id: file_id.to_string(),
+                    revision: file.revision,
+                    content_unchanged: true,
+                });
+            }
+        }
+
+        tx.increment_ref_count(file_id).await?;
+        ensure_parents(&mut *tx, workspace_id, &dst).await?;
+
+        if let Some(d) = existing_dst {
             if let Some(ref old_fid) = d.file_id {
-                if old_fid != file_id {
-                    let remaining = tx.decrement_ref_count(old_fid).await?;
-                    if remaining <= 0 {
-                        tx.delete_file_content(old_fid).await?;
-                        tx.delete_file_chunks(old_fid).await?;
-                        let outbox =
-                            make_outbox(workspace_id, OutboxEventType::ChunkDelete, old_fid);
-                        tx.insert_outbox(&outbox).await?;
-                        tx.delete_file(old_fid).await?;
-                    }
+                let remaining = tx.decrement_ref_count(old_fid).await?;
+                if remaining <= 0 {
+                    tx.delete_file_content(old_fid).await?;
+                    tx.delete_file_chunks(old_fid).await?;
+                    let outbox =
+                        make_outbox(workspace_id, OutboxEventType::ChunkDelete, old_fid);
+                    tx.insert_outbox(&outbox).await?;
+                    tx.delete_file(old_fid).await?;
                 }
             }
             tx.update_dentry_file_id(workspace_id, &dst, file_id)
@@ -477,6 +555,36 @@ impl FsService {
             revision: file.revision,
             content_unchanged: true,
         })
+    }
+
+    pub async fn append_file(
+        &self,
+        workspace_id: &str,
+        raw_path: &str,
+        content: &str,
+    ) -> Result<api::WriteFileResponse> {
+        let norm = path::normalize(raw_path)?;
+
+        let existing = self.meta.get_dentry(workspace_id, &norm).await?;
+        let old_content = match existing {
+            Some(ref d) if d.is_dir => {
+                return Err(VedaError::AlreadyExists(format!("{norm} is a directory")));
+            }
+            Some(ref d) if d.file_id.is_some() => {
+                Some(self.read_file(workspace_id, &norm).await?)
+            }
+            _ => None,
+        };
+
+        let new_content = match old_content {
+            Some(mut old) => {
+                old.push_str(content);
+                old
+            }
+            None => content.to_string(),
+        };
+
+        self.write_file(workspace_id, &norm, &new_content).await
     }
 
     pub async fn rename(

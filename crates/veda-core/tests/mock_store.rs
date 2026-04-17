@@ -107,6 +107,48 @@ impl MetadataStore for MockMetadataStore {
             .map(|d| d.path.clone()))
     }
 
+    async fn query_fs_events(
+        &self,
+        workspace_id: &str,
+        since_id: i64,
+        path_prefix: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<FsEvent>> {
+        let st = self.state.lock().unwrap();
+        let mut events: Vec<FsEvent> = st
+            .fs_events
+            .iter()
+            .filter(|e| {
+                e.workspace_id == workspace_id
+                    && e.id > since_id
+                    && path_prefix
+                        .map(|p| e.path.starts_with(p))
+                        .unwrap_or(true)
+            })
+            .cloned()
+            .collect();
+        events.sort_by_key(|e| e.id);
+        events.truncate(limit);
+        Ok(events)
+    }
+
+    async fn storage_stats(&self, workspace_id: &str) -> Result<StorageStats> {
+        let st = self.state.lock().unwrap();
+        let mut total_files: i64 = 0;
+        let mut total_dirs: i64 = 0;
+        let mut total_bytes: i64 = 0;
+        for d in &st.dentries {
+            if d.workspace_id != workspace_id { continue; }
+            if d.is_dir { total_dirs += 1; } else { total_files += 1; }
+        }
+        for f in &st.files {
+            if f.workspace_id == workspace_id {
+                total_bytes += f.size_bytes;
+            }
+        }
+        Ok(StorageStats { total_files, total_directories: total_dirs, total_bytes })
+    }
+
     async fn begin_tx(&self) -> Result<Box<dyn MetadataTx>> {
         Ok(Box::new(MockTx {
             state: Arc::clone(&self.state),

@@ -51,7 +51,7 @@ async fn main() -> anyhow::Result<()> {
 
     milvus.init_collections(cfg.embedding.dimension).await?;
 
-    let fs_service = FsService::new(mysql.clone());
+    let fs_service = Arc::new(FsService::new(mysql.clone()));
     let search_service = SearchService::new(
         mysql.clone(),
         milvus.clone(),
@@ -68,6 +68,7 @@ async fn main() -> anyhow::Result<()> {
         mysql.clone(),
         milvus.clone(),
         embedding.clone(),
+        fs_service.clone(),
     );
 
     let app_state = Arc::new(AppState {

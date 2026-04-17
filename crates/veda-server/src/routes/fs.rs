@@ -5,7 +5,7 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get, head, post, put};
 use axum::{Json, Router};
 use serde::Deserialize;
-use veda_types::api::{DirEntry, FileInfo, WriteFileResponse};
+use veda_types::api::{FileInfo, WriteFileResponse};
 use veda_types::{ApiResponse, VedaError};
 
 use crate::auth::AuthWorkspace;
@@ -59,17 +59,7 @@ async fn read_file(
             .fs_service
             .list_dir(&auth.workspace_id, &path)
             .await?;
-        let dir_entries: Vec<DirEntry> = entries
-            .into_iter()
-            .map(|d| DirEntry {
-                name: d.name.clone(),
-                path: d.path.clone(),
-                is_dir: d.is_dir,
-                size_bytes: None,
-                mime_type: None,
-            })
-            .collect();
-        return Ok(Json(ApiResponse::ok(dir_entries)).into_response());
+        return Ok(Json(ApiResponse::ok(entries)).into_response());
     }
 
     if let Some(ref lines) = q.lines {
@@ -113,7 +103,7 @@ async fn delete_file(
         return Err(VedaError::PermissionDenied.into());
     }
     let path = format!("/{path}");
-    state.fs_service.delete(&auth.workspace_id, &path).await?;
+    let _count = state.fs_service.delete(&auth.workspace_id, &path).await?;
     Ok(Json(ApiResponse::ok(())))
 }
 

@@ -150,7 +150,7 @@ async fn h_read(State(st): State<S>, headers: axum::http::HeaderMap, Path(p): Pa
 async fn h_del(State(st): State<S>, headers: axum::http::HeaderMap, Path(p): Path<String>) -> Response {
     let ws = match resolve_ws(&st, auth_hdr(&headers)).await { Some(w) => w, None => return StatusCode::UNAUTHORIZED.into_response() };
     match st.fs.delete(&ws, &format!("/{p}")).await {
-        Ok(()) => Json(veda_types::ApiResponse::ok(())).into_response(),
+        Ok(_count) => Json(veda_types::ApiResponse::ok(())).into_response(),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
     }
 }
