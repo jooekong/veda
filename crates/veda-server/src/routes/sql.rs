@@ -20,7 +20,7 @@ async fn execute_sql(
     Json(req): Json<SqlRequest>,
 ) -> std::result::Result<Json<ApiResponse<Vec<serde_json::Value>>>, AppError> {
     let batches = state.sql_engine
-        .execute(&auth.workspace_id, &req.sql)
+        .execute(&auth.workspace_id, auth.read_only, &req.sql)
         .await?;
 
     let mut rows: Vec<serde_json::Value> = Vec::new();

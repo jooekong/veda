@@ -11,7 +11,7 @@ use tracing::info;
 use veda_core::service::fs::FsService;
 use veda_types::VedaError;
 
-const MAX_READ_SIZE: i64 = 50 * 1024 * 1024; // 50 MB
+use crate::format::MAX_SINGLE_FILE_BYTES;
 
 pub struct FsUdfContext {
     pub workspace_id: String,
@@ -145,9 +145,9 @@ impl ScalarUDFImpl for FsScalarUdf {
                     match stat {
                         Ok(info) => {
                             if let Some(sz) = info.size_bytes {
-                                if sz > MAX_READ_SIZE {
+                                if sz as usize > MAX_SINGLE_FILE_BYTES {
                                     return Err(exec_err(VedaError::QuotaExceeded(
-                                        format!("file {} is {} bytes, exceeds {}MB limit", path, sz, MAX_READ_SIZE / 1024 / 1024),
+                                        format!("file {} is {} bytes, exceeds {}MB limit", path, sz, MAX_SINGLE_FILE_BYTES / 1024 / 1024),
                                     )));
                                 }
                             }

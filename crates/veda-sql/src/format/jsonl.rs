@@ -1,16 +1,10 @@
 use std::sync::Arc;
 
 use arrow::array::{Int64Builder, RecordBatch, StringBuilder};
-use arrow::datatypes::{DataType, Field, Schema};
 use datafusion::common::Result;
+use tracing::warn;
 
-pub fn jsonl_schema() -> Arc<Schema> {
-    Arc::new(Schema::new(vec![
-        Field::new("_line_number", DataType::Int64, false),
-        Field::new("line", DataType::Utf8, false),
-        Field::new("_path", DataType::Utf8, false),
-    ]))
-}
+use super::line_schema;
 
 pub fn parse_jsonl(content: &str, path: &str) -> Result<RecordBatch> {
     let mut ln_b = Int64Builder::new();
@@ -23,6 +17,7 @@ pub fn parse_jsonl(content: &str, path: &str) -> Result<RecordBatch> {
             continue;
         }
         if serde_json::from_str::<serde_json::Value>(trimmed).is_err() {
+            warn!(path = path, line_number = i + 1, "skipping invalid JSON line");
             continue;
         }
         ln_b.append_value((i + 1) as i64);
@@ -31,7 +26,7 @@ pub fn parse_jsonl(content: &str, path: &str) -> Result<RecordBatch> {
     }
 
     Ok(RecordBatch::try_new(
-        jsonl_schema(),
+        line_schema(),
         vec![
             Arc::new(ln_b.finish()),
             Arc::new(line_b.finish()),

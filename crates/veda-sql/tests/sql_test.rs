@@ -285,7 +285,7 @@ async fn select_star_from_files() {
         make_dentry("/src", "src", true),
     ];
     let engine = make_engine(dentries, vec![], Arc::new(MockCollVector::new()));
-    let batches = engine.execute("ws1", "SELECT path, name, is_dir FROM files").await.unwrap();
+    let batches = engine.execute("ws1", false, "SELECT path, name, is_dir FROM files").await.unwrap();
     let total: usize = batches.iter().map(|b| b.num_rows()).sum();
     assert_eq!(total, 2);
 }
@@ -298,7 +298,7 @@ async fn where_filter_on_files() {
         make_dentry("/docs", "docs", true),
     ];
     let engine = make_engine(dentries, vec![], Arc::new(MockCollVector::new()));
-    let batches = engine.execute("ws1", "SELECT path FROM files WHERE is_dir = false").await.unwrap();
+    let batches = engine.execute("ws1", false, "SELECT path FROM files WHERE is_dir = false").await.unwrap();
     let total: usize = batches.iter().map(|b| b.num_rows()).sum();
     assert_eq!(total, 2);
 }
@@ -311,7 +311,7 @@ async fn count_files() {
         make_dentry("/c", "c", false),
     ];
     let engine = make_engine(dentries, vec![], Arc::new(MockCollVector::new()));
-    let batches = engine.execute("ws1", "SELECT count(*) as cnt FROM files").await.unwrap();
+    let batches = engine.execute("ws1", false, "SELECT count(*) as cnt FROM files").await.unwrap();
     assert_eq!(batches.len(), 1);
     let batch = &batches[0];
     assert_eq!(batch.num_rows(), 1);
@@ -345,7 +345,7 @@ async fn collection_query() {
     };
 
     let engine = make_engine(vec![], vec![schema], coll_vec);
-    let batches = engine.execute("ws1", "SELECT id, title FROM products").await.unwrap();
+    let batches = engine.execute("ws1", false, "SELECT id, title FROM products").await.unwrap();
     let total: usize = batches.iter().map(|b| b.num_rows()).sum();
     assert_eq!(total, 2);
 }
@@ -376,7 +376,7 @@ async fn collection_where_filter() {
     };
 
     let engine = make_engine(vec![], vec![schema], coll_vec);
-    let batches = engine.execute("ws1", "SELECT name FROM items WHERE category = 'fruit'").await.unwrap();
+    let batches = engine.execute("ws1", false, "SELECT name FROM items WHERE category = 'fruit'").await.unwrap();
     let total: usize = batches.iter().map(|b| b.num_rows()).sum();
     assert_eq!(total, 2);
 }
@@ -384,7 +384,7 @@ async fn collection_where_filter() {
 #[tokio::test]
 async fn empty_workspace_returns_empty() {
     let engine = make_engine(vec![], vec![], Arc::new(MockCollVector::new()));
-    let batches = engine.execute("ws1", "SELECT * FROM files").await.unwrap();
+    let batches = engine.execute("ws1", false, "SELECT * FROM files").await.unwrap();
     let total: usize = batches.iter().map(|b| b.num_rows()).sum();
     assert_eq!(total, 0);
 }
@@ -392,7 +392,7 @@ async fn empty_workspace_returns_empty() {
 #[tokio::test]
 async fn invalid_sql_returns_error() {
     let engine = make_engine(vec![], vec![], Arc::new(MockCollVector::new()));
-    let result = engine.execute("ws1", "SELEKT * FRUM nowhere").await;
+    let result = engine.execute("ws1", false, "SELEKT * FRUM nowhere").await;
     assert!(result.is_err());
 }
 
@@ -404,7 +404,7 @@ async fn files_with_nested_dirs() {
         make_dentry("/src/lib.rs", "lib.rs", false),
     ];
     let engine = make_engine(dentries, vec![], Arc::new(MockCollVector::new()));
-    let batches = engine.execute("ws1", "SELECT path FROM files WHERE is_dir = false").await.unwrap();
+    let batches = engine.execute("ws1", false, "SELECT path FROM files WHERE is_dir = false").await.unwrap();
     let total: usize = batches.iter().map(|b| b.num_rows()).sum();
     assert_eq!(total, 2);
 }
@@ -417,13 +417,13 @@ async fn udf_veda_write_and_read() {
     let engine = make_full_engine(meta);
 
     let batches = engine
-        .execute("ws1", "SELECT veda_write('/hello.txt', 'world') as bytes_written")
+        .execute("ws1", false, "SELECT veda_write('/hello.txt', 'world') as bytes_written")
         .await.unwrap();
     let arr = batches[0].column(0).as_any().downcast_ref::<arrow::array::Int64Array>().unwrap();
     assert_eq!(arr.value(0), 5);
 
     let batches = engine
-        .execute("ws1", "SELECT veda_read('/hello.txt') as content")
+        .execute("ws1", false, "SELECT veda_read('/hello.txt') as content")
         .await.unwrap();
     let arr = batches[0].column(0).as_any().downcast_ref::<arrow::array::StringArray>().unwrap();
     assert_eq!(arr.value(0), "world");
@@ -434,13 +434,13 @@ async fn udf_veda_exists() {
     let meta = Arc::new(MockMetaFull::new());
     let engine = make_full_engine(meta);
 
-    let batches = engine.execute("ws1", "SELECT veda_exists('/nope.txt') as e").await.unwrap();
+    let batches = engine.execute("ws1", false, "SELECT veda_exists('/nope.txt') as e").await.unwrap();
     let arr = batches[0].column(0).as_any().downcast_ref::<arrow::array::BooleanArray>().unwrap();
     assert!(!arr.value(0));
 
-    engine.execute("ws1", "SELECT veda_write('/exists.txt', 'hi')").await.unwrap();
+    engine.execute("ws1", false, "SELECT veda_write('/exists.txt', 'hi')").await.unwrap();
 
-    let batches = engine.execute("ws1", "SELECT veda_exists('/exists.txt') as e").await.unwrap();
+    let batches = engine.execute("ws1", false, "SELECT veda_exists('/exists.txt') as e").await.unwrap();
     let arr = batches[0].column(0).as_any().downcast_ref::<arrow::array::BooleanArray>().unwrap();
     assert!(arr.value(0));
 }
@@ -449,13 +449,13 @@ async fn udf_veda_exists() {
 async fn udf_veda_size_and_mtime() {
     let meta = Arc::new(MockMetaFull::new());
     let engine = make_full_engine(meta);
-    engine.execute("ws1", "SELECT veda_write('/data.txt', 'hello world')").await.unwrap();
+    engine.execute("ws1", false, "SELECT veda_write('/data.txt', 'hello world')").await.unwrap();
 
-    let batches = engine.execute("ws1", "SELECT veda_size('/data.txt') as sz").await.unwrap();
+    let batches = engine.execute("ws1", false, "SELECT veda_size('/data.txt') as sz").await.unwrap();
     let arr = batches[0].column(0).as_any().downcast_ref::<arrow::array::Int64Array>().unwrap();
     assert_eq!(arr.value(0), 11);
 
-    let batches = engine.execute("ws1", "SELECT veda_mtime('/data.txt') as mt").await.unwrap();
+    let batches = engine.execute("ws1", false, "SELECT veda_mtime('/data.txt') as mt").await.unwrap();
     let arr = batches[0].column(0).as_any().downcast_ref::<arrow::array::StringArray>().unwrap();
     assert!(!arr.value(0).is_empty());
 }
@@ -464,10 +464,10 @@ async fn udf_veda_size_and_mtime() {
 async fn udf_veda_append() {
     let meta = Arc::new(MockMetaFull::new());
     let engine = make_full_engine(meta);
-    engine.execute("ws1", "SELECT veda_write('/log.txt', 'line1\n')").await.unwrap();
-    engine.execute("ws1", "SELECT veda_append('/log.txt', 'line2\n')").await.unwrap();
+    engine.execute("ws1", false, "SELECT veda_write('/log.txt', 'line1\n')").await.unwrap();
+    engine.execute("ws1", false, "SELECT veda_append('/log.txt', 'line2\n')").await.unwrap();
 
-    let batches = engine.execute("ws1", "SELECT veda_read('/log.txt') as c").await.unwrap();
+    let batches = engine.execute("ws1", false, "SELECT veda_read('/log.txt') as c").await.unwrap();
     let arr = batches[0].column(0).as_any().downcast_ref::<arrow::array::StringArray>().unwrap();
     assert_eq!(arr.value(0), "line1\nline2\n");
 }
@@ -477,20 +477,20 @@ async fn udf_veda_mkdir_and_remove() {
     let meta = Arc::new(MockMetaFull::new());
     let engine = make_full_engine(meta);
 
-    let batches = engine.execute("ws1", "SELECT veda_mkdir('/mydir') as ok").await.unwrap();
+    let batches = engine.execute("ws1", false, "SELECT veda_mkdir('/mydir') as ok").await.unwrap();
     let arr = batches[0].column(0).as_any().downcast_ref::<arrow::array::BooleanArray>().unwrap();
     assert!(arr.value(0));
 
-    let batches = engine.execute("ws1", "SELECT veda_exists('/mydir') as e").await.unwrap();
+    let batches = engine.execute("ws1", false, "SELECT veda_exists('/mydir') as e").await.unwrap();
     let arr = batches[0].column(0).as_any().downcast_ref::<arrow::array::BooleanArray>().unwrap();
     assert!(arr.value(0));
 
-    engine.execute("ws1", "SELECT veda_write('/target.txt', 'data')").await.unwrap();
-    let batches = engine.execute("ws1", "SELECT veda_remove('/target.txt') as r").await.unwrap();
+    engine.execute("ws1", false, "SELECT veda_write('/target.txt', 'data')").await.unwrap();
+    let batches = engine.execute("ws1", false, "SELECT veda_remove('/target.txt') as r").await.unwrap();
     let arr = batches[0].column(0).as_any().downcast_ref::<arrow::array::Int64Array>().unwrap();
     assert_eq!(arr.value(0), 1);
 
-    let batches = engine.execute("ws1", "SELECT veda_exists('/target.txt') as e").await.unwrap();
+    let batches = engine.execute("ws1", false, "SELECT veda_exists('/target.txt') as e").await.unwrap();
     let arr = batches[0].column(0).as_any().downcast_ref::<arrow::array::BooleanArray>().unwrap();
     assert!(!arr.value(0));
 }
@@ -500,11 +500,11 @@ async fn udf_column_arg_veda_exists() {
     let meta = Arc::new(MockMetaFull::new());
     let engine = make_full_engine(meta);
 
-    engine.execute("ws1", "SELECT veda_write('/a.txt', 'aaa')").await.unwrap();
-    engine.execute("ws1", "SELECT veda_write('/b.txt', 'bbb')").await.unwrap();
+    engine.execute("ws1", false, "SELECT veda_write('/a.txt', 'aaa')").await.unwrap();
+    engine.execute("ws1", false, "SELECT veda_write('/b.txt', 'bbb')").await.unwrap();
 
     let batches = engine
-        .execute("ws1", "SELECT path, veda_exists(path) as e FROM files WHERE is_dir = false ORDER BY path")
+        .execute("ws1", false, "SELECT path, veda_exists(path) as e FROM files WHERE is_dir = false ORDER BY path")
         .await
         .unwrap();
     let total: usize = batches.iter().map(|b| b.num_rows()).sum();
@@ -520,11 +520,11 @@ async fn udf_column_arg_veda_read() {
     let meta = Arc::new(MockMetaFull::new());
     let engine = make_full_engine(meta);
 
-    engine.execute("ws1", "SELECT veda_write('/x.txt', 'content_x')").await.unwrap();
-    engine.execute("ws1", "SELECT veda_write('/y.txt', 'content_y')").await.unwrap();
+    engine.execute("ws1", false, "SELECT veda_write('/x.txt', 'content_x')").await.unwrap();
+    engine.execute("ws1", false, "SELECT veda_write('/y.txt', 'content_y')").await.unwrap();
 
     let batches = engine
-        .execute("ws1", "SELECT path, veda_read(path) as content FROM files WHERE is_dir = false ORDER BY path")
+        .execute("ws1", false, "SELECT path, veda_read(path) as content FROM files WHERE is_dir = false ORDER BY path")
         .await
         .unwrap();
     let total: usize = batches.iter().map(|b| b.num_rows()).sum();
@@ -542,12 +542,12 @@ async fn veda_fs_dir_listing() {
     let meta = Arc::new(MockMetaFull::new());
     let engine = make_full_engine(meta);
 
-    engine.execute("ws1", "SELECT veda_mkdir('/docs')").await.unwrap();
-    engine.execute("ws1", "SELECT veda_write('/docs/a.txt', 'aaa')").await.unwrap();
-    engine.execute("ws1", "SELECT veda_write('/docs/b.md', 'bbb')").await.unwrap();
+    engine.execute("ws1", false, "SELECT veda_mkdir('/docs')").await.unwrap();
+    engine.execute("ws1", false, "SELECT veda_write('/docs/a.txt', 'aaa')").await.unwrap();
+    engine.execute("ws1", false, "SELECT veda_write('/docs/b.md', 'bbb')").await.unwrap();
 
     let batches = engine
-        .execute("ws1", "SELECT path, name, type, size_bytes FROM veda_fs('/docs/')")
+        .execute("ws1", false, "SELECT path, name, type, size_bytes FROM veda_fs('/docs/')")
         .await.unwrap();
     let total: usize = batches.iter().map(|b| b.num_rows()).sum();
     assert_eq!(total, 2, "should list 2 files under /docs/");
@@ -558,10 +558,10 @@ async fn veda_fs_read_plain_text() {
     let meta = Arc::new(MockMetaFull::new());
     let engine = make_full_engine(meta);
 
-    engine.execute("ws1", "SELECT veda_write('/notes.txt', 'line1\nline2\nline3')").await.unwrap();
+    engine.execute("ws1", false, "SELECT veda_write('/notes.txt', 'line1\nline2\nline3')").await.unwrap();
 
     let batches = engine
-        .execute("ws1", "SELECT _line_number, line FROM veda_fs('/notes.txt')")
+        .execute("ws1", false, "SELECT _line_number, line FROM veda_fs('/notes.txt')")
         .await.unwrap();
     let total: usize = batches.iter().map(|b| b.num_rows()).sum();
     assert_eq!(total, 3);
@@ -579,10 +579,10 @@ async fn veda_fs_read_csv() {
     let engine = make_full_engine(meta);
 
     let csv = "name,age\nAlice,30\nBob,25";
-    engine.execute("ws1", &format!("SELECT veda_write('/data.csv', '{csv}')")).await.unwrap();
+    engine.execute("ws1", false, &format!("SELECT veda_write('/data.csv', '{csv}')")).await.unwrap();
 
     let batches = engine
-        .execute("ws1", "SELECT name, age FROM veda_fs('/data.csv')")
+        .execute("ws1", false, "SELECT name, age FROM veda_fs('/data.csv')")
         .await.unwrap();
     let total: usize = batches.iter().map(|b| b.num_rows()).sum();
     assert_eq!(total, 2);
@@ -599,10 +599,10 @@ async fn veda_fs_read_jsonl() {
 
     let jsonl = r#"{"level":"info","msg":"start"}
 {"level":"error","msg":"fail"}"#;
-    engine.execute("ws1", &format!("SELECT veda_write('/app.jsonl', '{jsonl}')")).await.unwrap();
+    engine.execute("ws1", false, &format!("SELECT veda_write('/app.jsonl', '{jsonl}')")).await.unwrap();
 
     let batches = engine
-        .execute("ws1", "SELECT _line_number, line FROM veda_fs('/app.jsonl')")
+        .execute("ws1", false, "SELECT _line_number, line FROM veda_fs('/app.jsonl')")
         .await.unwrap();
     let total: usize = batches.iter().map(|b| b.num_rows()).sum();
     assert_eq!(total, 2);
@@ -617,13 +617,41 @@ async fn veda_fs_glob() {
     let meta = Arc::new(MockMetaFull::new());
     let engine = make_full_engine(meta);
 
-    engine.execute("ws1", "SELECT veda_mkdir('/logs')").await.unwrap();
-    engine.execute("ws1", "SELECT veda_write('/logs/a.txt', 'log_a\nline2')").await.unwrap();
-    engine.execute("ws1", "SELECT veda_write('/logs/b.txt', 'log_b')").await.unwrap();
+    engine.execute("ws1", false, "SELECT veda_mkdir('/logs')").await.unwrap();
+    engine.execute("ws1", false, "SELECT veda_write('/logs/a.txt', 'log_a\nline2')").await.unwrap();
+    engine.execute("ws1", false, "SELECT veda_write('/logs/b.txt', 'log_b')").await.unwrap();
 
     let batches = engine
-        .execute("ws1", "SELECT _line_number, line, _path FROM veda_fs('/logs/*.txt')")
+        .execute("ws1", false, "SELECT _line_number, line, _path FROM veda_fs('/logs/*.txt')")
         .await.unwrap();
     let total: usize = batches.iter().map(|b| b.num_rows()).sum();
     assert_eq!(total, 3, "2 lines from a.txt + 1 from b.txt");
+}
+
+#[tokio::test]
+async fn read_only_rejects_write_udf() {
+    let meta = Arc::new(MockMetaFull::new());
+    let engine = make_full_engine(meta);
+
+    let result = engine
+        .execute("ws1", true, "SELECT veda_write('/x.txt', 'data')")
+        .await;
+    assert!(result.is_err(), "write UDF should fail with read_only=true");
+    let err_msg = result.unwrap_err().to_string();
+    assert!(err_msg.contains("permission denied") || err_msg.contains("read-only"),
+        "error should mention permission: {err_msg}");
+}
+
+#[tokio::test]
+async fn read_only_allows_read_udf() {
+    let meta = Arc::new(MockMetaFull::new());
+    let engine = make_full_engine(meta);
+
+    engine.execute("ws1", false, "SELECT veda_write('/r.txt', 'data')").await.unwrap();
+
+    let batches = engine
+        .execute("ws1", true, "SELECT veda_read('/r.txt') as c")
+        .await.unwrap();
+    let arr = batches[0].column(0).as_any().downcast_ref::<arrow::array::StringArray>().unwrap();
+    assert_eq!(arr.value(0), "data");
 }

@@ -1,5 +1,6 @@
-use std::fmt::{self, Debug, Formatter};
 use std::sync::Arc;
+use std::collections::HashMap;
+use std::fmt::{self, Debug, Formatter};
 
 use arrow::array::{Int64Builder, RecordBatch, StringBuilder};
 use datafusion::catalog::{TableFunctionImpl, TableProvider};
@@ -11,12 +12,11 @@ use datafusion::logical_expr::Expr;
 use veda_core::service::fs::FsService;
 use veda_types::Dentry;
 
-use crate::format::{self, FileFormat};
+use crate::format::{self, FileFormat, MAX_SINGLE_FILE_BYTES};
 use crate::fs_udf;
 
 const MAX_GLOB_TOTAL_READ: usize = 100 * 1024 * 1024; // 100MB
 const MAX_GLOB_FILE_COUNT: usize = 10_000;
-const MAX_SINGLE_FILE_READ: usize = 50 * 1024 * 1024; // 50MB
 
 /// Factory that implements DataFusion's `TableFunctionImpl` for `veda_fs(path)`.
 pub struct VedaFsTableFactory {
@@ -46,8 +46,10 @@ impl TableFunctionImpl for VedaFsTableFactory {
 
         match mode {
             FsMode::DirListing => {
-                let dentries = fs_udf::block_on(fs.list_dir_recursive(&ws, &path))
-                    .map_err(|e| datafusion::error::DataFusionError::Execution(e.to_string()))?;
+                let dentries = fs_udf::block_on(
+                    fs.list_dir_recursive(&ws, &path, MAX_GLOB_FILE_COUNT),
+                )
+                .map_err(|e| datafusion::error::DataFusionError::Execution(e.to_string()))?;
 
                 let batch = build_dir_listing_batch(&dentries, &fs, &ws)?;
                 let schema = format::dir_listing_schema();
@@ -62,22 +64,16 @@ impl TableFunctionImpl for VedaFsTableFactory {
                 Ok(Arc::new(table))
             }
             FsMode::Glob => {
-                let matching = fs_udf::block_on(fs.glob_files(&ws, &path))
-                    .map_err(|e| datafusion::error::DataFusionError::Execution(e.to_string()))?;
-
-                if matching.len() > MAX_GLOB_FILE_COUNT {
-                    return plan_err!(
-                        "glob matched {} files, exceeds limit of {}",
-                        matching.len(),
-                        MAX_GLOB_FILE_COUNT
-                    );
-                }
+                let matching = fs_udf::block_on(
+                    fs.glob_files(&ws, &path, MAX_GLOB_FILE_COUNT),
+                )
+                .map_err(|e| datafusion::error::DataFusionError::Execution(e.to_string()))?;
 
                 let batches = read_glob_files(&fs, &ws, &matching)?;
 
                 if batches.is_empty() {
-                    let text_schema = crate::format::parse_file("", "/empty", &FileFormat::PlainText)?.schema();
-                    let table = MemTable::try_new(text_schema, vec![vec![]])?;
+                    let empty = format::empty_batch_for_format(&path)?;
+                    let table = MemTable::try_new(empty.schema(), vec![vec![]])?;
                     return Ok(Arc::new(table));
                 }
 
@@ -97,7 +93,7 @@ enum FsMode {
 }
 
 fn detect_mode(path: &str) -> FsMode {
-    if path.contains('*') || path.contains('?') || path.contains('[') {
+    if path.contains('*') || path.contains('?') {
         FsMode::Glob
     } else if path.ends_with('/') {
         FsMode::DirListing
@@ -109,9 +105,21 @@ fn detect_mode(path: &str) -> FsMode {
 fn build_dir_listing_batch(
     dentries: &[Dentry],
     fs: &FsService,
-    ws: &str,
+    _ws: &str,
 ) -> Result<RecordBatch> {
     let n = dentries.len();
+
+    let file_ids: Vec<&str> = dentries
+        .iter()
+        .filter_map(|d| d.file_id.as_deref())
+        .collect();
+    let mut file_map: HashMap<String, veda_types::FileRecord> = HashMap::new();
+    for fid in &file_ids {
+        if let Ok(Some(fr)) = fs_udf::block_on(fs.get_file(fid)) {
+            file_map.insert(fid.to_string(), fr);
+        }
+    }
+
     let mut path_b = StringBuilder::with_capacity(n, n * 32);
     let mut name_b = StringBuilder::with_capacity(n, n * 16);
     let mut type_b = StringBuilder::with_capacity(n, n * 8);
@@ -123,19 +131,11 @@ fn build_dir_listing_batch(
         name_b.append_value(&d.name);
         type_b.append_value(if d.is_dir { "directory" } else { "file" });
 
-        match fs_udf::block_on(fs.stat(ws, &d.path)) {
-            Ok(info) => {
-                match info.size_bytes {
-                    Some(sz) => size_b.append_value(sz),
-                    None => size_b.append_null(),
-                }
-                mtime_b.append_value(info.updated_at.to_rfc3339());
-            }
-            Err(_) => {
-                size_b.append_null();
-                mtime_b.append_value(d.updated_at.to_rfc3339());
-            }
+        match d.file_id.as_deref().and_then(|fid| file_map.get(fid)) {
+            Some(fr) => size_b.append_value(fr.size_bytes),
+            None => size_b.append_null(),
         }
+        mtime_b.append_value(d.updated_at.to_rfc3339());
     }
 
     let schema = format::dir_listing_schema();
@@ -161,9 +161,9 @@ fn read_single_file(
         .map_err(|e| datafusion::error::DataFusionError::Execution(e.to_string()))?;
 
     if let Some(sz) = info.size_bytes {
-        if sz as usize > MAX_SINGLE_FILE_READ {
+        if sz as usize > MAX_SINGLE_FILE_BYTES {
             return Err(datafusion::error::DataFusionError::Execution(
-                format!("file {} is {} bytes, exceeds {}MB limit", path, sz, MAX_SINGLE_FILE_READ / 1024 / 1024),
+                format!("file {} is {} bytes, exceeds {}MB limit", path, sz, MAX_SINGLE_FILE_BYTES / 1024 / 1024),
             ));
         }
     }

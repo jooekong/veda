@@ -20,6 +20,10 @@ impl FsService {
         Self { meta }
     }
 
+    pub async fn get_file(&self, file_id: &str) -> Result<Option<FileRecord>> {
+        self.meta.get_file(file_id).await
+    }
+
     pub async fn write_file(
         &self,
         workspace_id: &str,
@@ -301,10 +305,12 @@ impl FsService {
     }
 
     /// Recursively list all dentries under a directory.
+    /// `max_entries` caps the total number of collected dentries to prevent OOM.
     pub async fn list_dir_recursive(
         &self,
         workspace_id: &str,
         raw_path: &str,
+        max_entries: usize,
     ) -> Result<Vec<Dentry>> {
         let norm = path::normalize(raw_path)?;
         let mut all = Vec::new();
@@ -315,6 +321,11 @@ impl FsService {
                 queue.push(d.path.clone());
             }
             all.push(d);
+            if all.len() > max_entries {
+                return Err(VedaError::QuotaExceeded(
+                    format!("directory listing exceeded {} entries", max_entries),
+                ));
+            }
         }
         while let Some(dir) = queue.pop() {
             let children = self.meta.list_dentries(workspace_id, &dir).await?;
@@ -323,6 +334,11 @@ impl FsService {
                     queue.push(c.path.clone());
                 }
                 all.push(c);
+                if all.len() > max_entries {
+                    return Err(VedaError::QuotaExceeded(
+                        format!("directory listing exceeded {} entries", max_entries),
+                    ));
+                }
             }
         }
         Ok(all)
@@ -334,9 +350,10 @@ impl FsService {
         &self,
         workspace_id: &str,
         pattern: &str,
+        max_matches: usize,
     ) -> Result<Vec<Dentry>> {
         let prefix = glob_fixed_prefix(pattern);
-        let all = self.list_dir_recursive(workspace_id, &prefix).await?;
+        let all = self.list_dir_recursive(workspace_id, &prefix, max_matches).await?;
         Ok(all
             .into_iter()
             .filter(|d| !d.is_dir && glob_match(pattern, &d.path))

@@ -1,16 +1,9 @@
 use std::sync::Arc;
 
 use arrow::array::{Int64Builder, RecordBatch, StringBuilder};
-use arrow::datatypes::{DataType, Field, Schema};
 use datafusion::common::Result;
 
-pub fn text_schema() -> Arc<Schema> {
-    Arc::new(Schema::new(vec![
-        Field::new("_line_number", DataType::Int64, false),
-        Field::new("line", DataType::Utf8, false),
-        Field::new("_path", DataType::Utf8, false),
-    ]))
-}
+use super::line_schema;
 
 pub fn parse_text(content: &str, path: &str) -> Result<RecordBatch> {
     let lines: Vec<&str> = content.lines().collect();
@@ -27,7 +20,7 @@ pub fn parse_text(content: &str, path: &str) -> Result<RecordBatch> {
     }
 
     Ok(RecordBatch::try_new(
-        text_schema(),
+        line_schema(),
         vec![
             Arc::new(ln_b.finish()),
             Arc::new(line_b.finish()),

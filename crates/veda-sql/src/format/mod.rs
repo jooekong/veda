@@ -4,7 +4,10 @@ mod text;
 
 use std::sync::Arc;
 use arrow::array::RecordBatch;
+use arrow::datatypes::{DataType, Field, Schema};
 use datafusion::common::Result;
+
+pub const MAX_SINGLE_FILE_BYTES: usize = 50 * 1024 * 1024; // 50MB
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum FileFormat {
@@ -32,9 +35,23 @@ pub fn parse_file(content: &str, path: &str, format: &FileFormat) -> Result<Reco
     }
 }
 
-/// Build a schema for directory listing mode.
-pub fn dir_listing_schema() -> Arc<arrow::datatypes::Schema> {
-    use arrow::datatypes::{DataType, Field, Schema};
+/// Schema shared by plain text and JSONL formats: (_line_number, line, _path).
+pub fn line_schema() -> Arc<Schema> {
+    Arc::new(Schema::new(vec![
+        Field::new("_line_number", DataType::Int64, false),
+        Field::new("line", DataType::Utf8, false),
+        Field::new("_path", DataType::Utf8, false),
+    ]))
+}
+
+/// Build an empty RecordBatch matching the format detected from a path.
+pub fn empty_batch_for_format(path: &str) -> Result<RecordBatch> {
+    let fmt = detect_format(path);
+    parse_file("", path, &fmt)
+}
+
+/// Schema for directory listing mode.
+pub fn dir_listing_schema() -> Arc<Schema> {
     Arc::new(Schema::new(vec![
         Field::new("path", DataType::Utf8, false),
         Field::new("name", DataType::Utf8, false),

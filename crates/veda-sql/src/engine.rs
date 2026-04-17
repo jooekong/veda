@@ -34,6 +34,7 @@ impl VedaSqlEngine {
     pub async fn execute(
         &self,
         workspace_id: &str,
+        read_only: bool,
         sql: &str,
     ) -> veda_types::Result<Vec<RecordBatch>> {
         let ctx = SessionContext::new();
@@ -56,7 +57,7 @@ impl VedaSqlEngine {
         let fs_ctx = Arc::new(FsUdfContext {
             workspace_id: workspace_id.to_string(),
             fs_service: self.fs_service.clone(),
-            read_only: false,
+            read_only,
         });
         fs_udf::register_all(&ctx, fs_ctx);
 
