@@ -98,11 +98,11 @@ impl Worker {
     }
 
     async fn handle_chunk_sync(&self, workspace_id: &str, file_id: &str) -> veda_types::Result<()> {
-        let file = self
-            .meta
-            .get_file(file_id)
-            .await?
-            .ok_or_else(|| VedaError::NotFound(format!("file {file_id}")))?;
+        let Some(file) = self.meta.get_file(file_id).await? else {
+            warn!(workspace_id, file_id, "chunk_sync skipped: file no longer exists");
+            self.vector.delete_chunks(workspace_id, file_id).await?;
+            return Ok(());
+        };
 
         let content = match file.storage_type {
             StorageType::Inline => self
