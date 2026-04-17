@@ -71,6 +71,10 @@ veda ls /docs
 # 读文件
 veda cat /docs/hello.txt
 
+# 追加内容（新增）
+veda append /docs/hello.txt " +append"
+echo " via-stdin" | veda append /docs/hello.txt -
+
 # 移动/重命名
 veda mv /docs/hello.txt /docs/greeting.txt
 
@@ -386,6 +390,213 @@ veda collection delete full_embed
 veda rm /project
 ```
 
+## 11. 新增功能专项回归（FS9 + 稳定性修复）
+
+> 本节覆盖最近新增/修复能力：`veda append`、SQL FS UDF、`veda_fs()`、`veda_fs_events()`、`veda_storage_stats()`、只读 key 权限、schema 字段兼容、50MB 限额。
+
+### 11.1 CLI Append + SQL Append
+
+验证：`POST /v1/fs/{path}`、`veda append`、`veda_append()` 三条路径行为一致。
+
+```bash
+# CLI append（字符串 + stdin）
+echo "hello" | veda cp - /append/demo.txt
+veda append /append/demo.txt " world"
+echo " !!!" | veda append /append/demo.txt -
+veda cat /append/demo.txt
+
+# SQL append
+veda sql "SELECT veda_append('/append/demo.txt', ' [sql]') AS appended_bytes"
+veda sql "SELECT veda_read('/append/demo.txt') AS content"
+```
+
+预期结果：
+- `veda cat` 最终包含 `hello world !!! [sql]`
+- `veda_append` 返回追加字节数（`appended_bytes`）
+
+### 11.2 SQL Scalar UDF 全链路
+
+验证：`veda_read/write/append/exists/size/mtime/remove/mkdir`。
+
+```bash
+veda sql "SELECT veda_write('/sql_udf/a.txt', 'alpha') AS bytes_written"
+veda sql "SELECT veda_append('/sql_udf/a.txt', ' beta') AS bytes_appended"
+veda sql "SELECT veda_read('/sql_udf/a.txt') AS content"
+veda sql "SELECT veda_exists('/sql_udf/a.txt') AS exists_flag"
+veda sql "SELECT veda_size('/sql_udf/a.txt') AS size_bytes"
+veda sql "SELECT veda_mtime('/sql_udf/a.txt') AS mtime"
+veda sql "SELECT veda_mkdir('/sql_udf/tmp') AS mkdir_ok"
+veda sql "SELECT veda_remove('/sql_udf/a.txt') AS removed_count"
+veda sql "SELECT veda_exists('/sql_udf/a.txt') AS exists_after_remove"
+```
+
+预期结果：
+- `content` 为 `alpha beta`
+- `exists_flag=true`，删除后 `exists_after_remove=false`
+- `size_bytes`、`mtime` 为非 null
+
+### 11.3 `veda_fs()` Table Function（目录 / 文件 / 格式解析 / glob）
+
+验证：目录列举、plain text、CSV、JSONL、glob 多文件读取。
+
+```bash
+# 准备数据
+veda mkdir /tf
+veda mkdir /tf/logs
+printf "line1\nline2\nline3\n" | veda cp - /tf/notes.txt
+printf "name,age\nAlice,30\nBob,25\n" | veda cp - /tf/users.csv
+printf "{\"level\":\"info\",\"msg\":\"start\"}\n{\"level\":\"error\",\"msg\":\"fail\"}\n" | veda cp - /tf/app.jsonl
+printf "a1\na2\n" | veda cp - /tf/logs/a.txt
+printf "b1\n" | veda cp - /tf/logs/b.txt
+
+# 目录模式（path 以 / 结尾）
+veda sql "SELECT path, name, type, size_bytes FROM veda_fs('/tf/') ORDER BY path"
+
+# 文件模式（自动按扩展名解析）
+veda sql "SELECT _line_number, line, _path FROM veda_fs('/tf/notes.txt')"
+veda sql "SELECT _line_number, name, age, _path FROM veda_fs('/tf/users.csv') ORDER BY _line_number"
+veda sql "SELECT _line_number, line FROM veda_fs('/tf/app.jsonl') ORDER BY _line_number"
+
+# glob 模式（同一模式下建议同格式文件）
+veda sql "SELECT _path, COUNT(*) AS lines FROM veda_fs('/tf/logs/*.txt') GROUP BY _path ORDER BY _path"
+```
+
+预期结果：
+- 目录模式返回 `path/name/type/size_bytes/mtime`
+- `notes.txt` 返回 3 行，`_line_number` 从 1 开始
+- CSV 返回列 `name/age`，JSONL 返回 `line`（每行一个 JSON 字符串）
+- glob 返回两行统计：`a.txt=2`、`b.txt=1`
+
+### 11.4 `veda_fs_events()`（位置参数、过滤、错误处理）
+
+验证：`since_id`、`path_prefix`、`limit` 生效；参数校验报错友好。
+
+```bash
+# 造事件
+veda sql "SELECT veda_write('/events/a.txt', 'A')"
+veda sql "SELECT veda_write('/events/b.txt', 'B')"
+veda sql "SELECT veda_remove('/events/b.txt')"
+
+# 事件查询：参数都是位置参数
+# arg1: since_id(INT), arg2: path_prefix(STRING), arg3: limit(INT)
+veda sql "SELECT id, event_type, path FROM veda_fs_events() ORDER BY id DESC LIMIT 20"
+veda sql "SELECT id, event_type, path FROM veda_fs_events(0, '/events/', 100)"
+veda sql "SELECT id, event_type, path FROM veda_fs_events(1)"
+
+# 错误参数
+veda sql "SELECT * FROM veda_fs_events(0, '/events/', -1)"
+veda sql "SELECT * FROM veda_fs_events('oops')"
+```
+
+预期结果：
+- 查询结果按 `id` 递增，可看到 `/events/` 下 create/delete 事件
+- `limit=-1` 报错：`limit must be non-negative`
+- `'oops'` 报错：`arg 1 (since_id) must be INT`
+
+### 11.5 `veda_storage_stats()` 统计
+
+验证：返回单行聚合统计（文件数、目录数、总字节）。
+
+```bash
+veda sql "SELECT total_files, total_directories, total_bytes FROM veda_storage_stats()"
+```
+
+预期结果：
+- 返回 1 行
+- 三列都为非负数，`total_bytes` 在有文件时应大于 0
+
+### 11.6 Read-only Workspace Key 权限验证（新增）
+
+验证：只读 key 可以读，但会拒绝写接口和写 SQL UDF。
+
+```bash
+# 1) 从 veda config show 拿到 api_key 和 workspace_id，创建 read-only key
+curl -sS -X POST "http://localhost:3000/v1/workspaces/<WORKSPACE_ID>/keys" \
+  -H "Authorization: Bearer <API_KEY>" \
+  -H "Content-Type: application/json" \
+  -d '{"name":"ro-test","permission":"read"}'
+
+# 2) 将返回的 key 写入 CLI 配置
+veda config set workspace_key <READ_ONLY_KEY>
+
+# 3) 读请求应成功，写请求应失败
+veda sql "SELECT veda_read('/tf/notes.txt')"
+veda sql "SELECT veda_write('/tf/ro_denied.txt', 'x')"
+echo "x" | veda cp - /tf/ro_denied.txt
+
+# 4) 测完恢复 read-write key
+veda workspace use <WORKSPACE_ID>
+```
+
+预期结果：
+- `veda_read` 正常
+- `veda_write` / `cp` 报 `permission denied`
+
+### 11.7 Collection schema 字段名兼容（`type` / `field_type`）
+
+验证：`FieldDefinition` 兼容两种字段名写法。
+
+```bash
+# 新写法：type
+veda collection create schema_type_demo \
+  --schema '[{"name":"title","type":"varchar"},{"name":"content","type":"varchar"}]' \
+  --embed-source content
+
+# 旧写法：field_type
+veda collection create schema_field_type_demo \
+  --schema '[{"name":"title","field_type":"varchar"},{"name":"content","field_type":"varchar"}]' \
+  --embed-source content
+
+veda collection desc schema_type_demo
+veda collection desc schema_field_type_demo
+```
+
+预期结果：
+- 两个 collection 都创建成功
+- `desc` 都能正确显示字段类型
+
+### 11.8 50MB 限额保护（可选，耗时）
+
+验证：`write_file` 与 `append_file` 都受 50MB 限制。
+
+```bash
+python - <<'PY'
+from pathlib import Path
+Path('/tmp/veda-51mb.txt').write_text('x' * (51 * 1024 * 1024))
+Path('/tmp/veda-49mb.txt').write_text('a' * (49 * 1024 * 1024))
+Path('/tmp/veda-2mb.txt').write_text('b' * (2 * 1024 * 1024))
+PY
+
+# write 超限
+veda cp /tmp/veda-51mb.txt /quota/too-big.txt
+
+# append 超限：49MB + 2MB > 50MB
+veda cp /tmp/veda-49mb.txt /quota/base.txt
+cat /tmp/veda-2mb.txt | veda append /quota/base.txt -
+```
+
+预期结果：
+- 两个超限请求都返回 `quota exceeded`
+
+### 11.9 自动化回归命令（建议每次本地测都跑）
+
+```bash
+# 核心 append/COW/配额回归
+cargo test -p veda-core append_file_cow_isolation
+cargo test -p veda-core append_creates_new_file
+cargo test -p veda-core append_to_existing_file
+cargo test -p veda-core write_file_size_limit
+
+# SQL 新能力回归
+cargo test -p veda-sql udf_veda_append
+cargo test -p veda-sql veda_fs_dir_listing
+cargo test -p veda-sql veda_fs_read_csv
+cargo test -p veda-sql veda_fs_glob
+cargo test -p veda-sql veda_fs_events_basic
+cargo test -p veda-sql veda_storage_stats_basic
+cargo test -p veda-sql read_only_rejects_write_udf
+```
+
 ## 常见问题
 
 
@@ -395,5 +606,8 @@ veda rm /project
 | `file xxx not found` (Worker) | outbox 中残留指向已删除文件的任务      | `UPDATE veda_outbox SET status='completed' WHERE status IN ('pending','failed')` |
 | `unexpected argument --data`  | `data` 是位置参数              | 去掉 `--data`，直接跟 JSON                                                             |
 | JSON 解析报 control character    | JSON 字符串跨行了               | 确保 JSON 写在一行内                                                                    |
+| `permission denied`（写请求）      | 使用了只读 workspace key       | 用 `veda workspace use <WORKSPACE_ID>` 重新生成读写 key                                  |
+| `veda_fs_events ... must be INT` | `veda_fs_events` 参数类型不对 | 按位置参数传：`(since_id:int, path_prefix:string, limit:int)`                           |
+| `glob matches files of mixed formats` | glob 同时匹配了 txt/csv/jsonl | 用更精确 pattern（例如 `*.txt` / `*.csv`），同一次 `veda_fs()` 尽量只查一种格式                       |
 
 
