@@ -256,5 +256,13 @@ impl ScalarUDFImpl for FsScalarUdf {
 }
 
 fn exec_err(e: VedaError) -> datafusion::error::DataFusionError {
-    datafusion::error::DataFusionError::Execution(e.to_string())
+    let msg = match &e {
+        VedaError::NotFound(p) => format!("veda: file or directory not found: {p}"),
+        VedaError::AlreadyExists(p) => format!("veda: already exists: {p}"),
+        VedaError::PermissionDenied => "veda: permission denied".to_string(),
+        VedaError::InvalidPath(p) => format!("veda: invalid path: {p}"),
+        VedaError::QuotaExceeded(m) => format!("veda: quota exceeded: {m}"),
+        _ => format!("veda: {e}"),
+    };
+    datafusion::error::DataFusionError::Execution(msg)
 }

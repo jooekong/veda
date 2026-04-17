@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
+use arrow::array::Array;
 use async_trait::async_trait;
 use veda_core::store::*;
 use veda_sql::VedaSqlEngine;
@@ -695,6 +696,69 @@ async fn veda_storage_stats_basic() {
     assert!(files.value(0) >= 2, "should have at least 2 files");
     assert!(dirs.value(0) >= 1, "should have at least 1 directory");
     assert!(bytes.value(0) > 0, "total bytes should be > 0");
+}
+
+// ── Error handling & guardrail tests ─────────────────
+
+#[tokio::test]
+async fn udf_read_not_found_returns_null() {
+    let meta = Arc::new(MockMetaFull::new());
+    let engine = make_full_engine(meta);
+
+    let batches = engine
+        .execute("ws1", false, "SELECT veda_read('/nonexistent.txt') as c")
+        .await.unwrap();
+    let arr = batches[0].column(0).as_any().downcast_ref::<arrow::array::StringArray>().unwrap();
+    assert!(arr.is_null(0), "reading a nonexistent file should return NULL");
+}
+
+#[tokio::test]
+async fn udf_exists_not_found_returns_false() {
+    let meta = Arc::new(MockMetaFull::new());
+    let engine = make_full_engine(meta);
+
+    let batches = engine
+        .execute("ws1", false, "SELECT veda_exists('/ghost.txt') as e")
+        .await.unwrap();
+    let arr = batches[0].column(0).as_any().downcast_ref::<arrow::array::BooleanArray>().unwrap();
+    assert!(!arr.value(0), "veda_exists on missing file should return false");
+}
+
+#[tokio::test]
+async fn udf_size_not_found_returns_null() {
+    let meta = Arc::new(MockMetaFull::new());
+    let engine = make_full_engine(meta);
+
+    let batches = engine
+        .execute("ws1", false, "SELECT veda_size('/missing.bin') as s")
+        .await.unwrap();
+    let arr = batches[0].column(0).as_any().downcast_ref::<arrow::array::Int64Array>().unwrap();
+    assert!(arr.is_null(0), "veda_size on missing file should return NULL");
+}
+
+#[tokio::test]
+async fn udf_remove_nonexistent_errors() {
+    let meta = Arc::new(MockMetaFull::new());
+    let engine = make_full_engine(meta);
+
+    let result = engine
+        .execute("ws1", false, "SELECT veda_remove('/nope.txt')")
+        .await;
+    assert!(result.is_err(), "removing nonexistent file should error");
+    let msg = result.unwrap_err().to_string();
+    assert!(msg.contains("not found"), "error should mention not found: {msg}");
+}
+
+#[tokio::test]
+async fn udf_error_message_is_friendly() {
+    let meta = Arc::new(MockMetaFull::new());
+    let engine = make_full_engine(meta);
+
+    let result = engine
+        .execute("ws1", false, "SELECT veda_remove('/doesnotexist.txt')")
+        .await;
+    let msg = result.unwrap_err().to_string();
+    assert!(msg.contains("veda:"), "error should have veda: prefix for clarity: {msg}");
 }
 
 #[tokio::test]
