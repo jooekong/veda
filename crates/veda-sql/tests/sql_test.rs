@@ -126,7 +126,14 @@ impl MetadataTx for MockMetaFullTx {
     async fn insert_file_chunks(&mut self, _chunks: &[FileChunk]) -> Result<()> { Ok(()) }
     async fn delete_file_chunks(&mut self, _id: &str) -> Result<()> { Ok(()) }
     async fn insert_outbox(&mut self, _event: &OutboxEvent) -> Result<()> { Ok(()) }
-    async fn insert_fs_event(&mut self, event: &FsEvent) -> Result<()> { self.fs_events.lock().unwrap().push(event.clone()); Ok(()) }
+    async fn insert_fs_event(&mut self, event: &FsEvent) -> Result<()> {
+        let mut st = self.fs_events.lock().unwrap();
+        let next_id = st.len() as i64 + 1;
+        let mut e = event.clone();
+        e.id = next_id;
+        st.push(e);
+        Ok(())
+    }
     async fn commit(self: Box<Self>) -> Result<()> { Ok(()) }
     async fn rollback(self: Box<Self>) -> Result<()> { Ok(()) }
 }
@@ -626,6 +633,68 @@ async fn veda_fs_glob() {
         .await.unwrap();
     let total: usize = batches.iter().map(|b| b.num_rows()).sum();
     assert_eq!(total, 3, "2 lines from a.txt + 1 from b.txt");
+}
+
+// ── veda_fs_events() / veda_storage_stats() Tests ─────
+
+#[tokio::test]
+async fn veda_fs_events_basic() {
+    let meta = Arc::new(MockMetaFull::new());
+    let engine = make_full_engine(meta);
+
+    engine.execute("ws1", false, "SELECT veda_write('/a.txt', 'hello')").await.unwrap();
+    engine.execute("ws1", false, "SELECT veda_write('/b.txt', 'world')").await.unwrap();
+
+    let batches = engine
+        .execute("ws1", false, "SELECT id, event_type, path FROM veda_fs_events()")
+        .await.unwrap();
+    let total: usize = batches.iter().map(|b| b.num_rows()).sum();
+    assert!(total >= 2, "should have at least 2 events, got {total}");
+}
+
+#[tokio::test]
+async fn veda_fs_events_since_id() {
+    let meta = Arc::new(MockMetaFull::new());
+    let engine = make_full_engine(meta);
+
+    engine.execute("ws1", false, "SELECT veda_write('/a.txt', 'a')").await.unwrap();
+    engine.execute("ws1", false, "SELECT veda_write('/b.txt', 'b')").await.unwrap();
+    engine.execute("ws1", false, "SELECT veda_write('/c.txt', 'c')").await.unwrap();
+
+    let all = engine
+        .execute("ws1", false, "SELECT id FROM veda_fs_events()")
+        .await.unwrap();
+    let all_count: usize = all.iter().map(|b| b.num_rows()).sum();
+
+    let since = engine
+        .execute("ws1", false, "SELECT id FROM veda_fs_events(1)")
+        .await.unwrap();
+    let since_count: usize = since.iter().map(|b| b.num_rows()).sum();
+    assert!(since_count < all_count, "since_id=1 filter should reduce results: all={all_count} since={since_count}");
+}
+
+#[tokio::test]
+async fn veda_storage_stats_basic() {
+    let meta = Arc::new(MockMetaFull::new());
+    let engine = make_full_engine(meta);
+
+    engine.execute("ws1", false, "SELECT veda_mkdir('/data')").await.unwrap();
+    engine.execute("ws1", false, "SELECT veda_write('/data/x.txt', 'hello')").await.unwrap();
+    engine.execute("ws1", false, "SELECT veda_write('/data/y.txt', 'world!')").await.unwrap();
+
+    let batches = engine
+        .execute("ws1", false, "SELECT total_files, total_directories, total_bytes FROM veda_storage_stats()")
+        .await.unwrap();
+    assert_eq!(batches.len(), 1);
+    assert_eq!(batches[0].num_rows(), 1);
+
+    let files = batches[0].column(0).as_any().downcast_ref::<arrow::array::Int64Array>().unwrap();
+    let dirs = batches[0].column(1).as_any().downcast_ref::<arrow::array::Int64Array>().unwrap();
+    let bytes = batches[0].column(2).as_any().downcast_ref::<arrow::array::Int64Array>().unwrap();
+
+    assert!(files.value(0) >= 2, "should have at least 2 files");
+    assert!(dirs.value(0) >= 1, "should have at least 1 directory");
+    assert!(bytes.value(0) > 0, "total bytes should be > 0");
 }
 
 #[tokio::test]

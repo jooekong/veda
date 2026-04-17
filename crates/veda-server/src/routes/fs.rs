@@ -18,6 +18,7 @@ pub fn routes() -> Router<Arc<AppState>> {
         .route("/v1/fs/{*path}", get(read_file))
         .route("/v1/fs/{*path}", head(stat_file))
         .route("/v1/fs/{*path}", delete(delete_file))
+        .route("/v1/fs/{*path}", post(append_file))
         .route("/v1/fs-copy", post(copy_file))
         .route("/v1/fs-rename", post(rename_file))
         .route("/v1/fs-mkdir", post(mkdir))
@@ -42,6 +43,23 @@ async fn write_file(
     let resp = state
         .fs_service
         .write_file(&auth.workspace_id, &path, &body)
+        .await?;
+    Ok(Json(ApiResponse::ok(resp)))
+}
+
+async fn append_file(
+    State(state): State<Arc<AppState>>,
+    auth: AuthWorkspace,
+    Path(path): Path<String>,
+    body: String,
+) -> Result<Json<ApiResponse<WriteFileResponse>>, AppError> {
+    if auth.read_only {
+        return Err(VedaError::PermissionDenied.into());
+    }
+    let path = format!("/{path}");
+    let resp = state
+        .fs_service
+        .append_file(&auth.workspace_id, &path, &body)
         .await?;
     Ok(Json(ApiResponse::ok(resp)))
 }

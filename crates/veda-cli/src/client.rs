@@ -68,6 +68,15 @@ impl Client {
         Self::check(resp).await
     }
 
+    pub async fn append_file(&self, ws_key: &str, path: &str, content: &str) -> Result<serde_json::Value> {
+        let path = path.trim_start_matches('/');
+        let resp = self.http.post(format!("{}/v1/fs/{path}", self.base))
+            .bearer_auth(ws_key)
+            .body(content.to_string())
+            .send().await?;
+        Self::check(resp).await
+    }
+
     pub async fn read_file(&self, ws_key: &str, path: &str, lines: Option<&str>) -> Result<String> {
         let path = path.trim_start_matches('/');
         let mut url = format!("{}/v1/fs/{path}", self.base);

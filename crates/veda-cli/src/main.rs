@@ -56,6 +56,13 @@ enum Commands {
     Rm {
         path: String,
     },
+    /// Append content to a file
+    Append {
+        /// Remote path
+        path: String,
+        /// Content to append (or "-" for stdin)
+        content: String,
+    },
     /// Create directory
     Mkdir {
         path: String,
@@ -252,6 +259,18 @@ async fn main() -> anyhow::Result<()> {
         Commands::Rm { path } => {
             c.delete_file(cfg.ws_key()?, &path).await?;
             println!("Deleted {path}");
+        }
+        Commands::Append { path, content } => {
+            let data = if content == "-" {
+                use std::io::Read;
+                let mut buf = String::new();
+                std::io::stdin().read_to_string(&mut buf)?;
+                buf
+            } else {
+                content
+            };
+            c.append_file(cfg.ws_key()?, &path, &data).await?;
+            println!("Appended {} bytes to {path}", data.len());
         }
         Commands::Mkdir { path } => {
             c.mkdir(cfg.ws_key()?, &path).await?;

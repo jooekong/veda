@@ -29,20 +29,19 @@ veda-fuse       FUSE 挂载（不在默认 workspace）      (空壳)
 - `veda-core`：MetadataStore/MetadataTx/VectorStore/TaskQueue/EmbeddingService/AuthStore/CollectionMetaStore/CollectionVectorStore trait 定义；FsService（write/read/list/stat/delete/copy/rename/mkdir/append/glob_files/list_dir_recursive，含 dedup/COW/分层存储/outbox）；SearchService（hybrid/semantic/fulltext 三模式）；CollectionService（create/list/get/delete/insert_rows/search）；path normalization；SHA256 checksum；glob matching；21 个 mock 单元测试 + 14 个工具单元测试
 - `veda-store`：MysqlStore（MetadataStore + MetadataTx + TaskQueue + AuthStore + CollectionMetaStore 实现，含 schema migration）；MilvusStore（VectorStore + CollectionVectorStore 实现，REST v2 client）；10 个 MySQL 集成测试 + 2 个 Milvus 集成测试
 - `veda-pipeline`：EmbeddingProvider（OpenAI 兼容 HTTP）；semantic_chunk（heading-based + sliding window）；storage_chunk（256KB 边界 + start_line）；extract_text（text/plain 占位）；6 个 chunking 单元测试 + 4 个 embedding 集成测试
-- `veda-sql`：VedaSqlEngine（DataFusion session 管理）；FilesTable（递归 dentry 枚举）；CollectionTable（Milvus 查询 → Arrow）；8 个 FS SQL 标量函数（veda_read/write/append/exists/size/mtime/remove/mkdir）；`veda_fs()` Table Function（目录列举 / 文件读取 / glob 匹配，CSV/TSV/JSONL/plain text 自动解析）；支持 SELECT/WHERE/COUNT/JOIN 等标准 SQL；20 个 mock 单元测试
+- `veda-sql`：VedaSqlEngine（DataFusion session 管理）；FilesTable（递归 dentry 枚举）；CollectionTable（Milvus 查询 → Arrow）；8 个 FS SQL 标量函数（veda_read/write/append/exists/size/mtime/remove/mkdir）；`veda_fs()` Table Function（目录列举 / 文件读取 / glob 匹配，CSV/TSV/JSONL/plain text 自动解析）；`veda_fs_events()` Table Function（事件查询，支持 since_id/path_prefix/limit）；`veda_storage_stats()` Table Function（文件/目录/字节统计）；支持 SELECT/WHERE/COUNT/JOIN 等标准 SQL；25 个 mock 单元测试
 - `veda-server`：ServerConfig（TOML 加载）；JWT 签发/验证；API Key + Workspace Key 认证中间件；Account/Workspace/File/Search/Collection/SQL 全部 REST 路由；Worker（outbox 消费 + chunk sync）；graceful shutdown；1 个 HTTP 集成测试
-- `veda-cli`：clap 命令行解析；account create/login；workspace create/list/use；cp/cat/ls/mv/rm/mkdir；search；collection CRUD；sql；config 管理；$HOME/.config/veda/config.toml 持久化
+- `veda-server`：新增 `POST /v1/fs/{path}` append 路由
+- `veda-cli`：clap 命令行解析；account create/login；workspace create/list/use；cp/cat/ls/mv/rm/mkdir/append；search；collection CRUD；sql；config 管理；$HOME/.config/veda/config.toml 持久化
 
 ## 测试策略
 
-- 单元测试：`cargo test`（74 个测试，全部自动运行）
+- 单元测试：`cargo test`（79 个测试，全部自动运行）
 - 集成测试：`cargo test -- --ignored`（17 个测试，需要 `config/test.toml` 配置真实 MySQL/Milvus/Embedding 服务）
 - 敏感配置：`config/test.toml`（已 gitignore），模板见 `config/test.toml.example`
 
 ## 待实现
 
-- `veda_fs_events()` / `veda_storage_stats()` Table Function
-- `POST /v1/fs/{path}?append` HTTP API
 - WebSocket 实时事件推送
 - Reconciler（MySQL ↔ Milvus 数据对比自愈）
 - Prometheus metrics 导出

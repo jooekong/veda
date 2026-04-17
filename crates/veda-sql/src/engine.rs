@@ -10,6 +10,8 @@ use crate::collection_table::CollectionTable;
 use crate::files_table::FilesTable;
 use crate::fs_udf::{self, FsUdfContext};
 use crate::fs_table::VedaFsTableFactory;
+use crate::fs_events_table::VedaFsEventsFactory;
+use crate::storage_stats_table::VedaStorageStatsFactory;
 
 pub struct VedaSqlEngine {
     meta: Arc<dyn MetadataStore>,
@@ -64,6 +66,16 @@ impl VedaSqlEngine {
         ctx.register_udtf("veda_fs", Arc::new(VedaFsTableFactory {
             workspace_id: workspace_id.to_string(),
             fs_service: self.fs_service.clone(),
+        }));
+
+        ctx.register_udtf("veda_fs_events", Arc::new(VedaFsEventsFactory {
+            workspace_id: workspace_id.to_string(),
+            meta: self.meta.clone(),
+        }));
+
+        ctx.register_udtf("veda_storage_stats", Arc::new(VedaStorageStatsFactory {
+            workspace_id: workspace_id.to_string(),
+            meta: self.meta.clone(),
         }));
 
         let df = ctx.sql(sql).await
