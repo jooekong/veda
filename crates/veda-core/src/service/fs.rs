@@ -10,6 +10,7 @@ use crate::store::MetadataStore;
 
 const INLINE_THRESHOLD: i64 = 256 * 1024;
 const CHUNK_SIZE: usize = 256 * 1024;
+const MAX_APPEND_FILE_BYTES: i64 = 50 * 1024 * 1024;
 
 pub struct FsService {
     meta: Arc<dyn MetadataStore>,
@@ -624,27 +625,139 @@ impl FsService {
         content: &str,
     ) -> Result<api::WriteFileResponse> {
         let norm = path::normalize(raw_path)?;
+        let mut tx = self.meta.begin_tx().await?;
 
-        let existing = self.meta.get_dentry(workspace_id, &norm).await?;
-        let old_content = match existing {
+        let existing = tx.get_dentry(workspace_id, &norm).await?;
+
+        let new_content = match existing {
             Some(ref d) if d.is_dir => {
                 return Err(VedaError::AlreadyExists(format!("{norm} is a directory")));
             }
             Some(ref d) if d.file_id.is_some() => {
-                Some(self.read_file(workspace_id, &norm).await?)
-            }
-            _ => None,
-        };
+                let fid = d.file_id.as_deref().unwrap();
+                let file = tx.get_file(fid).await?
+                    .ok_or_else(|| VedaError::NotFound(fid.to_string()))?;
 
-        let new_content = match old_content {
-            Some(mut old) => {
+                if file.size_bytes + content.len() as i64 > MAX_APPEND_FILE_BYTES {
+                    return Err(VedaError::QuotaExceeded(format!(
+                        "append would exceed {}MB limit (current {} + append {})",
+                        MAX_APPEND_FILE_BYTES / 1024 / 1024,
+                        file.size_bytes,
+                        content.len()
+                    )));
+                }
+
+                let mut old = match file.storage_type {
+                    StorageType::Inline => tx
+                        .get_file_content(fid)
+                        .await?
+                        .unwrap_or_default(),
+                    StorageType::Chunked => {
+                        let chunks = tx.get_file_chunks(fid, None, None).await?;
+                        chunks.into_iter().map(|c| c.content).collect::<String>()
+                    }
+                };
                 old.push_str(content);
                 old
             }
-            None => content.to_string(),
+            _ => content.to_string(),
         };
 
-        self.write_file(workspace_id, &norm, &new_content).await
+        let checksum = sha256_hex(new_content.as_bytes());
+        let size = new_content.len() as i64;
+        let line_count = Some(new_content.lines().count() as i32);
+
+        if let Some(ref dentry) = existing {
+            if let Some(ref fid) = dentry.file_id {
+                let file = tx.get_file(fid).await?;
+                if let Some(f) = file {
+                    if f.checksum_sha256 == checksum {
+                        tx.commit().await?;
+                        return Ok(api::WriteFileResponse {
+                            file_id: fid.clone(),
+                            revision: f.revision,
+                            content_unchanged: true,
+                        });
+                    }
+
+                    let new_rev = f.revision + 1;
+                    let new_storage_type = if size <= INLINE_THRESHOLD {
+                        StorageType::Inline
+                    } else {
+                        StorageType::Chunked
+                    };
+                    tx.delete_file_content(fid).await?;
+                    tx.delete_file_chunks(fid).await?;
+                    write_content(&mut *tx, fid, &new_content, size).await?;
+                    tx.update_file_revision(fid, new_rev, size, &checksum, line_count, new_storage_type).await?;
+
+                    let outbox = make_outbox(workspace_id, OutboxEventType::ChunkSync, fid);
+                    tx.insert_outbox(&outbox).await?;
+                    let evt = make_fs_event(workspace_id, FsEventType::Update, &norm, Some(fid));
+                    tx.insert_fs_event(&evt).await?;
+                    tx.commit().await?;
+                    return Ok(api::WriteFileResponse {
+                        file_id: fid.clone(),
+                        revision: new_rev,
+                        content_unchanged: false,
+                    });
+                }
+            }
+        }
+
+        let file_id = Uuid::new_v4().to_string();
+        let now = Utc::now();
+        let storage_type = if size <= INLINE_THRESHOLD {
+            StorageType::Inline
+        } else {
+            StorageType::Chunked
+        };
+        let file = FileRecord {
+            id: file_id.clone(),
+            workspace_id: workspace_id.to_string(),
+            size_bytes: size,
+            mime_type: "text/plain".to_string(),
+            storage_type,
+            source_type: SourceType::Text,
+            line_count,
+            checksum_sha256: checksum,
+            revision: 1,
+            ref_count: 1,
+            created_at: now,
+            updated_at: now,
+        };
+        tx.insert_file(&file).await?;
+        write_content(&mut *tx, &file_id, &new_content, size).await?;
+
+        if existing.is_some() {
+            tx.update_dentry_file_id(workspace_id, &norm, &file_id).await?;
+        } else {
+            ensure_parents(&mut *tx, workspace_id, &norm).await?;
+            let dentry = Dentry {
+                id: Uuid::new_v4().to_string(),
+                workspace_id: workspace_id.to_string(),
+                parent_path: path::parent(&norm).to_string(),
+                name: path::filename(&norm).to_string(),
+                path: norm.clone(),
+                file_id: Some(file_id.clone()),
+                is_dir: false,
+                created_at: now,
+                updated_at: now,
+            };
+            tx.insert_dentry(&dentry).await?;
+        }
+
+        let outbox = make_outbox(workspace_id, OutboxEventType::ChunkSync, &file_id);
+        tx.insert_outbox(&outbox).await?;
+        let evt = make_fs_event(workspace_id, FsEventType::Create, &norm, Some(&file_id));
+        tx.insert_fs_event(&evt).await?;
+        tx.commit().await?;
+
+        Ok(api::WriteFileResponse {
+            file_id,
+            revision: 1,
+            content_unchanged: false,
+        })
     }
 
     pub async fn rename(

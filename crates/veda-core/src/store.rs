@@ -84,7 +84,14 @@ pub trait MetadataTx: Send {
     async fn increment_ref_count(&mut self, file_id: &str) -> Result<()>;
     async fn delete_file(&mut self, file_id: &str) -> Result<()>;
 
-    // content ops
+    // content ops (read + write)
+    async fn get_file_content(&mut self, file_id: &str) -> Result<Option<String>>;
+    async fn get_file_chunks(
+        &mut self,
+        file_id: &str,
+        start_line: Option<i32>,
+        end_line: Option<i32>,
+    ) -> Result<Vec<FileChunk>>;
     async fn insert_file_content(&mut self, file_id: &str, content: &str) -> Result<()>;
     async fn delete_file_content(&mut self, file_id: &str) -> Result<()>;
     async fn insert_file_chunks(&mut self, chunks: &[FileChunk]) -> Result<()>;

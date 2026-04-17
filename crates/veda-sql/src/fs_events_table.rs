@@ -8,6 +8,7 @@ use datafusion::common::ScalarValue;
 use datafusion::datasource::memory::MemTable;
 use datafusion::error::Result;
 use datafusion::logical_expr::Expr;
+use tracing::warn;
 
 use veda_core::store::MetadataStore;
 
@@ -55,18 +56,30 @@ impl TableFunctionImpl for VedaFsEventsFactory {
         }
 
         if let Some(sv) = exprs.first().and_then(|e| extract_scalar(e)) {
-            if let ScalarValue::Int64(Some(v)) = sv {
-                since_id = *v;
+            match sv {
+                ScalarValue::Int64(Some(v)) => since_id = *v,
+                ScalarValue::Null => {}
+                other => return Err(datafusion::error::DataFusionError::Plan(
+                    format!("veda_fs_events: arg 1 (since_id) must be INT, got {}", other.data_type()),
+                )),
             }
         }
         if let Some(sv) = exprs.get(1).and_then(|e| extract_scalar(e)) {
-            if let ScalarValue::Utf8(Some(v)) = sv {
-                path_prefix = Some(v.clone());
+            match sv {
+                ScalarValue::Utf8(Some(v)) => path_prefix = Some(v.clone()),
+                ScalarValue::Null => {}
+                other => return Err(datafusion::error::DataFusionError::Plan(
+                    format!("veda_fs_events: arg 2 (path_prefix) must be STRING, got {}", other.data_type()),
+                )),
             }
         }
         if let Some(sv) = exprs.get(2).and_then(|e| extract_scalar(e)) {
-            if let ScalarValue::Int64(Some(v)) = sv {
-                limit = *v as usize;
+            match sv {
+                ScalarValue::Int64(Some(v)) => limit = *v as usize,
+                ScalarValue::Null => {}
+                other => return Err(datafusion::error::DataFusionError::Plan(
+                    format!("veda_fs_events: arg 3 (limit) must be INT, got {}", other.data_type()),
+                )),
             }
         }
 
@@ -80,6 +93,13 @@ impl TableFunctionImpl for VedaFsEventsFactory {
         )
         .map_err(|e| datafusion::error::DataFusionError::Execution(e.to_string()))?;
 
+        if events.len() == limit {
+            warn!(
+                "veda_fs_events: returned {} rows (hit limit) — pass an explicit limit to retrieve more",
+                limit
+            );
+        }
+
         let schema = fs_events_schema();
         let n = events.len();
 
@@ -91,7 +111,7 @@ impl TableFunctionImpl for VedaFsEventsFactory {
 
         for e in &events {
             id_b.append_value(e.id);
-            type_b.append_value(format!("{:?}", e.event_type).to_lowercase());
+            type_b.append_value(e.event_type.as_str());
             path_b.append_value(&e.path);
             match &e.file_id {
                 Some(fid) => fid_b.append_value(fid),

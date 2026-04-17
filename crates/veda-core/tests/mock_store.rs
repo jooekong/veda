@@ -307,6 +307,28 @@ impl MetadataTx for MockTx {
         Ok(())
     }
 
+    async fn get_file_content(&mut self, file_id: &str) -> Result<Option<String>> {
+        let st = self.state.lock().unwrap();
+        Ok(st.file_contents.get(file_id).cloned())
+    }
+
+    async fn get_file_chunks(
+        &mut self,
+        file_id: &str,
+        _start_line: Option<i32>,
+        _end_line: Option<i32>,
+    ) -> Result<Vec<FileChunk>> {
+        let st = self.state.lock().unwrap();
+        let mut chunks: Vec<_> = st
+            .file_chunks
+            .iter()
+            .filter(|c| c.file_id == file_id)
+            .cloned()
+            .collect();
+        chunks.sort_by_key(|c| c.chunk_index);
+        Ok(chunks)
+    }
+
     async fn insert_file_content(&mut self, file_id: &str, content: &str) -> Result<()> {
         let mut st = self.state.lock().unwrap();
         st.file_contents

@@ -73,6 +73,17 @@ pub enum FsEventType {
     Move,
 }
 
+impl FsEventType {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Create => "create",
+            Self::Update => "update",
+            Self::Delete => "delete",
+            Self::Move => "move",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SearchMode {
@@ -316,5 +327,7 @@ pub struct FsEvent {
 pub struct StorageStats {
     pub total_files: i64,
     pub total_directories: i64,
+    /// Logical bytes: sum of file sizes as seen by the user.
+    /// Deduped files are counted once per dentry (copy = double-counted).
     pub total_bytes: i64,
 }

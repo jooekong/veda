@@ -985,6 +985,60 @@ impl MetadataTx for MysqlMetadataTx {
         Ok(())
     }
 
+    async fn get_file_content(&mut self, file_id: &str) -> Result<Option<String>> {
+        let t = self.tx_mut()?;
+        let row = sqlx::query(r#"SELECT content FROM veda_file_contents WHERE file_id = ?"#)
+            .bind(file_id)
+            .fetch_optional(t.as_mut())
+            .await
+            .map_err(storage_err)?;
+        Ok(row
+            .map(|r| r.try_get::<String, _>("content"))
+            .transpose()
+            .map_err(storage_err)?)
+    }
+
+    async fn get_file_chunks(
+        &mut self,
+        file_id: &str,
+        start_line: Option<i32>,
+        end_line: Option<i32>,
+    ) -> Result<Vec<FileChunk>> {
+        let t = self.tx_mut()?;
+        let mut q = String::from(
+            r#"SELECT file_id, chunk_index, start_line, content FROM veda_file_chunks WHERE file_id = ?"#,
+        );
+        let rows = match (start_line, end_line) {
+            (Some(a), Some(b)) => {
+                q.push_str(" AND start_line >= ? AND start_line <= ? ORDER BY chunk_index");
+                sqlx::query(&q).bind(file_id).bind(a).bind(b).fetch_all(t.as_mut()).await
+            }
+            (Some(a), None) => {
+                q.push_str(" AND start_line >= ? ORDER BY chunk_index");
+                sqlx::query(&q).bind(file_id).bind(a).fetch_all(t.as_mut()).await
+            }
+            (None, Some(b)) => {
+                q.push_str(" AND start_line <= ? ORDER BY chunk_index");
+                sqlx::query(&q).bind(file_id).bind(b).fetch_all(t.as_mut()).await
+            }
+            (None, None) => {
+                q.push_str(" ORDER BY chunk_index");
+                sqlx::query(&q).bind(file_id).fetch_all(t.as_mut()).await
+            }
+        }
+        .map_err(storage_err)?;
+
+        Ok(rows
+            .into_iter()
+            .map(|r| FileChunk {
+                file_id: r.try_get::<String, _>("file_id").unwrap_or_default(),
+                chunk_index: r.try_get::<i32, _>("chunk_index").unwrap_or(0),
+                start_line: r.try_get::<i32, _>("start_line").unwrap_or(0),
+                content: r.try_get::<String, _>("content").unwrap_or_default(),
+            })
+            .collect())
+    }
+
     async fn insert_file_content(&mut self, file_id: &str, content: &str) -> Result<()> {
         let t = self.tx_mut()?;
         sqlx::query(

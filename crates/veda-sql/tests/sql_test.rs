@@ -122,6 +122,8 @@ impl MetadataTx for MockMetaFullTx {
         Ok(())
     }
     async fn delete_file(&mut self, id: &str) -> Result<()> { self.files.lock().unwrap().retain(|f| f.id != id); Ok(()) }
+    async fn get_file_content(&mut self, id: &str) -> Result<Option<String>> { Ok(self.file_contents.lock().unwrap().get(id).cloned()) }
+    async fn get_file_chunks(&mut self, _id: &str, _s: Option<i32>, _e: Option<i32>) -> Result<Vec<FileChunk>> { Ok(vec![]) }
     async fn insert_file_content(&mut self, id: &str, content: &str) -> Result<()> { self.file_contents.lock().unwrap().insert(id.to_string(), content.to_string()); Ok(()) }
     async fn delete_file_content(&mut self, id: &str) -> Result<()> { self.file_contents.lock().unwrap().remove(id); Ok(()) }
     async fn insert_file_chunks(&mut self, _chunks: &[FileChunk]) -> Result<()> { Ok(()) }
@@ -129,6 +131,7 @@ impl MetadataTx for MockMetaFullTx {
     async fn insert_outbox(&mut self, _event: &OutboxEvent) -> Result<()> { Ok(()) }
     async fn insert_fs_event(&mut self, event: &FsEvent) -> Result<()> {
         let mut st = self.fs_events.lock().unwrap();
+        // Emulate MySQL AUTO_INCREMENT — production uses DB-assigned IDs
         let next_id = st.len() as i64 + 1;
         let mut e = event.clone();
         e.id = next_id;
