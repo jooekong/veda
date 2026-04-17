@@ -9,6 +9,15 @@ pub trait MetadataStore: Send + Sync {
     async fn list_dentries(&self, workspace_id: &str, parent_path: &str)
         -> Result<Vec<Dentry>>;
     async fn get_file(&self, file_id: &str) -> Result<Option<FileRecord>>;
+    async fn get_files_batch(&self, file_ids: &[String]) -> Result<Vec<FileRecord>> {
+        let mut results = Vec::with_capacity(file_ids.len());
+        for id in file_ids {
+            if let Some(f) = self.get_file(id).await? {
+                results.push(f);
+            }
+        }
+        Ok(results)
+    }
     async fn get_file_content(&self, file_id: &str) -> Result<Option<String>>;
     async fn get_file_chunks(
         &self,

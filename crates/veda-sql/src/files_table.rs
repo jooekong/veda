@@ -18,7 +18,6 @@ use datafusion::physical_plan::{
     DisplayAs, DisplayFormatType, ExecutionPlan, Partitioning, PlanProperties,
     SendableRecordBatchStream, project_schema,
 };
-use tracing::warn;
 use veda_core::store::MetadataStore;
 use veda_types::{Dentry, FileRecord};
 
@@ -88,19 +87,16 @@ impl TableProvider for FilesTable {
             all.extend(children);
         }
 
-        // Batch-load FileRecords for all non-dir dentries
-        let mut file_map: HashMap<String, FileRecord> = HashMap::new();
-        for d in &all {
-            if let Some(ref fid) = d.file_id {
-                if !d.is_dir {
-                    match self.meta.get_file(fid).await {
-                        Ok(Some(fr)) => { file_map.insert(fid.clone(), fr); }
-                        Ok(None) => {}
-                        Err(e) => warn!(file_id = %fid, error = %e, "failed to load file record"),
-                    }
-                }
-            }
-        }
+        let file_ids: Vec<String> = all.iter()
+            .filter(|d| !d.is_dir)
+            .filter_map(|d| d.file_id.clone())
+            .collect();
+        let file_records = self.meta.get_files_batch(&file_ids).await
+            .map_err(|e| datafusion::error::DataFusionError::External(Box::new(e)))?;
+        let file_map: HashMap<String, FileRecord> = file_records
+            .into_iter()
+            .map(|f| (f.id.clone(), f))
+            .collect();
 
         let schema = files_schema();
         let projected = project_schema(&schema, projection)?;

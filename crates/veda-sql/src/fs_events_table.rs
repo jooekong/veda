@@ -75,7 +75,14 @@ impl TableFunctionImpl for VedaFsEventsFactory {
         }
         if let Some(sv) = exprs.get(2).and_then(|e| extract_scalar(e)) {
             match sv {
-                ScalarValue::Int64(Some(v)) => limit = *v as usize,
+                ScalarValue::Int64(Some(v)) => {
+                    if *v < 0 {
+                        return Err(datafusion::error::DataFusionError::Plan(
+                            format!("veda_fs_events: limit must be non-negative, got {}", v),
+                        ));
+                    }
+                    limit = (*v as usize).min(100_000);
+                }
                 ScalarValue::Null => {}
                 other => return Err(datafusion::error::DataFusionError::Plan(
                     format!("veda_fs_events: arg 3 (limit) must be INT, got {}", other.data_type()),

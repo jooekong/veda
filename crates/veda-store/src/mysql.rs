@@ -596,6 +596,25 @@ impl MetadataStore for MysqlStore {
         get_file_conn(&mut *conn, file_id).await
     }
 
+    async fn get_files_batch(&self, file_ids: &[String]) -> Result<Vec<FileRecord>> {
+        if file_ids.is_empty() {
+            return Ok(vec![]);
+        }
+        let placeholders = vec!["?"; file_ids.len()].join(",");
+        let sql = format!(
+            "SELECT id, workspace_id, size_bytes, mime_type, storage_type, source_type, \
+             line_count, checksum_sha256, revision, ref_count, created_at, updated_at \
+             FROM veda_files WHERE id IN ({})",
+            placeholders
+        );
+        let mut q = sqlx::query(&sql);
+        for id in file_ids {
+            q = q.bind(id);
+        }
+        let rows = q.fetch_all(&self.pool).await.map_err(storage_err)?;
+        rows.iter().map(|r| row_to_file(r)).collect()
+    }
+
     async fn get_file_content(&self, file_id: &str) -> Result<Option<String>> {
         let row = sqlx::query(r#"SELECT content FROM veda_file_contents WHERE file_id = ?"#)
             .bind(file_id)
@@ -778,7 +797,7 @@ impl MetadataTx for MysqlMetadataTx {
 
     async fn insert_dentry(&mut self, dentry: &Dentry) -> Result<()> {
         let t = self.tx_mut()?;
-        sqlx::query(
+        match sqlx::query(
             r#"INSERT INTO veda_dentries
             (id, workspace_id, parent_path, name, path, file_id, is_dir, created_at, updated_at)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)"#,
@@ -794,8 +813,13 @@ impl MetadataTx for MysqlMetadataTx {
         .bind(dentry.updated_at.naive_utc())
         .execute(t.as_mut())
         .await
-        .map_err(storage_err)?;
-        Ok(())
+        {
+            Ok(_) => Ok(()),
+            Err(sqlx::Error::Database(ref db_err)) if db_err.code().as_deref() == Some("23000") => {
+                Err(VedaError::AlreadyExists(format!("dentry {}", dentry.path)))
+            }
+            Err(e) => Err(storage_err(e)),
+        }
     }
 
     async fn update_dentry_file_id(
@@ -1028,15 +1052,7 @@ impl MetadataTx for MysqlMetadataTx {
         }
         .map_err(storage_err)?;
 
-        Ok(rows
-            .into_iter()
-            .map(|r| FileChunk {
-                file_id: r.try_get::<String, _>("file_id").unwrap_or_default(),
-                chunk_index: r.try_get::<i32, _>("chunk_index").unwrap_or(0),
-                start_line: r.try_get::<i32, _>("start_line").unwrap_or(0),
-                content: r.try_get::<String, _>("content").unwrap_or_default(),
-            })
-            .collect())
+        rows.into_iter().map(|r| row_to_file_chunk(&r)).collect()
     }
 
     async fn insert_file_content(&mut self, file_id: &str, content: &str) -> Result<()> {
@@ -1238,16 +1254,19 @@ impl TaskQueue for MysqlStore {
             .await
             .map_err(storage_err)?;
         } else {
-            sqlx::query(
-                r#"UPDATE veda_outbox SET status = 'pending', retry_count = ?, payload = CAST(? AS JSON),
-                   available_at = DATE_ADD(UTC_TIMESTAMP(), INTERVAL 30 SECOND), lease_until = NULL WHERE id = ?"#,
-            )
-            .bind(next_retry)
-            .bind(&payload_str)
-            .bind(task_id)
-            .execute(&self.pool)
-            .await
-            .map_err(storage_err)?;
+            let backoff_secs: i64 = (30 * (1i64 << next_retry.min(10))).min(3600);
+            let sql = format!(
+                "UPDATE veda_outbox SET status = 'pending', retry_count = ?, payload = CAST(? AS JSON), \
+                 available_at = DATE_ADD(UTC_TIMESTAMP(), INTERVAL {} SECOND), lease_until = NULL WHERE id = ?",
+                backoff_secs
+            );
+            sqlx::query(&sql)
+                .bind(next_retry)
+                .bind(&payload_str)
+                .bind(task_id)
+                .execute(&self.pool)
+                .await
+                .map_err(storage_err)?;
         }
         Ok(())
     }

@@ -261,6 +261,52 @@ async fn delete_dir_cleans_up_child_files() {
 }
 
 #[tokio::test]
+async fn append_file_cow_isolation() {
+    let (svc, _state) = make_service();
+    svc.write_file("ws1", "/orig.txt", "hello").await.unwrap();
+    svc.copy_file("ws1", "/orig.txt", "/copy.txt").await.unwrap();
+
+    // Append to one side should NOT affect the other
+    svc.append_file("ws1", "/orig.txt", " world").await.unwrap();
+
+    let orig = svc.read_file("ws1", "/orig.txt").await.unwrap();
+    let copy = svc.read_file("ws1", "/copy.txt").await.unwrap();
+    assert_eq!(orig, "hello world");
+    assert_eq!(copy, "hello", "copy should be unchanged after appending to orig");
+}
+
+#[tokio::test]
+async fn append_creates_new_file() {
+    let (svc, _) = make_service();
+    let resp = svc.append_file("ws1", "/new.txt", "appended").await.unwrap();
+    assert_eq!(resp.revision, 1);
+    assert!(!resp.content_unchanged);
+
+    let content = svc.read_file("ws1", "/new.txt").await.unwrap();
+    assert_eq!(content, "appended");
+}
+
+#[tokio::test]
+async fn append_to_existing_file() {
+    let (svc, _) = make_service();
+    svc.write_file("ws1", "/log.txt", "line1\n").await.unwrap();
+    let resp = svc.append_file("ws1", "/log.txt", "line2\n").await.unwrap();
+    assert_eq!(resp.revision, 2);
+    assert!(!resp.content_unchanged);
+
+    let content = svc.read_file("ws1", "/log.txt").await.unwrap();
+    assert_eq!(content, "line1\nline2\n");
+}
+
+#[tokio::test]
+async fn write_file_size_limit() {
+    let (svc, _) = make_service();
+    let big = "x".repeat(51 * 1024 * 1024);
+    let result = svc.write_file("ws1", "/big.txt", &big).await;
+    assert!(matches!(result, Err(VedaError::QuotaExceeded(_))));
+}
+
+#[tokio::test]
 async fn copy_overwrite_decrements_old_ref_count() {
     let (svc, state) = make_service();
     svc.write_file("ws1", "/a.txt", "content_a").await.unwrap();

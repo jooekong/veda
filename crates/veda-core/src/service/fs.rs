@@ -10,7 +10,7 @@ use crate::store::MetadataStore;
 
 const INLINE_THRESHOLD: i64 = 256 * 1024;
 const CHUNK_SIZE: usize = 256 * 1024;
-const MAX_APPEND_FILE_BYTES: i64 = 50 * 1024 * 1024;
+const MAX_FILE_BYTES: i64 = 50 * 1024 * 1024;
 
 pub struct FsService {
     meta: Arc<dyn MetadataStore>,
@@ -32,9 +32,16 @@ impl FsService {
         content: &str,
     ) -> Result<api::WriteFileResponse> {
         let norm = path::normalize(raw_path)?;
-        let checksum = sha256_hex(content.as_bytes());
         let size = content.len() as i64;
-        let line_count = Some(content.lines().count() as i32);
+        if size > MAX_FILE_BYTES {
+            return Err(VedaError::QuotaExceeded(format!(
+                "file size {}MB exceeds {}MB limit",
+                size / 1024 / 1024,
+                MAX_FILE_BYTES / 1024 / 1024,
+            )));
+        }
+        let checksum = sha256_hex(content.as_bytes());
+        let line_count = Some(content.lines().count().min(i32::MAX as usize) as i32);
 
         let mut tx = self.meta.begin_tx().await?;
         let existing = tx.get_dentry(workspace_id, &norm).await?;
@@ -502,7 +509,7 @@ impl FsService {
                 tx.commit().await?;
                 Ok(())
             }
-            Err(VedaError::Storage(msg)) if msg.contains("Duplicate entry") => {
+            Err(VedaError::AlreadyExists(_)) => {
                 tx.rollback().await.ok();
                 Ok(())
             }
@@ -629,7 +636,8 @@ impl FsService {
 
         let existing = tx.get_dentry(workspace_id, &norm).await?;
 
-        let new_content = match existing {
+        // Read existing content and keep the file record for reuse
+        let (new_content, existing_file) = match existing {
             Some(ref d) if d.is_dir => {
                 return Err(VedaError::AlreadyExists(format!("{norm} is a directory")));
             }
@@ -638,10 +646,10 @@ impl FsService {
                 let file = tx.get_file(fid).await?
                     .ok_or_else(|| VedaError::NotFound(fid.to_string()))?;
 
-                if file.size_bytes + content.len() as i64 > MAX_APPEND_FILE_BYTES {
+                if file.size_bytes + content.len() as i64 > MAX_FILE_BYTES {
                     return Err(VedaError::QuotaExceeded(format!(
                         "append would exceed {}MB limit (current {} + append {})",
-                        MAX_APPEND_FILE_BYTES / 1024 / 1024,
+                        MAX_FILE_BYTES / 1024 / 1024,
                         file.size_bytes,
                         content.len()
                     )));
@@ -658,50 +666,96 @@ impl FsService {
                     }
                 };
                 old.push_str(content);
-                old
+                (old, Some(file))
             }
-            _ => content.to_string(),
+            _ => (content.to_string(), None),
         };
 
         let checksum = sha256_hex(new_content.as_bytes());
         let size = new_content.len() as i64;
-        let line_count = Some(new_content.lines().count() as i32);
+        let line_count = Some(new_content.lines().count().min(i32::MAX as usize) as i32);
 
         if let Some(ref dentry) = existing {
             if let Some(ref fid) = dentry.file_id {
-                let file = tx.get_file(fid).await?;
-                if let Some(f) = file {
-                    if f.checksum_sha256 == checksum {
-                        tx.commit().await?;
-                        return Ok(api::WriteFileResponse {
-                            file_id: fid.clone(),
-                            revision: f.revision,
-                            content_unchanged: true,
-                        });
-                    }
+                let f = existing_file.as_ref().unwrap();
 
-                    let new_rev = f.revision + 1;
+                if f.checksum_sha256 == checksum {
+                    tx.commit().await?;
+                    return Ok(api::WriteFileResponse {
+                        file_id: fid.clone(),
+                        revision: f.revision,
+                        content_unchanged: true,
+                    });
+                }
+
+                if f.ref_count > 1 {
+                    // COW: fork a new file record instead of mutating the shared one
+                    let new_file_id = Uuid::new_v4().to_string();
                     let new_storage_type = if size <= INLINE_THRESHOLD {
                         StorageType::Inline
                     } else {
                         StorageType::Chunked
                     };
-                    tx.delete_file_content(fid).await?;
-                    tx.delete_file_chunks(fid).await?;
-                    write_content(&mut *tx, fid, &new_content, size).await?;
-                    tx.update_file_revision(fid, new_rev, size, &checksum, line_count, new_storage_type).await?;
+                    let now = Utc::now();
+                    let new_file = FileRecord {
+                        id: new_file_id.clone(),
+                        workspace_id: workspace_id.to_string(),
+                        size_bytes: size,
+                        mime_type: f.mime_type.clone(),
+                        storage_type: new_storage_type,
+                        source_type: f.source_type,
+                        line_count,
+                        checksum_sha256: checksum.clone(),
+                        revision: f.revision + 1,
+                        ref_count: 1,
+                        created_at: now,
+                        updated_at: now,
+                    };
+                    tx.insert_file(&new_file).await?;
+                    write_content(&mut *tx, &new_file_id, &new_content, size).await?;
+                    tx.decrement_ref_count(fid).await?;
+                    tx.update_dentry_file_id(workspace_id, &norm, &new_file_id)
+                        .await?;
 
-                    let outbox = make_outbox(workspace_id, OutboxEventType::ChunkSync, fid);
+                    let outbox =
+                        make_outbox(workspace_id, OutboxEventType::ChunkSync, &new_file_id);
                     tx.insert_outbox(&outbox).await?;
-                    let evt = make_fs_event(workspace_id, FsEventType::Update, &norm, Some(fid));
+                    let evt = make_fs_event(
+                        workspace_id,
+                        FsEventType::Update,
+                        &norm,
+                        Some(&new_file_id),
+                    );
                     tx.insert_fs_event(&evt).await?;
                     tx.commit().await?;
                     return Ok(api::WriteFileResponse {
-                        file_id: fid.clone(),
-                        revision: new_rev,
+                        file_id: new_file_id,
+                        revision: new_file.revision,
                         content_unchanged: false,
                     });
                 }
+
+                let new_rev = f.revision + 1;
+                let new_storage_type = if size <= INLINE_THRESHOLD {
+                    StorageType::Inline
+                } else {
+                    StorageType::Chunked
+                };
+                tx.delete_file_content(fid).await?;
+                tx.delete_file_chunks(fid).await?;
+                write_content(&mut *tx, fid, &new_content, size).await?;
+                tx.update_file_revision(fid, new_rev, size, &checksum, line_count, new_storage_type).await?;
+
+                let outbox = make_outbox(workspace_id, OutboxEventType::ChunkSync, fid);
+                tx.insert_outbox(&outbox).await?;
+                let evt = make_fs_event(workspace_id, FsEventType::Update, &norm, Some(fid));
+                tx.insert_fs_event(&evt).await?;
+                tx.commit().await?;
+                return Ok(api::WriteFileResponse {
+                    file_id: fid.clone(),
+                    revision: new_rev,
+                    content_unchanged: false,
+                });
             }
         }
 
@@ -914,8 +968,10 @@ async fn ensure_parents(
         created_at: now,
         updated_at: now,
     };
-    tx.insert_dentry(&dentry).await?;
-    Ok(())
+    match tx.insert_dentry(&dentry).await {
+        Ok(()) | Err(VedaError::AlreadyExists(_)) => Ok(()),
+        Err(e) => Err(e),
+    }
 }
 
 fn make_outbox(workspace_id: &str, event_type: OutboxEventType, file_id: &str) -> OutboxEvent {

@@ -89,7 +89,9 @@ impl Worker {
                 self.task_queue.complete(task.id).await?;
             }
             OutboxEventType::CollectionSync => {
-                self.task_queue.complete(task.id).await?;
+                let msg = "CollectionSync not implemented";
+                warn!(task_id = task.id, msg);
+                return Err(VedaError::Internal(msg.to_string()));
             }
         }
         Ok(())
@@ -110,14 +112,18 @@ impl Worker {
                 .unwrap_or_default(),
             StorageType::Chunked => {
                 let chunks = self.meta.get_file_chunks(file_id, None, None).await?;
-                chunks.into_iter().map(|c| c.content).collect()
+                let total: usize = chunks.iter().map(|c| c.content.len()).sum();
+                let mut buf = String::with_capacity(total);
+                for c in chunks {
+                    buf.push_str(&c.content);
+                }
+                buf
             }
         };
 
-        self.vector.delete_chunks(workspace_id, file_id).await?;
-
         let sem_chunks = semantic_chunk(&content, 2048);
         if sem_chunks.is_empty() {
+            self.vector.delete_chunks(workspace_id, file_id).await?;
             return Ok(());
         }
 
@@ -137,6 +143,8 @@ impl Worker {
             })
             .collect();
 
+        // upsert_chunks handles insert-then-cleanup: new data is persisted first,
+        // stale chunks (from previous version with more chunks) are cleaned after.
         self.vector.upsert_chunks(&chunks_with_emb).await?;
         Ok(())
     }

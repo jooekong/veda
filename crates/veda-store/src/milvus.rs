@@ -370,18 +370,8 @@ impl VectorStore for MilvusStore {
         if chunks.is_empty() {
             return Ok(());
         }
-        let mut filters = Vec::new();
-        for c in chunks {
-            filters.push(milvus_quote(&c.id));
-        }
-        if !filters.is_empty() {
-            let filter = format!("id in [{}]", filters.join(", "));
-            let del = json!({
-                "collectionName": COLLECTION,
-                "filter": filter
-            });
-            let _ = self.post_v2("/v2/vectordb/entities/delete", del).await;
-        }
+
+        // 1. Upsert new chunks first (safe: at worst we have brief duplicates)
         let data: Vec<Value> = chunks
             .iter()
             .map(|c| {
@@ -399,7 +389,23 @@ impl VectorStore for MilvusStore {
             "collectionName": COLLECTION,
             "data": data
         });
-        self.post_v2("/v2/vectordb/entities/insert", body).await?;
+        self.post_v2("/v2/vectordb/entities/upsert", body).await?;
+
+        // 2. Delete stale chunks (indices beyond the new set) — safe because new data is persisted
+        let max_index = chunks.iter().map(|c| c.chunk_index).max().unwrap_or(0);
+        let file_id = &chunks[0].file_id;
+        let ws_id = &chunks[0].workspace_id;
+        let ws = milvus_quote(ws_id);
+        let fid = milvus_quote(file_id);
+        let filter = format!(
+            "workspace_id == {ws} && file_id == {fid} && chunk_index > {max_index}"
+        );
+        let del = json!({
+            "collectionName": COLLECTION,
+            "filter": filter
+        });
+        let _ = self.post_v2("/v2/vectordb/entities/delete", del).await;
+
         if let Err(e) = self
             .post_v2(
                 "/v2/vectordb/collections/flush",
