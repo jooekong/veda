@@ -139,6 +139,10 @@ impl CollectionService {
                 obj.entry("id")
                     .or_insert_with(|| serde_json::Value::String(Uuid::new_v4().to_string()));
                 obj.insert("vector".to_string(), serde_json::json!(emb));
+                obj.insert(
+                    "workspace_id".to_string(),
+                    serde_json::Value::String(workspace_id.to_string()),
+                );
             }
             milvus_rows.push(r);
         }

@@ -113,29 +113,36 @@ impl FromRequestParts<Arc<AppState>> for AuthWorkspace {
                 .and_then(|s| s.strip_prefix("Bearer "))
                 .ok_or_else(auth_err)?;
 
-            if let Some(claims) = verify_jwt(&state.jwt_secret, token) {
-                return Ok(AuthWorkspace {
-                    workspace_id: claims.workspace_id,
-                    _account_id: claims.account_id,
-                    read_only: false,
-                });
-            }
+            let (workspace_id, account_id, read_only) =
+                if let Some(claims) = verify_jwt(&state.jwt_secret, token) {
+                    (claims.workspace_id, claims.account_id, false)
+                } else {
+                    let key_hash = veda_core::checksum::sha256_hex(token.as_bytes());
+                    let wk = state
+                        .auth_store
+                        .get_workspace_key_by_hash(&key_hash)
+                        .await
+                        .map_err(|_| auth_err())?
+                        .ok_or_else(auth_err)?;
+                    let read_only = wk.permission == veda_types::KeyPermission::Read;
+                    (wk.workspace_id, String::new(), read_only)
+                };
 
-            let key_hash = veda_core::checksum::sha256_hex(token.as_bytes());
-            if let Some(wk) = state
+            let ws = state
                 .auth_store
-                .get_workspace_key_by_hash(&key_hash)
+                .get_workspace(&workspace_id)
                 .await
                 .map_err(|_| auth_err())?
-            {
-                return Ok(AuthWorkspace {
-                    workspace_id: wk.workspace_id,
-                    _account_id: String::new(),
-                    read_only: wk.permission == veda_types::KeyPermission::Read,
-                });
+                .ok_or_else(auth_err)?;
+            if ws.status != veda_types::WorkspaceStatus::Active {
+                return Err(auth_err());
             }
 
-            Err(auth_err())
+            Ok(AuthWorkspace {
+                workspace_id,
+                _account_id: account_id,
+                read_only,
+            })
         }
     }
 }

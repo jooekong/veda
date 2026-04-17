@@ -71,5 +71,19 @@ impl InodeTable {
             self.path_to_ino.insert(new.to_string(), ino);
             self.attr_cache.remove(&ino);
         }
+        let prefix = format!("{old}/");
+        let children: Vec<(String, u64)> = self
+            .path_to_ino
+            .iter()
+            .filter(|(p, _)| p.starts_with(&prefix))
+            .map(|(p, &ino)| (p.clone(), ino))
+            .collect();
+        for (child_path, ino) in children {
+            self.path_to_ino.remove(&child_path);
+            let new_child = format!("{new}{}", &child_path[old.len()..]);
+            self.ino_to_path.insert(ino, new_child.clone());
+            self.path_to_ino.insert(new_child, ino);
+            self.attr_cache.remove(&ino);
+        }
     }
 }

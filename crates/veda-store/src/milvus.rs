@@ -607,8 +607,10 @@ impl CollectionVectorStore for MilvusStore {
             .map(|r| {
                 let mut row = r.clone();
                 if let Some(obj) = row.as_object_mut() {
-                    obj.entry("workspace_id")
-                        .or_insert_with(|| Value::String(workspace_id.to_string()));
+                    obj.insert(
+                        "workspace_id".to_string(),
+                        Value::String(workspace_id.to_string()),
+                    );
                 }
                 row
             })

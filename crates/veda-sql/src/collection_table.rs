@@ -78,13 +78,14 @@ impl TableProvider for CollectionTable {
         _state: &dyn Session,
         projection: Option<&Vec<usize>>,
         _filters: &[Expr],
-        _limit: Option<usize>,
+        limit: Option<usize>,
     ) -> Result<Arc<dyn ExecutionPlan>> {
+        let query_limit = limit.unwrap_or(16384).min(16384);
         let rows = self.coll_vector
             .query_collection(
                 &self.milvus_name,
                 &self.workspace_id,
-                16384,
+                query_limit,
             )
             .await
             .map_err(|e| datafusion::error::DataFusionError::External(Box::new(e)))?;

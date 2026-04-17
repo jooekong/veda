@@ -65,6 +65,7 @@ impl TableProvider for FilesTable {
         _filters: &[Expr],
         _limit: Option<usize>,
     ) -> Result<Arc<dyn ExecutionPlan>> {
+        const MAX_SCAN_ENTRIES: usize = 100_000;
         let dentries = self.meta
             .list_dentries(&self.workspace_id, "/")
             .await
@@ -85,6 +86,14 @@ impl TableProvider for FilesTable {
                 }
             }
             all.extend(children);
+            if all.len() > MAX_SCAN_ENTRIES {
+                return Err(datafusion::error::DataFusionError::Execution(
+                    format!(
+                        "files table scan exceeded {MAX_SCAN_ENTRIES} entries, \
+                         consider narrowing your query"
+                    ),
+                ));
+            }
         }
 
         let file_ids: Vec<String> = all.iter()

@@ -299,6 +299,18 @@ impl FsService {
         raw_path: &str,
     ) -> Result<Vec<api::DirEntry>> {
         let norm = path::normalize(raw_path)?;
+        if norm != "/" {
+            let dentry = self
+                .meta
+                .get_dentry(workspace_id, &norm)
+                .await?
+                .ok_or_else(|| VedaError::NotFound(norm.clone()))?;
+            if !dentry.is_dir {
+                return Err(VedaError::InvalidPath(format!(
+                    "{norm} is not a directory"
+                )));
+            }
+        }
         let dentries = self.meta.list_dentries(workspace_id, &norm).await?;
         Ok(dentries
             .into_iter()
