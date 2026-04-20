@@ -25,6 +25,7 @@ fn files_schema() -> SchemaRef {
     Arc::new(Schema::new(vec![
         Field::new("path", DataType::Utf8, false),
         Field::new("name", DataType::Utf8, false),
+        Field::new("file_id", DataType::Utf8, true),
         Field::new("is_dir", DataType::Boolean, false),
         Field::new("size_bytes", DataType::Int64, true),
         Field::new("mime_type", DataType::Utf8, true),
@@ -176,6 +177,7 @@ impl ExecutionPlan for FilesExec {
         let n = self.dentries.len();
         let mut path_b = StringBuilder::with_capacity(n, n * 32);
         let mut name_b = StringBuilder::with_capacity(n, n * 16);
+        let mut file_id_b = StringBuilder::with_capacity(n, n * 36);
         let mut is_dir_b = BooleanBuilder::with_capacity(n);
         let mut size_b = Int64Builder::with_capacity(n);
         let mut mime_b = StringBuilder::with_capacity(n, n * 16);
@@ -185,6 +187,10 @@ impl ExecutionPlan for FilesExec {
         for d in &self.dentries {
             path_b.append_value(&d.path);
             name_b.append_value(&d.name);
+            match &d.file_id {
+                Some(fid) => file_id_b.append_value(fid),
+                None => file_id_b.append_null(),
+            }
             is_dir_b.append_value(d.is_dir);
             let fr = d.file_id.as_ref().and_then(|fid| self.file_map.get(fid));
             match fr {
@@ -208,6 +214,7 @@ impl ExecutionPlan for FilesExec {
             vec![
                 Arc::new(path_b.finish()),
                 Arc::new(name_b.finish()),
+                Arc::new(file_id_b.finish()),
                 Arc::new(is_dir_b.finish()),
                 Arc::new(size_b.finish()),
                 Arc::new(mime_b.finish()),

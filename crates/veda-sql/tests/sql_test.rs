@@ -460,6 +460,43 @@ async fn files_with_nested_dirs() {
     assert_eq!(total, 2);
 }
 
+#[tokio::test]
+async fn select_file_id_from_files() {
+    let d_file = make_dentry("/cow/a.txt", "a.txt", false);
+    let expected_fid = d_file.file_id.clone().unwrap();
+    let d_dir = make_dentry("/cow", "cow", true);
+    let dentries = vec![d_dir, d_file];
+    let engine = make_engine(dentries, vec![], Arc::new(MockCollVector::new()));
+
+    let batches = engine
+        .execute("ws1", false, "SELECT path, file_id FROM files WHERE path LIKE '/cow/%'")
+        .await
+        .unwrap();
+    let total: usize = batches.iter().map(|b| b.num_rows()).sum();
+    assert_eq!(total, 1);
+
+    let path_arr = batches[0].column(0).as_any().downcast_ref::<arrow::array::StringArray>().unwrap();
+    assert_eq!(path_arr.value(0), "/cow/a.txt");
+
+    let fid_arr = batches[0].column(1).as_any().downcast_ref::<arrow::array::StringArray>().unwrap();
+    assert_eq!(fid_arr.value(0), expected_fid);
+}
+
+#[tokio::test]
+async fn file_id_is_null_for_dirs() {
+    let dentries = vec![make_dentry("/mydir", "mydir", true)];
+    let engine = make_engine(dentries, vec![], Arc::new(MockCollVector::new()));
+
+    let batches = engine
+        .execute("ws1", false, "SELECT path, file_id FROM files WHERE is_dir = true")
+        .await
+        .unwrap();
+    assert_eq!(batches[0].num_rows(), 1);
+
+    let fid_arr = batches[0].column(1).as_any().downcast_ref::<arrow::array::StringArray>().unwrap();
+    assert!(fid_arr.is_null(0), "file_id should be NULL for directories");
+}
+
 // ── UDF Tests ─────────────────────────────────────────
 
 #[tokio::test]
