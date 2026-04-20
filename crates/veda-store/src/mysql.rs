@@ -591,6 +591,24 @@ impl MetadataStore for MysqlStore {
         Ok(out)
     }
 
+    async fn list_dentries_under(&self, workspace_id: &str, path_prefix: &str) -> Result<Vec<Dentry>> {
+        let like = format!("{}/%", escape_like(path_prefix));
+        let mut rows = sqlx::query(
+            r#"SELECT id, workspace_id, parent_path, name, path, file_id, is_dir, created_at, updated_at
+               FROM veda_dentries WHERE workspace_id = ? AND path LIKE ? ESCAPE '\\' ORDER BY path"#,
+        )
+        .bind(workspace_id)
+        .bind(&like)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(storage_err)?;
+        let mut out = Vec::with_capacity(rows.len());
+        for r in rows.drain(..) {
+            out.push(row_to_dentry(&r)?);
+        }
+        Ok(out)
+    }
+
     async fn get_file(&self, file_id: &str) -> Result<Option<FileRecord>> {
         let mut conn = self.pool.acquire().await.map_err(storage_err)?;
         get_file_conn(&mut *conn, file_id).await

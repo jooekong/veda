@@ -8,6 +8,21 @@ pub trait MetadataStore: Send + Sync {
     async fn get_dentry(&self, workspace_id: &str, path: &str) -> Result<Option<Dentry>>;
     async fn list_dentries(&self, workspace_id: &str, parent_path: &str)
         -> Result<Vec<Dentry>>;
+    async fn list_dentries_under(&self, workspace_id: &str, path_prefix: &str)
+        -> Result<Vec<Dentry>> {
+        let mut all = Vec::new();
+        let mut queue = vec![path_prefix.to_string()];
+        while let Some(dir) = queue.pop() {
+            let children = self.list_dentries(workspace_id, &dir).await?;
+            for c in &children {
+                if c.is_dir {
+                    queue.push(c.path.clone());
+                }
+            }
+            all.extend(children);
+        }
+        Ok(all)
+    }
     async fn get_file(&self, file_id: &str) -> Result<Option<FileRecord>>;
     async fn get_files_batch(&self, file_ids: &[String]) -> Result<Vec<FileRecord>> {
         let mut results = Vec::with_capacity(file_ids.len());

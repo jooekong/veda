@@ -54,6 +54,26 @@ impl MetadataStore for MockMetadataStore {
             .collect())
     }
 
+    async fn list_dentries_under(
+        &self,
+        workspace_id: &str,
+        path_prefix: &str,
+    ) -> Result<Vec<Dentry>> {
+        let st = self.state.lock().unwrap();
+        if path_prefix == "/" {
+            return Ok(st.dentries.iter()
+                .filter(|d| d.workspace_id == workspace_id)
+                .cloned().collect());
+        }
+        let prefix = format!("{path_prefix}/");
+        Ok(st
+            .dentries
+            .iter()
+            .filter(|d| d.workspace_id == workspace_id && d.path.starts_with(&prefix))
+            .cloned()
+            .collect())
+    }
+
     async fn get_file(&self, file_id: &str) -> Result<Option<FileRecord>> {
         let st = self.state.lock().unwrap();
         Ok(st.files.iter().find(|f| f.id == file_id).cloned())

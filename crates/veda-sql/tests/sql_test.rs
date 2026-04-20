@@ -34,6 +34,14 @@ impl MetadataStore for MockMetaFull {
     async fn list_dentries(&self, ws: &str, parent: &str) -> Result<Vec<Dentry>> {
         Ok(self.dentries.lock().unwrap().iter().filter(|d| d.workspace_id == ws && d.parent_path == parent).cloned().collect())
     }
+    async fn list_dentries_under(&self, ws: &str, prefix: &str) -> Result<Vec<Dentry>> {
+        let st = self.dentries.lock().unwrap();
+        if prefix == "/" {
+            return Ok(st.iter().filter(|d| d.workspace_id == ws).cloned().collect());
+        }
+        let pfx = format!("{prefix}/");
+        Ok(st.iter().filter(|d| d.workspace_id == ws && d.path.starts_with(&pfx)).cloned().collect())
+    }
     async fn get_file(&self, id: &str) -> Result<Option<FileRecord>> {
         Ok(self.files.lock().unwrap().iter().find(|f| f.id == id).cloned())
     }
@@ -190,6 +198,14 @@ impl MetadataStore for MockMeta {
         Ok(self.dentries.lock().unwrap().iter()
             .filter(|d| d.parent_path == parent)
             .cloned().collect())
+    }
+    async fn list_dentries_under(&self, _ws: &str, prefix: &str) -> Result<Vec<Dentry>> {
+        let st = self.dentries.lock().unwrap();
+        if prefix == "/" {
+            return Ok(st.iter().cloned().collect());
+        }
+        let pfx = format!("{prefix}/");
+        Ok(st.iter().filter(|d| d.path.starts_with(&pfx)).cloned().collect())
     }
 
     async fn get_file(&self, _id: &str) -> Result<Option<FileRecord>> { Ok(None) }
@@ -480,6 +496,160 @@ async fn select_file_id_from_files() {
 
     let fid_arr = batches[0].column(1).as_any().downcast_ref::<arrow::array::StringArray>().unwrap();
     assert_eq!(fid_arr.value(0), expected_fid);
+}
+
+#[tokio::test]
+async fn files_path_like_prefix_filter() {
+    let dentries = vec![
+        make_dentry("/docs", "docs", true),
+        make_dentry("/docs/a.md", "a.md", false),
+        make_dentry("/docs/b.md", "b.md", false),
+        make_dentry("/src", "src", true),
+        make_dentry("/src/main.rs", "main.rs", false),
+        make_dentry("/readme.md", "readme.md", false),
+    ];
+    let engine = make_engine(dentries, vec![], Arc::new(MockCollVector::new()));
+
+    let batches = engine
+        .execute("ws1", false, "SELECT path FROM files WHERE path LIKE '/docs/%'")
+        .await
+        .unwrap();
+    let total: usize = batches.iter().map(|b| b.num_rows()).sum();
+    assert_eq!(total, 2, "should only return files under /docs/");
+
+    let path_arr = batches[0].column(0).as_any()
+        .downcast_ref::<arrow::array::StringArray>().unwrap();
+    let mut paths: Vec<&str> = (0..path_arr.len()).map(|i| path_arr.value(i)).collect();
+    paths.sort();
+    assert_eq!(paths, vec!["/docs/a.md", "/docs/b.md"]);
+}
+
+#[tokio::test]
+async fn files_path_eq_filter() {
+    let dentries = vec![
+        make_dentry("/a.txt", "a.txt", false),
+        make_dentry("/b.txt", "b.txt", false),
+        make_dentry("/docs", "docs", true),
+        make_dentry("/docs/c.txt", "c.txt", false),
+    ];
+    let engine = make_engine(dentries, vec![], Arc::new(MockCollVector::new()));
+
+    let batches = engine
+        .execute("ws1", false, "SELECT path FROM files WHERE path = '/docs/c.txt'")
+        .await
+        .unwrap();
+    let total: usize = batches.iter().map(|b| b.num_rows()).sum();
+    assert_eq!(total, 1);
+
+    let path_arr = batches[0].column(0).as_any()
+        .downcast_ref::<arrow::array::StringArray>().unwrap();
+    assert_eq!(path_arr.value(0), "/docs/c.txt");
+}
+
+#[tokio::test]
+async fn files_limit() {
+    let dentries = vec![
+        make_dentry("/a.txt", "a.txt", false),
+        make_dentry("/b.txt", "b.txt", false),
+        make_dentry("/c.txt", "c.txt", false),
+        make_dentry("/d.txt", "d.txt", false),
+    ];
+    let engine = make_engine(dentries, vec![], Arc::new(MockCollVector::new()));
+
+    let batches = engine
+        .execute("ws1", false, "SELECT path FROM files LIMIT 2")
+        .await
+        .unwrap();
+    let total: usize = batches.iter().map(|b| b.num_rows()).sum();
+    assert_eq!(total, 2);
+}
+
+#[tokio::test]
+async fn files_exposes_full_file_record() {
+    let meta = Arc::new(MockMetaFull::new());
+    let now = chrono::Utc::now();
+    let file_id = "f-full".to_string();
+    meta.dentries.lock().unwrap().push(Dentry {
+        id: "d1".into(),
+        workspace_id: "ws1".into(),
+        parent_path: "/".into(),
+        name: "a.txt".into(),
+        path: "/a.txt".into(),
+        file_id: Some(file_id.clone()),
+        is_dir: false,
+        created_at: now,
+        updated_at: now,
+    });
+    meta.files.lock().unwrap().push(FileRecord {
+        id: file_id.clone(),
+        workspace_id: "ws1".into(),
+        size_bytes: 10,
+        mime_type: "text/plain".into(),
+        storage_type: StorageType::Inline,
+        source_type: SourceType::Text,
+        line_count: Some(3),
+        checksum_sha256: "abc".into(),
+        revision: 2,
+        ref_count: 5,
+        created_at: now,
+        updated_at: now,
+    });
+
+    let engine = make_full_engine(meta);
+    let batches = engine
+        .execute(
+            "ws1",
+            false,
+            "SELECT ref_count, line_count, storage_type, source_type, created_at, updated_at \
+             FROM files WHERE is_dir = false",
+        )
+        .await
+        .unwrap();
+    assert_eq!(batches[0].num_rows(), 1);
+
+    let rc = batches[0].column(0).as_any().downcast_ref::<arrow::array::Int32Array>().unwrap();
+    assert_eq!(rc.value(0), 5);
+    let lc = batches[0].column(1).as_any().downcast_ref::<arrow::array::Int32Array>().unwrap();
+    assert_eq!(lc.value(0), 3);
+    let st = batches[0].column(2).as_any().downcast_ref::<arrow::array::StringArray>().unwrap();
+    assert_eq!(st.value(0), "inline");
+    let sr = batches[0].column(3).as_any().downcast_ref::<arrow::array::StringArray>().unwrap();
+    assert_eq!(sr.value(0), "text");
+    let ca = batches[0].column(4).as_any().downcast_ref::<arrow::array::StringArray>().unwrap();
+    assert!(!ca.value(0).is_empty(), "created_at should be populated");
+    let ua = batches[0].column(5).as_any().downcast_ref::<arrow::array::StringArray>().unwrap();
+    assert!(!ua.value(0).is_empty(), "updated_at should be populated");
+}
+
+#[tokio::test]
+async fn files_new_fields_null_for_dirs() {
+    let meta = Arc::new(MockMetaFull::new());
+    let now = chrono::Utc::now();
+    meta.dentries.lock().unwrap().push(Dentry {
+        id: "d1".into(),
+        workspace_id: "ws1".into(),
+        parent_path: "/".into(),
+        name: "mydir".into(),
+        path: "/mydir".into(),
+        file_id: None,
+        is_dir: true,
+        created_at: now,
+        updated_at: now,
+    });
+    let engine = make_full_engine(meta);
+    let batches = engine
+        .execute(
+            "ws1",
+            false,
+            "SELECT ref_count, storage_type FROM files WHERE is_dir = true",
+        )
+        .await
+        .unwrap();
+    assert_eq!(batches[0].num_rows(), 1);
+    let rc = batches[0].column(0).as_any().downcast_ref::<arrow::array::Int32Array>().unwrap();
+    assert!(rc.is_null(0));
+    let st = batches[0].column(1).as_any().downcast_ref::<arrow::array::StringArray>().unwrap();
+    assert!(st.is_null(0));
 }
 
 #[tokio::test]
