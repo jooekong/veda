@@ -9,6 +9,7 @@ use std::sync::Arc;
 
 use tokio::net::TcpListener;
 use tokio::sync::watch;
+use axum::extract::DefaultBodyLimit;
 use tower_http::cors::CorsLayer;
 use tower_http::trace::TraceLayer;
 use tracing::info;
@@ -83,7 +84,7 @@ async fn main() -> anyhow::Result<()> {
 
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
 
-    if cfg.worker.enabled {
+    let worker_handle = if cfg.worker.enabled {
         let w = Worker::new(
             mysql.clone(),
             mysql.clone(),
@@ -92,12 +93,15 @@ async fn main() -> anyhow::Result<()> {
             cfg.worker.batch_size,
             cfg.worker.poll_interval_secs,
         );
-        tokio::spawn(async move {
+        Some(tokio::spawn(async move {
             w.run(shutdown_rx).await;
-        });
-    }
+        }))
+    } else {
+        None
+    };
 
     let app = routes::build_router(app_state)
+        .layer(DefaultBodyLimit::max(50 * 1024 * 1024))
         .layer(TraceLayer::new_for_http())
         .layer(CorsLayer::permissive());
 
@@ -111,6 +115,10 @@ async fn main() -> anyhow::Result<()> {
             let _ = shutdown_tx.send(true);
         })
         .await?;
+
+    if let Some(handle) = worker_handle {
+        let _ = handle.await;
+    }
 
     Ok(())
 }

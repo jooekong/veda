@@ -425,7 +425,7 @@ impl MysqlStore {
     id VARCHAR(36) PRIMARY KEY,
     name VARCHAR(128) NOT NULL,
     email VARCHAR(256),
-    password_hash VARCHAR(128),
+    password_hash VARCHAR(255),
     status VARCHAR(16) DEFAULT 'active',
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,

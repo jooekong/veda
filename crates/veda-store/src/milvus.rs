@@ -56,8 +56,13 @@ pub struct MilvusStore {
 impl MilvusStore {
     pub fn new(url: &str, token: Option<String>, db_name: Option<String>) -> Self {
         let base_url = url.trim_end_matches('/').to_string();
+        let http = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(30))
+            .connect_timeout(std::time::Duration::from_secs(5))
+            .build()
+            .unwrap_or_else(|_| reqwest::Client::new());
         Self {
-            http: reqwest::Client::new(),
+            http,
             base_url,
             token,
             db_name,

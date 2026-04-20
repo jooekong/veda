@@ -49,6 +49,11 @@ impl CliConfig {
         let path = Self::config_path()?;
         let raw = toml::to_string_pretty(self)?;
         std::fs::write(&path, raw)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
+        }
         Ok(())
     }
 

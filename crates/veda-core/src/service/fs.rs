@@ -544,8 +544,9 @@ impl FsService {
             ));
         }
 
-        let src_dentry = self
-            .meta
+        let mut tx = self.meta.begin_tx().await?;
+
+        let src_dentry = tx
             .get_dentry(workspace_id, &src)
             .await?
             .ok_or_else(|| VedaError::NotFound(src.clone()))?;
@@ -560,8 +561,6 @@ impl FsService {
             .file_id
             .as_deref()
             .ok_or_else(|| VedaError::NotFound(src.clone()))?;
-
-        let mut tx = self.meta.begin_tx().await?;
 
         let existing_dst = tx.get_dentry(workspace_id, &dst).await?;
         if let Some(ref d) = existing_dst {
