@@ -171,6 +171,14 @@ enum ConfigCmd {
     },
 }
 
+fn mask_secret(s: &str) -> String {
+    if s.len() <= 10 {
+        "***".into()
+    } else {
+        format!("{}...{}", &s[..6], &s[s.len() - 4..])
+    }
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
@@ -350,9 +358,9 @@ async fn main() -> anyhow::Result<()> {
         Commands::Config { action } => match action {
             ConfigCmd::Show => {
                 println!("server_url: {}", cfg.server_url);
-                println!("api_key: {}", cfg.api_key.as_deref().unwrap_or("<not set>"));
+                println!("api_key: {}", cfg.api_key.as_deref().map(mask_secret).unwrap_or_else(|| "<not set>".into()));
                 println!("workspace_id: {}", cfg.workspace_id.as_deref().unwrap_or("<not set>"));
-                println!("workspace_key: {}", if cfg.workspace_key.is_some() { "<set>" } else { "<not set>" });
+                println!("workspace_key: {}", cfg.workspace_key.as_deref().map(mask_secret).unwrap_or_else(|| "<not set>".into()));
             }
             ConfigCmd::Set { key, value } => {
                 match key.as_str() {

@@ -43,7 +43,7 @@ fn main() -> anyhow::Result<()> {
 
     let mut options = vec![
         fuser::MountOption::FSName("veda".to_string()),
-        fuser::MountOption::DefaultPermission,
+        fuser::MountOption::DefaultPermissions,
     ];
     if args.foreground {
         options.push(fuser::MountOption::AutoUnmount);

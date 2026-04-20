@@ -1,153 +1,67 @@
-# Veda 本地测试 SOP
+# Veda 本地测试 SOP（全覆盖）
 
-## 前置条件
+> 一份文档覆盖：环境搭建 → FS（CRUD / 存储 / COW / 配额 / 事件）→ HTTP / SQL / `veda_fs*` → Collection & Embedding → 文件搜索闭环 → FUSE 挂载 → 并发 → 回归测试。
 
-- MySQL、Milvus、Embedding API 可用
-- `config/server.toml` 已配置（见下方模板）
+---
 
-## 0. 编译
+## 一、环境
+
+### 0. 前置
+
+- MySQL、Milvus、Embedding API（OpenAI 兼容）可用
+- macOS FUSE 测试需 `brew install --cask macfuse`（Linux：`apt install libfuse-dev pkg-config`），否则跳过 §24
+
+### 0.1 编译
 
 ```bash
+# 主 workspace
 cargo build -p veda-server -p veda-cli
-# 后续用 VEDA 代替完整路径
 alias veda='./target/debug/veda-cli'
+
+# veda-fuse 是独立 crate（在根 Cargo.toml 的 exclude 里），单独构建
+cargo build --manifest-path crates/veda-fuse/Cargo.toml
+alias vfuse='./crates/veda-fuse/target/debug/veda-fuse'
 ```
 
-## 1. 启动 Server
+### 1. 启动 Server
 
 ```bash
-cargo run -p veda-server
-# 默认监听 0.0.0.0:3000
+cargo run -p veda-server         # 默认监听 0.0.0.0:3000
 ```
 
-## 2. 配置 CLI
+### 2. 账号 & API Key
 
 ```bash
 veda config set server_url http://localhost:3000
-veda config show
-```
-
-## 3. 创建 Account
-
-```bash
 veda account create --name joe --email joe@test.com --password 123456
-# API key 自动保存到 ~/.config/veda/config.toml
+# 已有账号用：
+# veda account login --email joe@test.com --password 123456
 ```
 
-如果 account 已存在：
-
-```bash
-veda account login --email joe@test.com --password 123456
-```
-
-## 4. 创建 & 选择 Workspace
+### 3. Workspace & Workspace Key
 
 ```bash
 veda workspace create --name test-ws
-# 输出 workspace ID，复制它
-
 veda workspace list
-# 确认 workspace ID
-
-veda workspace use <WORKSPACE_ID>
-# workspace key 自动保存
+veda workspace use <WORKSPACE_ID>            # 自动创建并保存 read-write key
 ```
 
-## 5. 文件操作
+### 4. 只读 Key（给 §11 读-only 测试用）
 
 ```bash
-# 创建目录
-veda mkdir /docs
+WSID=$(awk '/workspace_id/{print $2}' ~/.config/veda/config.toml)
+APIK=$(awk '/api_key/{print $2}'      ~/.config/veda/config.toml)
 
-# 上传文件
-veda cp ./README.md /docs/readme.md
-
-# 从 stdin 上传
-echo "hello world" | veda cp - /docs/hello.txt
-
-# 列目录
-veda ls /docs
-
-# 读文件
-veda cat /docs/hello.txt
-
-# 追加内容（新增）
-veda append /docs/hello.txt " +append"
-echo " via-stdin" | veda append /docs/hello.txt -
-
-# 移动/重命名
-veda mv /docs/hello.txt /docs/greeting.txt
-
-# 删除
-veda rm /docs/greeting.txt
+curl -sS -X POST "http://localhost:3000/v1/workspaces/$WSID/keys" \
+  -H "Authorization: Bearer $APIK" -H "Content-Type: application/json" \
+  -d '{"name":"ro-test","permission":"read"}'
+# 用时 veda config set workspace_key <RO_KEY>；测完 veda workspace use $WSID 还原
 ```
 
-## 6. 搜索
-
-```bash
-# 混合搜索（默认）
-veda search "rust ownership"
-
-# 语义搜索
-veda search "database indexing" --mode semantic
-
-# 全文搜索
-veda search "hello" --mode fulltext --limit 5
-```
-
-> 注意：搜索依赖 Worker 完成 ChunkSync，上传文件后等几秒再搜索。
-
-## 7. Collection 操作
-
-```bash
-# 创建 collection
-veda collection create my_docs \
-  --schema '[{"name":"title","field_type":"varchar"},{"name":"content","field_type":"varchar"},{"name":"category","field_type":"varchar"}]' \
-  --embed-source content
-
-# 查看 collections
-veda collection list
-
-# 插入数据（JSON 必须写在一行）
-veda collection insert my_docs '[{"title":"Rust Intro","content":"Rust ownership and borrowing","category":"tech"},{"title":"DB 101","content":"MySQL indexing basics","category":"db"}]'
-
-# 语义搜索 collection
-veda collection search my_docs "memory management" --limit 5
-
-# 删除 collection
-veda collection delete my_docs
-```
-
-## 8. SQL 查询
-
-```bash
-# 查文件表
-veda sql "SELECT name, size, mime_type FROM files LIMIT 10"
-
-# 查 collection 表（表名 = collection 名）
-veda sql "SELECT title, category FROM my_docs LIMIT 20"
-
-# 聚合
-veda sql "SELECT category, COUNT(*) AS cnt FROM my_docs GROUP BY category"
-```
-
-## 9. 验证配置
-
-```bash
-veda config show
-# 预期输出：
-# server_url: http://localhost:3000
-# api_key: <set>
-# workspace_id: <uuid>
-# workspace_key: <set>
-```
-
-## 配置文件模板
-
-`config/server.toml`:
+### 配置文件模板 `config/server.toml`
 
 ```toml
-listen = "0.0.0.0:3000"
+listen     = "0.0.0.0:3000"
 jwt_secret = "your-secret-key"
 
 [mysql]
@@ -168,460 +82,544 @@ dimension = 1024
 enabled = true
 ```
 
-## 10. 复杂测试场景
-
-> 以下场景覆盖多文件 + 多表联合操作、Collection embedding 能力深度验证。
-> 请在完成 §3-§4 后按顺序执行。
-
-### 10.1 多目录多文件 + SQL 交叉查询
-
-验证：文件系统深层嵌套 → SQL files 表完整返回元数据。
+### 工作前缀
 
 ```bash
-# 创建多级目录
-veda mkdir /project
-veda mkdir /project/src
-veda mkdir /project/docs
-veda mkdir /project/tests
-
-# 上传不同类型文件
-echo "fn main() { println!(\"hello\"); }" | veda cp - /project/src/main.rs
-echo "pub fn add(a: i32, b: i32) -> i32 { a + b }" | veda cp - /project/src/lib.rs
-echo "# Project README\nThis is a Rust project." | veda cp - /project/docs/readme.md
-echo "{ \"name\": \"veda\", \"version\": \"0.1.0\" }" | veda cp - /project/config.json
-echo "#[test] fn it_works() { assert_eq!(2+2, 4); }" | veda cp - /project/tests/basic.rs
-
-# 验证目录递归
-veda ls /project
-veda ls /project/src
-
-# SQL: 查文件元数据是否填充
-veda sql "SELECT path, name, size_bytes, mime_type, revision FROM files ORDER BY path"
-
-# SQL: 按目录过滤
-veda sql "SELECT path, size_bytes FROM files WHERE path LIKE '/project/src/%'"
-
-# SQL: 统计
-veda sql "SELECT is_dir, COUNT(*) AS cnt, SUM(CASE WHEN size_bytes IS NOT NULL THEN size_bytes ELSE 0 END) AS total_bytes FROM files GROUP BY is_dir"
+export TP=/sop                   # 所有测试路径前缀，结尾清理方便
+veda mkdir $TP
 ```
 
-预期结果：
+### 常量参考（`crates/veda-core/src/service/fs.rs`）
 
-- 4 个目录 + 5 个文件 = 9 条 dentry
-- 文件行 `size_bytes`、`mime_type` 非 null；目录行为 null
-- `/project/src/%` 过滤只返回 `main.rs`, `lib.rs`
+| 常量 | 值 | 说明 |
+|---|---|---|
+| `INLINE_THRESHOLD` | 256 KiB | 超出改走 chunked |
+| `CHUNK_SIZE`       | 256 KiB | 尽量在 `\n` 处切块 |
+| `MAX_FILE_BYTES`   | 50 MiB  | `write` + `append` 共同配额 |
+| segment 上限       | 255 B   | 超长 → `InvalidPath` |
+| 禁用字符           | `\0` `:` | 非法 segment |
 
-### 10.2 多 Collection + SQL 跨表查询
+---
 
-验证：同一 workspace 下多张 Collection 表可以独立查询和 JOIN。
+## 二、FS 基础
+
+### 5. 路径规范化
 
 ```bash
-# 创建两个 collection
-veda collection create authors \
-  --schema '[{"name":"author","field_type":"varchar"},{"name":"bio","field_type":"varchar"},{"name":"country","field_type":"varchar"}]' \
-  --embed-source bio
+# 合法：多斜杠、./、NFC
+veda sql "SELECT veda_write('$TP/norm//a/./b.txt', 'ok')"
+veda sql "SELECT veda_exists('$TP/norm/a/../a/b.txt')"       -- true
 
-veda collection create articles \
-  --schema '[{"name":"title","field_type":"varchar"},{"name":"content","field_type":"varchar"},{"name":"author","field_type":"varchar"},{"name":"topic","field_type":"varchar"}]' \
-  --embed-source content
-
-# Describe 验证 schema
-veda collection desc authors
-veda collection desc articles
-
-# 插入 authors
-veda collection insert authors '[{"author":"Alice","bio":"Expert in distributed systems and consensus algorithms","country":"US"},{"author":"Bob","bio":"Database kernel developer focusing on storage engines","country":"CN"},{"author":"Carol","bio":"Machine learning researcher specializing in NLP and transformers","country":"UK"}]'
-
-# 插入 articles
-veda collection insert articles '[{"title":"Raft Consensus","content":"Raft is a consensus algorithm designed for understandability. It decomposes the problem into leader election, log replication, and safety.","author":"Alice","topic":"distributed"},{"title":"B-Tree Internals","content":"B-Trees are balanced tree data structures optimized for disk I/O. They maintain sorted data for efficient range queries.","author":"Bob","topic":"database"},{"title":"Attention Mechanism","content":"The attention mechanism allows models to focus on different parts of the input sequence when producing output.","author":"Carol","topic":"ml"},{"title":"LSM-Tree Storage","content":"Log-structured merge trees are write-optimized data structures widely used in modern databases like RocksDB and LevelDB.","author":"Bob","topic":"database"},{"title":"Vector Databases","content":"Vector databases store and index high-dimensional embeddings for efficient approximate nearest neighbor search.","author":"Alice","topic":"database"}]'
-
-# SQL: 单表查询
-veda sql "SELECT title, author, topic FROM articles"
-veda sql "SELECT author, country FROM authors"
-
-# SQL: 聚合
-veda sql "SELECT topic, COUNT(*) AS cnt FROM articles GROUP BY topic ORDER BY cnt DESC"
-veda sql "SELECT author, COUNT(*) AS article_count FROM articles GROUP BY author"
-
-# SQL: WHERE 过滤
-veda sql "SELECT title, author FROM articles WHERE topic = 'database'"
-
-# SQL: 跨表 JOIN（authors × articles）
-veda sql "SELECT a.title, a.author, au.country FROM articles a JOIN authors au ON a.author = au.author"
-
-# SQL: 跨表 + 聚合
-veda sql "SELECT au.country, COUNT(*) AS cnt FROM articles a JOIN authors au ON a.author = au.author GROUP BY au.country ORDER BY cnt DESC"
-
-# SQL: 文件表 + collection 表同时查询
-veda sql "SELECT 'files' AS source, COUNT(*) AS cnt FROM files UNION ALL SELECT 'articles', COUNT(*) FROM articles UNION ALL SELECT 'authors', COUNT(*) FROM authors"
+# 非法
+veda sql "SELECT veda_write('rel.txt', 'x')"                 -- InvalidPath
+veda sql "SELECT veda_read('$TP/../../etc/passwd')"          -- InvalidPath
+veda sql "SELECT veda_write('$TP/bad:name', 'x')"            -- InvalidPath
+# 超长 segment（>255B）
+python - <<'PY'
+import subprocess, os
+subprocess.run(['./target/debug/veda-cli','sql',
+    f"SELECT veda_write('{os.environ['TP']}/{'x'*300}', 'x')"])
+PY
 ```
 
-预期结果：
-
-- `articles` 5 行，`authors` 3 行
-- `topic` 聚合：database=3, distributed=1, ml=1
-- JOIN 返回 5 行，每篇文章附带作者国家
-- UNION ALL 返回 3 行汇总各表行数
-
-### 10.3 Embedding 语义搜索深度测试
-
-验证：embedding 向量正确生成，语义搜索按相关性排序。
+### 6. 基础 CRUD
 
 ```bash
-# 创建知识库 collection，embed 字段为 content
-veda collection create kb \
-  --schema '[{"name":"title","field_type":"varchar"},{"name":"content","field_type":"varchar"},{"name":"domain","field_type":"varchar"}]' \
-  --embed-source content
+# mkdir 幂等
+veda mkdir $TP/crud
+veda mkdir $TP/crud                                   # 不报错
 
-# 插入语义差异明显的条目
-veda collection insert kb '[{"title":"Rust Ownership","content":"Rust uses an ownership system with borrowing and lifetimes to guarantee memory safety without garbage collection. Each value has a single owner, and when the owner goes out of scope, the value is dropped.","domain":"programming"},{"title":"Photosynthesis","content":"Photosynthesis is the process by which green plants convert sunlight, water, and carbon dioxide into glucose and oxygen. It occurs in the chloroplasts of plant cells.","domain":"biology"},{"title":"Black Holes","content":"A black hole is a region of spacetime where gravity is so strong that nothing, not even light, can escape from it. They form when massive stars collapse at the end of their life cycle.","domain":"physics"},{"title":"SQL Indexing","content":"Database indexes are data structures that improve the speed of data retrieval operations. B-tree indexes are the most common, providing O(log n) lookup for equality and range queries.","domain":"database"},{"title":"Neural Networks","content":"Neural networks are computing systems inspired by biological neural networks. They consist of layers of interconnected nodes that learn to map inputs to outputs through training on data.","domain":"ml"},{"title":"TCP Handshake","content":"TCP uses a three-way handshake to establish connections: SYN, SYN-ACK, ACK. This ensures both sides are ready to communicate and agree on initial sequence numbers.","domain":"networking"}]'
+# 写 / 读 / stat / ls
+echo "hello" | veda cp - $TP/crud/a.txt
+veda cat $TP/crud/a.txt
+veda ls  $TP/crud
+curl -sS "http://localhost:3000/v1/fs$TP/crud/a.txt?stat=1" \
+  -H "Authorization: Bearer $(awk '/workspace_key/{print $2}' ~/.config/veda/config.toml)"
 
-# 语义搜索：应该按相关性返回
-# 查 memory safety → 应优先返回 Rust Ownership
-veda collection search kb "memory safety and garbage collection" --limit 3
+# stdin 上传
+echo "world" | veda cp - $TP/crud/b.txt
 
-# 查 plant energy → 应优先返回 Photosynthesis
-veda collection search kb "how do plants produce energy from sunlight" --limit 3
+# 追加（CLI / stdin / SQL 三种等价路径）
+veda append $TP/crud/a.txt " +more"
+echo " +stdin" | veda append $TP/crud/a.txt -
+veda sql "SELECT veda_append('$TP/crud/a.txt', ' +sql')"
+veda cat $TP/crud/a.txt                               -- hello +more +stdin +sql
 
-# 查 database performance → 应优先返回 SQL Indexing
-veda collection search kb "speed up database queries" --limit 3
-
-# 查 deep learning → 应优先返回 Neural Networks
-veda collection search kb "artificial intelligence training models" --limit 3
-
-# 跨领域模糊查询：同时涉及多个领域
-veda collection search kb "data structures used in computer systems" --limit 6
+# 移动 / 删除
+veda mv $TP/crud/b.txt $TP/crud/b2.txt
+veda rm $TP/crud/a.txt
 ```
 
-预期结果：
-
-- 每个查询的 top-1 应与意图对应的 domain 匹配
-- 跨领域查询返回多个 domain 的结果
-
-### 10.4 Embedding Source 对比测试
-
-验证：不同 `embed-source` 字段影响搜索行为。
+### 7. Revision / Checksum 去重
 
 ```bash
-# 创建按 title embedding 的 collection
-veda collection create by_title \
-  --schema '[{"name":"title","field_type":"varchar"},{"name":"body","field_type":"varchar"}]' \
-  --embed-source title
-
-# 创建按 body embedding 的 collection
-veda collection create by_body \
-  --schema '[{"name":"title","field_type":"varchar"},{"name":"body","field_type":"varchar"}]' \
-  --embed-source body
-
-# 相同数据插入两个 collection
-veda collection insert by_title '[{"title":"Quick Sort Algorithm","body":"A restaurant in downtown Shanghai serves excellent xiaolongbao dumplings."},{"title":"Shanghai Restaurants","body":"Quick sort is a divide-and-conquer sorting algorithm with average O(n log n) time complexity."}]'
-
-veda collection insert by_body '[{"title":"Quick Sort Algorithm","body":"A restaurant in downtown Shanghai serves excellent xiaolongbao dumplings."},{"title":"Shanghai Restaurants","body":"Quick sort is a divide-and-conquer sorting algorithm with average O(n log n) time complexity."}]'
-
-# 搜索 "sorting algorithm"
-# by_title 应优先返回 "Quick Sort Algorithm"（title 匹配）
-veda collection search by_title "sorting algorithm" --limit 2
-
-# by_body 应优先返回 "Shanghai Restaurants"（body 内容是排序算法）
-veda collection search by_body "sorting algorithm" --limit 2
+echo "same" | veda cp - $TP/rev/x.txt
+veda sql "SELECT revision FROM files WHERE path='$TP/rev/x.txt'"     -- 1
+echo "same" | veda cp - $TP/rev/x.txt                                # 同内容
+veda sql "SELECT revision FROM files WHERE path='$TP/rev/x.txt'"     -- 仍 1
+echo "changed" | veda cp - $TP/rev/x.txt
+veda sql "SELECT revision FROM files WHERE path='$TP/rev/x.txt'"     -- 2
 ```
 
-预期结果：
-
-- `by_title` 搜 "sorting algorithm" → top-1 是 "Quick Sort Algorithm"
-- `by_body` 搜 "sorting algorithm" → top-1 是 "Shanghai Restaurants"（因为它的 body 才是排序内容）
-- 证明 `embed-source` 字段选择直接决定语义搜索方向
-
-### 10.5 无 Embedding Source 的 Collection（全行序列化 Embedding）
-
-验证：不指定 `--embed-source` 时，整行 JSON 做 embedding。
+### 8. COW 写隔离
 
 ```bash
-veda collection create full_embed \
-  --schema '[{"name":"key","field_type":"varchar"},{"name":"value","field_type":"varchar"}]'
+echo "origin" | veda cp - $TP/cow/src.txt
 
-veda collection insert full_embed '[{"key":"color","value":"red"},{"key":"animal","value":"dog"},{"key":"fruit","value":"apple"}]'
+KEY=$(awk '/workspace_key/{print $2}' ~/.config/veda/config.toml)
+curl -sS -X POST http://localhost:3000/v1/fs-copy \
+  -H "Authorization: Bearer $KEY" -H "Content-Type: application/json" \
+  -d "{\"from\":\"$TP/cow/src.txt\",\"to\":\"$TP/cow/dup.txt\"}"
 
-# 搜索应基于整行内容
-veda collection search full_embed "red fruit" --limit 3
+# 此时 src/dup 共享 file_id
+veda sql "SELECT path, file_id FROM files WHERE path LIKE '$TP/cow/%'"
 
-# SQL 查全量
-veda sql "SELECT key, value FROM full_embed"
+# 覆盖写 dup：fork 出新 file_id，src 内容不变
+echo "forked" | veda cp - $TP/cow/dup.txt
+veda cat $TP/cow/src.txt                          -- origin
+
+# append 触发 COW 同样生效
+curl -sS -X POST http://localhost:3000/v1/fs-copy \
+  -H "Authorization: Bearer $KEY" -H "Content-Type: application/json" \
+  -d "{\"from\":\"$TP/cow/src.txt\",\"to\":\"$TP/cow/app.txt\"}"
+veda append $TP/cow/app.txt " +tail"
+veda cat $TP/cow/src.txt                          -- origin
+veda cat $TP/cow/app.txt                          -- origin +tail
 ```
 
-预期结果：
-
-- 搜索 "red fruit" 时 "color:red" 和 "fruit:apple" 排名靠前
-- SQL 返回 3 行
-
-### 10.6 文件上传 + 语义搜索端到端
-
-验证：文件上传后 Worker 完成 ChunkSync，全局搜索可以找到文件内容。
+### 9. Ref-count & 级联删除
 
 ```bash
-# 上传有意义的长文本
-echo "Rust is a systems programming language that runs blazingly fast, prevents segfaults, and guarantees thread safety. It achieves memory safety without garbage collection through its ownership system. The borrow checker ensures references are always valid." | veda cp - /project/docs/rust-intro.md
+echo "shared" | veda cp - $TP/ref/a.txt
+for dst in b.txt c.txt; do
+  curl -sS -X POST http://localhost:3000/v1/fs-copy \
+    -H "Authorization: Bearer $KEY" -H "Content-Type: application/json" \
+    -d "{\"from\":\"$TP/ref/a.txt\",\"to\":\"$TP/ref/$dst\"}"
+done
 
-echo "PostgreSQL is a powerful, open source object-relational database system. It has a strong reputation for reliability, feature robustness, and performance. It supports both SQL and JSON querying." | veda cp - /project/docs/postgres-intro.md
-
-# 等待 Worker 处理
-sleep 5
-
-# 语义搜索文件内容
-veda search "memory safety without GC" --mode semantic --limit 3
-veda search "relational database with JSON support" --mode semantic --limit 3
-
-# 混合搜索
-veda search "borrow checker" --limit 3
-
-# 全文搜索
-veda search "PostgreSQL" --mode fulltext --limit 3
+veda sql "SELECT file_id, ref_count FROM files WHERE path LIKE '$TP/ref/%'"
+veda rm $TP/ref/a.txt
+veda rm $TP/ref/b.txt
+veda cat $TP/ref/c.txt                            -- 底层仍存在
+veda rm $TP/ref/c.txt
+veda sql "SELECT COUNT(*) FROM files WHERE path LIKE '$TP/ref/%'"    -- 0
 ```
 
-预期结果：
-
-- 语义搜 "memory safety without GC" → 命中 rust-intro.md
-- 语义搜 "relational database with JSON support" → 命中 postgres-intro.md
-- 全文搜 "PostgreSQL" → 精确命中 postgres-intro.md
-
-### 10.7 清理
+### 10. Inline ↔ Chunked
 
 ```bash
-veda collection delete kb
-veda collection delete authors
-veda collection delete articles
-veda collection delete by_title
-veda collection delete by_body
-veda collection delete full_embed
-veda rm /project
+python -c "open('/tmp/small.txt','w').write('a'*(100*1024))"
+python -c "open('/tmp/big.txt','w').write('b'*(300*1024))"
+
+veda cp /tmp/small.txt $TP/store/s.txt
+veda cp /tmp/big.txt   $TP/store/b.txt
+veda sql "SELECT path, storage_type, size_bytes FROM files WHERE path LIKE '$TP/store/%'"
+
+# 切换：100KB → 300KB inline→chunked；300KB → 100KB chunked→inline
+veda cp /tmp/big.txt   $TP/store/s.txt
+veda cp /tmp/small.txt $TP/store/b.txt
+veda sql "SELECT path, storage_type FROM files WHERE path LIKE '$TP/store/%'"
 ```
 
-## 11. 新增功能专项回归（FS9 + 稳定性修复）
-
-> 本节覆盖最近新增/修复能力：`veda append`、SQL FS UDF、`veda_fs()`、`veda_fs_events()`、`veda_storage_stats()`、只读 key 权限、schema 字段兼容、50MB 限额。
-
-### 11.1 CLI Append + SQL Append
-
-验证：`POST /v1/fs/{path}`、`veda append`、`veda_append()` 三条路径行为一致。
+### 11. `cat --lines` 行范围
 
 ```bash
-# CLI append（字符串 + stdin）
-echo "hello" | veda cp - /append/demo.txt
-veda append /append/demo.txt " world"
-echo " !!!" | veda append /append/demo.txt -
-veda cat /append/demo.txt
-
-# SQL append
-veda sql "SELECT veda_append('/append/demo.txt', ' [sql]') AS appended_bytes"
-veda sql "SELECT veda_read('/append/demo.txt') AS content"
+printf "one\ntwo\nthree\nfour\nfive\n" | veda cp - $TP/lines/a.txt
+veda cat $TP/lines/a.txt --lines 2:4                          -- two/three/four
+veda cat $TP/lines/a.txt --lines 5:99                         -- five
+veda cat $TP/lines/a.txt --lines 100:200                      -- 空
+veda cat $TP/lines/a.txt --lines 0:3                          -- InvalidInput
+veda cat $TP/lines/a.txt --lines 5:1                          -- InvalidInput
 ```
 
-预期结果：
+### 12. 错误边界
 
-- `veda cat` 最终包含 `hello world !!! [sql]`
-- `veda_append` 返回追加字节数（`appended_bytes`）
+| 场景 | 命令 | 预期 |
+|---|---|---|
+| 删根 | `veda rm /` | `cannot delete root` |
+| 写到目录路径 | `echo x \| veda cp - $TP/crud` | `is a directory` |
+| mkdir 到已存在文件 | `veda mkdir $TP/lines/a.txt` | `exists as a file` |
+| rename 到已存在 | `veda mv $TP/lines/a.txt $TP/rev/x.txt` | `AlreadyExists` |
+| rename 目录入自身 | `veda mv $TP/crud $TP/crud/sub` | `move a directory into itself` |
+| copy 目录 | `fs-copy` src=目录 | `cannot copy a directory` |
+| copy src==dst | from==to | `source and destination are the same` |
 
-### 11.2 SQL Scalar UDF 全链路
-
-验证：`veda_read/write/append/exists/size/mtime/remove/mkdir`。
+### 13. 50MB 配额
 
 ```bash
-veda sql "SELECT veda_write('/sql_udf/a.txt', 'alpha') AS bytes_written"
-veda sql "SELECT veda_append('/sql_udf/a.txt', ' beta') AS bytes_appended"
-veda sql "SELECT veda_read('/sql_udf/a.txt') AS content"
-veda sql "SELECT veda_exists('/sql_udf/a.txt') AS exists_flag"
-veda sql "SELECT veda_size('/sql_udf/a.txt') AS size_bytes"
-veda sql "SELECT veda_mtime('/sql_udf/a.txt') AS mtime"
-veda sql "SELECT veda_mkdir('/sql_udf/tmp') AS mkdir_ok"
-veda sql "SELECT veda_remove('/sql_udf/a.txt') AS removed_count"
-veda sql "SELECT veda_exists('/sql_udf/a.txt') AS exists_after_remove"
+python - <<'PY'
+from pathlib import Path
+Path('/tmp/51mb.txt').write_text('x'*51*1024*1024)
+Path('/tmp/49mb.txt').write_text('a'*49*1024*1024)
+Path('/tmp/2mb.txt').write_text('b'*2 *1024*1024)
+PY
+
+veda cp /tmp/51mb.txt $TP/quota/too-big.txt                    # QuotaExceeded
+veda cp /tmp/49mb.txt $TP/quota/base.txt                       # OK
+cat /tmp/2mb.txt | veda append $TP/quota/base.txt -            # QuotaExceeded
 ```
 
-预期结果：
+---
 
-- `content` 为 `alpha beta`
-- `exists_flag=true`，删除后 `exists_after_remove=false`
-- `size_bytes`、`mtime` 为非 null
+## 三、HTTP & SQL
 
-### 11.3 `veda_fs()` Table Function（目录 / 文件 / 格式解析 / glob）
+### 14. 原生 HTTP 端点
 
-验证：目录列举、plain text、CSV、JSONL、glob 多文件读取。
+```bash
+KEY=$(awk '/workspace_key/{print $2}' ~/.config/veda/config.toml)
+BASE=http://localhost:3000
+
+curl -sS -X PUT    "$BASE/v1/fs$TP/http/a.txt" -H "Authorization: Bearer $KEY" -d 'hi'
+curl -sS            "$BASE/v1/fs$TP/http/a.txt"            -H "Authorization: Bearer $KEY"
+curl -sS            "$BASE/v1/fs$TP/http/a.txt?stat=1"     -H "Authorization: Bearer $KEY"
+curl -sS            "$BASE/v1/fs$TP/http?list=1"           -H "Authorization: Bearer $KEY"
+curl -sS            "$BASE/v1/fs$TP/http/a.txt?lines=1:1"  -H "Authorization: Bearer $KEY"
+curl -sS -I         "$BASE/v1/fs$TP/http/a.txt"            -H "Authorization: Bearer $KEY"
+curl -sS -X POST    "$BASE/v1/fs$TP/http/a.txt" -H "Authorization: Bearer $KEY" -d ' +app'
+curl -sS -X DELETE  "$BASE/v1/fs$TP/http/a.txt"            -H "Authorization: Bearer $KEY"
+curl -sS -X POST    "$BASE/v1/fs-mkdir"  -H "Authorization: Bearer $KEY" \
+  -H "Content-Type: application/json" -d "{\"path\":\"$TP/http/sub\"}"
+curl -sS -X POST    "$BASE/v1/fs-rename" -H "Authorization: Bearer $KEY" \
+  -H "Content-Type: application/json" -d "{\"from\":\"$TP/http/sub\",\"to\":\"$TP/http/sub2\"}"
+```
+
+### 15. `files` 表 SQL
+
+```bash
+veda sql "SELECT path, size_bytes, mime_type, revision, storage_type \
+          FROM files ORDER BY path LIMIT 20"
+
+veda sql "SELECT path, size_bytes FROM files WHERE path LIKE '$TP/store/%'"
+
+veda sql "SELECT is_dir, COUNT(*) AS cnt, \
+          SUM(CASE WHEN size_bytes IS NOT NULL THEN size_bytes ELSE 0 END) AS bytes \
+          FROM files GROUP BY is_dir"
+```
+
+### 16. FS 标量 UDF
+
+```bash
+veda sql "SELECT veda_write ('$TP/udf/a.txt', 'alpha')  AS n"
+veda sql "SELECT veda_append('$TP/udf/a.txt', ' beta')  AS n"
+veda sql "SELECT veda_read  ('$TP/udf/a.txt')           AS c"     -- alpha beta
+veda sql "SELECT veda_exists('$TP/udf/a.txt')           AS b"
+veda sql "SELECT veda_size  ('$TP/udf/a.txt')           AS sz"
+veda sql "SELECT veda_mtime ('$TP/udf/a.txt')           AS mt"
+veda sql "SELECT veda_mkdir ('$TP/udf/sub')             AS ok"
+veda sql "SELECT veda_remove('$TP/udf/a.txt')           AS n"
+
+# 组合：对 SELECT 行逐条调用
+veda sql "SELECT path, veda_size(path) AS sz \
+          FROM files WHERE path LIKE '$TP/store/%'"
+```
+
+### 17. `veda_fs()` 表函数
 
 ```bash
 # 准备数据
-veda mkdir /tf
-veda mkdir /tf/logs
-printf "line1\nline2\nline3\n" | veda cp - /tf/notes.txt
-printf "name,age\nAlice,30\nBob,25\n" | veda cp - /tf/users.csv
-printf "{\"level\":\"info\",\"msg\":\"start\"}\n{\"level\":\"error\",\"msg\":\"fail\"}\n" | veda cp - /tf/app.jsonl
-printf "a1\na2\n" | veda cp - /tf/logs/a.txt
-printf "b1\n" | veda cp - /tf/logs/b.txt
+veda mkdir $TP/tf; veda mkdir $TP/tf/logs
+printf "line1\nline2\nline3\n"                               | veda cp - $TP/tf/notes.txt
+printf "name,age\nAlice,30\nBob,25\n"                        | veda cp - $TP/tf/users.csv
+printf '{"lvl":"info","msg":"s"}\n{"lvl":"err","msg":"f"}\n' | veda cp - $TP/tf/app.jsonl
+printf "a1\na2\n" | veda cp - $TP/tf/logs/a.txt
+printf "b1\n"     | veda cp - $TP/tf/logs/b.txt
 
-# 目录模式（path 以 / 结尾）
-veda sql "SELECT path, name, type, size_bytes FROM veda_fs('/tf/') ORDER BY path"
+# 目录（路径 / 结尾）
+veda sql "SELECT path, name, type, size_bytes FROM veda_fs('$TP/tf/') ORDER BY path"
 
-# 文件模式（自动按扩展名解析）
-veda sql "SELECT _line_number, line, _path FROM veda_fs('/tf/notes.txt')"
-veda sql "SELECT _line_number, name, age, _path FROM veda_fs('/tf/users.csv') ORDER BY _line_number"
-veda sql "SELECT _line_number, line FROM veda_fs('/tf/app.jsonl') ORDER BY _line_number"
+# 按扩展名解析
+veda sql "SELECT _line_number, line       FROM veda_fs('$TP/tf/notes.txt')"
+veda sql "SELECT _line_number, name, age  FROM veda_fs('$TP/tf/users.csv') ORDER BY _line_number"
+veda sql "SELECT _line_number, line       FROM veda_fs('$TP/tf/app.jsonl')"
 
-# glob 模式（同一模式下建议同格式文件）
-veda sql "SELECT _path, COUNT(*) AS lines FROM veda_fs('/tf/logs/*.txt') GROUP BY _path ORDER BY _path"
+# glob
+veda sql "SELECT _path, COUNT(*) n FROM veda_fs('$TP/tf/logs/*.txt') GROUP BY _path"
+veda sql "SELECT _path, COUNT(*) n FROM veda_fs('$TP/tf/**/*.txt')   GROUP BY _path"
 ```
 
-预期结果：
-
-- 目录模式返回 `path/name/type/size_bytes/mtime`
-- `notes.txt` 返回 3 行，`_line_number` 从 1 开始
-- CSV 返回列 `name/age`，JSONL 返回 `line`（每行一个 JSON 字符串）
-- glob 返回两行统计：`a.txt=2`、`b.txt=1`
-
-### 11.4 `veda_fs_events()`（位置参数、过滤、错误处理）
-
-验证：`since_id`、`path_prefix`、`limit` 生效；参数校验报错友好。
+### 18. `veda_fs_events()` 事件流
 
 ```bash
-# 造事件
-veda sql "SELECT veda_write('/events/a.txt', 'A')"
-veda sql "SELECT veda_write('/events/b.txt', 'B')"
-veda sql "SELECT veda_remove('/events/b.txt')"
+veda sql "SELECT veda_write('$TP/ev/a.txt', 'A')"
+veda sql "SELECT veda_append('$TP/ev/a.txt', 'A2')"
+veda mv  $TP/ev/a.txt $TP/ev/b.txt
+veda sql "SELECT veda_remove('$TP/ev/b.txt')"
 
-# 事件查询：参数都是位置参数
-# arg1: since_id(INT), arg2: path_prefix(STRING), arg3: limit(INT)
+# 位置参数：(since_id INT, path_prefix STRING, limit INT)
 veda sql "SELECT id, event_type, path FROM veda_fs_events() ORDER BY id DESC LIMIT 20"
-veda sql "SELECT id, event_type, path FROM veda_fs_events(0, '/events/', 100)"
+veda sql "SELECT id, event_type, path FROM veda_fs_events(0, '$TP/ev/', 100)"
 veda sql "SELECT id, event_type, path FROM veda_fs_events(1)"
 
-# 错误参数
-veda sql "SELECT * FROM veda_fs_events(0, '/events/', -1)"
-veda sql "SELECT * FROM veda_fs_events('oops')"
+# 错误
+veda sql "SELECT * FROM veda_fs_events(0,'$TP/ev/',-1)"       -- limit must be non-negative
+veda sql "SELECT * FROM veda_fs_events('oops')"               -- arg 1 (since_id) must be INT
 ```
 
-预期结果：
+预期可见 `create` / `update` / `move` / `delete` 四类事件。
 
-- 查询结果按 `id` 递增，可看到 `/events/` 下 create/delete 事件
-- `limit=-1` 报错：`limit must be non-negative`
-- `'oops'` 报错：`arg 1 (since_id) must be INT`
-
-### 11.5 `veda_storage_stats()` 统计
-
-验证：返回单行聚合统计（文件数、目录数、总字节）。
+### 19. `veda_storage_stats()`
 
 ```bash
 veda sql "SELECT total_files, total_directories, total_bytes FROM veda_storage_stats()"
 ```
 
-预期结果：
-
-- 返回 1 行
-- 三列都为非负数，`total_bytes` 在有文件时应大于 0
-
-### 11.6 Read-only Workspace Key 权限验证（新增）
-
-验证：只读 key 可以读，但会拒绝写接口和写 SQL UDF。
+### 19.1 只读 Key 权限
 
 ```bash
-# 1) 从 veda config show 拿到 api_key 和 workspace_id，创建 read-only key
-curl -sS -X POST "http://localhost:3000/v1/workspaces/<WORKSPACE_ID>/keys" \
-  -H "Authorization: Bearer <API_KEY>" \
-  -H "Content-Type: application/json" \
-  -d '{"name":"ro-test","permission":"read"}'
+veda config set workspace_key $RO_KEY        # §4 拿到的只读 key
 
-# 2) 将返回的 key 写入 CLI 配置
-veda config set workspace_key <READ_ONLY_KEY>
+# 读可通过
+veda cat $TP/lines/a.txt
+veda sql "SELECT veda_read('$TP/lines/a.txt')"
 
-# 3) 读请求应成功，写请求应失败
-veda sql "SELECT veda_read('/tf/notes.txt')"
-veda sql "SELECT veda_write('/tf/ro_denied.txt', 'x')"
-echo "x" | veda cp - /tf/ro_denied.txt
+# 写全部拒绝
+echo x | veda cp - $TP/ro/denied.txt                 -- permission denied
+veda sql "SELECT veda_write('$TP/ro/denied.txt','x')" -- permission denied
+veda append $TP/lines/a.txt " x"                     -- permission denied
+veda rm $TP/lines/a.txt                              -- permission denied
+veda mkdir $TP/ro                                    -- permission denied
+veda mv $TP/lines/a.txt $TP/lines/b.txt              -- permission denied
 
-# 4) 测完恢复 read-write key
-veda workspace use <WORKSPACE_ID>
+# 还原
+veda workspace use $WSID
 ```
 
-预期结果：
+---
 
-- `veda_read` 正常
-- `veda_write` / `cp` 报 `permission denied`
+## 四、Collection
 
-### 11.7 Collection schema 字段名兼容（`type` / `field_type`）
-
-验证：`FieldDefinition` 兼容两种字段名写法。
+### 20. 基础管理
 
 ```bash
-# 新写法：type
-veda collection create schema_type_demo \
-  --schema '[{"name":"title","type":"varchar"},{"name":"content","type":"varchar"}]' \
+# 新写法：type；旧写法：field_type（同时兼容）
+veda collection create docs \
+  --schema '[{"name":"title","type":"varchar"},{"name":"content","type":"varchar"},{"name":"category","type":"varchar"}]' \
   --embed-source content
 
-# 旧写法：field_type
-veda collection create schema_field_type_demo \
-  --schema '[{"name":"title","field_type":"varchar"},{"name":"content","field_type":"varchar"}]' \
+veda collection list
+veda collection desc docs
+
+veda collection insert docs '[{"title":"Rust Intro","content":"Rust ownership and borrowing","category":"tech"},{"title":"DB 101","content":"MySQL indexing basics","category":"db"}]'
+
+veda collection search docs "memory management" --limit 5
+veda sql "SELECT title, category FROM docs"
+veda sql "SELECT category, COUNT(*) FROM docs GROUP BY category"
+```
+
+### 21. Embedding 深度
+
+```bash
+# kb：语义差异明显的条目
+veda collection create kb \
+  --schema '[{"name":"title","type":"varchar"},{"name":"content","type":"varchar"},{"name":"domain","type":"varchar"}]' \
   --embed-source content
 
-veda collection desc schema_type_demo
-veda collection desc schema_field_type_demo
+veda collection insert kb '[
+ {"title":"Rust Ownership","content":"Rust uses an ownership system with borrowing and lifetimes to guarantee memory safety without garbage collection.","domain":"programming"},
+ {"title":"Photosynthesis","content":"Photosynthesis is the process by which green plants convert sunlight into glucose.","domain":"biology"},
+ {"title":"Black Holes","content":"A black hole is a region of spacetime where gravity is so strong that nothing can escape.","domain":"physics"},
+ {"title":"SQL Indexing","content":"Database indexes improve the speed of data retrieval. B-tree provides O(log n) lookup.","domain":"database"},
+ {"title":"Neural Networks","content":"Neural networks are computing systems inspired by biological neurons, learning via training.","domain":"ml"},
+ {"title":"TCP Handshake","content":"TCP uses a three-way handshake SYN/SYN-ACK/ACK to establish connections.","domain":"networking"}]'
+
+veda collection search kb "memory safety and garbage collection"          --limit 3
+veda collection search kb "how do plants produce energy from sunlight"    --limit 3
+veda collection search kb "speed up database queries"                     --limit 3
+veda collection search kb "artificial intelligence training models"       --limit 3
+veda collection search kb "data structures used in computer systems"      --limit 6
+
+# embed-source 对比：同一数据、不同 embedding 字段得到不同排序
+veda collection create by_title --schema '[{"name":"title","type":"varchar"},{"name":"body","type":"varchar"}]' --embed-source title
+veda collection create by_body  --schema '[{"name":"title","type":"varchar"},{"name":"body","type":"varchar"}]' --embed-source body
+for C in by_title by_body; do
+  veda collection insert $C '[
+   {"title":"Quick Sort Algorithm","body":"A restaurant in downtown Shanghai serves excellent xiaolongbao."},
+   {"title":"Shanghai Restaurants","body":"Quick sort is a divide-and-conquer sorting algorithm with O(n log n)."}]'
+done
+veda collection search by_title "sorting algorithm" --limit 2    # top-1: Quick Sort Algorithm
+veda collection search by_body  "sorting algorithm" --limit 2    # top-1: Shanghai Restaurants
+
+# 不指定 embed-source：整行 JSON 做 embedding
+veda collection create full_embed --schema '[{"name":"key","type":"varchar"},{"name":"value","type":"varchar"}]'
+veda collection insert full_embed '[{"key":"color","value":"red"},{"key":"animal","value":"dog"},{"key":"fruit","value":"apple"}]'
+veda collection search full_embed "red fruit" --limit 3
 ```
 
-预期结果：
-
-- 两个 collection 都创建成功
-- `desc` 都能正确显示字段类型
-
-### 11.8 50MB 限额保护（可选，耗时）
-
-验证：`write_file` 与 `append_file` 都受 50MB 限制。
+### 22. 多 Collection + 跨表 JOIN
 
 ```bash
-python - <<'PY'
-from pathlib import Path
-Path('/tmp/veda-51mb.txt').write_text('x' * (51 * 1024 * 1024))
-Path('/tmp/veda-49mb.txt').write_text('a' * (49 * 1024 * 1024))
-Path('/tmp/veda-2mb.txt').write_text('b' * (2 * 1024 * 1024))
-PY
+veda collection create authors \
+  --schema '[{"name":"author","type":"varchar"},{"name":"bio","type":"varchar"},{"name":"country","type":"varchar"}]' \
+  --embed-source bio
+veda collection create articles \
+  --schema '[{"name":"title","type":"varchar"},{"name":"content","type":"varchar"},{"name":"author","type":"varchar"},{"name":"topic","type":"varchar"}]' \
+  --embed-source content
 
-# write 超限
-veda cp /tmp/veda-51mb.txt /quota/too-big.txt
+veda collection insert authors '[
+ {"author":"Alice","bio":"Expert in distributed systems.","country":"US"},
+ {"author":"Bob","bio":"Database kernel developer.","country":"CN"},
+ {"author":"Carol","bio":"ML researcher focused on NLP.","country":"UK"}]'
+veda collection insert articles '[
+ {"title":"Raft","content":"Raft is a consensus algorithm.","author":"Alice","topic":"distributed"},
+ {"title":"B-Tree","content":"B-Trees are balanced trees for disk I/O.","author":"Bob","topic":"database"},
+ {"title":"Attention","content":"Attention focuses on parts of input.","author":"Carol","topic":"ml"},
+ {"title":"LSM","content":"LSM trees are write-optimized.","author":"Bob","topic":"database"},
+ {"title":"VectorDB","content":"Vector DBs index high-dim embeddings.","author":"Alice","topic":"database"}]'
 
-# append 超限：49MB + 2MB > 50MB
-veda cp /tmp/veda-49mb.txt /quota/base.txt
-cat /tmp/veda-2mb.txt | veda append /quota/base.txt -
+veda sql "SELECT topic, COUNT(*) cnt FROM articles GROUP BY topic ORDER BY cnt DESC"
+veda sql "SELECT a.title, a.author, au.country \
+          FROM articles a JOIN authors au ON a.author = au.author"
+veda sql "SELECT au.country, COUNT(*) cnt \
+          FROM articles a JOIN authors au ON a.author = au.author \
+          GROUP BY au.country ORDER BY cnt DESC"
+# 三表汇总
+veda sql "SELECT 'files' src, COUNT(*) n FROM files \
+          UNION ALL SELECT 'articles', COUNT(*) FROM articles \
+          UNION ALL SELECT 'authors',  COUNT(*) FROM authors"
 ```
 
-预期结果：
+---
 
-- 两个超限请求都返回 `quota exceeded`
+## 五、文件搜索闭环
 
-### 11.9 自动化回归命令（建议每次本地测都跑）
+### 23. Worker ChunkSync + 全局搜索
 
 ```bash
-# 核心 append/COW/配额回归
+echo "Rust is a systems language with memory safety via ownership." \
+  | veda cp - $TP/search/rust.md
+echo "PostgreSQL is a relational database that supports SQL and JSON." \
+  | veda cp - $TP/search/pg.md
+
+sleep 5                          # 等 outbox 消费
+
+veda search "memory safety without GC"           --mode semantic --limit 3
+veda search "relational database with JSON"      --mode semantic --limit 3
+veda search "PostgreSQL"                         --mode fulltext --limit 3
+veda search "ownership"                                           --limit 3   # hybrid
+```
+
+预期：每个查询 top-1 命中对应文件。
+
+---
+
+## 六、挂载 & 并发
+
+### 24. FUSE 挂载（需先装 macFUSE/libfuse）
+
+```bash
+mkdir -p /tmp/veda-mnt
+KEY=$(awk '/workspace_key/{print $2}' ~/.config/veda/config.toml)
+vfuse --server http://localhost:3000 --key $KEY --mount /tmp/veda-mnt --foreground &
+FUSE_PID=$!
+sleep 1
+
+# readdir / getattr / read
+ls -la /tmp/veda-mnt$TP
+cat    /tmp/veda-mnt$TP/lines/a.txt
+
+# create + write（FUSE create → write → release）
+echo "from-fuse" > /tmp/veda-mnt$TP/fuse/hello.txt
+veda cat $TP/fuse/hello.txt
+
+# mkdir / rename / truncate / unlink / rmdir
+mkdir    /tmp/veda-mnt$TP/fuse/sub
+mv       /tmp/veda-mnt$TP/fuse/hello.txt /tmp/veda-mnt$TP/fuse/sub/h2.txt
+echo "abcdefghij" > /tmp/veda-mnt$TP/fuse/t.txt
+truncate -s 3 /tmp/veda-mnt$TP/fuse/t.txt
+veda cat $TP/fuse/t.txt                                   -- abc
+rm       /tmp/veda-mnt$TP/fuse/sub/h2.txt
+rmdir    /tmp/veda-mnt$TP/fuse/sub
+
+# 卸载
+kill $FUSE_PID; wait $FUSE_PID 2>/dev/null
+umount /tmp/veda-mnt 2>/dev/null || true
+```
+
+### 25. 并发
+
+```bash
+# 并发写同一路径
+for i in $(seq 1 20); do
+  (echo "v$i" | veda cp - $TP/conc/x.txt) &
+done; wait
+veda sql "SELECT revision FROM files WHERE path='$TP/conc/x.txt'"
+
+# 并发 append
+echo "" | veda cp - $TP/conc/log.txt
+for i in $(seq 1 20); do
+  (veda append $TP/conc/log.txt "line-$i;") &
+done; wait
+veda cat $TP/conc/log.txt | tr ';' '\n' | grep -c 'line-'      # 应为 20
+```
+
+### 26. Outbox / Worker 观察
+
+```bash
+veda sql "SELECT event_type, status, COUNT(*) n FROM veda_outbox GROUP BY event_type, status"
+# 卡住时：
+# UPDATE veda_outbox SET status='completed' WHERE status IN ('pending','failed');
+```
+
+---
+
+## 七、回归 & 维护
+
+### 27. 自动化回归
+
+```bash
+# Path / FS 核心
+cargo test -p veda-core path::tests
+cargo test -p veda-core write_file_size_limit
 cargo test -p veda-core append_file_cow_isolation
 cargo test -p veda-core append_creates_new_file
 cargo test -p veda-core append_to_existing_file
-cargo test -p veda-core write_file_size_limit
+cargo test -p veda-core copy_file_shares_content
+cargo test -p veda-core delete_cascades_refcount
+cargo test -p veda-core rename_into_self
 
-# SQL 新能力回归
+# SQL
 cargo test -p veda-sql udf_veda_append
+cargo test -p veda-sql udf_veda_read
 cargo test -p veda-sql veda_fs_dir_listing
 cargo test -p veda-sql veda_fs_read_csv
 cargo test -p veda-sql veda_fs_glob
 cargo test -p veda-sql veda_fs_events_basic
 cargo test -p veda-sql veda_storage_stats_basic
 cargo test -p veda-sql read_only_rejects_write_udf
+
+# FUSE（需独立 workspace）
+cargo test --manifest-path crates/veda-fuse/Cargo.toml
 ```
 
-## 常见问题
+### 28. 清理
 
+```bash
+veda rm $TP
+for c in docs kb by_title by_body full_embed authors articles; do
+  veda collection delete $c
+done
+veda sql "SELECT COUNT(*) FROM files WHERE path LIKE '$TP/%'"         -- 0
+```
 
-| 问题                                    | 原因                        | 解决                                                                               |
-| ------------------------------------- | ------------------------- | -------------------------------------------------------------------------------- |
-| `vector dimension mismatch`           | Milvus 旧 collection 维度不匹配 | 删除旧 collection 后重启 server                                                        |
-| `file xxx not found` (Worker)         | outbox 中残留指向已删除文件的任务      | `UPDATE veda_outbox SET status='completed' WHERE status IN ('pending','failed')` |
-| `unexpected argument --data`          | `data` 是位置参数              | 去掉 `--data`，直接跟 JSON                                                             |
-| JSON 解析报 control character            | JSON 字符串跨行了               | 确保 JSON 写在一行内                                                                    |
-| `permission denied`（写请求）              | 使用了只读 workspace key       | 用 `veda workspace use <WORKSPACE_ID>` 重新生成读写 key                                 |
-| `veda_fs_events ... must be INT`      | `veda_fs_events` 参数类型不对   | 按位置参数传：`(since_id:int, path_prefix:string, limit:int)`                           |
-| `glob matches files of mixed formats` | glob 同时匹配了 txt/csv/jsonl  | 用更精确 pattern（例如 `*.txt` / `*.csv`），同一次 `veda_fs()` 尽量只查一种格式                      |
+### 29. 常见问题
 
+| 问题 | 原因 | 解决 |
+|---|---|---|
+| `vector dimension mismatch` | Milvus 旧 collection 维度不匹配 | 删除旧 collection 后重启 server |
+| `file xxx not found` (Worker) | outbox 残留指向已删文件 | `UPDATE veda_outbox SET status='completed' WHERE status IN ('pending','failed')` |
+| `unexpected argument --data` | `data` 是位置参数 | 去掉 `--data`，直接跟 JSON |
+| JSON 报 control character | JSON 跨行 | 写在一行内 |
+| `permission denied`（写） | 用了只读 key | `veda workspace use $WSID` 还原 |
+| `veda_fs_events ... must be INT` | 参数类型错 | 位置参数：`(since_id:INT, path_prefix:STRING, limit:INT)` |
+| glob 匹配混合格式 | `*` 同时命中 txt/csv/jsonl | 用更精确 pattern；单次 `veda_fs()` 只查一种格式 |
+| veda-fuse 编译错 `package ID ... did not match` | `veda-fuse` 在 workspace exclude | 用 `--manifest-path crates/veda-fuse/Cargo.toml` |
+| veda-fuse 编译错 `fuse.pc` 缺失 | 未装 macFUSE/libfuse | `brew install --cask macfuse` 或 `apt install libfuse-dev pkg-config` |
 
+### 30. 源码参考
+
+- HTTP 路由：`crates/veda-server/src/routes/`
+- FS 服务：`crates/veda-core/src/service/fs.rs`
+- 路径工具：`crates/veda-core/src/path.rs`
+- SQL UDF / 表函数：`crates/veda-sql/src/fs_udf.rs`、`fs_table.rs`、`fs_events_table.rs`、`storage_stats_table.rs`
+- FUSE：`crates/veda-fuse/src/fs.rs`
+- CLI：`crates/veda-cli/src/main.rs`

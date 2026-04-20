@@ -9,7 +9,7 @@ use fuser::{
 use tracing::{debug, warn};
 
 use crate::client::{ClientError, FileInfo, VedaClient};
-use crate::inode::{InodeTable, ROOT_INO};
+use crate::inode::InodeTable;
 
 const TTL: Duration = Duration::from_secs(5);
 const BLOCK_SIZE: u32 = 512;
@@ -118,7 +118,7 @@ impl Filesystem for VedaFs {
         }
     }
 
-    fn getattr(&mut self, _req: &Request, ino: u64, _fh: Option<u64>, reply: ReplyAttr) {
+    fn getattr(&mut self, _req: &Request, ino: u64, reply: ReplyAttr) {
         if let Some(attr) = self.inodes.get_cached_attr(ino) {
             reply.attr(&TTL, &attr);
             return;
