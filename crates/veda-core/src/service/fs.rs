@@ -386,6 +386,22 @@ impl FsService {
         raw_path: &str,
     ) -> Result<api::FileInfo> {
         let norm = path::normalize(raw_path)?;
+        // Root directory has no dentry row; synthesize a virtual one
+        // to stay consistent with list_dir's root handling.
+        if norm == "/" {
+            let now = Utc::now();
+            return Ok(api::FileInfo {
+                path: "/".to_string(),
+                file_id: None,
+                is_dir: true,
+                size_bytes: None,
+                mime_type: None,
+                revision: None,
+                checksum: None,
+                created_at: now,
+                updated_at: now,
+            });
+        }
         let dentry = self
             .meta
             .get_dentry(workspace_id, &norm)

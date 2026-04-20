@@ -34,7 +34,7 @@ fn main() -> anyhow::Result<()> {
     let client = client::VedaClient::new(&args.server, &args.key);
 
     client.stat("/").map_err(|e| {
-        anyhow::anyhow!("cannot connect to server {}: {e}", args.server)
+        anyhow::anyhow!("server health check failed (stat '/' at {}): {e}", args.server)
     })?;
 
     info!(mount = %args.mount, server = %args.server, "mounting veda workspace");

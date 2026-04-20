@@ -115,8 +115,15 @@ async fn delete_file() {
 #[tokio::test]
 async fn delete_root_fails() {
     let (svc, _) = make_service();
-    let result = svc.delete("ws1", "/").await;
-    assert!(matches!(result, Err(VedaError::InvalidPath(_))));
+    for path in ["/", "", "/.", "///"] {
+        let result = svc.delete("ws1", path).await;
+        match &result {
+            Err(VedaError::InvalidPath(msg)) => {
+                assert!(msg.contains("cannot delete root"), "path={path:?} msg={msg}");
+            }
+            other => panic!("expected InvalidPath for {path:?}, got {other:?}"),
+        }
+    }
 }
 
 #[tokio::test]
@@ -161,6 +168,20 @@ async fn stat_dir() {
     let info = svc.stat("ws1", "/mydir").await.unwrap();
     assert!(info.is_dir);
     assert!(info.file_id.is_none());
+}
+
+#[tokio::test]
+async fn stat_root_virtual() {
+    // Root has no dentry row; stat must still succeed and report a directory.
+    // Regression: vfuse startup and root getattr 404'd before this.
+    let (svc, _) = make_service();
+    for path in ["/", "", "/.", "///"] {
+        let info = svc.stat("ws1", path).await.unwrap();
+        assert_eq!(info.path, "/", "input {path:?}");
+        assert!(info.is_dir, "input {path:?}");
+        assert!(info.file_id.is_none());
+        assert!(info.size_bytes.is_none());
+    }
 }
 
 #[tokio::test]
@@ -303,7 +324,27 @@ async fn write_file_size_limit() {
     let (svc, _) = make_service();
     let big = "x".repeat(51 * 1024 * 1024);
     let result = svc.write_file("ws1", "/big.txt", &big).await;
-    assert!(matches!(result, Err(VedaError::QuotaExceeded(_))));
+    match &result {
+        Err(VedaError::QuotaExceeded(msg)) => {
+            assert!(msg.contains("50MB"), "error should mention limit: {msg}");
+        }
+        other => panic!("expected QuotaExceeded, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn list_dir_root() {
+    let (svc, _) = make_service();
+    svc.write_file("ws1", "/a.txt", "a").await.unwrap();
+    svc.mkdir("ws1", "/subdir").await.unwrap();
+
+    for path in ["/", "", "/.", "///"] {
+        let entries = svc.list_dir("ws1", path).await.unwrap();
+        assert_eq!(entries.len(), 2, "path={path:?}");
+        let names: Vec<&str> = entries.iter().map(|e| e.name.as_str()).collect();
+        assert!(names.contains(&"a.txt"), "path={path:?}");
+        assert!(names.contains(&"subdir"), "path={path:?}");
+    }
 }
 
 #[tokio::test]

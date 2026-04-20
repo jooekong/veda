@@ -20,6 +20,9 @@ pub enum VedaError {
     #[error("quota exceeded: {0}")]
     QuotaExceeded(String),
 
+    #[error("payload too large: {0}")]
+    PayloadTooLarge(String),
+
     #[error("embedding failed: {0}")]
     EmbeddingFailed(String),
 

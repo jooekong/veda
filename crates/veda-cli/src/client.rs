@@ -96,7 +96,7 @@ impl Client {
     pub async fn list_dir(&self, ws_key: &str, path: &str) -> Result<serde_json::Value> {
         let path = path.trim_start_matches('/');
         let url = if path.is_empty() {
-            format!("{}/v1/fs/.?list", self.base)
+            format!("{}/v1/fs?list", self.base)
         } else {
             format!("{}/v1/fs/{path}?list", self.base)
         };
@@ -116,7 +116,12 @@ impl Client {
 
     pub async fn delete_file(&self, ws_key: &str, path: &str) -> Result<serde_json::Value> {
         let path = path.trim_start_matches('/');
-        let resp = self.http.delete(format!("{}/v1/fs/{path}", self.base))
+        let url = if path.is_empty() {
+            format!("{}/v1/fs", self.base)
+        } else {
+            format!("{}/v1/fs/{path}", self.base)
+        };
+        let resp = self.http.delete(&url)
             .bearer_auth(ws_key)
             .send().await?;
         Self::check(resp).await

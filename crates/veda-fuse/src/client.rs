@@ -73,7 +73,7 @@ impl VedaClient {
     pub fn stat(&self, path: &str) -> Result<FileInfo> {
         let path = path.trim_start_matches('/');
         let url = if path.is_empty() {
-            format!("{}/v1/fs/.?stat", self.base)
+            format!("{}/v1/fs?stat", self.base)
         } else {
             format!("{}/v1/fs/{path}?stat", self.base)
         };
@@ -123,7 +123,7 @@ impl VedaClient {
     pub fn list_dir(&self, path: &str) -> Result<Vec<DirEntry>> {
         let path = path.trim_start_matches('/');
         let url = if path.is_empty() {
-            format!("{}/v1/fs/.?list", self.base)
+            format!("{}/v1/fs?list", self.base)
         } else {
             format!("{}/v1/fs/{path}?list", self.base)
         };
@@ -143,7 +143,12 @@ impl VedaClient {
 
     pub fn delete(&self, path: &str) -> Result<()> {
         let path = path.trim_start_matches('/');
-        let resp = self.http.delete(format!("{}/v1/fs/{path}", self.base))
+        let url = if path.is_empty() {
+            format!("{}/v1/fs", self.base)
+        } else {
+            format!("{}/v1/fs/{path}", self.base)
+        };
+        let resp = self.http.delete(&url)
             .bearer_auth(&self.key)
             .send()
             .map_err(|e| ClientError::Io(e.to_string()))?;

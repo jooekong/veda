@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use axum::extract::{Path, Query, State};
+use axum::extract::rejection::StringRejection;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get, head, post, put};
 use axum::{Json, Router};
@@ -12,8 +13,11 @@ use crate::auth::AuthWorkspace;
 use crate::error::AppError;
 use crate::state::AppState;
 
+const MAX_BODY_MB: usize = 50;
+
 pub fn routes() -> Router<Arc<AppState>> {
     Router::new()
+        .route("/v1/fs", get(read_root).head(stat_root).delete(delete_root))
         .route("/v1/fs/{*path}", put(write_file))
         .route("/v1/fs/{*path}", get(read_file))
         .route("/v1/fs/{*path}", head(stat_file))
@@ -31,15 +35,48 @@ struct FsQuery {
     stat: Option<String>,
 }
 
+async fn read_root(
+    State(state): State<Arc<AppState>>,
+    auth: AuthWorkspace,
+    Query(q): Query<FsQuery>,
+) -> Result<Response, AppError> {
+    if q.stat.is_some() {
+        let info = state.fs_service.stat(&auth.workspace_id, "/").await?;
+        return Ok(Json(ApiResponse::ok(info)).into_response());
+    }
+    if q.list.is_some() {
+        let entries = state.fs_service.list_dir(&auth.workspace_id, "/").await?;
+        return Ok(Json(ApiResponse::ok(entries)).into_response());
+    }
+    Err(VedaError::InvalidInput("use ?stat or ?list".into()).into())
+}
+
+async fn stat_root(
+    State(state): State<Arc<AppState>>,
+    auth: AuthWorkspace,
+) -> Result<Json<ApiResponse<FileInfo>>, AppError> {
+    let info = state.fs_service.stat(&auth.workspace_id, "/").await?;
+    Ok(Json(ApiResponse::ok(info)))
+}
+
+async fn delete_root(
+    _auth: AuthWorkspace,
+) -> Result<Json<ApiResponse<()>>, AppError> {
+    Err(VedaError::InvalidPath("cannot delete root".into()).into())
+}
+
 async fn write_file(
     State(state): State<Arc<AppState>>,
     auth: AuthWorkspace,
     Path(path): Path<String>,
-    body: String,
+    body: Result<String, StringRejection>,
 ) -> Result<Json<ApiResponse<WriteFileResponse>>, AppError> {
     if auth.read_only {
         return Err(VedaError::PermissionDenied.into());
     }
+    let body = body.map_err(|_| {
+        AppError(VedaError::PayloadTooLarge(format!("max file size is {MAX_BODY_MB}MB")))
+    })?;
     let path = format!("/{path}");
     let resp = state
         .fs_service
@@ -52,11 +89,14 @@ async fn append_file(
     State(state): State<Arc<AppState>>,
     auth: AuthWorkspace,
     Path(path): Path<String>,
-    body: String,
+    body: Result<String, StringRejection>,
 ) -> Result<Json<ApiResponse<WriteFileResponse>>, AppError> {
     if auth.read_only {
         return Err(VedaError::PermissionDenied.into());
     }
+    let body = body.map_err(|_| {
+        AppError(VedaError::PayloadTooLarge(format!("max file size is {MAX_BODY_MB}MB")))
+    })?;
     let path = format!("/{path}");
     let resp = state
         .fs_service
