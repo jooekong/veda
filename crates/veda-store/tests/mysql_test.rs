@@ -33,8 +33,8 @@ fn workspace_root() -> PathBuf {
 
 fn load_mysql_url() -> String {
     let path = workspace_root().join("config/test.toml");
-    let raw = std::fs::read_to_string(&path)
-        .unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
+    let raw =
+        std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
     let cfg: TestToml = toml::from_str(&raw).expect("parse test.toml [mysql]");
     cfg.mysql.database_url
 }
@@ -150,6 +150,35 @@ async fn mysql_migrate_and_dentry_crud() {
     assert_eq!(n, 1);
     Box::new(tx).commit().await.expect("commit");
     cleanup_workspace(&store, &ws).await;
+}
+
+#[tokio::test]
+#[ignore]
+async fn mysql_list_dentries_under_root_lists_workspace_entries() {
+    let url = load_mysql_url();
+    let store = MysqlStore::new(&url).await.expect("connect");
+    store.migrate().await.expect("migrate");
+    let ws = Uuid::new_v4().to_string();
+    let other_ws = Uuid::new_v4().to_string();
+    let d1 = sample_dentry(&ws, "/a.txt", "a.txt", None);
+    let d2 = sample_dentry(&ws, "/b.txt", "b.txt", None);
+    let d3 = sample_dentry(&other_ws, "/z.txt", "z.txt", None);
+
+    let mut tx = store.begin_tx().await.expect("begin");
+    tx.insert_dentry(&d1).await.expect("insert d1");
+    tx.insert_dentry(&d2).await.expect("insert d2");
+    tx.insert_dentry(&d3).await.expect("insert d3");
+    Box::new(tx).commit().await.expect("commit");
+
+    let rows = store
+        .list_dentries_under(&ws, "/")
+        .await
+        .expect("list under root");
+    let paths: Vec<String> = rows.into_iter().map(|d| d.path).collect();
+    assert_eq!(paths, vec!["/a.txt".to_string(), "/b.txt".to_string()]);
+
+    cleanup_workspace(&store, &ws).await;
+    cleanup_workspace(&store, &other_ws).await;
 }
 
 #[tokio::test]
@@ -409,7 +438,10 @@ async fn mysql_workspace_crud() {
     assert_eq!(archived.status, WorkspaceStatus::Archived);
 
     let list_after = store.list_workspaces(&acct_id).await.unwrap();
-    assert!(list_after.is_empty(), "archived workspace not in active list");
+    assert!(
+        list_after.is_empty(),
+        "archived workspace not in active list"
+    );
 
     cleanup_account(&store, &acct_id).await;
 }
@@ -529,7 +561,10 @@ async fn mysql_collection_schema_crud() {
     assert_eq!(list.len(), 1);
 
     store.delete_collection_schema(&coll_id).await.unwrap();
-    let deleted = store.get_collection_schema(&ws_id, "articles").await.unwrap();
+    let deleted = store
+        .get_collection_schema(&ws_id, "articles")
+        .await
+        .unwrap();
     assert!(deleted.is_none());
 
     // cleanup

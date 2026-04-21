@@ -9,7 +9,6 @@ use std::sync::Arc;
 
 use tokio::net::TcpListener;
 use tokio::sync::watch;
-use axum::extract::DefaultBodyLimit;
 use tower_http::cors::CorsLayer;
 use tower_http::trace::TraceLayer;
 use tracing::info;
@@ -53,16 +52,9 @@ async fn main() -> anyhow::Result<()> {
     milvus.init_collections(cfg.embedding.dimension).await?;
 
     let fs_service = Arc::new(FsService::new(mysql.clone()));
-    let search_service = SearchService::new(
-        mysql.clone(),
-        milvus.clone(),
-        embedding.clone(),
-    );
-    let collection_service = CollectionService::new(
-        mysql.clone(),
-        milvus.clone(),
-        embedding.clone(),
-    );
+    let search_service = SearchService::new(mysql.clone(), milvus.clone(), embedding.clone());
+    let collection_service =
+        CollectionService::new(mysql.clone(), milvus.clone(), embedding.clone());
 
     let sql_engine = veda_sql::VedaSqlEngine::new(
         mysql.clone(),
@@ -101,7 +93,6 @@ async fn main() -> anyhow::Result<()> {
     };
 
     let app = routes::build_router(app_state)
-        .layer(DefaultBodyLimit::max(50 * 1024 * 1024))
         .layer(TraceLayer::new_for_http())
         .layer(CorsLayer::permissive());
 

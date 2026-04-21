@@ -1,8 +1,8 @@
 //! MySQL-backed metadata store, transactional metadata, and outbox task queue.
 
 use async_trait::async_trait;
-use sqlx::{MySqlPool, Row, Transaction};
 use sqlx::types::Json;
+use sqlx::{MySqlPool, Row, Transaction};
 use veda_core::store::{AuthStore, CollectionMetaStore, MetadataStore, MetadataTx, TaskQueue};
 use veda_types::{
     Account, AccountStatus, ApiKeyRecord, CollectionSchema, CollectionStatus, CollectionType,
@@ -591,17 +591,32 @@ impl MetadataStore for MysqlStore {
         Ok(out)
     }
 
-    async fn list_dentries_under(&self, workspace_id: &str, path_prefix: &str) -> Result<Vec<Dentry>> {
-        let like = format!("{}/%", escape_like(path_prefix));
-        let mut rows = sqlx::query(
-            r#"SELECT id, workspace_id, parent_path, name, path, file_id, is_dir, created_at, updated_at
-               FROM veda_dentries WHERE workspace_id = ? AND path LIKE ? ESCAPE '\\' ORDER BY path"#,
-        )
-        .bind(workspace_id)
-        .bind(&like)
-        .fetch_all(&self.pool)
-        .await
-        .map_err(storage_err)?;
+    async fn list_dentries_under(
+        &self,
+        workspace_id: &str,
+        path_prefix: &str,
+    ) -> Result<Vec<Dentry>> {
+        let mut rows = if path_prefix == "/" {
+            sqlx::query(
+                r#"SELECT id, workspace_id, parent_path, name, path, file_id, is_dir, created_at, updated_at
+                   FROM veda_dentries WHERE workspace_id = ? ORDER BY path"#,
+            )
+            .bind(workspace_id)
+            .fetch_all(&self.pool)
+            .await
+            .map_err(storage_err)?
+        } else {
+            let like = format!("{}/%", escape_like(path_prefix));
+            sqlx::query(
+                r#"SELECT id, workspace_id, parent_path, name, path, file_id, is_dir, created_at, updated_at
+                   FROM veda_dentries WHERE workspace_id = ? AND path LIKE ? ESCAPE '\\' ORDER BY path"#,
+            )
+            .bind(workspace_id)
+            .bind(&like)
+            .fetch_all(&self.pool)
+            .await
+            .map_err(storage_err)?
+        };
         let mut out = Vec::with_capacity(rows.len());
         for r in rows.drain(..) {
             out.push(row_to_dentry(&r)?);
@@ -666,11 +681,19 @@ impl MetadataStore for MysqlStore {
             }
             (Some(a), None) => {
                 q.push_str(" AND start_line >= ? ORDER BY chunk_index");
-                sqlx::query(&q).bind(file_id).bind(a).fetch_all(&self.pool).await
+                sqlx::query(&q)
+                    .bind(file_id)
+                    .bind(a)
+                    .fetch_all(&self.pool)
+                    .await
             }
             (None, Some(b)) => {
                 q.push_str(" AND start_line <= ? ORDER BY chunk_index");
-                sqlx::query(&q).bind(file_id).bind(b).fetch_all(&self.pool).await
+                sqlx::query(&q)
+                    .bind(file_id)
+                    .bind(b)
+                    .fetch_all(&self.pool)
+                    .await
             }
             (None, None) => {
                 q.push_str(" ORDER BY chunk_index");
@@ -744,20 +767,18 @@ impl MetadataStore for MysqlStore {
                 .await
                 .map_err(storage_err)?
             }
-            None => {
-                sqlx::query(
-                    r#"SELECT id, workspace_id, event_type, path, file_id, created_at
+            None => sqlx::query(
+                r#"SELECT id, workspace_id, event_type, path, file_id, created_at
                        FROM veda_fs_events
                        WHERE workspace_id = ? AND id > ?
                        ORDER BY id ASC LIMIT ?"#,
-                )
-                .bind(workspace_id)
-                .bind(since_id)
-                .bind(limit_i64)
-                .fetch_all(&self.pool)
-                .await
-                .map_err(storage_err)?
-            }
+            )
+            .bind(workspace_id)
+            .bind(since_id)
+            .bind(limit_i64)
+            .fetch_all(&self.pool)
+            .await
+            .map_err(storage_err)?,
         };
         rows.iter().map(|r| row_to_fs_event(r)).collect()
     }
@@ -847,15 +868,13 @@ impl MetadataTx for MysqlMetadataTx {
         file_id: &str,
     ) -> Result<()> {
         let t = self.tx_mut()?;
-        sqlx::query(
-            r#"UPDATE veda_dentries SET file_id = ? WHERE workspace_id = ? AND path = ?"#,
-        )
-        .bind(file_id)
-        .bind(workspace_id)
-        .bind(path)
-        .execute(t.as_mut())
-        .await
-        .map_err(storage_err)?;
+        sqlx::query(r#"UPDATE veda_dentries SET file_id = ? WHERE workspace_id = ? AND path = ?"#)
+            .bind(file_id)
+            .bind(workspace_id)
+            .bind(path)
+            .execute(t.as_mut())
+            .await
+            .map_err(storage_err)?;
         Ok(())
     }
 
@@ -870,18 +889,33 @@ impl MetadataTx for MysqlMetadataTx {
         Ok(r.rows_affected())
     }
 
-    async fn list_dentries_under(&mut self, workspace_id: &str, path_prefix: &str) -> Result<Vec<Dentry>> {
+    async fn list_dentries_under(
+        &mut self,
+        workspace_id: &str,
+        path_prefix: &str,
+    ) -> Result<Vec<Dentry>> {
         let t = self.tx_mut()?;
-        let like = format!("{}/%", escape_like(path_prefix));
-        let rows = sqlx::query(
-            r#"SELECT id, workspace_id, parent_path, name, path, file_id, is_dir, created_at, updated_at
-               FROM veda_dentries WHERE workspace_id = ? AND path LIKE ? ESCAPE '\\'"#,
-        )
-        .bind(workspace_id)
-        .bind(&like)
-        .fetch_all(t.as_mut())
-        .await
-        .map_err(storage_err)?;
+        let rows = if path_prefix == "/" {
+            sqlx::query(
+                r#"SELECT id, workspace_id, parent_path, name, path, file_id, is_dir, created_at, updated_at
+                   FROM veda_dentries WHERE workspace_id = ? ORDER BY path"#,
+            )
+            .bind(workspace_id)
+            .fetch_all(t.as_mut())
+            .await
+            .map_err(storage_err)?
+        } else {
+            let like = format!("{}/%", escape_like(path_prefix));
+            sqlx::query(
+                r#"SELECT id, workspace_id, parent_path, name, path, file_id, is_dir, created_at, updated_at
+                   FROM veda_dentries WHERE workspace_id = ? AND path LIKE ? ESCAPE '\\' ORDER BY path"#,
+            )
+            .bind(workspace_id)
+            .bind(&like)
+            .fetch_all(t.as_mut())
+            .await
+            .map_err(storage_err)?
+        };
         let mut out = Vec::with_capacity(rows.len());
         for r in &rows {
             out.push(row_to_dentry(r)?);
@@ -889,7 +923,11 @@ impl MetadataTx for MysqlMetadataTx {
         Ok(out)
     }
 
-    async fn delete_dentries_under(&mut self, workspace_id: &str, parent_path: &str) -> Result<u64> {
+    async fn delete_dentries_under(
+        &mut self,
+        workspace_id: &str,
+        parent_path: &str,
+    ) -> Result<u64> {
         let t = self.tx_mut()?;
         let r = if parent_path == "/" {
             sqlx::query(
@@ -1053,15 +1091,28 @@ impl MetadataTx for MysqlMetadataTx {
         let rows = match (start_line, end_line) {
             (Some(a), Some(b)) => {
                 q.push_str(" AND start_line >= ? AND start_line <= ? ORDER BY chunk_index");
-                sqlx::query(&q).bind(file_id).bind(a).bind(b).fetch_all(t.as_mut()).await
+                sqlx::query(&q)
+                    .bind(file_id)
+                    .bind(a)
+                    .bind(b)
+                    .fetch_all(t.as_mut())
+                    .await
             }
             (Some(a), None) => {
                 q.push_str(" AND start_line >= ? ORDER BY chunk_index");
-                sqlx::query(&q).bind(file_id).bind(a).fetch_all(t.as_mut()).await
+                sqlx::query(&q)
+                    .bind(file_id)
+                    .bind(a)
+                    .fetch_all(t.as_mut())
+                    .await
             }
             (None, Some(b)) => {
                 q.push_str(" AND start_line <= ? ORDER BY chunk_index");
-                sqlx::query(&q).bind(file_id).bind(b).fetch_all(t.as_mut()).await
+                sqlx::query(&q)
+                    .bind(file_id)
+                    .bind(b)
+                    .fetch_all(t.as_mut())
+                    .await
             }
             (None, None) => {
                 q.push_str(" ORDER BY chunk_index");
@@ -1230,11 +1281,13 @@ impl TaskQueue for MysqlStore {
     }
 
     async fn complete(&self, task_id: i64) -> Result<()> {
-        sqlx::query(r#"UPDATE veda_outbox SET status = 'completed', lease_until = NULL WHERE id = ?"#)
-            .bind(task_id)
-            .execute(&self.pool)
-            .await
-            .map_err(storage_err)?;
+        sqlx::query(
+            r#"UPDATE veda_outbox SET status = 'completed', lease_until = NULL WHERE id = ?"#,
+        )
+        .bind(task_id)
+        .execute(&self.pool)
+        .await
+        .map_err(storage_err)?;
         Ok(())
     }
 
@@ -1251,14 +1304,16 @@ impl TaskQueue for MysqlStore {
         };
         let retry: i32 = r.try_get("retry_count").map_err(storage_err)?;
         let max: i32 = r.try_get("max_retries").map_err(storage_err)?;
-        let Json(mut payload): Json<serde_json::Value> = r.try_get("payload").map_err(storage_err)?;
+        let Json(mut payload): Json<serde_json::Value> =
+            r.try_get("payload").map_err(storage_err)?;
         if let serde_json::Value::Object(ref mut m) = payload {
             m.insert(
                 "_last_error".into(),
                 serde_json::Value::String(error.to_string()),
             );
         }
-        let payload_str = serde_json::to_string(&payload).map_err(|e| storage_err(e.to_string()))?;
+        let payload_str =
+            serde_json::to_string(&payload).map_err(|e| storage_err(e.to_string()))?;
         let next_retry = retry + 1;
         if next_retry >= max {
             sqlx::query(
@@ -1493,8 +1548,8 @@ impl AuthStore for MysqlStore {
 #[async_trait]
 impl CollectionMetaStore for MysqlStore {
     async fn create_collection_schema(&self, schema: &CollectionSchema) -> Result<()> {
-        let schema_str = serde_json::to_string(&schema.schema_json)
-            .map_err(|e| storage_err(e.to_string()))?;
+        let schema_str =
+            serde_json::to_string(&schema.schema_json).map_err(|e| storage_err(e.to_string()))?;
         sqlx::query(
             r#"INSERT INTO veda_collection_schemas
                (id, workspace_id, name, collection_type, schema_json, embedding_source, embedding_dim, status, created_at, updated_at)

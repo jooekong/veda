@@ -12,14 +12,14 @@ use datafusion::datasource::{TableProvider, TableType};
 use datafusion::error::Result;
 use datafusion::execution::context::TaskContext;
 use datafusion::logical_expr::Expr;
+use datafusion::logical_expr::TableProviderFilterPushDown;
 use datafusion::physical_expr::EquivalenceProperties;
 use datafusion::physical_plan::execution_plan::{Boundedness, EmissionType};
 use datafusion::physical_plan::memory::MemoryStream;
 use datafusion::physical_plan::{
-    DisplayAs, DisplayFormatType, ExecutionPlan, Partitioning, PlanProperties,
-    SendableRecordBatchStream, project_schema,
+    project_schema, DisplayAs, DisplayFormatType, ExecutionPlan, Partitioning, PlanProperties,
+    SendableRecordBatchStream,
 };
-use datafusion::logical_expr::TableProviderFilterPushDown;
 use veda_core::store::MetadataStore;
 use veda_types::{Dentry, FileRecord};
 
@@ -68,7 +68,11 @@ fn extract_like_dir_prefix(pattern: &str) -> Option<String> {
     let fixed = &pattern[..wildcard_pos];
     let last_slash = fixed.rfind('/')?;
     let dir = &fixed[..last_slash];
-    if dir.is_empty() { None } else { Some(dir.to_string()) }
+    if dir.is_empty() {
+        None
+    } else {
+        Some(dir.to_string())
+    }
 }
 
 /// Extract a path prefix from filters to narrow the scan scope.
@@ -80,28 +84,33 @@ fn extract_path_prefix(filters: &[Expr]) -> Option<String> {
             Expr::Like(like) if !like.negated && !like.case_insensitive => {
                 let is_path_col = matches!(like.expr.as_ref(),
                     Expr::Column(c) if c.name == "path");
-                if !is_path_col { continue; }
+                if !is_path_col {
+                    continue;
+                }
                 match like.pattern.as_ref() {
-                    Expr::Literal(ScalarValue::Utf8(Some(pat)), _) => {
-                        extract_like_dir_prefix(pat)
-                    }
+                    Expr::Literal(ScalarValue::Utf8(Some(pat)), _) => extract_like_dir_prefix(pat),
                     _ => None,
                 }
             }
             Expr::BinaryExpr(bin) => {
                 use datafusion::logical_expr::Operator;
-                if bin.op != Operator::Eq { continue; }
-                let (col_expr, lit_expr) = match (bin.left.as_ref(), bin.right.as_ref()) {
-                    (Expr::Column(c), lit) if c.name == "path" => (c, lit),
-                    (lit, Expr::Column(c)) if c.name == "path" => (c, lit),
+                if bin.op != Operator::Eq {
+                    continue;
+                }
+                let lit_expr = match (bin.left.as_ref(), bin.right.as_ref()) {
+                    (Expr::Column(c), lit) if c.name == "path" => lit,
+                    (lit, Expr::Column(c)) if c.name == "path" => lit,
                     _ => continue,
                 };
-                let _ = col_expr;
                 match lit_expr {
                     Expr::Literal(ScalarValue::Utf8(Some(val)), _) => {
                         val.rfind('/').and_then(|pos| {
                             let dir = &val[..pos];
-                            if dir.is_empty() { None } else { Some(dir.to_string()) }
+                            if dir.is_empty() {
+                                None
+                            } else {
+                                Some(dir.to_string())
+                            }
                         })
                     }
                     _ => None,
@@ -146,38 +155,53 @@ impl Debug for FilesTable {
 
 #[async_trait]
 impl TableProvider for FilesTable {
-    fn as_any(&self) -> &dyn Any { self }
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
 
-    fn schema(&self) -> SchemaRef { files_schema() }
+    fn schema(&self) -> SchemaRef {
+        files_schema()
+    }
 
-    fn table_type(&self) -> TableType { TableType::Base }
+    fn table_type(&self) -> TableType {
+        TableType::Base
+    }
 
     fn supports_filters_pushdown(
         &self,
         filters: &[&Expr],
     ) -> Result<Vec<TableProviderFilterPushDown>> {
-        Ok(filters.iter().map(|f| {
-            match f {
+        Ok(filters
+            .iter()
+            .map(|f| match f {
                 Expr::Like(like) if !like.negated && !like.case_insensitive => {
                     let is_path = matches!(like.expr.as_ref(),
                         Expr::Column(c) if c.name == "path");
-                    if is_path { TableProviderFilterPushDown::Inexact }
-                    else { TableProviderFilterPushDown::Unsupported }
+                    if is_path {
+                        TableProviderFilterPushDown::Inexact
+                    } else {
+                        TableProviderFilterPushDown::Unsupported
+                    }
                 }
                 Expr::BinaryExpr(bin) => {
                     use datafusion::logical_expr::Operator;
-                    if bin.op != Operator::Eq { return TableProviderFilterPushDown::Unsupported; }
+                    if bin.op != Operator::Eq {
+                        return TableProviderFilterPushDown::Unsupported;
+                    }
                     let is_path_eq = matches!(
                         (bin.left.as_ref(), bin.right.as_ref()),
                         (Expr::Column(c), _) | (_, Expr::Column(c))
                         if c.name == "path"
                     );
-                    if is_path_eq { TableProviderFilterPushDown::Inexact }
-                    else { TableProviderFilterPushDown::Unsupported }
+                    if is_path_eq {
+                        TableProviderFilterPushDown::Inexact
+                    } else {
+                        TableProviderFilterPushDown::Unsupported
+                    }
                 }
                 _ => TableProviderFilterPushDown::Unsupported,
-            }
-        }).collect())
+            })
+            .collect())
     }
 
     async fn scan(
@@ -191,39 +215,44 @@ impl TableProvider for FilesTable {
 
         let path_prefix = extract_path_prefix(filters);
 
-        let to_df_err = |e: veda_types::VedaError| {
-            datafusion::error::DataFusionError::External(Box::new(e))
-        };
+        let to_df_err =
+            |e: veda_types::VedaError| datafusion::error::DataFusionError::External(Box::new(e));
 
         let scan_root = path_prefix.as_deref().unwrap_or("/");
-        let mut all: Vec<Dentry> = self.meta
+        let mut all: Vec<Dentry> = self
+            .meta
             .list_dentries_under(&self.workspace_id, scan_root)
             .await
             .map_err(to_df_err)?;
 
         if all.len() > MAX_SCAN_ENTRIES {
-            return Err(datafusion::error::DataFusionError::Execution(
-                format!(
-                    "files table scan exceeded {MAX_SCAN_ENTRIES} entries, \
+            return Err(datafusion::error::DataFusionError::Execution(format!(
+                "files table scan exceeded {MAX_SCAN_ENTRIES} entries, \
                      consider narrowing your query"
-                ),
-            ));
+            )));
         }
 
-        if filters.is_empty() {
-            if let Some(lim) = limit {
-                all.truncate(lim);
-            }
+        let effective_limit = if filters.is_empty() { limit } else { None };
+
+        if let Some(lim) = effective_limit {
+            all.truncate(lim);
         }
 
         let file_map = if needs_file_records(projection) {
-            let file_ids: Vec<String> = all.iter()
+            let file_ids: Vec<String> = all
+                .iter()
                 .filter(|d| !d.is_dir)
                 .filter_map(|d| d.file_id.clone())
                 .collect();
-            let file_records = self.meta.get_files_batch(&file_ids).await
+            let file_records = self
+                .meta
+                .get_files_batch(&file_ids)
+                .await
                 .map_err(|e| datafusion::error::DataFusionError::External(Box::new(e)))?;
-            file_records.into_iter().map(|f| (f.id.clone(), f)).collect()
+            file_records
+                .into_iter()
+                .map(|f| (f.id.clone(), f))
+                .collect()
         } else {
             HashMap::new()
         };
@@ -235,7 +264,7 @@ impl TableProvider for FilesTable {
             file_map,
             schema,
             projected,
-            limit,
+            effective_limit,
         )))
     }
 }
@@ -272,7 +301,14 @@ impl FilesExec {
             EmissionType::Incremental,
             Boundedness::Bounded,
         );
-        Self { dentries, file_map, full_schema, projected_schema, limit, cache: Arc::new(cache) }
+        Self {
+            dentries,
+            file_map,
+            full_schema,
+            projected_schema,
+            limit,
+            cache: Arc::new(cache),
+        }
     }
 }
 
@@ -283,14 +319,24 @@ impl DisplayAs for FilesExec {
 }
 
 impl ExecutionPlan for FilesExec {
-    fn as_any(&self) -> &dyn Any { self }
-    fn name(&self) -> &'static str { "FilesExec" }
-    fn properties(&self) -> &Arc<PlanProperties> { &self.cache }
-    fn children(&self) -> Vec<&Arc<dyn ExecutionPlan>> { vec![] }
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+    fn name(&self) -> &'static str {
+        "FilesExec"
+    }
+    fn properties(&self) -> &Arc<PlanProperties> {
+        &self.cache
+    }
+    fn children(&self) -> Vec<&Arc<dyn ExecutionPlan>> {
+        vec![]
+    }
     fn with_new_children(
         self: Arc<Self>,
         _: Vec<Arc<dyn ExecutionPlan>>,
-    ) -> Result<Arc<dyn ExecutionPlan>> { Ok(self) }
+    ) -> Result<Arc<dyn ExecutionPlan>> {
+        Ok(self)
+    }
 
     fn execute(
         &self,
@@ -382,7 +428,10 @@ impl ExecutionPlan for FilesExec {
         let projected = if self.full_schema == self.projected_schema {
             batch
         } else {
-            let indices: Vec<usize> = self.projected_schema.fields().iter()
+            let indices: Vec<usize> = self
+                .projected_schema
+                .fields()
+                .iter()
                 .filter_map(|f| self.full_schema.index_of(f.name()).ok())
                 .collect();
             batch.project(&indices)?

@@ -48,9 +48,7 @@ impl FsService {
 
         if let Some(ref dentry) = existing {
             if dentry.is_dir {
-                return Err(VedaError::AlreadyExists(format!(
-                    "{norm} is a directory"
-                )));
+                return Err(VedaError::AlreadyExists(format!("{norm} is a directory")));
             }
             if let Some(ref fid) = dentry.file_id {
                 let file = tx.get_file(fid).await?;
@@ -121,7 +119,12 @@ impl FsService {
                     tx.delete_file_chunks(fid).await?;
                     write_content(&mut *tx, fid, content, size).await?;
                     tx.update_file_revision(
-                        fid, new_rev, size, &checksum, line_count, new_storage_type,
+                        fid,
+                        new_rev,
+                        size,
+                        &checksum,
+                        line_count,
+                        new_storage_type,
                     )
                     .await?;
 
@@ -276,10 +279,7 @@ impl FsService {
                 .await?
                 .ok_or_else(|| VedaError::NotFound(format!("content for {file_id}")))?,
             StorageType::Chunked => {
-                let chunks = self
-                    .meta
-                    .get_file_chunks(file_id, None, Some(end))
-                    .await?;
+                let chunks = self.meta.get_file_chunks(file_id, None, Some(end)).await?;
                 chunks.into_iter().map(|c| c.content).collect::<String>()
             }
         };
@@ -293,11 +293,7 @@ impl FsService {
         Ok(lines[s..e].join("\n"))
     }
 
-    pub async fn list_dir(
-        &self,
-        workspace_id: &str,
-        raw_path: &str,
-    ) -> Result<Vec<api::DirEntry>> {
+    pub async fn list_dir(&self, workspace_id: &str, raw_path: &str) -> Result<Vec<api::DirEntry>> {
         let norm = path::normalize(raw_path)?;
         if norm != "/" {
             let dentry = self
@@ -306,9 +302,7 @@ impl FsService {
                 .await?
                 .ok_or_else(|| VedaError::NotFound(norm.clone()))?;
             if !dentry.is_dir {
-                return Err(VedaError::InvalidPath(format!(
-                    "{norm} is not a directory"
-                )));
+                return Err(VedaError::InvalidPath(format!("{norm} is not a directory")));
             }
         }
         let dentries = self.meta.list_dentries(workspace_id, &norm).await?;
@@ -342,9 +336,10 @@ impl FsService {
             }
             all.push(d);
             if all.len() > max_entries {
-                return Err(VedaError::QuotaExceeded(
-                    format!("directory listing exceeded {} entries", max_entries),
-                ));
+                return Err(VedaError::QuotaExceeded(format!(
+                    "directory listing exceeded {} entries",
+                    max_entries
+                )));
             }
         }
         while let Some(dir) = queue.pop() {
@@ -355,9 +350,10 @@ impl FsService {
                 }
                 all.push(c);
                 if all.len() > max_entries {
-                    return Err(VedaError::QuotaExceeded(
-                        format!("directory listing exceeded {} entries", max_entries),
-                    ));
+                    return Err(VedaError::QuotaExceeded(format!(
+                        "directory listing exceeded {} entries",
+                        max_entries
+                    )));
                 }
             }
         }
@@ -373,18 +369,16 @@ impl FsService {
         max_matches: usize,
     ) -> Result<Vec<Dentry>> {
         let prefix = glob_fixed_prefix(pattern);
-        let all = self.list_dir_recursive(workspace_id, &prefix, max_matches).await?;
+        let all = self
+            .list_dir_recursive(workspace_id, &prefix, max_matches)
+            .await?;
         Ok(all
             .into_iter()
             .filter(|d| !d.is_dir && glob_match(pattern, &d.path))
             .collect())
     }
 
-    pub async fn stat(
-        &self,
-        workspace_id: &str,
-        raw_path: &str,
-    ) -> Result<api::FileInfo> {
+    pub async fn stat(&self, workspace_id: &str, raw_path: &str) -> Result<api::FileInfo> {
         let norm = path::normalize(raw_path)?;
         // Root directory has no dentry row; synthesize a virtual one
         // to stay consistent with list_dir's root handling.
@@ -441,11 +435,7 @@ impl FsService {
     }
 
     /// Delete a file or directory. Returns the number of deleted dentries.
-    pub async fn delete(
-        &self,
-        workspace_id: &str,
-        raw_path: &str,
-    ) -> Result<u64> {
+    pub async fn delete(&self, workspace_id: &str, raw_path: &str) -> Result<u64> {
         let norm = path::normalize(raw_path)?;
         if norm == "/" {
             return Err(VedaError::InvalidPath("cannot delete root".to_string()));
@@ -513,9 +503,7 @@ impl FsService {
             if d.is_dir {
                 return Ok(());
             }
-            return Err(VedaError::AlreadyExists(format!(
-                "{norm} exists as a file"
-            )));
+            return Err(VedaError::AlreadyExists(format!("{norm} exists as a file")));
         }
 
         ensure_parents(&mut *tx, workspace_id, &norm).await?;
@@ -562,29 +550,34 @@ impl FsService {
 
         let mut tx = self.meta.begin_tx().await?;
 
-        let src_dentry = tx
-            .get_dentry(workspace_id, &src)
-            .await?
-            .ok_or_else(|| VedaError::NotFound(src.clone()))?;
+        let src_dentry = match tx.get_dentry(workspace_id, &src).await? {
+            Some(dentry) => dentry,
+            None => {
+                tx.rollback().await?;
+                return Err(VedaError::NotFound(src.clone()));
+            }
+        };
 
         if src_dentry.is_dir {
+            tx.rollback().await?;
             return Err(VedaError::InvalidInput(
                 "cannot copy a directory".to_string(),
             ));
         }
 
-        let file_id = src_dentry
-            .file_id
-            .as_deref()
-            .ok_or_else(|| VedaError::NotFound(src.clone()))?;
+        let file_id = match src_dentry.file_id.as_deref() {
+            Some(fid) => fid,
+            None => {
+                tx.rollback().await?;
+                return Err(VedaError::NotFound(src.clone()));
+            }
+        };
 
         let existing_dst = tx.get_dentry(workspace_id, &dst).await?;
         if let Some(ref d) = existing_dst {
             if d.is_dir {
                 tx.rollback().await?;
-                return Err(VedaError::AlreadyExists(format!(
-                    "{dst} is a directory"
-                )));
+                return Err(VedaError::AlreadyExists(format!("{dst} is a directory")));
             }
             if d.file_id.as_deref() == Some(file_id) {
                 tx.commit().await?;
@@ -610,8 +603,7 @@ impl FsService {
                 if remaining <= 0 {
                     tx.delete_file_content(old_fid).await?;
                     tx.delete_file_chunks(old_fid).await?;
-                    let outbox =
-                        make_outbox(workspace_id, OutboxEventType::ChunkDelete, old_fid);
+                    let outbox = make_outbox(workspace_id, OutboxEventType::ChunkDelete, old_fid);
                     tx.insert_outbox(&outbox).await?;
                     tx.delete_file(old_fid).await?;
                 }
@@ -670,7 +662,9 @@ impl FsService {
             }
             Some(ref d) if d.file_id.is_some() => {
                 let fid = d.file_id.as_deref().unwrap();
-                let file = tx.get_file(fid).await?
+                let file = tx
+                    .get_file(fid)
+                    .await?
                     .ok_or_else(|| VedaError::NotFound(fid.to_string()))?;
 
                 if file.size_bytes + content.len() as i64 > MAX_FILE_BYTES {
@@ -683,10 +677,7 @@ impl FsService {
                 }
 
                 let mut old = match file.storage_type {
-                    StorageType::Inline => tx
-                        .get_file_content(fid)
-                        .await?
-                        .unwrap_or_default(),
+                    StorageType::Inline => tx.get_file_content(fid).await?.unwrap_or_default(),
                     StorageType::Chunked => {
                         let chunks = tx.get_file_chunks(fid, None, None).await?;
                         chunks.into_iter().map(|c| c.content).collect::<String>()
@@ -747,12 +738,8 @@ impl FsService {
                     let outbox =
                         make_outbox(workspace_id, OutboxEventType::ChunkSync, &new_file_id);
                     tx.insert_outbox(&outbox).await?;
-                    let evt = make_fs_event(
-                        workspace_id,
-                        FsEventType::Update,
-                        &norm,
-                        Some(&new_file_id),
-                    );
+                    let evt =
+                        make_fs_event(workspace_id, FsEventType::Update, &norm, Some(&new_file_id));
                     tx.insert_fs_event(&evt).await?;
                     tx.commit().await?;
                     return Ok(api::WriteFileResponse {
@@ -771,7 +758,15 @@ impl FsService {
                 tx.delete_file_content(fid).await?;
                 tx.delete_file_chunks(fid).await?;
                 write_content(&mut *tx, fid, &new_content, size).await?;
-                tx.update_file_revision(fid, new_rev, size, &checksum, line_count, new_storage_type).await?;
+                tx.update_file_revision(
+                    fid,
+                    new_rev,
+                    size,
+                    &checksum,
+                    line_count,
+                    new_storage_type,
+                )
+                .await?;
 
                 let outbox = make_outbox(workspace_id, OutboxEventType::ChunkSync, fid);
                 tx.insert_outbox(&outbox).await?;
@@ -811,7 +806,8 @@ impl FsService {
         write_content(&mut *tx, &file_id, &new_content, size).await?;
 
         if existing.is_some() {
-            tx.update_dentry_file_id(workspace_id, &norm, &file_id).await?;
+            tx.update_dentry_file_id(workspace_id, &norm, &file_id)
+                .await?;
         } else {
             ensure_parents(&mut *tx, workspace_id, &norm).await?;
             let dentry = Dentry {
@@ -841,12 +837,7 @@ impl FsService {
         })
     }
 
-    pub async fn rename(
-        &self,
-        workspace_id: &str,
-        src_path: &str,
-        dst_path: &str,
-    ) -> Result<()> {
+    pub async fn rename(&self, workspace_id: &str, src_path: &str, dst_path: &str) -> Result<()> {
         let src = path::normalize(src_path)?;
         let dst = path::normalize(dst_path)?;
 
