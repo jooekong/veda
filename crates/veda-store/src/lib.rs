@@ -1,5 +1,5 @@
-pub mod mysql;
 pub mod milvus;
+pub mod mysql;
 
-pub use mysql::MysqlStore;
 pub use milvus::MilvusStore;
+pub use mysql::MysqlStore;

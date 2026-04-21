@@ -4,11 +4,11 @@ pub mod fs;
 pub mod search;
 pub mod sql;
 
-use std::sync::Arc;
+use crate::state::AppState;
 use axum::routing::get;
 use axum::{Json, Router};
+use std::sync::Arc;
 use veda_types::ApiResponse;
-use crate::state::AppState;
 
 pub fn build_router(state: Arc<AppState>) -> Router {
     Router::new()

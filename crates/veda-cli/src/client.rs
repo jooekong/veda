@@ -1,4 +1,4 @@
-use anyhow::{Context, Result, bail};
+use anyhow::{bail, Context, Result};
 
 pub struct Client {
     base: String,
@@ -22,58 +22,98 @@ impl Client {
         serde_json::from_str(&text).context("parse JSON response")
     }
 
-    pub async fn create_account(&self, name: &str, email: &str, password: &str) -> Result<serde_json::Value> {
-        let resp = self.http.post(format!("{}/v1/accounts", self.base))
+    pub async fn create_account(
+        &self,
+        name: &str,
+        email: &str,
+        password: &str,
+    ) -> Result<serde_json::Value> {
+        let resp = self
+            .http
+            .post(format!("{}/v1/accounts", self.base))
             .json(&serde_json::json!({"name": name, "email": email, "password": password}))
-            .send().await?;
+            .send()
+            .await?;
         Self::check(resp).await
     }
 
     pub async fn login(&self, email: &str, password: &str) -> Result<serde_json::Value> {
-        let resp = self.http.post(format!("{}/v1/accounts/login", self.base))
+        let resp = self
+            .http
+            .post(format!("{}/v1/accounts/login", self.base))
             .json(&serde_json::json!({"email": email, "password": password}))
-            .send().await?;
+            .send()
+            .await?;
         Self::check(resp).await
     }
 
     pub async fn create_workspace(&self, api_key: &str, name: &str) -> Result<serde_json::Value> {
-        let resp = self.http.post(format!("{}/v1/workspaces", self.base))
+        let resp = self
+            .http
+            .post(format!("{}/v1/workspaces", self.base))
             .bearer_auth(api_key)
             .json(&serde_json::json!({"name": name}))
-            .send().await?;
+            .send()
+            .await?;
         Self::check(resp).await
     }
 
     pub async fn list_workspaces(&self, api_key: &str) -> Result<serde_json::Value> {
-        let resp = self.http.get(format!("{}/v1/workspaces", self.base))
+        let resp = self
+            .http
+            .get(format!("{}/v1/workspaces", self.base))
             .bearer_auth(api_key)
-            .send().await?;
+            .send()
+            .await?;
         Self::check(resp).await
     }
 
-    pub async fn create_workspace_key(&self, api_key: &str, ws_id: &str) -> Result<serde_json::Value> {
-        let resp = self.http.post(format!("{}/v1/workspaces/{ws_id}/keys", self.base))
+    pub async fn create_workspace_key(
+        &self,
+        api_key: &str,
+        ws_id: &str,
+    ) -> Result<serde_json::Value> {
+        let resp = self
+            .http
+            .post(format!("{}/v1/workspaces/{ws_id}/keys", self.base))
             .bearer_auth(api_key)
             .json(&serde_json::json!({"name": "cli"}))
-            .send().await?;
+            .send()
+            .await?;
         Self::check(resp).await
     }
 
-    pub async fn write_file(&self, ws_key: &str, path: &str, content: &str) -> Result<serde_json::Value> {
+    pub async fn write_file(
+        &self,
+        ws_key: &str,
+        path: &str,
+        content: &str,
+    ) -> Result<serde_json::Value> {
         let path = path.trim_start_matches('/');
-        let resp = self.http.put(format!("{}/v1/fs/{path}", self.base))
+        let resp = self
+            .http
+            .put(format!("{}/v1/fs/{path}", self.base))
             .bearer_auth(ws_key)
             .body(content.to_string())
-            .send().await?;
+            .send()
+            .await?;
         Self::check(resp).await
     }
 
-    pub async fn append_file(&self, ws_key: &str, path: &str, content: &str) -> Result<serde_json::Value> {
+    pub async fn append_file(
+        &self,
+        ws_key: &str,
+        path: &str,
+        content: &str,
+    ) -> Result<serde_json::Value> {
         let path = path.trim_start_matches('/');
-        let resp = self.http.post(format!("{}/v1/fs/{path}", self.base))
+        let resp = self
+            .http
+            .post(format!("{}/v1/fs/{path}", self.base))
             .bearer_auth(ws_key)
             .body(content.to_string())
-            .send().await?;
+            .send()
+            .await?;
         Self::check(resp).await
     }
 
@@ -83,9 +123,7 @@ impl Client {
         if let Some(l) = lines {
             url.push_str(&format!("?lines={l}"));
         }
-        let resp = self.http.get(&url)
-            .bearer_auth(ws_key)
-            .send().await?;
+        let resp = self.http.get(&url).bearer_auth(ws_key).send().await?;
         if !resp.status().is_success() {
             let text = resp.text().await?;
             bail!("read failed: {text}");
@@ -100,17 +138,23 @@ impl Client {
         } else {
             format!("{}/v1/fs/{path}?list", self.base)
         };
-        let resp = self.http.get(&url)
-            .bearer_auth(ws_key)
-            .send().await?;
+        let resp = self.http.get(&url).bearer_auth(ws_key).send().await?;
         Self::check(resp).await
     }
 
-    pub async fn rename_file(&self, ws_key: &str, src: &str, dst: &str) -> Result<serde_json::Value> {
-        let resp = self.http.post(format!("{}/v1/fs-rename", self.base))
+    pub async fn rename_file(
+        &self,
+        ws_key: &str,
+        src: &str,
+        dst: &str,
+    ) -> Result<serde_json::Value> {
+        let resp = self
+            .http
+            .post(format!("{}/v1/fs-rename", self.base))
             .bearer_auth(ws_key)
             .json(&serde_json::json!({"from": src, "to": dst}))
-            .send().await?;
+            .send()
+            .await?;
         Self::check(resp).await
     }
 
@@ -121,30 +165,44 @@ impl Client {
         } else {
             format!("{}/v1/fs/{path}", self.base)
         };
-        let resp = self.http.delete(&url)
-            .bearer_auth(ws_key)
-            .send().await?;
+        let resp = self.http.delete(&url).bearer_auth(ws_key).send().await?;
         Self::check(resp).await
     }
 
     pub async fn mkdir(&self, ws_key: &str, path: &str) -> Result<serde_json::Value> {
-        let resp = self.http.post(format!("{}/v1/fs-mkdir", self.base))
+        let resp = self
+            .http
+            .post(format!("{}/v1/fs-mkdir", self.base))
             .bearer_auth(ws_key)
             .json(&serde_json::json!({"path": path}))
-            .send().await?;
+            .send()
+            .await?;
         Self::check(resp).await
     }
 
-    pub async fn search(&self, ws_key: &str, query: &str, mode: &str, limit: usize) -> Result<serde_json::Value> {
-        let resp = self.http.post(format!("{}/v1/search", self.base))
+    pub async fn search(
+        &self,
+        ws_key: &str,
+        query: &str,
+        mode: &str,
+        limit: usize,
+    ) -> Result<serde_json::Value> {
+        let resp = self
+            .http
+            .post(format!("{}/v1/search", self.base))
             .bearer_auth(ws_key)
             .json(&serde_json::json!({"query": query, "mode": mode, "limit": limit}))
-            .send().await?;
+            .send()
+            .await?;
         Self::check(resp).await
     }
 
     pub async fn create_collection(
-        &self, ws_key: &str, name: &str, schema: &serde_json::Value, embed_source: Option<&str>,
+        &self,
+        ws_key: &str,
+        name: &str,
+        schema: &serde_json::Value,
+        embed_source: Option<&str>,
     ) -> Result<serde_json::Value> {
         let mut body = serde_json::json!({
             "name": name,
@@ -154,57 +212,87 @@ impl Client {
         if let Some(src) = embed_source {
             body["embedding_source"] = serde_json::Value::String(src.to_string());
         }
-        let resp = self.http.post(format!("{}/v1/collections", self.base))
+        let resp = self
+            .http
+            .post(format!("{}/v1/collections", self.base))
             .bearer_auth(ws_key)
             .json(&body)
-            .send().await?;
+            .send()
+            .await?;
         Self::check(resp).await
     }
 
     pub async fn list_collections(&self, ws_key: &str) -> Result<serde_json::Value> {
-        let resp = self.http.get(format!("{}/v1/collections", self.base))
+        let resp = self
+            .http
+            .get(format!("{}/v1/collections", self.base))
             .bearer_auth(ws_key)
-            .send().await?;
+            .send()
+            .await?;
         Self::check(resp).await
     }
 
     pub async fn describe_collection(&self, ws_key: &str, name: &str) -> Result<serde_json::Value> {
-        let resp = self.http.get(format!("{}/v1/collections/{name}", self.base))
+        let resp = self
+            .http
+            .get(format!("{}/v1/collections/{name}", self.base))
             .bearer_auth(ws_key)
-            .send().await?;
+            .send()
+            .await?;
         Self::check(resp).await
     }
 
     pub async fn delete_collection(&self, ws_key: &str, name: &str) -> Result<serde_json::Value> {
-        let resp = self.http.delete(format!("{}/v1/collections/{name}", self.base))
+        let resp = self
+            .http
+            .delete(format!("{}/v1/collections/{name}", self.base))
             .bearer_auth(ws_key)
-            .send().await?;
+            .send()
+            .await?;
         Self::check(resp).await
     }
 
-    pub async fn insert_rows(&self, ws_key: &str, name: &str, rows: &serde_json::Value) -> Result<serde_json::Value> {
-        let resp = self.http.post(format!("{}/v1/collections/{name}/rows", self.base))
+    pub async fn insert_rows(
+        &self,
+        ws_key: &str,
+        name: &str,
+        rows: &serde_json::Value,
+    ) -> Result<serde_json::Value> {
+        let resp = self
+            .http
+            .post(format!("{}/v1/collections/{name}/rows", self.base))
             .bearer_auth(ws_key)
             .json(&serde_json::json!({"rows": rows}))
-            .send().await?;
+            .send()
+            .await?;
         Self::check(resp).await
     }
 
     pub async fn search_collection(
-        &self, ws_key: &str, name: &str, query: &str, limit: usize,
+        &self,
+        ws_key: &str,
+        name: &str,
+        query: &str,
+        limit: usize,
     ) -> Result<serde_json::Value> {
-        let resp = self.http.post(format!("{}/v1/collections/{name}/search", self.base))
+        let resp = self
+            .http
+            .post(format!("{}/v1/collections/{name}/search", self.base))
             .bearer_auth(ws_key)
             .json(&serde_json::json!({"query": query, "limit": limit}))
-            .send().await?;
+            .send()
+            .await?;
         Self::check(resp).await
     }
 
     pub async fn execute_sql(&self, ws_key: &str, sql: &str) -> Result<serde_json::Value> {
-        let resp = self.http.post(format!("{}/v1/sql", self.base))
+        let resp = self
+            .http
+            .post(format!("{}/v1/sql", self.base))
             .bearer_auth(ws_key)
             .json(&serde_json::json!({"sql": sql}))
-            .send().await?;
+            .send()
+            .await?;
         Self::check(resp).await
     }
 }

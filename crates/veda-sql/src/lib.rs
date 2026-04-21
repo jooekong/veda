@@ -1,11 +1,11 @@
-mod engine;
-mod embedding_udf;
-mod files_table;
 mod collection_table;
-pub mod fs_udf;
+mod embedding_udf;
+mod engine;
+mod files_table;
 mod format;
-mod fs_table;
 mod fs_events_table;
+mod fs_table;
+pub mod fs_udf;
 mod search_table;
 mod storage_stats_table;
 

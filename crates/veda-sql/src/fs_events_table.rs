@@ -59,45 +59,53 @@ impl TableFunctionImpl for VedaFsEventsFactory {
             match sv {
                 ScalarValue::Int64(Some(v)) => since_id = *v,
                 ScalarValue::Null => {}
-                other => return Err(datafusion::error::DataFusionError::Plan(
-                    format!("veda_fs_events: arg 1 (since_id) must be INT, got {}", other.data_type()),
-                )),
+                other => {
+                    return Err(datafusion::error::DataFusionError::Plan(format!(
+                        "veda_fs_events: arg 1 (since_id) must be INT, got {}",
+                        other.data_type()
+                    )))
+                }
             }
         }
         if let Some(sv) = exprs.get(1).and_then(|e| extract_scalar(e)) {
             match sv {
                 ScalarValue::Utf8(Some(v)) => path_prefix = Some(v.clone()),
                 ScalarValue::Null => {}
-                other => return Err(datafusion::error::DataFusionError::Plan(
-                    format!("veda_fs_events: arg 2 (path_prefix) must be STRING, got {}", other.data_type()),
-                )),
+                other => {
+                    return Err(datafusion::error::DataFusionError::Plan(format!(
+                        "veda_fs_events: arg 2 (path_prefix) must be STRING, got {}",
+                        other.data_type()
+                    )))
+                }
             }
         }
         if let Some(sv) = exprs.get(2).and_then(|e| extract_scalar(e)) {
             match sv {
                 ScalarValue::Int64(Some(v)) => {
                     if *v < 0 {
-                        return Err(datafusion::error::DataFusionError::Plan(
-                            format!("veda_fs_events: limit must be non-negative, got {}", v),
-                        ));
+                        return Err(datafusion::error::DataFusionError::Plan(format!(
+                            "veda_fs_events: limit must be non-negative, got {}",
+                            v
+                        )));
                     }
                     limit = (*v as usize).min(100_000);
                 }
                 ScalarValue::Null => {}
-                other => return Err(datafusion::error::DataFusionError::Plan(
-                    format!("veda_fs_events: arg 3 (limit) must be INT, got {}", other.data_type()),
-                )),
+                other => {
+                    return Err(datafusion::error::DataFusionError::Plan(format!(
+                        "veda_fs_events: arg 3 (limit) must be INT, got {}",
+                        other.data_type()
+                    )))
+                }
             }
         }
 
-        let events = fs_udf::block_on(
-            self.meta.query_fs_events(
-                &self.workspace_id,
-                since_id,
-                path_prefix.as_deref(),
-                limit,
-            ),
-        )
+        let events = fs_udf::block_on(self.meta.query_fs_events(
+            &self.workspace_id,
+            since_id,
+            path_prefix.as_deref(),
+            limit,
+        ))
         .map_err(|e| datafusion::error::DataFusionError::Execution(e.to_string()))?;
 
         if events.len() == limit {

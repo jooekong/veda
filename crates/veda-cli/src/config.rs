@@ -1,4 +1,4 @@
-use anyhow::{Context, Result, bail};
+use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
@@ -60,7 +60,9 @@ impl CliConfig {
     pub fn api_key(&self) -> Result<&str> {
         match &self.api_key {
             Some(k) => Ok(k),
-            None => bail!("no API key configured. Run `veda account create` or `veda account login` first."),
+            None => bail!(
+                "no API key configured. Run `veda account create` or `veda account login` first."
+            ),
         }
     }
 

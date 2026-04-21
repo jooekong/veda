@@ -51,8 +51,8 @@ impl CollectionService {
 
         let id = Uuid::new_v4().to_string();
         let now = Utc::now();
-        let schema_json = serde_json::to_value(fields)
-            .map_err(|e| VedaError::Internal(e.to_string()))?;
+        let schema_json =
+            serde_json::to_value(fields).map_err(|e| VedaError::Internal(e.to_string()))?;
 
         let cs = CollectionSchema {
             id: id.clone(),
@@ -84,11 +84,7 @@ impl CollectionService {
         self.meta.list_collection_schemas(workspace_id).await
     }
 
-    pub async fn get(
-        &self,
-        workspace_id: &str,
-        name: &str,
-    ) -> Result<CollectionSchema> {
+    pub async fn get(&self, workspace_id: &str, name: &str) -> Result<CollectionSchema> {
         self.meta
             .get_collection_schema(workspace_id, name)
             .await?
@@ -97,7 +93,9 @@ impl CollectionService {
 
     pub async fn delete(&self, workspace_id: &str, name: &str) -> Result<()> {
         let schema = self.get(workspace_id, name).await?;
-        self.vector.drop_dynamic_collection(&schema.milvus_name()).await?;
+        self.vector
+            .drop_dynamic_collection(&schema.milvus_name())
+            .await?;
         self.meta.delete_collection_schema(&schema.id).await?;
         Ok(())
     }
@@ -165,9 +163,10 @@ impl CollectionService {
         let milvus_name = schema.milvus_name();
 
         let vectors = self.embedding.embed(&[query.to_string()]).await?;
-        let vector = vectors.into_iter().next().ok_or_else(|| {
-            VedaError::EmbeddingFailed("empty embedding result".to_string())
-        })?;
+        let vector = vectors
+            .into_iter()
+            .next()
+            .ok_or_else(|| VedaError::EmbeddingFailed("empty embedding result".to_string()))?;
 
         let limit = if limit == 0 { 10 } else { limit };
         self.vector

@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use arrow::array::{Array, BooleanBuilder, Int64Builder, StringBuilder, StringArray};
+use arrow::array::{Array, BooleanBuilder, Int64Builder, StringArray, StringBuilder};
 use arrow::datatypes::DataType;
 use datafusion::common::Result;
 use datafusion::logical_expr::{
@@ -42,14 +42,54 @@ impl PartialEq for FsUdfContext {
 impl Eq for FsUdfContext {}
 
 pub fn register_all(ctx: &datafusion::prelude::SessionContext, fs_ctx: Arc<FsUdfContext>) {
-    ctx.register_udf(ScalarUDF::from(FsScalarUdf::new("veda_read", 1, DataType::Utf8, fs_ctx.clone())));
-    ctx.register_udf(ScalarUDF::from(FsScalarUdf::new("veda_write", 2, DataType::Int64, fs_ctx.clone())));
-    ctx.register_udf(ScalarUDF::from(FsScalarUdf::new("veda_append", 2, DataType::Int64, fs_ctx.clone())));
-    ctx.register_udf(ScalarUDF::from(FsScalarUdf::new("veda_exists", 1, DataType::Boolean, fs_ctx.clone())));
-    ctx.register_udf(ScalarUDF::from(FsScalarUdf::new("veda_size", 1, DataType::Int64, fs_ctx.clone())));
-    ctx.register_udf(ScalarUDF::from(FsScalarUdf::new("veda_mtime", 1, DataType::Utf8, fs_ctx.clone())));
-    ctx.register_udf(ScalarUDF::from(FsScalarUdf::new("veda_remove", 1, DataType::Int64, fs_ctx.clone())));
-    ctx.register_udf(ScalarUDF::from(FsScalarUdf::new("veda_mkdir", 1, DataType::Boolean, fs_ctx)));
+    ctx.register_udf(ScalarUDF::from(FsScalarUdf::new(
+        "veda_read",
+        1,
+        DataType::Utf8,
+        fs_ctx.clone(),
+    )));
+    ctx.register_udf(ScalarUDF::from(FsScalarUdf::new(
+        "veda_write",
+        2,
+        DataType::Int64,
+        fs_ctx.clone(),
+    )));
+    ctx.register_udf(ScalarUDF::from(FsScalarUdf::new(
+        "veda_append",
+        2,
+        DataType::Int64,
+        fs_ctx.clone(),
+    )));
+    ctx.register_udf(ScalarUDF::from(FsScalarUdf::new(
+        "veda_exists",
+        1,
+        DataType::Boolean,
+        fs_ctx.clone(),
+    )));
+    ctx.register_udf(ScalarUDF::from(FsScalarUdf::new(
+        "veda_size",
+        1,
+        DataType::Int64,
+        fs_ctx.clone(),
+    )));
+    ctx.register_udf(ScalarUDF::from(FsScalarUdf::new(
+        "veda_mtime",
+        1,
+        DataType::Utf8,
+        fs_ctx.clone(),
+    )));
+    ctx.register_udf(ScalarUDF::from(FsScalarUdf::new(
+        "veda_remove",
+        1,
+        DataType::Int64,
+        fs_ctx.clone(),
+    )));
+    ctx.register_udf(ScalarUDF::from(FsScalarUdf::new(
+        "veda_mkdir",
+        1,
+        DataType::Boolean,
+        fs_ctx,
+    )));
 }
 
 pub(crate) fn block_on<F: std::future::Future<Output: Send> + Send>(f: F) -> F::Output {
@@ -58,11 +98,7 @@ pub(crate) fn block_on<F: std::future::Future<Output: Send> + Send>(f: F) -> F::
         tokio::runtime::RuntimeFlavor::MultiThread => {
             tokio::task::block_in_place(|| handle.block_on(f))
         }
-        _ => {
-            std::thread::scope(|s| {
-                s.spawn(|| handle.block_on(f)).join().unwrap()
-            })
-        }
+        _ => std::thread::scope(|s| s.spawn(|| handle.block_on(f)).join().unwrap()),
     }
 }
 
@@ -78,13 +114,14 @@ fn get_string_values(args: &[ColumnarValue], idx: usize, num_rows: usize) -> Res
             Ok(vec![s; num_rows])
         }
         ColumnarValue::Array(arr) => {
-            let str_arr = arr
-                .as_any()
-                .downcast_ref::<StringArray>()
-                .ok_or_else(|| datafusion::error::DataFusionError::Execution(
+            let str_arr = arr.as_any().downcast_ref::<StringArray>().ok_or_else(|| {
+                datafusion::error::DataFusionError::Execution(
                     "expected string array argument".to_string(),
-                ))?;
-            Ok((0..str_arr.len()).map(|i| str_arr.value(i).to_string()).collect())
+                )
+            })?;
+            Ok((0..str_arr.len())
+                .map(|i| str_arr.value(i).to_string())
+                .collect())
         }
     }
 }
@@ -126,10 +163,18 @@ impl FsScalarUdf {
 }
 
 impl ScalarUDFImpl for FsScalarUdf {
-    fn as_any(&self) -> &dyn std::any::Any { self }
-    fn name(&self) -> &str { &self.udf_name }
-    fn signature(&self) -> &Signature { &self.sig }
-    fn return_type(&self, _: &[DataType]) -> Result<DataType> { Ok(self.ret.clone()) }
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+    fn name(&self) -> &str {
+        &self.udf_name
+    }
+    fn signature(&self) -> &Signature {
+        &self.sig
+    }
+    fn return_type(&self, _: &[DataType]) -> Result<DataType> {
+        Ok(self.ret.clone())
+    }
 
     fn invoke_with_args(&self, args: ScalarFunctionArgs) -> Result<ColumnarValue> {
         let num_rows = args.number_rows;
@@ -146,13 +191,19 @@ impl ScalarUDFImpl for FsScalarUdf {
                         Ok(info) => {
                             if let Some(sz) = info.size_bytes {
                                 if sz as usize > MAX_SINGLE_FILE_BYTES {
-                                    return Err(exec_err(VedaError::QuotaExceeded(
-                                        format!("file {} is {} bytes, exceeds {}MB limit", path, sz, MAX_SINGLE_FILE_BYTES / 1024 / 1024),
-                                    )));
+                                    return Err(exec_err(VedaError::QuotaExceeded(format!(
+                                        "file {} is {} bytes, exceeds {}MB limit",
+                                        path,
+                                        sz,
+                                        MAX_SINGLE_FILE_BYTES / 1024 / 1024
+                                    ))));
                                 }
                             }
                         }
-                        Err(ref e) if not_found_to_none(e) => { builder.append_null(); continue; }
+                        Err(ref e) if not_found_to_none(e) => {
+                            builder.append_null();
+                            continue;
+                        }
                         Err(e) => return Err(exec_err(e)),
                     }
                     match block_on(fs.read_file(ws, path)) {
@@ -169,7 +220,12 @@ impl ScalarUDFImpl for FsScalarUdf {
                 let contents = get_string_values(&args.args, 1, num_rows)?;
                 let mut builder = Int64Builder::with_capacity(num_rows);
                 for (path, content) in paths.iter().zip(contents.iter()) {
-                    info!(udf = "veda_write", workspace_id = ws, path = path, bytes = content.len());
+                    info!(
+                        udf = "veda_write",
+                        workspace_id = ws,
+                        path = path,
+                        bytes = content.len()
+                    );
                     block_on(fs.write_file(ws, path, content)).map_err(exec_err)?;
                     builder.append_value(content.len() as i64);
                 }
@@ -181,7 +237,12 @@ impl ScalarUDFImpl for FsScalarUdf {
                 let contents = get_string_values(&args.args, 1, num_rows)?;
                 let mut builder = Int64Builder::with_capacity(num_rows);
                 for (path, content) in paths.iter().zip(contents.iter()) {
-                    info!(udf = "veda_append", workspace_id = ws, path = path, bytes = content.len());
+                    info!(
+                        udf = "veda_append",
+                        workspace_id = ws,
+                        path = path,
+                        bytes = content.len()
+                    );
                     block_on(fs.append_file(ws, path, content)).map_err(exec_err)?;
                     builder.append_value(content.len() as i64);
                 }
@@ -248,9 +309,10 @@ impl ScalarUDFImpl for FsScalarUdf {
                 }
                 Ok(ColumnarValue::Array(Arc::new(builder.finish())))
             }
-            _ => Err(datafusion::error::DataFusionError::Execution(
-                format!("unknown fs udf: {}", self.udf_name),
-            )),
+            _ => Err(datafusion::error::DataFusionError::Execution(format!(
+                "unknown fs udf: {}",
+                self.udf_name
+            ))),
         }
     }
 }

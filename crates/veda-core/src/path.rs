@@ -9,9 +9,7 @@ pub fn normalize(path: &str) -> Result<String> {
     let path = path.nfc().collect::<String>();
 
     if !path.starts_with('/') {
-        return Err(VedaError::InvalidPath(
-            "path must start with /".to_string(),
-        ));
+        return Err(VedaError::InvalidPath("path must start with /".to_string()));
     }
 
     let mut parts: Vec<&str> = Vec::new();
@@ -21,9 +19,7 @@ pub fn normalize(path: &str) -> Result<String> {
         }
         if seg == ".." {
             if parts.is_empty() {
-                return Err(VedaError::InvalidPath(
-                    "path escapes root".to_string(),
-                ));
+                return Err(VedaError::InvalidPath("path escapes root".to_string()));
             }
             parts.pop();
             continue;

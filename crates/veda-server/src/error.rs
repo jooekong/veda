@@ -14,11 +14,20 @@ impl IntoResponse for AppError {
             VedaError::PermissionDenied => (StatusCode::FORBIDDEN, "permission denied".to_string()),
             VedaError::InvalidPath(p) => (StatusCode::BAD_REQUEST, format!("invalid path: {p}")),
             VedaError::InvalidInput(p) => (StatusCode::BAD_REQUEST, format!("invalid input: {p}")),
-            VedaError::QuotaExceeded(p) => (StatusCode::TOO_MANY_REQUESTS, format!("quota exceeded: {p}")),
-            VedaError::PayloadTooLarge(p) => (StatusCode::PAYLOAD_TOO_LARGE, format!("payload too large: {p}")),
+            VedaError::QuotaExceeded(p) => (
+                StatusCode::TOO_MANY_REQUESTS,
+                format!("quota exceeded: {p}"),
+            ),
+            VedaError::PayloadTooLarge(p) => (
+                StatusCode::PAYLOAD_TOO_LARGE,
+                format!("payload too large: {p}"),
+            ),
             _ => {
                 error!(err = %self.0, "internal error");
-                (StatusCode::INTERNAL_SERVER_ERROR, "internal server error".to_string())
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "internal server error".to_string(),
+                )
             }
         };
         (status, Json(ApiResponse::<()>::err(msg))).into_response()

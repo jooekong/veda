@@ -20,8 +20,8 @@ struct EmbeddingSection {
 
 fn load_test_config() -> EmbeddingSection {
     let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../config/test.toml");
-    let raw = std::fs::read_to_string(&path)
-        .unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
+    let raw =
+        std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
     let cfg: TestConfig = toml::from_str(&raw).expect("parse test.toml");
     cfg.embedding
 }
@@ -35,7 +35,9 @@ fn make_provider() -> EmbeddingProvider {
 #[ignore]
 async fn embedding_single_text() -> Result<()> {
     let provider = make_provider();
-    let vecs = provider.embed(&["hello from veda-pipeline".to_string()]).await?;
+    let vecs = provider
+        .embed(&["hello from veda-pipeline".to_string()])
+        .await?;
     assert_eq!(vecs.len(), 1);
     let dim = cfg_dimension_or_vector_len(&provider, &vecs[0]);
     assert_eq!(vecs[0].len(), dim);

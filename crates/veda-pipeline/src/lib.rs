@@ -1,3 +1,3 @@
-pub mod embedding;
 pub mod chunking;
+pub mod embedding;
 pub mod extraction;

@@ -29,31 +29,79 @@ impl MockMetaFull {
 #[async_trait]
 impl MetadataStore for MockMetaFull {
     async fn get_dentry(&self, ws: &str, path: &str) -> Result<Option<Dentry>> {
-        Ok(self.dentries.lock().unwrap().iter().find(|d| d.workspace_id == ws && d.path == path).cloned())
+        Ok(self
+            .dentries
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|d| d.workspace_id == ws && d.path == path)
+            .cloned())
     }
     async fn list_dentries(&self, ws: &str, parent: &str) -> Result<Vec<Dentry>> {
-        Ok(self.dentries.lock().unwrap().iter().filter(|d| d.workspace_id == ws && d.parent_path == parent).cloned().collect())
+        Ok(self
+            .dentries
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|d| d.workspace_id == ws && d.parent_path == parent)
+            .cloned()
+            .collect())
     }
     async fn list_dentries_under(&self, ws: &str, prefix: &str) -> Result<Vec<Dentry>> {
         let st = self.dentries.lock().unwrap();
         if prefix == "/" {
-            return Ok(st.iter().filter(|d| d.workspace_id == ws).cloned().collect());
+            return Ok(st
+                .iter()
+                .filter(|d| d.workspace_id == ws)
+                .cloned()
+                .collect());
         }
         let pfx = format!("{prefix}/");
-        Ok(st.iter().filter(|d| d.workspace_id == ws && d.path.starts_with(&pfx)).cloned().collect())
+        Ok(st
+            .iter()
+            .filter(|d| d.workspace_id == ws && d.path.starts_with(&pfx))
+            .cloned()
+            .collect())
     }
     async fn get_file(&self, id: &str) -> Result<Option<FileRecord>> {
-        Ok(self.files.lock().unwrap().iter().find(|f| f.id == id).cloned())
+        Ok(self
+            .files
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|f| f.id == id)
+            .cloned())
     }
     async fn get_file_content(&self, id: &str) -> Result<Option<String>> {
         Ok(self.file_contents.lock().unwrap().get(id).cloned())
     }
-    async fn get_file_chunks(&self, _id: &str, _s: Option<i32>, _e: Option<i32>) -> Result<Vec<FileChunk>> { Ok(vec![]) }
-    async fn find_file_by_checksum(&self, _ws: &str, _cksum: &str) -> Result<Option<FileRecord>> { Ok(None) }
-    async fn get_dentry_path_by_file_id(&self, _ws: &str, _fid: &str) -> Result<Option<String>> { Ok(None) }
-    async fn query_fs_events(&self, ws: &str, since: i64, _prefix: Option<&str>, limit: usize) -> Result<Vec<FsEvent>> {
+    async fn get_file_chunks(
+        &self,
+        _id: &str,
+        _s: Option<i32>,
+        _e: Option<i32>,
+    ) -> Result<Vec<FileChunk>> {
+        Ok(vec![])
+    }
+    async fn find_file_by_checksum(&self, _ws: &str, _cksum: &str) -> Result<Option<FileRecord>> {
+        Ok(None)
+    }
+    async fn get_dentry_path_by_file_id(&self, _ws: &str, _fid: &str) -> Result<Option<String>> {
+        Ok(None)
+    }
+    async fn query_fs_events(
+        &self,
+        ws: &str,
+        since: i64,
+        _prefix: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<FsEvent>> {
         let st = self.fs_events.lock().unwrap();
-        let mut v: Vec<_> = st.iter().filter(|e| e.workspace_id == ws && e.id > since).cloned().collect();
+        let mut v: Vec<_> = st
+            .iter()
+            .filter(|e| e.workspace_id == ws && e.id > since)
+            .cloned()
+            .collect();
         v.sort_by_key(|e| e.id);
         v.truncate(limit);
         Ok(v)
@@ -61,10 +109,24 @@ impl MetadataStore for MockMetaFull {
     async fn storage_stats(&self, ws: &str) -> Result<StorageStats> {
         let dentries = self.dentries.lock().unwrap();
         let files = self.files.lock().unwrap();
-        let total_files = dentries.iter().filter(|d| d.workspace_id == ws && !d.is_dir).count() as i64;
-        let total_dirs = dentries.iter().filter(|d| d.workspace_id == ws && d.is_dir).count() as i64;
-        let total_bytes: i64 = files.iter().filter(|f| f.workspace_id == ws).map(|f| f.size_bytes).sum();
-        Ok(StorageStats { total_files, total_directories: total_dirs, total_bytes })
+        let total_files = dentries
+            .iter()
+            .filter(|d| d.workspace_id == ws && !d.is_dir)
+            .count() as i64;
+        let total_dirs = dentries
+            .iter()
+            .filter(|d| d.workspace_id == ws && d.is_dir)
+            .count() as i64;
+        let total_bytes: i64 = files
+            .iter()
+            .filter(|f| f.workspace_id == ws)
+            .map(|f| f.size_bytes)
+            .sum();
+        Ok(StorageStats {
+            total_files,
+            total_directories: total_dirs,
+            total_bytes,
+        })
     }
     async fn begin_tx(&self) -> Result<Box<dyn MetadataTx>> {
         Ok(Box::new(MockMetaFullTx {
@@ -87,11 +149,28 @@ struct MockMetaFullTx {
 #[async_trait]
 impl MetadataTx for MockMetaFullTx {
     async fn get_dentry(&mut self, ws: &str, path: &str) -> Result<Option<Dentry>> {
-        Ok(self.dentries.lock().unwrap().iter().find(|d| d.workspace_id == ws && d.path == path).cloned())
+        Ok(self
+            .dentries
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|d| d.workspace_id == ws && d.path == path)
+            .cloned())
     }
-    async fn insert_dentry(&mut self, dentry: &Dentry) -> Result<()> { self.dentries.lock().unwrap().push(dentry.clone()); Ok(()) }
+    async fn insert_dentry(&mut self, dentry: &Dentry) -> Result<()> {
+        self.dentries.lock().unwrap().push(dentry.clone());
+        Ok(())
+    }
     async fn update_dentry_file_id(&mut self, ws: &str, path: &str, file_id: &str) -> Result<()> {
-        if let Some(d) = self.dentries.lock().unwrap().iter_mut().find(|d| d.workspace_id == ws && d.path == path) { d.file_id = Some(file_id.to_string()); }
+        if let Some(d) = self
+            .dentries
+            .lock()
+            .unwrap()
+            .iter_mut()
+            .find(|d| d.workspace_id == ws && d.path == path)
+        {
+            d.file_id = Some(file_id.to_string());
+        }
         Ok(())
     }
     async fn delete_dentry(&mut self, ws: &str, path: &str) -> Result<u64> {
@@ -101,7 +180,14 @@ impl MetadataTx for MockMetaFullTx {
         Ok((before - st.len()) as u64)
     }
     async fn list_dentries_under(&mut self, ws: &str, prefix: &str) -> Result<Vec<Dentry>> {
-        Ok(self.dentries.lock().unwrap().iter().filter(|d| d.workspace_id == ws && d.path.starts_with(&format!("{prefix}/"))).cloned().collect())
+        Ok(self
+            .dentries
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|d| d.workspace_id == ws && d.path.starts_with(&format!("{prefix}/")))
+            .cloned()
+            .collect())
     }
     async fn delete_dentries_under(&mut self, ws: &str, parent: &str) -> Result<u64> {
         let mut st = self.dentries.lock().unwrap();
@@ -109,34 +195,106 @@ impl MetadataTx for MockMetaFullTx {
         st.retain(|d| !(d.workspace_id == ws && d.path.starts_with(&format!("{parent}/"))));
         Ok((before - st.len()) as u64)
     }
-    async fn rename_dentry(&mut self, ws: &str, old: &str, new: &str, np: &str, nn: &str) -> Result<()> {
-        if let Some(d) = self.dentries.lock().unwrap().iter_mut().find(|d| d.workspace_id == ws && d.path == old) {
-            d.path = new.to_string(); d.parent_path = np.to_string(); d.name = nn.to_string();
+    async fn rename_dentry(
+        &mut self,
+        ws: &str,
+        old: &str,
+        new: &str,
+        np: &str,
+        nn: &str,
+    ) -> Result<()> {
+        if let Some(d) = self
+            .dentries
+            .lock()
+            .unwrap()
+            .iter_mut()
+            .find(|d| d.workspace_id == ws && d.path == old)
+        {
+            d.path = new.to_string();
+            d.parent_path = np.to_string();
+            d.name = nn.to_string();
         }
         Ok(())
     }
-    async fn get_file(&mut self, id: &str) -> Result<Option<FileRecord>> { Ok(self.files.lock().unwrap().iter().find(|f| f.id == id).cloned()) }
-    async fn insert_file(&mut self, file: &FileRecord) -> Result<()> { self.files.lock().unwrap().push(file.clone()); Ok(()) }
-    async fn update_file_revision(&mut self, id: &str, rev: i32, size: i64, cksum: &str, lc: Option<i32>, st: StorageType) -> Result<()> {
-        if let Some(f) = self.files.lock().unwrap().iter_mut().find(|f| f.id == id) { f.revision = rev; f.size_bytes = size; f.checksum_sha256 = cksum.to_string(); f.line_count = lc; f.storage_type = st; }
+    async fn get_file(&mut self, id: &str) -> Result<Option<FileRecord>> {
+        Ok(self
+            .files
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|f| f.id == id)
+            .cloned())
+    }
+    async fn insert_file(&mut self, file: &FileRecord) -> Result<()> {
+        self.files.lock().unwrap().push(file.clone());
+        Ok(())
+    }
+    async fn update_file_revision(
+        &mut self,
+        id: &str,
+        rev: i32,
+        size: i64,
+        cksum: &str,
+        lc: Option<i32>,
+        st: StorageType,
+    ) -> Result<()> {
+        if let Some(f) = self.files.lock().unwrap().iter_mut().find(|f| f.id == id) {
+            f.revision = rev;
+            f.size_bytes = size;
+            f.checksum_sha256 = cksum.to_string();
+            f.line_count = lc;
+            f.storage_type = st;
+        }
         Ok(())
     }
     async fn decrement_ref_count(&mut self, id: &str) -> Result<i32> {
-        if let Some(f) = self.files.lock().unwrap().iter_mut().find(|f| f.id == id) { f.ref_count -= 1; return Ok(f.ref_count); }
+        if let Some(f) = self.files.lock().unwrap().iter_mut().find(|f| f.id == id) {
+            f.ref_count -= 1;
+            return Ok(f.ref_count);
+        }
         Ok(0)
     }
     async fn increment_ref_count(&mut self, id: &str) -> Result<()> {
-        if let Some(f) = self.files.lock().unwrap().iter_mut().find(|f| f.id == id) { f.ref_count += 1; }
+        if let Some(f) = self.files.lock().unwrap().iter_mut().find(|f| f.id == id) {
+            f.ref_count += 1;
+        }
         Ok(())
     }
-    async fn delete_file(&mut self, id: &str) -> Result<()> { self.files.lock().unwrap().retain(|f| f.id != id); Ok(()) }
-    async fn get_file_content(&mut self, id: &str) -> Result<Option<String>> { Ok(self.file_contents.lock().unwrap().get(id).cloned()) }
-    async fn get_file_chunks(&mut self, _id: &str, _s: Option<i32>, _e: Option<i32>) -> Result<Vec<FileChunk>> { Ok(vec![]) }
-    async fn insert_file_content(&mut self, id: &str, content: &str) -> Result<()> { self.file_contents.lock().unwrap().insert(id.to_string(), content.to_string()); Ok(()) }
-    async fn delete_file_content(&mut self, id: &str) -> Result<()> { self.file_contents.lock().unwrap().remove(id); Ok(()) }
-    async fn insert_file_chunks(&mut self, _chunks: &[FileChunk]) -> Result<()> { Ok(()) }
-    async fn delete_file_chunks(&mut self, _id: &str) -> Result<()> { Ok(()) }
-    async fn insert_outbox(&mut self, _event: &OutboxEvent) -> Result<()> { Ok(()) }
+    async fn delete_file(&mut self, id: &str) -> Result<()> {
+        self.files.lock().unwrap().retain(|f| f.id != id);
+        Ok(())
+    }
+    async fn get_file_content(&mut self, id: &str) -> Result<Option<String>> {
+        Ok(self.file_contents.lock().unwrap().get(id).cloned())
+    }
+    async fn get_file_chunks(
+        &mut self,
+        _id: &str,
+        _s: Option<i32>,
+        _e: Option<i32>,
+    ) -> Result<Vec<FileChunk>> {
+        Ok(vec![])
+    }
+    async fn insert_file_content(&mut self, id: &str, content: &str) -> Result<()> {
+        self.file_contents
+            .lock()
+            .unwrap()
+            .insert(id.to_string(), content.to_string());
+        Ok(())
+    }
+    async fn delete_file_content(&mut self, id: &str) -> Result<()> {
+        self.file_contents.lock().unwrap().remove(id);
+        Ok(())
+    }
+    async fn insert_file_chunks(&mut self, _chunks: &[FileChunk]) -> Result<()> {
+        Ok(())
+    }
+    async fn delete_file_chunks(&mut self, _id: &str) -> Result<()> {
+        Ok(())
+    }
+    async fn insert_outbox(&mut self, _event: &OutboxEvent) -> Result<()> {
+        Ok(())
+    }
     async fn insert_fs_event(&mut self, event: &FsEvent) -> Result<()> {
         let mut st = self.fs_events.lock().unwrap();
         // Emulate MySQL AUTO_INCREMENT — production uses DB-assigned IDs
@@ -146,8 +304,12 @@ impl MetadataTx for MockMetaFullTx {
         st.push(e);
         Ok(())
     }
-    async fn commit(self: Box<Self>) -> Result<()> { Ok(()) }
-    async fn rollback(self: Box<Self>) -> Result<()> { Ok(()) }
+    async fn commit(self: Box<Self>) -> Result<()> {
+        Ok(())
+    }
+    async fn rollback(self: Box<Self>) -> Result<()> {
+        Ok(())
+    }
 }
 
 fn make_full_engine(meta: Arc<MockMetaFull>) -> VedaSqlEngine {
@@ -184,20 +346,33 @@ struct MockMeta {
 
 impl MockMeta {
     fn new(dentries: Vec<Dentry>) -> Self {
-        Self { dentries: Mutex::new(dentries) }
+        Self {
+            dentries: Mutex::new(dentries),
+        }
     }
 }
 
 #[async_trait]
 impl MetadataStore for MockMeta {
     async fn get_dentry(&self, _ws: &str, path: &str) -> Result<Option<Dentry>> {
-        Ok(self.dentries.lock().unwrap().iter().find(|d| d.path == path).cloned())
+        Ok(self
+            .dentries
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|d| d.path == path)
+            .cloned())
     }
 
     async fn list_dentries(&self, _ws: &str, parent: &str) -> Result<Vec<Dentry>> {
-        Ok(self.dentries.lock().unwrap().iter()
+        Ok(self
+            .dentries
+            .lock()
+            .unwrap()
+            .iter()
             .filter(|d| d.parent_path == parent)
-            .cloned().collect())
+            .cloned()
+            .collect())
     }
     async fn list_dentries_under(&self, _ws: &str, prefix: &str) -> Result<Vec<Dentry>> {
         let st = self.dentries.lock().unwrap();
@@ -205,17 +380,52 @@ impl MetadataStore for MockMeta {
             return Ok(st.iter().cloned().collect());
         }
         let pfx = format!("{prefix}/");
-        Ok(st.iter().filter(|d| d.path.starts_with(&pfx)).cloned().collect())
+        Ok(st
+            .iter()
+            .filter(|d| d.path.starts_with(&pfx))
+            .cloned()
+            .collect())
     }
 
-    async fn get_file(&self, _id: &str) -> Result<Option<FileRecord>> { Ok(None) }
-    async fn get_file_content(&self, _id: &str) -> Result<Option<String>> { Ok(None) }
-    async fn get_file_chunks(&self, _id: &str, _s: Option<i32>, _e: Option<i32>) -> Result<Vec<FileChunk>> { Ok(vec![]) }
-    async fn find_file_by_checksum(&self, _ws: &str, _cksum: &str) -> Result<Option<FileRecord>> { Ok(None) }
-    async fn get_dentry_path_by_file_id(&self, _ws: &str, _fid: &str) -> Result<Option<String>> { Ok(None) }
-    async fn query_fs_events(&self, _ws: &str, _since: i64, _prefix: Option<&str>, _limit: usize) -> Result<Vec<FsEvent>> { Ok(vec![]) }
-    async fn storage_stats(&self, _ws: &str) -> Result<StorageStats> { Ok(StorageStats { total_files: 0, total_directories: 0, total_bytes: 0 }) }
-    async fn begin_tx(&self) -> Result<Box<dyn MetadataTx>> { unreachable!() }
+    async fn get_file(&self, _id: &str) -> Result<Option<FileRecord>> {
+        Ok(None)
+    }
+    async fn get_file_content(&self, _id: &str) -> Result<Option<String>> {
+        Ok(None)
+    }
+    async fn get_file_chunks(
+        &self,
+        _id: &str,
+        _s: Option<i32>,
+        _e: Option<i32>,
+    ) -> Result<Vec<FileChunk>> {
+        Ok(vec![])
+    }
+    async fn find_file_by_checksum(&self, _ws: &str, _cksum: &str) -> Result<Option<FileRecord>> {
+        Ok(None)
+    }
+    async fn get_dentry_path_by_file_id(&self, _ws: &str, _fid: &str) -> Result<Option<String>> {
+        Ok(None)
+    }
+    async fn query_fs_events(
+        &self,
+        _ws: &str,
+        _since: i64,
+        _prefix: Option<&str>,
+        _limit: usize,
+    ) -> Result<Vec<FsEvent>> {
+        Ok(vec![])
+    }
+    async fn storage_stats(&self, _ws: &str) -> Result<StorageStats> {
+        Ok(StorageStats {
+            total_files: 0,
+            total_directories: 0,
+            total_bytes: 0,
+        })
+    }
+    async fn begin_tx(&self) -> Result<Box<dyn MetadataTx>> {
+        unreachable!()
+    }
 }
 
 // ── Mock VectorStore ──────────────────────────────────
@@ -226,21 +436,29 @@ struct MockVector {
 
 impl MockVector {
     fn new(hits: Vec<SearchHit>) -> Self {
-        Self { hits: Mutex::new(hits) }
+        Self {
+            hits: Mutex::new(hits),
+        }
     }
 }
 
 #[async_trait]
 impl VectorStore for MockVector {
-    async fn upsert_chunks(&self, _chunks: &[ChunkWithEmbedding]) -> Result<()> { Ok(()) }
-    async fn delete_chunks(&self, _ws: &str, _fid: &str) -> Result<()> { Ok(()) }
+    async fn upsert_chunks(&self, _chunks: &[ChunkWithEmbedding]) -> Result<()> {
+        Ok(())
+    }
+    async fn delete_chunks(&self, _ws: &str, _fid: &str) -> Result<()> {
+        Ok(())
+    }
     async fn search(&self, _req: &SearchRequest) -> Result<Vec<SearchHit>> {
         Ok(self.hits.lock().unwrap().clone())
     }
     async fn hybrid_search(&self, _req: &HybridSearchRequest) -> Result<Vec<SearchHit>> {
         Ok(self.hits.lock().unwrap().clone())
     }
-    async fn init_collections(&self, _dim: u32) -> Result<()> { Ok(()) }
+    async fn init_collections(&self, _dim: u32) -> Result<()> {
+        Ok(())
+    }
 }
 
 // ── Mock CollectionMetaStore ──────────────────────────
@@ -251,19 +469,33 @@ struct MockCollMeta {
 
 impl MockCollMeta {
     fn new(schemas: Vec<CollectionSchema>) -> Self {
-        Self { schemas: Mutex::new(schemas) }
+        Self {
+            schemas: Mutex::new(schemas),
+        }
     }
 }
 
 #[async_trait]
 impl CollectionMetaStore for MockCollMeta {
-    async fn create_collection_schema(&self, _s: &CollectionSchema) -> Result<()> { Ok(()) }
-    async fn get_collection_schema(&self, _ws: &str, _name: &str) -> Result<Option<CollectionSchema>> { Ok(None) }
-    async fn get_collection_schema_by_id(&self, _id: &str) -> Result<Option<CollectionSchema>> { Ok(None) }
+    async fn create_collection_schema(&self, _s: &CollectionSchema) -> Result<()> {
+        Ok(())
+    }
+    async fn get_collection_schema(
+        &self,
+        _ws: &str,
+        _name: &str,
+    ) -> Result<Option<CollectionSchema>> {
+        Ok(None)
+    }
+    async fn get_collection_schema_by_id(&self, _id: &str) -> Result<Option<CollectionSchema>> {
+        Ok(None)
+    }
     async fn list_collection_schemas(&self, _ws: &str) -> Result<Vec<CollectionSchema>> {
         Ok(self.schemas.lock().unwrap().clone())
     }
-    async fn delete_collection_schema(&self, _id: &str) -> Result<()> { Ok(()) }
+    async fn delete_collection_schema(&self, _id: &str) -> Result<()> {
+        Ok(())
+    }
 }
 
 // ── Mock CollectionVectorStore ────────────────────────
@@ -274,7 +506,9 @@ struct MockCollVector {
 
 impl MockCollVector {
     fn new() -> Self {
-        Self { data: Mutex::new(HashMap::new()) }
+        Self {
+            data: Mutex::new(HashMap::new()),
+        }
     }
     fn insert(&self, name: &str, rows: Vec<serde_json::Value>) {
         self.data.lock().unwrap().insert(name.to_string(), rows);
@@ -283,14 +517,53 @@ impl MockCollVector {
 
 #[async_trait]
 impl CollectionVectorStore for MockCollVector {
-    async fn create_dynamic_collection(&self, _n: &str, _f: &[FieldDefinition], _d: u32) -> Result<()> { Ok(()) }
-    async fn drop_dynamic_collection(&self, _n: &str) -> Result<()> { Ok(()) }
-    async fn insert_collection_rows(&self, _n: &str, _ws: &str, _r: &[serde_json::Value]) -> Result<()> { Ok(()) }
-    async fn search_collection(&self, name: &str, _ws: &str, _vec: &[f32], _limit: usize) -> Result<Vec<serde_json::Value>> {
-        Ok(self.data.lock().unwrap().get(name).cloned().unwrap_or_default())
+    async fn create_dynamic_collection(
+        &self,
+        _n: &str,
+        _f: &[FieldDefinition],
+        _d: u32,
+    ) -> Result<()> {
+        Ok(())
     }
-    async fn query_collection(&self, name: &str, _ws: &str, _limit: usize) -> Result<Vec<serde_json::Value>> {
-        Ok(self.data.lock().unwrap().get(name).cloned().unwrap_or_default())
+    async fn drop_dynamic_collection(&self, _n: &str) -> Result<()> {
+        Ok(())
+    }
+    async fn insert_collection_rows(
+        &self,
+        _n: &str,
+        _ws: &str,
+        _r: &[serde_json::Value],
+    ) -> Result<()> {
+        Ok(())
+    }
+    async fn search_collection(
+        &self,
+        name: &str,
+        _ws: &str,
+        _vec: &[f32],
+        _limit: usize,
+    ) -> Result<Vec<serde_json::Value>> {
+        Ok(self
+            .data
+            .lock()
+            .unwrap()
+            .get(name)
+            .cloned()
+            .unwrap_or_default())
+    }
+    async fn query_collection(
+        &self,
+        name: &str,
+        _ws: &str,
+        _limit: usize,
+    ) -> Result<Vec<serde_json::Value>> {
+        Ok(self
+            .data
+            .lock()
+            .unwrap()
+            .get(name)
+            .cloned()
+            .unwrap_or_default())
     }
 }
 
@@ -303,15 +576,23 @@ impl EmbeddingService for MockEmbed {
     async fn embed(&self, texts: &[String]) -> Result<Vec<Vec<f32>>> {
         Ok(texts.iter().map(|_| vec![0.0; 128]).collect())
     }
-    fn dimension(&self) -> usize { 128 }
+    fn dimension(&self) -> usize {
+        128
+    }
 }
 
 // ── Helpers ───────────────────────────────────────────
 
 fn make_dentry(path: &str, name: &str, is_dir: bool) -> Dentry {
-    let parent = if path == "/" { "".to_string() } else {
+    let parent = if path == "/" {
+        "".to_string()
+    } else {
         let p = path.rsplit_once('/').map(|(a, _)| a).unwrap_or("");
-        if p.is_empty() { "/".to_string() } else { p.to_string() }
+        if p.is_empty() {
+            "/".to_string()
+        } else {
+            p.to_string()
+        }
     };
     Dentry {
         id: uuid::Uuid::new_v4().to_string(),
@@ -319,7 +600,11 @@ fn make_dentry(path: &str, name: &str, is_dir: bool) -> Dentry {
         parent_path: parent,
         name: name.into(),
         path: path.into(),
-        file_id: if is_dir { None } else { Some(uuid::Uuid::new_v4().to_string()) },
+        file_id: if is_dir {
+            None
+        } else {
+            Some(uuid::Uuid::new_v4().to_string())
+        },
         is_dir,
         created_at: chrono::Utc::now(),
         updated_at: chrono::Utc::now(),
@@ -352,7 +637,10 @@ async fn select_star_from_files() {
         make_dentry("/src", "src", true),
     ];
     let engine = make_engine(dentries, vec![], Arc::new(MockCollVector::new()));
-    let batches = engine.execute("ws1", false, "SELECT path, name, is_dir FROM files").await.unwrap();
+    let batches = engine
+        .execute("ws1", false, "SELECT path, name, is_dir FROM files")
+        .await
+        .unwrap();
     let total: usize = batches.iter().map(|b| b.num_rows()).sum();
     assert_eq!(total, 2);
 }
@@ -365,7 +653,10 @@ async fn where_filter_on_files() {
         make_dentry("/docs", "docs", true),
     ];
     let engine = make_engine(dentries, vec![], Arc::new(MockCollVector::new()));
-    let batches = engine.execute("ws1", false, "SELECT path FROM files WHERE is_dir = false").await.unwrap();
+    let batches = engine
+        .execute("ws1", false, "SELECT path FROM files WHERE is_dir = false")
+        .await
+        .unwrap();
     let total: usize = batches.iter().map(|b| b.num_rows()).sum();
     assert_eq!(total, 2);
 }
@@ -378,22 +669,31 @@ async fn count_files() {
         make_dentry("/c", "c", false),
     ];
     let engine = make_engine(dentries, vec![], Arc::new(MockCollVector::new()));
-    let batches = engine.execute("ws1", false, "SELECT count(*) as cnt FROM files").await.unwrap();
+    let batches = engine
+        .execute("ws1", false, "SELECT count(*) as cnt FROM files")
+        .await
+        .unwrap();
     assert_eq!(batches.len(), 1);
     let batch = &batches[0];
     assert_eq!(batch.num_rows(), 1);
     let col = batch.column(0);
-    let arr = col.as_any().downcast_ref::<arrow::array::Int64Array>().unwrap();
+    let arr = col
+        .as_any()
+        .downcast_ref::<arrow::array::Int64Array>()
+        .unwrap();
     assert_eq!(arr.value(0), 3);
 }
 
 #[tokio::test]
 async fn collection_query() {
     let coll_vec = Arc::new(MockCollVector::new());
-    coll_vec.insert("veda_coll_s1", vec![
-        serde_json::json!({"id": "1", "title": "Widget", "price": "9.99"}),
-        serde_json::json!({"id": "2", "title": "Gadget", "price": "19.99"}),
-    ]);
+    coll_vec.insert(
+        "veda_coll_s1",
+        vec![
+            serde_json::json!({"id": "1", "title": "Widget", "price": "9.99"}),
+            serde_json::json!({"id": "2", "title": "Gadget", "price": "19.99"}),
+        ],
+    );
 
     let schema = CollectionSchema {
         id: "s1".into(),
@@ -412,7 +712,10 @@ async fn collection_query() {
     };
 
     let engine = make_engine(vec![], vec![schema], coll_vec);
-    let batches = engine.execute("ws1", false, "SELECT id, title FROM products").await.unwrap();
+    let batches = engine
+        .execute("ws1", false, "SELECT id, title FROM products")
+        .await
+        .unwrap();
     let total: usize = batches.iter().map(|b| b.num_rows()).sum();
     assert_eq!(total, 2);
 }
@@ -420,11 +723,14 @@ async fn collection_query() {
 #[tokio::test]
 async fn collection_where_filter() {
     let coll_vec = Arc::new(MockCollVector::new());
-    coll_vec.insert("veda_coll_s2", vec![
-        serde_json::json!({"id": "1", "name": "Apple", "category": "fruit"}),
-        serde_json::json!({"id": "2", "name": "Carrot", "category": "vegetable"}),
-        serde_json::json!({"id": "3", "name": "Banana", "category": "fruit"}),
-    ]);
+    coll_vec.insert(
+        "veda_coll_s2",
+        vec![
+            serde_json::json!({"id": "1", "name": "Apple", "category": "fruit"}),
+            serde_json::json!({"id": "2", "name": "Carrot", "category": "vegetable"}),
+            serde_json::json!({"id": "3", "name": "Banana", "category": "fruit"}),
+        ],
+    );
 
     let schema = CollectionSchema {
         id: "s2".into(),
@@ -443,7 +749,14 @@ async fn collection_where_filter() {
     };
 
     let engine = make_engine(vec![], vec![schema], coll_vec);
-    let batches = engine.execute("ws1", false, "SELECT name FROM items WHERE category = 'fruit'").await.unwrap();
+    let batches = engine
+        .execute(
+            "ws1",
+            false,
+            "SELECT name FROM items WHERE category = 'fruit'",
+        )
+        .await
+        .unwrap();
     let total: usize = batches.iter().map(|b| b.num_rows()).sum();
     assert_eq!(total, 2);
 }
@@ -451,7 +764,10 @@ async fn collection_where_filter() {
 #[tokio::test]
 async fn empty_workspace_returns_empty() {
     let engine = make_engine(vec![], vec![], Arc::new(MockCollVector::new()));
-    let batches = engine.execute("ws1", false, "SELECT * FROM files").await.unwrap();
+    let batches = engine
+        .execute("ws1", false, "SELECT * FROM files")
+        .await
+        .unwrap();
     let total: usize = batches.iter().map(|b| b.num_rows()).sum();
     assert_eq!(total, 0);
 }
@@ -471,7 +787,10 @@ async fn files_with_nested_dirs() {
         make_dentry("/src/lib.rs", "lib.rs", false),
     ];
     let engine = make_engine(dentries, vec![], Arc::new(MockCollVector::new()));
-    let batches = engine.execute("ws1", false, "SELECT path FROM files WHERE is_dir = false").await.unwrap();
+    let batches = engine
+        .execute("ws1", false, "SELECT path FROM files WHERE is_dir = false")
+        .await
+        .unwrap();
     let total: usize = batches.iter().map(|b| b.num_rows()).sum();
     assert_eq!(total, 2);
 }
@@ -485,16 +804,28 @@ async fn select_file_id_from_files() {
     let engine = make_engine(dentries, vec![], Arc::new(MockCollVector::new()));
 
     let batches = engine
-        .execute("ws1", false, "SELECT path, file_id FROM files WHERE path LIKE '/cow/%'")
+        .execute(
+            "ws1",
+            false,
+            "SELECT path, file_id FROM files WHERE path LIKE '/cow/%'",
+        )
         .await
         .unwrap();
     let total: usize = batches.iter().map(|b| b.num_rows()).sum();
     assert_eq!(total, 1);
 
-    let path_arr = batches[0].column(0).as_any().downcast_ref::<arrow::array::StringArray>().unwrap();
+    let path_arr = batches[0]
+        .column(0)
+        .as_any()
+        .downcast_ref::<arrow::array::StringArray>()
+        .unwrap();
     assert_eq!(path_arr.value(0), "/cow/a.txt");
 
-    let fid_arr = batches[0].column(1).as_any().downcast_ref::<arrow::array::StringArray>().unwrap();
+    let fid_arr = batches[0]
+        .column(1)
+        .as_any()
+        .downcast_ref::<arrow::array::StringArray>()
+        .unwrap();
     assert_eq!(fid_arr.value(0), expected_fid);
 }
 
@@ -511,14 +842,21 @@ async fn files_path_like_prefix_filter() {
     let engine = make_engine(dentries, vec![], Arc::new(MockCollVector::new()));
 
     let batches = engine
-        .execute("ws1", false, "SELECT path FROM files WHERE path LIKE '/docs/%'")
+        .execute(
+            "ws1",
+            false,
+            "SELECT path FROM files WHERE path LIKE '/docs/%'",
+        )
         .await
         .unwrap();
     let total: usize = batches.iter().map(|b| b.num_rows()).sum();
     assert_eq!(total, 2, "should only return files under /docs/");
 
-    let path_arr = batches[0].column(0).as_any()
-        .downcast_ref::<arrow::array::StringArray>().unwrap();
+    let path_arr = batches[0]
+        .column(0)
+        .as_any()
+        .downcast_ref::<arrow::array::StringArray>()
+        .unwrap();
     let mut paths: Vec<&str> = (0..path_arr.len()).map(|i| path_arr.value(i)).collect();
     paths.sort();
     assert_eq!(paths, vec!["/docs/a.md", "/docs/b.md"]);
@@ -535,14 +873,21 @@ async fn files_path_eq_filter() {
     let engine = make_engine(dentries, vec![], Arc::new(MockCollVector::new()));
 
     let batches = engine
-        .execute("ws1", false, "SELECT path FROM files WHERE path = '/docs/c.txt'")
+        .execute(
+            "ws1",
+            false,
+            "SELECT path FROM files WHERE path = '/docs/c.txt'",
+        )
         .await
         .unwrap();
     let total: usize = batches.iter().map(|b| b.num_rows()).sum();
     assert_eq!(total, 1);
 
-    let path_arr = batches[0].column(0).as_any()
-        .downcast_ref::<arrow::array::StringArray>().unwrap();
+    let path_arr = batches[0]
+        .column(0)
+        .as_any()
+        .downcast_ref::<arrow::array::StringArray>()
+        .unwrap();
     assert_eq!(path_arr.value(0), "/docs/c.txt");
 }
 
@@ -607,17 +952,41 @@ async fn files_exposes_full_file_record() {
         .unwrap();
     assert_eq!(batches[0].num_rows(), 1);
 
-    let rc = batches[0].column(0).as_any().downcast_ref::<arrow::array::Int32Array>().unwrap();
+    let rc = batches[0]
+        .column(0)
+        .as_any()
+        .downcast_ref::<arrow::array::Int32Array>()
+        .unwrap();
     assert_eq!(rc.value(0), 5);
-    let lc = batches[0].column(1).as_any().downcast_ref::<arrow::array::Int32Array>().unwrap();
+    let lc = batches[0]
+        .column(1)
+        .as_any()
+        .downcast_ref::<arrow::array::Int32Array>()
+        .unwrap();
     assert_eq!(lc.value(0), 3);
-    let st = batches[0].column(2).as_any().downcast_ref::<arrow::array::StringArray>().unwrap();
+    let st = batches[0]
+        .column(2)
+        .as_any()
+        .downcast_ref::<arrow::array::StringArray>()
+        .unwrap();
     assert_eq!(st.value(0), "inline");
-    let sr = batches[0].column(3).as_any().downcast_ref::<arrow::array::StringArray>().unwrap();
+    let sr = batches[0]
+        .column(3)
+        .as_any()
+        .downcast_ref::<arrow::array::StringArray>()
+        .unwrap();
     assert_eq!(sr.value(0), "text");
-    let ca = batches[0].column(4).as_any().downcast_ref::<arrow::array::StringArray>().unwrap();
+    let ca = batches[0]
+        .column(4)
+        .as_any()
+        .downcast_ref::<arrow::array::StringArray>()
+        .unwrap();
     assert!(!ca.value(0).is_empty(), "created_at should be populated");
-    let ua = batches[0].column(5).as_any().downcast_ref::<arrow::array::StringArray>().unwrap();
+    let ua = batches[0]
+        .column(5)
+        .as_any()
+        .downcast_ref::<arrow::array::StringArray>()
+        .unwrap();
     assert!(!ua.value(0).is_empty(), "updated_at should be populated");
 }
 
@@ -646,9 +1015,17 @@ async fn files_new_fields_null_for_dirs() {
         .await
         .unwrap();
     assert_eq!(batches[0].num_rows(), 1);
-    let rc = batches[0].column(0).as_any().downcast_ref::<arrow::array::Int32Array>().unwrap();
+    let rc = batches[0]
+        .column(0)
+        .as_any()
+        .downcast_ref::<arrow::array::Int32Array>()
+        .unwrap();
     assert!(rc.is_null(0));
-    let st = batches[0].column(1).as_any().downcast_ref::<arrow::array::StringArray>().unwrap();
+    let st = batches[0]
+        .column(1)
+        .as_any()
+        .downcast_ref::<arrow::array::StringArray>()
+        .unwrap();
     assert!(st.is_null(0));
 }
 
@@ -658,12 +1035,20 @@ async fn file_id_is_null_for_dirs() {
     let engine = make_engine(dentries, vec![], Arc::new(MockCollVector::new()));
 
     let batches = engine
-        .execute("ws1", false, "SELECT path, file_id FROM files WHERE is_dir = true")
+        .execute(
+            "ws1",
+            false,
+            "SELECT path, file_id FROM files WHERE is_dir = true",
+        )
         .await
         .unwrap();
     assert_eq!(batches[0].num_rows(), 1);
 
-    let fid_arr = batches[0].column(1).as_any().downcast_ref::<arrow::array::StringArray>().unwrap();
+    let fid_arr = batches[0]
+        .column(1)
+        .as_any()
+        .downcast_ref::<arrow::array::StringArray>()
+        .unwrap();
     assert!(fid_arr.is_null(0), "file_id should be NULL for directories");
 }
 
@@ -675,15 +1060,29 @@ async fn udf_veda_write_and_read() {
     let engine = make_full_engine(meta);
 
     let batches = engine
-        .execute("ws1", false, "SELECT veda_write('/hello.txt', 'world') as bytes_written")
-        .await.unwrap();
-    let arr = batches[0].column(0).as_any().downcast_ref::<arrow::array::Int64Array>().unwrap();
+        .execute(
+            "ws1",
+            false,
+            "SELECT veda_write('/hello.txt', 'world') as bytes_written",
+        )
+        .await
+        .unwrap();
+    let arr = batches[0]
+        .column(0)
+        .as_any()
+        .downcast_ref::<arrow::array::Int64Array>()
+        .unwrap();
     assert_eq!(arr.value(0), 5);
 
     let batches = engine
         .execute("ws1", false, "SELECT veda_read('/hello.txt') as content")
-        .await.unwrap();
-    let arr = batches[0].column(0).as_any().downcast_ref::<arrow::array::StringArray>().unwrap();
+        .await
+        .unwrap();
+    let arr = batches[0]
+        .column(0)
+        .as_any()
+        .downcast_ref::<arrow::array::StringArray>()
+        .unwrap();
     assert_eq!(arr.value(0), "world");
 }
 
@@ -692,14 +1091,31 @@ async fn udf_veda_exists() {
     let meta = Arc::new(MockMetaFull::new());
     let engine = make_full_engine(meta);
 
-    let batches = engine.execute("ws1", false, "SELECT veda_exists('/nope.txt') as e").await.unwrap();
-    let arr = batches[0].column(0).as_any().downcast_ref::<arrow::array::BooleanArray>().unwrap();
+    let batches = engine
+        .execute("ws1", false, "SELECT veda_exists('/nope.txt') as e")
+        .await
+        .unwrap();
+    let arr = batches[0]
+        .column(0)
+        .as_any()
+        .downcast_ref::<arrow::array::BooleanArray>()
+        .unwrap();
     assert!(!arr.value(0));
 
-    engine.execute("ws1", false, "SELECT veda_write('/exists.txt', 'hi')").await.unwrap();
+    engine
+        .execute("ws1", false, "SELECT veda_write('/exists.txt', 'hi')")
+        .await
+        .unwrap();
 
-    let batches = engine.execute("ws1", false, "SELECT veda_exists('/exists.txt') as e").await.unwrap();
-    let arr = batches[0].column(0).as_any().downcast_ref::<arrow::array::BooleanArray>().unwrap();
+    let batches = engine
+        .execute("ws1", false, "SELECT veda_exists('/exists.txt') as e")
+        .await
+        .unwrap();
+    let arr = batches[0]
+        .column(0)
+        .as_any()
+        .downcast_ref::<arrow::array::BooleanArray>()
+        .unwrap();
     assert!(arr.value(0));
 }
 
@@ -707,14 +1123,35 @@ async fn udf_veda_exists() {
 async fn udf_veda_size_and_mtime() {
     let meta = Arc::new(MockMetaFull::new());
     let engine = make_full_engine(meta);
-    engine.execute("ws1", false, "SELECT veda_write('/data.txt', 'hello world')").await.unwrap();
+    engine
+        .execute(
+            "ws1",
+            false,
+            "SELECT veda_write('/data.txt', 'hello world')",
+        )
+        .await
+        .unwrap();
 
-    let batches = engine.execute("ws1", false, "SELECT veda_size('/data.txt') as sz").await.unwrap();
-    let arr = batches[0].column(0).as_any().downcast_ref::<arrow::array::Int64Array>().unwrap();
+    let batches = engine
+        .execute("ws1", false, "SELECT veda_size('/data.txt') as sz")
+        .await
+        .unwrap();
+    let arr = batches[0]
+        .column(0)
+        .as_any()
+        .downcast_ref::<arrow::array::Int64Array>()
+        .unwrap();
     assert_eq!(arr.value(0), 11);
 
-    let batches = engine.execute("ws1", false, "SELECT veda_mtime('/data.txt') as mt").await.unwrap();
-    let arr = batches[0].column(0).as_any().downcast_ref::<arrow::array::StringArray>().unwrap();
+    let batches = engine
+        .execute("ws1", false, "SELECT veda_mtime('/data.txt') as mt")
+        .await
+        .unwrap();
+    let arr = batches[0]
+        .column(0)
+        .as_any()
+        .downcast_ref::<arrow::array::StringArray>()
+        .unwrap();
     assert!(!arr.value(0).is_empty());
 }
 
@@ -722,11 +1159,24 @@ async fn udf_veda_size_and_mtime() {
 async fn udf_veda_append() {
     let meta = Arc::new(MockMetaFull::new());
     let engine = make_full_engine(meta);
-    engine.execute("ws1", false, "SELECT veda_write('/log.txt', 'line1\n')").await.unwrap();
-    engine.execute("ws1", false, "SELECT veda_append('/log.txt', 'line2\n')").await.unwrap();
+    engine
+        .execute("ws1", false, "SELECT veda_write('/log.txt', 'line1\n')")
+        .await
+        .unwrap();
+    engine
+        .execute("ws1", false, "SELECT veda_append('/log.txt', 'line2\n')")
+        .await
+        .unwrap();
 
-    let batches = engine.execute("ws1", false, "SELECT veda_read('/log.txt') as c").await.unwrap();
-    let arr = batches[0].column(0).as_any().downcast_ref::<arrow::array::StringArray>().unwrap();
+    let batches = engine
+        .execute("ws1", false, "SELECT veda_read('/log.txt') as c")
+        .await
+        .unwrap();
+    let arr = batches[0]
+        .column(0)
+        .as_any()
+        .downcast_ref::<arrow::array::StringArray>()
+        .unwrap();
     assert_eq!(arr.value(0), "line1\nline2\n");
 }
 
@@ -735,21 +1185,52 @@ async fn udf_veda_mkdir_and_remove() {
     let meta = Arc::new(MockMetaFull::new());
     let engine = make_full_engine(meta);
 
-    let batches = engine.execute("ws1", false, "SELECT veda_mkdir('/mydir') as ok").await.unwrap();
-    let arr = batches[0].column(0).as_any().downcast_ref::<arrow::array::BooleanArray>().unwrap();
+    let batches = engine
+        .execute("ws1", false, "SELECT veda_mkdir('/mydir') as ok")
+        .await
+        .unwrap();
+    let arr = batches[0]
+        .column(0)
+        .as_any()
+        .downcast_ref::<arrow::array::BooleanArray>()
+        .unwrap();
     assert!(arr.value(0));
 
-    let batches = engine.execute("ws1", false, "SELECT veda_exists('/mydir') as e").await.unwrap();
-    let arr = batches[0].column(0).as_any().downcast_ref::<arrow::array::BooleanArray>().unwrap();
+    let batches = engine
+        .execute("ws1", false, "SELECT veda_exists('/mydir') as e")
+        .await
+        .unwrap();
+    let arr = batches[0]
+        .column(0)
+        .as_any()
+        .downcast_ref::<arrow::array::BooleanArray>()
+        .unwrap();
     assert!(arr.value(0));
 
-    engine.execute("ws1", false, "SELECT veda_write('/target.txt', 'data')").await.unwrap();
-    let batches = engine.execute("ws1", false, "SELECT veda_remove('/target.txt') as r").await.unwrap();
-    let arr = batches[0].column(0).as_any().downcast_ref::<arrow::array::Int64Array>().unwrap();
+    engine
+        .execute("ws1", false, "SELECT veda_write('/target.txt', 'data')")
+        .await
+        .unwrap();
+    let batches = engine
+        .execute("ws1", false, "SELECT veda_remove('/target.txt') as r")
+        .await
+        .unwrap();
+    let arr = batches[0]
+        .column(0)
+        .as_any()
+        .downcast_ref::<arrow::array::Int64Array>()
+        .unwrap();
     assert_eq!(arr.value(0), 1);
 
-    let batches = engine.execute("ws1", false, "SELECT veda_exists('/target.txt') as e").await.unwrap();
-    let arr = batches[0].column(0).as_any().downcast_ref::<arrow::array::BooleanArray>().unwrap();
+    let batches = engine
+        .execute("ws1", false, "SELECT veda_exists('/target.txt') as e")
+        .await
+        .unwrap();
+    let arr = batches[0]
+        .column(0)
+        .as_any()
+        .downcast_ref::<arrow::array::BooleanArray>()
+        .unwrap();
     assert!(!arr.value(0));
 }
 
@@ -758,17 +1239,31 @@ async fn udf_column_arg_veda_exists() {
     let meta = Arc::new(MockMetaFull::new());
     let engine = make_full_engine(meta);
 
-    engine.execute("ws1", false, "SELECT veda_write('/a.txt', 'aaa')").await.unwrap();
-    engine.execute("ws1", false, "SELECT veda_write('/b.txt', 'bbb')").await.unwrap();
+    engine
+        .execute("ws1", false, "SELECT veda_write('/a.txt', 'aaa')")
+        .await
+        .unwrap();
+    engine
+        .execute("ws1", false, "SELECT veda_write('/b.txt', 'bbb')")
+        .await
+        .unwrap();
 
     let batches = engine
-        .execute("ws1", false, "SELECT path, veda_exists(path) as e FROM files WHERE is_dir = false ORDER BY path")
+        .execute(
+            "ws1",
+            false,
+            "SELECT path, veda_exists(path) as e FROM files WHERE is_dir = false ORDER BY path",
+        )
         .await
         .unwrap();
     let total: usize = batches.iter().map(|b| b.num_rows()).sum();
     assert_eq!(total, 2);
 
-    let arr = batches[0].column(1).as_any().downcast_ref::<arrow::array::BooleanArray>().unwrap();
+    let arr = batches[0]
+        .column(1)
+        .as_any()
+        .downcast_ref::<arrow::array::BooleanArray>()
+        .unwrap();
     assert!(arr.value(0), "first row should exist");
     assert!(arr.value(1), "second row should exist");
 }
@@ -778,17 +1273,31 @@ async fn udf_column_arg_veda_read() {
     let meta = Arc::new(MockMetaFull::new());
     let engine = make_full_engine(meta);
 
-    engine.execute("ws1", false, "SELECT veda_write('/x.txt', 'content_x')").await.unwrap();
-    engine.execute("ws1", false, "SELECT veda_write('/y.txt', 'content_y')").await.unwrap();
+    engine
+        .execute("ws1", false, "SELECT veda_write('/x.txt', 'content_x')")
+        .await
+        .unwrap();
+    engine
+        .execute("ws1", false, "SELECT veda_write('/y.txt', 'content_y')")
+        .await
+        .unwrap();
 
     let batches = engine
-        .execute("ws1", false, "SELECT path, veda_read(path) as content FROM files WHERE is_dir = false ORDER BY path")
+        .execute(
+            "ws1",
+            false,
+            "SELECT path, veda_read(path) as content FROM files WHERE is_dir = false ORDER BY path",
+        )
         .await
         .unwrap();
     let total: usize = batches.iter().map(|b| b.num_rows()).sum();
     assert_eq!(total, 2);
 
-    let arr = batches[0].column(1).as_any().downcast_ref::<arrow::array::StringArray>().unwrap();
+    let arr = batches[0]
+        .column(1)
+        .as_any()
+        .downcast_ref::<arrow::array::StringArray>()
+        .unwrap();
     assert_eq!(arr.value(0), "content_x");
     assert_eq!(arr.value(1), "content_y");
 }
@@ -800,13 +1309,27 @@ async fn veda_fs_dir_listing() {
     let meta = Arc::new(MockMetaFull::new());
     let engine = make_full_engine(meta);
 
-    engine.execute("ws1", false, "SELECT veda_mkdir('/docs')").await.unwrap();
-    engine.execute("ws1", false, "SELECT veda_write('/docs/a.txt', 'aaa')").await.unwrap();
-    engine.execute("ws1", false, "SELECT veda_write('/docs/b.md', 'bbb')").await.unwrap();
+    engine
+        .execute("ws1", false, "SELECT veda_mkdir('/docs')")
+        .await
+        .unwrap();
+    engine
+        .execute("ws1", false, "SELECT veda_write('/docs/a.txt', 'aaa')")
+        .await
+        .unwrap();
+    engine
+        .execute("ws1", false, "SELECT veda_write('/docs/b.md', 'bbb')")
+        .await
+        .unwrap();
 
     let batches = engine
-        .execute("ws1", false, "SELECT path, name, type, size_bytes FROM veda_fs('/docs/')")
-        .await.unwrap();
+        .execute(
+            "ws1",
+            false,
+            "SELECT path, name, type, size_bytes FROM veda_fs('/docs/')",
+        )
+        .await
+        .unwrap();
     let total: usize = batches.iter().map(|b| b.num_rows()).sum();
     assert_eq!(total, 2, "should list 2 files under /docs/");
 }
@@ -816,16 +1339,36 @@ async fn veda_fs_read_plain_text() {
     let meta = Arc::new(MockMetaFull::new());
     let engine = make_full_engine(meta);
 
-    engine.execute("ws1", false, "SELECT veda_write('/notes.txt', 'line1\nline2\nline3')").await.unwrap();
+    engine
+        .execute(
+            "ws1",
+            false,
+            "SELECT veda_write('/notes.txt', 'line1\nline2\nline3')",
+        )
+        .await
+        .unwrap();
 
     let batches = engine
-        .execute("ws1", false, "SELECT _line_number, line FROM veda_fs('/notes.txt')")
-        .await.unwrap();
+        .execute(
+            "ws1",
+            false,
+            "SELECT _line_number, line FROM veda_fs('/notes.txt')",
+        )
+        .await
+        .unwrap();
     let total: usize = batches.iter().map(|b| b.num_rows()).sum();
     assert_eq!(total, 3);
 
-    let ln_arr = batches[0].column(0).as_any().downcast_ref::<arrow::array::Int64Array>().unwrap();
-    let line_arr = batches[0].column(1).as_any().downcast_ref::<arrow::array::StringArray>().unwrap();
+    let ln_arr = batches[0]
+        .column(0)
+        .as_any()
+        .downcast_ref::<arrow::array::Int64Array>()
+        .unwrap();
+    let line_arr = batches[0]
+        .column(1)
+        .as_any()
+        .downcast_ref::<arrow::array::StringArray>()
+        .unwrap();
     assert_eq!(ln_arr.value(0), 1);
     assert_eq!(line_arr.value(0), "line1");
     assert_eq!(line_arr.value(2), "line3");
@@ -837,15 +1380,27 @@ async fn veda_fs_read_csv() {
     let engine = make_full_engine(meta);
 
     let csv = "name,age\nAlice,30\nBob,25";
-    engine.execute("ws1", false, &format!("SELECT veda_write('/data.csv', '{csv}')")).await.unwrap();
+    engine
+        .execute(
+            "ws1",
+            false,
+            &format!("SELECT veda_write('/data.csv', '{csv}')"),
+        )
+        .await
+        .unwrap();
 
     let batches = engine
         .execute("ws1", false, "SELECT name, age FROM veda_fs('/data.csv')")
-        .await.unwrap();
+        .await
+        .unwrap();
     let total: usize = batches.iter().map(|b| b.num_rows()).sum();
     assert_eq!(total, 2);
 
-    let name_arr = batches[0].column(0).as_any().downcast_ref::<arrow::array::StringArray>().unwrap();
+    let name_arr = batches[0]
+        .column(0)
+        .as_any()
+        .downcast_ref::<arrow::array::StringArray>()
+        .unwrap();
     assert_eq!(name_arr.value(0), "Alice");
     assert_eq!(name_arr.value(1), "Bob");
 }
@@ -857,15 +1412,31 @@ async fn veda_fs_read_jsonl() {
 
     let jsonl = r#"{"level":"info","msg":"start"}
 {"level":"error","msg":"fail"}"#;
-    engine.execute("ws1", false, &format!("SELECT veda_write('/app.jsonl', '{jsonl}')")).await.unwrap();
+    engine
+        .execute(
+            "ws1",
+            false,
+            &format!("SELECT veda_write('/app.jsonl', '{jsonl}')"),
+        )
+        .await
+        .unwrap();
 
     let batches = engine
-        .execute("ws1", false, "SELECT _line_number, line FROM veda_fs('/app.jsonl')")
-        .await.unwrap();
+        .execute(
+            "ws1",
+            false,
+            "SELECT _line_number, line FROM veda_fs('/app.jsonl')",
+        )
+        .await
+        .unwrap();
     let total: usize = batches.iter().map(|b| b.num_rows()).sum();
     assert_eq!(total, 2);
 
-    let line_arr = batches[0].column(1).as_any().downcast_ref::<arrow::array::StringArray>().unwrap();
+    let line_arr = batches[0]
+        .column(1)
+        .as_any()
+        .downcast_ref::<arrow::array::StringArray>()
+        .unwrap();
     assert!(line_arr.value(0).contains("info"));
     assert!(line_arr.value(1).contains("error"));
 }
@@ -875,13 +1446,31 @@ async fn veda_fs_glob() {
     let meta = Arc::new(MockMetaFull::new());
     let engine = make_full_engine(meta);
 
-    engine.execute("ws1", false, "SELECT veda_mkdir('/logs')").await.unwrap();
-    engine.execute("ws1", false, "SELECT veda_write('/logs/a.txt', 'log_a\nline2')").await.unwrap();
-    engine.execute("ws1", false, "SELECT veda_write('/logs/b.txt', 'log_b')").await.unwrap();
+    engine
+        .execute("ws1", false, "SELECT veda_mkdir('/logs')")
+        .await
+        .unwrap();
+    engine
+        .execute(
+            "ws1",
+            false,
+            "SELECT veda_write('/logs/a.txt', 'log_a\nline2')",
+        )
+        .await
+        .unwrap();
+    engine
+        .execute("ws1", false, "SELECT veda_write('/logs/b.txt', 'log_b')")
+        .await
+        .unwrap();
 
     let batches = engine
-        .execute("ws1", false, "SELECT _line_number, line, _path FROM veda_fs('/logs/*.txt')")
-        .await.unwrap();
+        .execute(
+            "ws1",
+            false,
+            "SELECT _line_number, line, _path FROM veda_fs('/logs/*.txt')",
+        )
+        .await
+        .unwrap();
     let total: usize = batches.iter().map(|b| b.num_rows()).sum();
     assert_eq!(total, 3, "2 lines from a.txt + 1 from b.txt");
 }
@@ -893,12 +1482,23 @@ async fn veda_fs_events_basic() {
     let meta = Arc::new(MockMetaFull::new());
     let engine = make_full_engine(meta);
 
-    engine.execute("ws1", false, "SELECT veda_write('/a.txt', 'hello')").await.unwrap();
-    engine.execute("ws1", false, "SELECT veda_write('/b.txt', 'world')").await.unwrap();
+    engine
+        .execute("ws1", false, "SELECT veda_write('/a.txt', 'hello')")
+        .await
+        .unwrap();
+    engine
+        .execute("ws1", false, "SELECT veda_write('/b.txt', 'world')")
+        .await
+        .unwrap();
 
     let batches = engine
-        .execute("ws1", false, "SELECT id, event_type, path FROM veda_fs_events()")
-        .await.unwrap();
+        .execute(
+            "ws1",
+            false,
+            "SELECT id, event_type, path FROM veda_fs_events()",
+        )
+        .await
+        .unwrap();
     let total: usize = batches.iter().map(|b| b.num_rows()).sum();
     assert!(total >= 2, "should have at least 2 events, got {total}");
 }
@@ -908,20 +1508,34 @@ async fn veda_fs_events_since_id() {
     let meta = Arc::new(MockMetaFull::new());
     let engine = make_full_engine(meta);
 
-    engine.execute("ws1", false, "SELECT veda_write('/a.txt', 'a')").await.unwrap();
-    engine.execute("ws1", false, "SELECT veda_write('/b.txt', 'b')").await.unwrap();
-    engine.execute("ws1", false, "SELECT veda_write('/c.txt', 'c')").await.unwrap();
+    engine
+        .execute("ws1", false, "SELECT veda_write('/a.txt', 'a')")
+        .await
+        .unwrap();
+    engine
+        .execute("ws1", false, "SELECT veda_write('/b.txt', 'b')")
+        .await
+        .unwrap();
+    engine
+        .execute("ws1", false, "SELECT veda_write('/c.txt', 'c')")
+        .await
+        .unwrap();
 
     let all = engine
         .execute("ws1", false, "SELECT id FROM veda_fs_events()")
-        .await.unwrap();
+        .await
+        .unwrap();
     let all_count: usize = all.iter().map(|b| b.num_rows()).sum();
 
     let since = engine
         .execute("ws1", false, "SELECT id FROM veda_fs_events(1)")
-        .await.unwrap();
+        .await
+        .unwrap();
     let since_count: usize = since.iter().map(|b| b.num_rows()).sum();
-    assert!(since_count < all_count, "since_id=1 filter should reduce results: all={all_count} since={since_count}");
+    assert!(
+        since_count < all_count,
+        "since_id=1 filter should reduce results: all={all_count} since={since_count}"
+    );
 }
 
 #[tokio::test]
@@ -929,19 +1543,45 @@ async fn veda_storage_stats_basic() {
     let meta = Arc::new(MockMetaFull::new());
     let engine = make_full_engine(meta);
 
-    engine.execute("ws1", false, "SELECT veda_mkdir('/data')").await.unwrap();
-    engine.execute("ws1", false, "SELECT veda_write('/data/x.txt', 'hello')").await.unwrap();
-    engine.execute("ws1", false, "SELECT veda_write('/data/y.txt', 'world!')").await.unwrap();
+    engine
+        .execute("ws1", false, "SELECT veda_mkdir('/data')")
+        .await
+        .unwrap();
+    engine
+        .execute("ws1", false, "SELECT veda_write('/data/x.txt', 'hello')")
+        .await
+        .unwrap();
+    engine
+        .execute("ws1", false, "SELECT veda_write('/data/y.txt', 'world!')")
+        .await
+        .unwrap();
 
     let batches = engine
-        .execute("ws1", false, "SELECT total_files, total_directories, total_bytes FROM veda_storage_stats()")
-        .await.unwrap();
+        .execute(
+            "ws1",
+            false,
+            "SELECT total_files, total_directories, total_bytes FROM veda_storage_stats()",
+        )
+        .await
+        .unwrap();
     assert_eq!(batches.len(), 1);
     assert_eq!(batches[0].num_rows(), 1);
 
-    let files = batches[0].column(0).as_any().downcast_ref::<arrow::array::Int64Array>().unwrap();
-    let dirs = batches[0].column(1).as_any().downcast_ref::<arrow::array::Int64Array>().unwrap();
-    let bytes = batches[0].column(2).as_any().downcast_ref::<arrow::array::Int64Array>().unwrap();
+    let files = batches[0]
+        .column(0)
+        .as_any()
+        .downcast_ref::<arrow::array::Int64Array>()
+        .unwrap();
+    let dirs = batches[0]
+        .column(1)
+        .as_any()
+        .downcast_ref::<arrow::array::Int64Array>()
+        .unwrap();
+    let bytes = batches[0]
+        .column(2)
+        .as_any()
+        .downcast_ref::<arrow::array::Int64Array>()
+        .unwrap();
 
     assert!(files.value(0) >= 2, "should have at least 2 files");
     assert!(dirs.value(0) >= 1, "should have at least 1 directory");
@@ -957,9 +1597,17 @@ async fn udf_read_not_found_returns_null() {
 
     let batches = engine
         .execute("ws1", false, "SELECT veda_read('/nonexistent.txt') as c")
-        .await.unwrap();
-    let arr = batches[0].column(0).as_any().downcast_ref::<arrow::array::StringArray>().unwrap();
-    assert!(arr.is_null(0), "reading a nonexistent file should return NULL");
+        .await
+        .unwrap();
+    let arr = batches[0]
+        .column(0)
+        .as_any()
+        .downcast_ref::<arrow::array::StringArray>()
+        .unwrap();
+    assert!(
+        arr.is_null(0),
+        "reading a nonexistent file should return NULL"
+    );
 }
 
 #[tokio::test]
@@ -969,9 +1617,17 @@ async fn udf_exists_not_found_returns_false() {
 
     let batches = engine
         .execute("ws1", false, "SELECT veda_exists('/ghost.txt') as e")
-        .await.unwrap();
-    let arr = batches[0].column(0).as_any().downcast_ref::<arrow::array::BooleanArray>().unwrap();
-    assert!(!arr.value(0), "veda_exists on missing file should return false");
+        .await
+        .unwrap();
+    let arr = batches[0]
+        .column(0)
+        .as_any()
+        .downcast_ref::<arrow::array::BooleanArray>()
+        .unwrap();
+    assert!(
+        !arr.value(0),
+        "veda_exists on missing file should return false"
+    );
 }
 
 #[tokio::test]
@@ -981,9 +1637,17 @@ async fn udf_size_not_found_returns_null() {
 
     let batches = engine
         .execute("ws1", false, "SELECT veda_size('/missing.bin') as s")
-        .await.unwrap();
-    let arr = batches[0].column(0).as_any().downcast_ref::<arrow::array::Int64Array>().unwrap();
-    assert!(arr.is_null(0), "veda_size on missing file should return NULL");
+        .await
+        .unwrap();
+    let arr = batches[0]
+        .column(0)
+        .as_any()
+        .downcast_ref::<arrow::array::Int64Array>()
+        .unwrap();
+    assert!(
+        arr.is_null(0),
+        "veda_size on missing file should return NULL"
+    );
 }
 
 #[tokio::test]
@@ -996,7 +1660,10 @@ async fn udf_remove_nonexistent_errors() {
         .await;
     assert!(result.is_err(), "removing nonexistent file should error");
     let msg = result.unwrap_err().to_string();
-    assert!(msg.contains("not found"), "error should mention not found: {msg}");
+    assert!(
+        msg.contains("not found"),
+        "error should mention not found: {msg}"
+    );
 }
 
 #[tokio::test]
@@ -1008,7 +1675,10 @@ async fn udf_error_message_is_friendly() {
         .execute("ws1", false, "SELECT veda_remove('/doesnotexist.txt')")
         .await;
     let msg = result.unwrap_err().to_string();
-    assert!(msg.contains("veda:"), "error should have veda: prefix for clarity: {msg}");
+    assert!(
+        msg.contains("veda:"),
+        "error should have veda: prefix for clarity: {msg}"
+    );
 }
 
 #[tokio::test]
@@ -1021,8 +1691,10 @@ async fn read_only_rejects_write_udf() {
         .await;
     assert!(result.is_err(), "write UDF should fail with read_only=true");
     let err_msg = result.unwrap_err().to_string();
-    assert!(err_msg.contains("permission denied") || err_msg.contains("read-only"),
-        "error should mention permission: {err_msg}");
+    assert!(
+        err_msg.contains("permission denied") || err_msg.contains("read-only"),
+        "error should mention permission: {err_msg}"
+    );
 }
 
 #[tokio::test]
@@ -1030,12 +1702,20 @@ async fn read_only_allows_read_udf() {
     let meta = Arc::new(MockMetaFull::new());
     let engine = make_full_engine(meta);
 
-    engine.execute("ws1", false, "SELECT veda_write('/r.txt', 'data')").await.unwrap();
+    engine
+        .execute("ws1", false, "SELECT veda_write('/r.txt', 'data')")
+        .await
+        .unwrap();
 
     let batches = engine
         .execute("ws1", true, "SELECT veda_read('/r.txt') as c")
-        .await.unwrap();
-    let arr = batches[0].column(0).as_any().downcast_ref::<arrow::array::StringArray>().unwrap();
+        .await
+        .unwrap();
+    let arr = batches[0]
+        .column(0)
+        .as_any()
+        .downcast_ref::<arrow::array::StringArray>()
+        .unwrap();
     assert_eq!(arr.value(0), "data");
 }
 
@@ -1048,13 +1728,19 @@ async fn embedding_returns_json_vector() {
 
     let batches = engine
         .execute("ws1", false, "SELECT embedding('hello world') as vec")
-        .await.unwrap();
+        .await
+        .unwrap();
     assert_eq!(batches.len(), 1);
     assert_eq!(batches[0].num_rows(), 1);
 
-    let arr = batches[0].column(0).as_any().downcast_ref::<arrow::array::StringArray>().unwrap();
+    let arr = batches[0]
+        .column(0)
+        .as_any()
+        .downcast_ref::<arrow::array::StringArray>()
+        .unwrap();
     let json_str = arr.value(0);
-    let parsed: Vec<f32> = serde_json::from_str(json_str).expect("should be valid JSON float array");
+    let parsed: Vec<f32> =
+        serde_json::from_str(json_str).expect("should be valid JSON float array");
     assert_eq!(parsed.len(), 128, "mock embedding dimension is 128");
 }
 
@@ -1063,15 +1749,27 @@ async fn embedding_with_column_arg() {
     let meta = Arc::new(MockMetaFull::new());
     let engine = make_full_engine(meta);
 
-    engine.execute("ws1", false, "SELECT veda_write('/doc.txt', 'some text')").await.unwrap();
+    engine
+        .execute("ws1", false, "SELECT veda_write('/doc.txt', 'some text')")
+        .await
+        .unwrap();
 
     let batches = engine
-        .execute("ws1", false, "SELECT path, embedding(veda_read(path)) as vec FROM files WHERE is_dir = false")
-        .await.unwrap();
+        .execute(
+            "ws1",
+            false,
+            "SELECT path, embedding(veda_read(path)) as vec FROM files WHERE is_dir = false",
+        )
+        .await
+        .unwrap();
     let total: usize = batches.iter().map(|b| b.num_rows()).sum();
     assert_eq!(total, 1);
 
-    let arr = batches[0].column(1).as_any().downcast_ref::<arrow::array::StringArray>().unwrap();
+    let arr = batches[0]
+        .column(1)
+        .as_any()
+        .downcast_ref::<arrow::array::StringArray>()
+        .unwrap();
     let parsed: Vec<f32> = serde_json::from_str(arr.value(0)).unwrap();
     assert_eq!(parsed.len(), 128);
 }
@@ -1101,37 +1799,49 @@ async fn search_returns_results() {
     let engine = make_full_engine_with_vector(meta, vector);
 
     let batches = engine
-        .execute("ws1", false, "SELECT file_id, score, content, path FROM search('deployment')")
-        .await.unwrap();
+        .execute(
+            "ws1",
+            false,
+            "SELECT file_id, score, content, path FROM search('deployment')",
+        )
+        .await
+        .unwrap();
     let total: usize = batches.iter().map(|b| b.num_rows()).sum();
     assert_eq!(total, 2);
 
-    let score_arr = batches[0].column(1).as_any().downcast_ref::<arrow::array::Float64Array>().unwrap();
+    let score_arr = batches[0]
+        .column(1)
+        .as_any()
+        .downcast_ref::<arrow::array::Float64Array>()
+        .unwrap();
     assert!((score_arr.value(0) - 0.95).abs() < 0.001);
 
-    let path_arr = batches[0].column(3).as_any().downcast_ref::<arrow::array::StringArray>().unwrap();
+    let path_arr = batches[0]
+        .column(3)
+        .as_any()
+        .downcast_ref::<arrow::array::StringArray>()
+        .unwrap();
     assert_eq!(path_arr.value(0), "/docs/deploy.md");
     assert!(path_arr.is_null(1));
 }
 
 #[tokio::test]
 async fn search_with_mode_and_limit() {
-    let hits = vec![
-        SearchHit {
-            file_id: "f1".into(),
-            chunk_index: 0,
-            content: "result".into(),
-            score: 0.9,
-            path: Some("/a.md".into()),
-        },
-    ];
+    let hits = vec![SearchHit {
+        file_id: "f1".into(),
+        chunk_index: 0,
+        content: "result".into(),
+        score: 0.9,
+        path: Some("/a.md".into()),
+    }];
     let vector = Arc::new(MockVector::new(hits));
     let meta = Arc::new(MockMetaFull::new());
     let engine = make_full_engine_with_vector(meta, vector);
 
     let batches = engine
         .execute("ws1", false, "SELECT * FROM search('query', 'semantic', 5)")
-        .await.unwrap();
+        .await
+        .unwrap();
     let total: usize = batches.iter().map(|b| b.num_rows()).sum();
     assert_eq!(total, 1);
 }
@@ -1144,7 +1854,8 @@ async fn search_empty_results() {
 
     let batches = engine
         .execute("ws1", false, "SELECT * FROM search('nothing')")
-        .await.unwrap();
+        .await
+        .unwrap();
     let total: usize = batches.iter().map(|b| b.num_rows()).sum();
     assert_eq!(total, 0);
 }
@@ -1159,22 +1870,42 @@ async fn search_invalid_mode_errors() {
         .await;
     assert!(result.is_err());
     let msg = result.unwrap_err().to_string();
-    assert!(msg.contains("unknown mode"), "error should mention unknown mode: {msg}");
+    assert!(
+        msg.contains("unknown mode"),
+        "error should mention unknown mode: {msg}"
+    );
 }
 
 #[tokio::test]
 async fn search_with_where_filter() {
     let hits = vec![
-        SearchHit { file_id: "f1".into(), chunk_index: 0, content: "high".into(), score: 0.95, path: Some("/a.md".into()) },
-        SearchHit { file_id: "f2".into(), chunk_index: 0, content: "low".into(), score: 0.30, path: Some("/b.md".into()) },
+        SearchHit {
+            file_id: "f1".into(),
+            chunk_index: 0,
+            content: "high".into(),
+            score: 0.95,
+            path: Some("/a.md".into()),
+        },
+        SearchHit {
+            file_id: "f2".into(),
+            chunk_index: 0,
+            content: "low".into(),
+            score: 0.30,
+            path: Some("/b.md".into()),
+        },
     ];
     let vector = Arc::new(MockVector::new(hits));
     let meta = Arc::new(MockMetaFull::new());
     let engine = make_full_engine_with_vector(meta, vector);
 
     let batches = engine
-        .execute("ws1", false, "SELECT path, score FROM search('test') WHERE score > 0.5")
-        .await.unwrap();
+        .execute(
+            "ws1",
+            false,
+            "SELECT path, score FROM search('test') WHERE score > 0.5",
+        )
+        .await
+        .unwrap();
     let total: usize = batches.iter().map(|b| b.num_rows()).sum();
     assert_eq!(total, 1);
 }

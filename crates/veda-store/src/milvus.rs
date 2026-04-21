@@ -1,7 +1,7 @@
 //! Milvus REST v2 `VectorStore` implementation.
 
 use async_trait::async_trait;
-use reqwest::header::{AUTHORIZATION, CONTENT_TYPE, HeaderMap, HeaderValue};
+use reqwest::header::{HeaderMap, HeaderValue, AUTHORIZATION, CONTENT_TYPE};
 use serde_json::{json, Value};
 use tracing::warn;
 use veda_core::store::{CollectionVectorStore, VectorStore};
@@ -18,10 +18,7 @@ fn storage_err(e: impl ToString) -> VedaError {
 
 /// Milvus boolean expressions use double-quoted string literals (see Milvus docs).
 fn milvus_quote(s: &str) -> String {
-    format!(
-        "\"{}\"",
-        s.replace('\\', "\\\\").replace('"', "\\\"")
-    )
+    format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\""))
 }
 
 /// Milvus may return `data` as a flat array of hits or as an array of per-query hit arrays.
@@ -110,7 +107,9 @@ impl MilvusStore {
             .await
             .map_err(|e| VedaError::Storage(e.to_string()))?;
         let v: Value = serde_json::from_str(&text).map_err(|e| {
-            VedaError::Storage(format!("milvus invalid json (HTTP {status}): {e}; body: {text}"))
+            VedaError::Storage(format!(
+                "milvus invalid json (HTTP {status}): {e}; body: {text}"
+            ))
         })?;
         let code = v
             .get("code")
@@ -179,7 +178,8 @@ impl MilvusStore {
                 ]
             }
         });
-        self.post_v2("/v2/vectordb/collections/create", body).await?;
+        self.post_v2("/v2/vectordb/collections/create", body)
+            .await?;
         Ok(())
     }
 
@@ -193,7 +193,10 @@ impl MilvusStore {
                 "indexName": "vector"
             }]
         });
-        match self.post_v2("/v2/vectordb/indexes/create", index_body).await {
+        match self
+            .post_v2("/v2/vectordb/indexes/create", index_body)
+            .await
+        {
             Ok(_) => Ok(()),
             Err(e) => {
                 let m = e.to_string();
@@ -217,10 +220,7 @@ impl MilvusStore {
                 .and_then(|x| x.as_str())
                 .unwrap_or("")
                 .to_string();
-            let chunk_index = row
-                .get("chunk_index")
-                .and_then(|x| x.as_i64())
-                .unwrap_or(0) as i32;
+            let chunk_index = row.get("chunk_index").and_then(|x| x.as_i64()).unwrap_or(0) as i32;
             let content = row
                 .get("content")
                 .and_then(|x| x.as_str())
@@ -230,11 +230,7 @@ impl MilvusStore {
                 .get("distance")
                 .and_then(|x| x.as_f64())
                 .map(|d| d as f32)
-                .or_else(|| {
-                    row.get("score")
-                        .and_then(|x| x.as_f64())
-                        .map(|d| d as f32)
-                })
+                .or_else(|| row.get("score").and_then(|x| x.as_f64()).map(|d| d as f32))
                 .unwrap_or(0.0);
             out.push(SearchHit {
                 file_id,
@@ -283,7 +279,10 @@ impl MilvusStore {
         Ok(Self::rows_to_hits(&rows, limit))
     }
 
-    async fn hybrid_search_remote(&self, req: &HybridSearchRequest) -> Result<Option<Vec<SearchHit>>> {
+    async fn hybrid_search_remote(
+        &self,
+        req: &HybridSearchRequest,
+    ) -> Result<Option<Vec<SearchHit>>> {
         let ws = milvus_quote(&req.workspace_id);
         let base_filter = format!("workspace_id == {ws}");
         let lim = req.limit.min(16_383).max(1);
@@ -307,7 +306,10 @@ impl MilvusStore {
             "limit": lim,
             "outputFields": ["id", "workspace_id", "file_id", "chunk_index", "content"]
         });
-        match self.post_v2("/v2/vectordb/entities/hybrid_search", body).await {
+        match self
+            .post_v2("/v2/vectordb/entities/hybrid_search", body)
+            .await
+        {
             Ok(v) => {
                 let rows = flatten_entity_rows(v.get("data"));
                 Ok(Some(Self::rows_to_hits(&rows, req.limit)))
@@ -334,7 +336,10 @@ impl MilvusStore {
                 .replace('_', "\\_")
                 .replace('"', "\\\"")
         );
-        let filter = format!("workspace_id == {ws} && content like {}", milvus_quote(&pat));
+        let filter = format!(
+            "workspace_id == {ws} && content like {}",
+            milvus_quote(&pat)
+        );
         let lim = limit.min(16_383).max(1);
         let body = json!({
             "collectionName": COLLECTION,
@@ -352,10 +357,7 @@ impl MilvusStore {
                     .and_then(|x| x.as_str())
                     .unwrap_or("")
                     .to_string(),
-                chunk_index: row
-                    .get("chunk_index")
-                    .and_then(|x| x.as_i64())
-                    .unwrap_or(0) as i32,
+                chunk_index: row.get("chunk_index").and_then(|x| x.as_i64()).unwrap_or(0) as i32,
                 content: row
                     .get("content")
                     .and_then(|x| x.as_str())
@@ -402,9 +404,8 @@ impl VectorStore for MilvusStore {
         let ws_id = &chunks[0].workspace_id;
         let ws = milvus_quote(ws_id);
         let fid = milvus_quote(file_id);
-        let filter = format!(
-            "workspace_id == {ws} && file_id == {fid} && chunk_index > {max_index}"
-        );
+        let filter =
+            format!("workspace_id == {ws} && file_id == {fid} && chunk_index > {max_index}");
         let del = json!({
             "collectionName": COLLECTION,
             "filter": filter
@@ -446,9 +447,10 @@ impl VectorStore for MilvusStore {
 
     async fn search(&self, req: &SearchRequest) -> Result<Vec<SearchHit>> {
         match req.mode {
-            SearchMode::Fulltext => self
-                .query_fulltext(&req.workspace_id, &req.query, req.limit)
-                .await,
+            SearchMode::Fulltext => {
+                self.query_fulltext(&req.workspace_id, &req.query, req.limit)
+                    .await
+            }
             SearchMode::Semantic | SearchMode::Hybrid => {
                 let Some(ref v) = req.query_vector else {
                     return Err(VedaError::InvalidInput(
@@ -557,7 +559,8 @@ impl CollectionVectorStore for MilvusStore {
                 "fields": schema_fields,
             }
         });
-        self.post_v2("/v2/vectordb/collections/create", body).await?;
+        self.post_v2("/v2/vectordb/collections/create", body)
+            .await?;
 
         let idx = json!({
             "collectionName": name,

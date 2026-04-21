@@ -42,9 +42,11 @@ impl TableFunctionImpl for VedaSearchFactory {
     fn call(&self, exprs: &[Expr]) -> Result<Arc<dyn TableProvider>> {
         let query = match exprs.first() {
             Some(Expr::Literal(ScalarValue::Utf8(Some(s)), _)) => s.clone(),
-            _ => return Err(datafusion::error::DataFusionError::Plan(
-                "search() requires a string query as first argument".to_string(),
-            )),
+            _ => {
+                return Err(datafusion::error::DataFusionError::Plan(
+                    "search() requires a string query as first argument".to_string(),
+                ))
+            }
         };
 
         let mode = match exprs.get(1) {
@@ -52,35 +54,42 @@ impl TableFunctionImpl for VedaSearchFactory {
                 "hybrid" => SearchMode::Hybrid,
                 "semantic" => SearchMode::Semantic,
                 "fulltext" => SearchMode::Fulltext,
-                other => return Err(datafusion::error::DataFusionError::Plan(
-                    format!("search(): unknown mode '{}', expected hybrid/semantic/fulltext", other),
-                )),
+                other => {
+                    return Err(datafusion::error::DataFusionError::Plan(format!(
+                        "search(): unknown mode '{}', expected hybrid/semantic/fulltext",
+                        other
+                    )))
+                }
             },
             Some(Expr::Literal(ScalarValue::Null, _)) | None => SearchMode::Hybrid,
-            _ => return Err(datafusion::error::DataFusionError::Plan(
-                "search(): mode (arg 2) must be a string".to_string(),
-            )),
+            _ => {
+                return Err(datafusion::error::DataFusionError::Plan(
+                    "search(): mode (arg 2) must be a string".to_string(),
+                ))
+            }
         };
 
         let limit: usize = match exprs.get(2) {
             Some(Expr::Literal(ScalarValue::Int64(Some(v)), _)) => {
                 if *v <= 0 {
-                    return Err(datafusion::error::DataFusionError::Plan(
-                        format!("search(): limit must be positive, got {}", v),
-                    ));
+                    return Err(datafusion::error::DataFusionError::Plan(format!(
+                        "search(): limit must be positive, got {}",
+                        v
+                    )));
                 }
                 *v as usize
             }
             Some(Expr::Literal(ScalarValue::Null, _)) | None => 10,
-            _ => return Err(datafusion::error::DataFusionError::Plan(
-                "search(): limit (arg 3) must be an integer".to_string(),
-            )),
+            _ => {
+                return Err(datafusion::error::DataFusionError::Plan(
+                    "search(): limit (arg 3) must be an integer".to_string(),
+                ))
+            }
         };
 
-        let hits = fs_udf::block_on(self.do_search(&query, mode, limit))
-            .map_err(|e| datafusion::error::DataFusionError::Execution(
-                format!("search() failed: {e}"),
-            ))?;
+        let hits = fs_udf::block_on(self.do_search(&query, mode, limit)).map_err(|e| {
+            datafusion::error::DataFusionError::Execution(format!("search() failed: {e}"))
+        })?;
 
         let schema = search_schema();
         let n = hits.len();

@@ -14,7 +14,10 @@ fn make_service() -> (FsService, Arc<std::sync::Mutex<mock_store::MockState>>) {
 #[tokio::test]
 async fn write_and_read() {
     let (svc, _state) = make_service();
-    let resp = svc.write_file("ws1", "/hello.txt", "hello world").await.unwrap();
+    let resp = svc
+        .write_file("ws1", "/hello.txt", "hello world")
+        .await
+        .unwrap();
     assert!(!resp.content_unchanged);
     assert_eq!(resp.revision, 1);
 
@@ -119,7 +122,10 @@ async fn delete_root_fails() {
         let result = svc.delete("ws1", path).await;
         match &result {
             Err(VedaError::InvalidPath(msg)) => {
-                assert!(msg.contains("cannot delete root"), "path={path:?} msg={msg}");
+                assert!(
+                    msg.contains("cannot delete root"),
+                    "path={path:?} msg={msg}"
+                );
             }
             other => panic!("expected InvalidPath for {path:?}, got {other:?}"),
         }
@@ -188,7 +194,10 @@ async fn stat_root_virtual() {
 async fn copy_file_cow() {
     let (svc, state) = make_service();
     svc.write_file("ws1", "/orig.txt", "shared").await.unwrap();
-    let resp = svc.copy_file("ws1", "/orig.txt", "/copy.txt").await.unwrap();
+    let resp = svc
+        .copy_file("ws1", "/orig.txt", "/copy.txt")
+        .await
+        .unwrap();
     assert!(resp.content_unchanged);
 
     let c1 = svc.read_file("ws1", "/orig.txt").await.unwrap();
@@ -228,7 +237,10 @@ async fn read_lines() {
     let content = "line1\nline2\nline3\nline4\nline5\n";
     svc.write_file("ws1", "/lines.txt", content).await.unwrap();
 
-    let lines = svc.read_file_lines("ws1", "/lines.txt", 2, 4).await.unwrap();
+    let lines = svc
+        .read_file_lines("ws1", "/lines.txt", 2, 4)
+        .await
+        .unwrap();
     assert_eq!(lines, "line2\nline3\nline4");
 }
 
@@ -285,7 +297,9 @@ async fn delete_dir_cleans_up_child_files() {
 async fn append_file_cow_isolation() {
     let (svc, _state) = make_service();
     svc.write_file("ws1", "/orig.txt", "hello").await.unwrap();
-    svc.copy_file("ws1", "/orig.txt", "/copy.txt").await.unwrap();
+    svc.copy_file("ws1", "/orig.txt", "/copy.txt")
+        .await
+        .unwrap();
 
     // Append to one side should NOT affect the other
     svc.append_file("ws1", "/orig.txt", " world").await.unwrap();
@@ -293,13 +307,19 @@ async fn append_file_cow_isolation() {
     let orig = svc.read_file("ws1", "/orig.txt").await.unwrap();
     let copy = svc.read_file("ws1", "/copy.txt").await.unwrap();
     assert_eq!(orig, "hello world");
-    assert_eq!(copy, "hello", "copy should be unchanged after appending to orig");
+    assert_eq!(
+        copy, "hello",
+        "copy should be unchanged after appending to orig"
+    );
 }
 
 #[tokio::test]
 async fn append_creates_new_file() {
     let (svc, _) = make_service();
-    let resp = svc.append_file("ws1", "/new.txt", "appended").await.unwrap();
+    let resp = svc
+        .append_file("ws1", "/new.txt", "appended")
+        .await
+        .unwrap();
     assert_eq!(resp.revision, 1);
     assert!(!resp.content_unchanged);
 

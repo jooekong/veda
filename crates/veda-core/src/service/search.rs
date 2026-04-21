@@ -33,7 +33,11 @@ impl SearchService {
         path_prefix: Option<&str>,
     ) -> Result<Vec<SearchHit>> {
         let limit = if limit == 0 { 10 } else { limit };
-        let fetch_limit = if path_prefix.is_some() { limit * 3 } else { limit };
+        let fetch_limit = if path_prefix.is_some() {
+            limit * 3
+        } else {
+            limit
+        };
 
         let mut hits = match mode {
             SearchMode::Semantic => {
@@ -94,9 +98,7 @@ impl SearchService {
         }
 
         if let Some(prefix) = path_prefix {
-            hits.retain(|h| {
-                h.path.as_ref().map_or(false, |p| p.starts_with(prefix))
-            });
+            hits.retain(|h| h.path.as_ref().map_or(false, |p| p.starts_with(prefix)));
         }
 
         hits.truncate(limit);

@@ -1,6 +1,6 @@
-use std::sync::Arc;
 use std::collections::HashMap;
 use std::fmt::{self, Debug, Formatter};
+use std::sync::Arc;
 
 use arrow::array::{Int64Builder, RecordBatch, StringBuilder};
 use datafusion::catalog::{TableFunctionImpl, TableProvider};
@@ -46,10 +46,11 @@ impl TableFunctionImpl for VedaFsTableFactory {
 
         match mode {
             FsMode::DirListing => {
-                let dentries = fs_udf::block_on(
-                    fs.list_dir_recursive(&ws, &path, MAX_GLOB_FILE_COUNT),
-                )
-                .map_err(|e| datafusion::error::DataFusionError::Execution(e.to_string()))?;
+                let dentries =
+                    fs_udf::block_on(fs.list_dir_recursive(&ws, &path, MAX_GLOB_FILE_COUNT))
+                        .map_err(|e| {
+                            datafusion::error::DataFusionError::Execution(e.to_string())
+                        })?;
 
                 let batch = build_dir_listing_batch(&dentries, &fs, &ws)?;
                 let schema = format::dir_listing_schema();
@@ -64,10 +65,8 @@ impl TableFunctionImpl for VedaFsTableFactory {
                 Ok(Arc::new(table))
             }
             FsMode::Glob => {
-                let matching = fs_udf::block_on(
-                    fs.glob_files(&ws, &path, MAX_GLOB_FILE_COUNT),
-                )
-                .map_err(|e| datafusion::error::DataFusionError::Execution(e.to_string()))?;
+                let matching = fs_udf::block_on(fs.glob_files(&ws, &path, MAX_GLOB_FILE_COUNT))
+                    .map_err(|e| datafusion::error::DataFusionError::Execution(e.to_string()))?;
 
                 let batches = read_glob_files(&fs, &ws, &matching)?;
 
@@ -102,11 +101,7 @@ fn detect_mode(path: &str) -> FsMode {
     }
 }
 
-fn build_dir_listing_batch(
-    dentries: &[Dentry],
-    fs: &FsService,
-    _ws: &str,
-) -> Result<RecordBatch> {
+fn build_dir_listing_batch(dentries: &[Dentry], fs: &FsService, _ws: &str) -> Result<RecordBatch> {
     let n = dentries.len();
 
     let file_ids: Vec<&str> = dentries
@@ -151,20 +146,18 @@ fn build_dir_listing_batch(
     )?)
 }
 
-fn read_single_file(
-    fs: &FsService,
-    ws: &str,
-    path: &str,
-    fmt: &FileFormat,
-) -> Result<RecordBatch> {
+fn read_single_file(fs: &FsService, ws: &str, path: &str, fmt: &FileFormat) -> Result<RecordBatch> {
     let info = fs_udf::block_on(fs.stat(ws, path))
         .map_err(|e| datafusion::error::DataFusionError::Execution(e.to_string()))?;
 
     if let Some(sz) = info.size_bytes {
         if sz as usize > MAX_SINGLE_FILE_BYTES {
-            return Err(datafusion::error::DataFusionError::Execution(
-                format!("file {} is {} bytes, exceeds {}MB limit", path, sz, MAX_SINGLE_FILE_BYTES / 1024 / 1024),
-            ));
+            return Err(datafusion::error::DataFusionError::Execution(format!(
+                "file {} is {} bytes, exceeds {}MB limit",
+                path,
+                sz,
+                MAX_SINGLE_FILE_BYTES / 1024 / 1024
+            )));
         }
     }
 
@@ -174,11 +167,7 @@ fn read_single_file(
     format::parse_file(&content, path, fmt)
 }
 
-fn read_glob_files(
-    fs: &FsService,
-    ws: &str,
-    dentries: &[Dentry],
-) -> Result<Vec<RecordBatch>> {
+fn read_glob_files(fs: &FsService, ws: &str, dentries: &[Dentry]) -> Result<Vec<RecordBatch>> {
     let mut batches = Vec::new();
     let mut total_read: usize = 0;
     let mut first_format: Option<FileFormat> = None;
@@ -200,9 +189,11 @@ fn read_glob_files(
 
         total_read += content.len();
         if total_read > MAX_GLOB_TOTAL_READ {
-            return Err(datafusion::error::DataFusionError::Execution(
-                format!("glob read budget exceeded: {} bytes > {}MB limit", total_read, MAX_GLOB_TOTAL_READ / 1024 / 1024),
-            ));
+            return Err(datafusion::error::DataFusionError::Execution(format!(
+                "glob read budget exceeded: {} bytes > {}MB limit",
+                total_read,
+                MAX_GLOB_TOTAL_READ / 1024 / 1024
+            )));
         }
 
         let batch = format::parse_file(&content, &d.path, &fmt)?;

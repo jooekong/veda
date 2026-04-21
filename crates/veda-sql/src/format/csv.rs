@@ -5,7 +5,12 @@ use arrow::datatypes::{DataType, Field, Schema, SchemaRef};
 use arrow_csv::ReaderBuilder;
 use datafusion::common::Result;
 
-pub fn parse_csv(content: &str, delimiter: u8, has_header: bool, path: &str) -> Result<RecordBatch> {
+pub fn parse_csv(
+    content: &str,
+    delimiter: u8,
+    has_header: bool,
+    path: &str,
+) -> Result<RecordBatch> {
     let cursor = std::io::Cursor::new(content.as_bytes());
 
     let (inferred_schema, _) = arrow_csv::reader::Format::default()

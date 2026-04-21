@@ -48,14 +48,9 @@ enum Commands {
         path: String,
     },
     /// Move/rename file
-    Mv {
-        src: String,
-        dst: String,
-    },
+    Mv { src: String, dst: String },
     /// Delete file or directory
-    Rm {
-        path: String,
-    },
+    Rm { path: String },
     /// Append content to a file
     Append {
         /// Remote path
@@ -64,9 +59,7 @@ enum Commands {
         content: String,
     },
     /// Create directory
-    Mkdir {
-        path: String,
-    },
+    Mkdir { path: String },
     /// Search files
     Search {
         query: String,
@@ -81,9 +74,7 @@ enum Commands {
         action: CollectionCmd,
     },
     /// Execute SQL query
-    Sql {
-        query: String,
-    },
+    Sql { query: String },
     /// Configuration management
     Config {
         #[command(subcommand)]
@@ -165,10 +156,7 @@ enum ConfigCmd {
     /// Show current configuration
     Show,
     /// Set a configuration value
-    Set {
-        key: String,
-        value: String,
-    },
+    Set { key: String, value: String },
 }
 
 fn mask_secret(s: &str) -> String {
@@ -192,7 +180,11 @@ async fn main() -> anyhow::Result<()> {
 
     match cli.command {
         Commands::Account { action } => match action {
-            AccountCmd::Create { name, email, password } => {
+            AccountCmd::Create {
+                name,
+                email,
+                password,
+            } => {
                 let resp = c.create_account(&name, &email, &password).await?;
                 let api_key = resp["data"]["api_key"].as_str().unwrap_or("");
                 cfg.api_key = Some(api_key.to_string());
@@ -211,13 +203,20 @@ async fn main() -> anyhow::Result<()> {
         Commands::Workspace { action } => match action {
             WorkspaceCmd::Create { name } => {
                 let resp = c.create_workspace(cfg.api_key()?, &name).await?;
-                println!("Workspace created: {}", resp["data"]["id"].as_str().unwrap_or(""));
+                println!(
+                    "Workspace created: {}",
+                    resp["data"]["id"].as_str().unwrap_or("")
+                );
             }
             WorkspaceCmd::List => {
                 let resp = c.list_workspaces(cfg.api_key()?).await?;
                 if let Some(arr) = resp["data"].as_array() {
                     for ws in arr {
-                        println!("{}\t{}", ws["id"].as_str().unwrap_or(""), ws["name"].as_str().unwrap_or(""));
+                        println!(
+                            "{}\t{}",
+                            ws["id"].as_str().unwrap_or(""),
+                            ws["name"].as_str().unwrap_or("")
+                        );
                     }
                 }
             }
@@ -290,22 +289,40 @@ async fn main() -> anyhow::Result<()> {
                 for hit in arr {
                     let path = hit["path"].as_str().unwrap_or("?");
                     let score = hit["score"].as_f64().unwrap_or(0.0);
-                    let content = hit["content"].as_str().unwrap_or("").chars().take(80).collect::<String>();
+                    let content = hit["content"]
+                        .as_str()
+                        .unwrap_or("")
+                        .chars()
+                        .take(80)
+                        .collect::<String>();
                     println!("{score:.3}\t{path}\t{content}");
                 }
             }
         }
         Commands::Collection { action } => match action {
-            CollectionCmd::Create { name, schema, embed_source } => {
+            CollectionCmd::Create {
+                name,
+                schema,
+                embed_source,
+            } => {
                 let schema_val: serde_json::Value = serde_json::from_str(&schema)?;
-                let resp = c.create_collection(cfg.ws_key()?, &name, &schema_val, embed_source.as_deref()).await?;
-                println!("Collection created: {}", resp["data"]["id"].as_str().unwrap_or(&name));
+                let resp = c
+                    .create_collection(cfg.ws_key()?, &name, &schema_val, embed_source.as_deref())
+                    .await?;
+                println!(
+                    "Collection created: {}",
+                    resp["data"]["id"].as_str().unwrap_or(&name)
+                );
             }
             CollectionCmd::List => {
                 let resp = c.list_collections(cfg.ws_key()?).await?;
                 if let Some(arr) = resp["data"].as_array() {
                     for coll in arr {
-                        println!("{}\t{}", coll["name"].as_str().unwrap_or(""), coll["status"].as_str().unwrap_or(""));
+                        println!(
+                            "{}\t{}",
+                            coll["name"].as_str().unwrap_or(""),
+                            coll["status"].as_str().unwrap_or("")
+                        );
                     }
                 }
             }
@@ -314,17 +331,40 @@ async fn main() -> anyhow::Result<()> {
                 let data = &resp["data"];
                 println!("Name:       {}", data["name"].as_str().unwrap_or(""));
                 println!("ID:         {}", data["id"].as_str().unwrap_or(""));
-                println!("Type:       {}", data["collection_type"].as_str().unwrap_or(""));
+                println!(
+                    "Type:       {}",
+                    data["collection_type"].as_str().unwrap_or("")
+                );
                 println!("Status:     {}", data["status"].as_str().unwrap_or(""));
-                println!("Embed Src:  {}", data["embedding_source"].as_str().unwrap_or("-"));
-                println!("Embed Dim:  {}", data["embedding_dim"].as_i64().map(|d| d.to_string()).unwrap_or("-".into()));
+                println!(
+                    "Embed Src:  {}",
+                    data["embedding_source"].as_str().unwrap_or("-")
+                );
+                println!(
+                    "Embed Dim:  {}",
+                    data["embedding_dim"]
+                        .as_i64()
+                        .map(|d| d.to_string())
+                        .unwrap_or("-".into())
+                );
                 if let Some(fields) = data["schema_json"].as_array() {
                     println!("Fields:");
                     for f in fields {
                         let fname = f["name"].as_str().unwrap_or("?");
-                        let ftype = f["field_type"].as_str().or_else(|| f["type"].as_str()).unwrap_or("?");
-                        let idx = if f["index"].as_bool().unwrap_or(false) { " [indexed]" } else { "" };
-                        let emb = if f["embed"].as_bool().unwrap_or(false) { " [embed]" } else { "" };
+                        let ftype = f["field_type"]
+                            .as_str()
+                            .or_else(|| f["type"].as_str())
+                            .unwrap_or("?");
+                        let idx = if f["index"].as_bool().unwrap_or(false) {
+                            " [indexed]"
+                        } else {
+                            ""
+                        };
+                        let emb = if f["embed"].as_bool().unwrap_or(false) {
+                            " [embed]"
+                        } else {
+                            ""
+                        };
                         println!("  - {fname}: {ftype}{idx}{emb}");
                     }
                 }
@@ -339,7 +379,9 @@ async fn main() -> anyhow::Result<()> {
                 println!("Rows inserted into {name}");
             }
             CollectionCmd::Search { name, query, limit } => {
-                let resp = c.search_collection(cfg.ws_key()?, &name, &query, limit).await?;
+                let resp = c
+                    .search_collection(cfg.ws_key()?, &name, &query, limit)
+                    .await?;
                 if let Some(arr) = resp["data"].as_array() {
                     for row in arr {
                         println!("{row}");
@@ -358,9 +400,24 @@ async fn main() -> anyhow::Result<()> {
         Commands::Config { action } => match action {
             ConfigCmd::Show => {
                 println!("server_url: {}", cfg.server_url);
-                println!("api_key: {}", cfg.api_key.as_deref().map(mask_secret).unwrap_or_else(|| "<not set>".into()));
-                println!("workspace_id: {}", cfg.workspace_id.as_deref().unwrap_or("<not set>"));
-                println!("workspace_key: {}", cfg.workspace_key.as_deref().map(mask_secret).unwrap_or_else(|| "<not set>".into()));
+                println!(
+                    "api_key: {}",
+                    cfg.api_key
+                        .as_deref()
+                        .map(mask_secret)
+                        .unwrap_or_else(|| "<not set>".into())
+                );
+                println!(
+                    "workspace_id: {}",
+                    cfg.workspace_id.as_deref().unwrap_or("<not set>")
+                );
+                println!(
+                    "workspace_key: {}",
+                    cfg.workspace_key
+                        .as_deref()
+                        .map(mask_secret)
+                        .unwrap_or_else(|| "<not set>".into())
+                );
             }
             ConfigCmd::Set { key, value } => {
                 match key.as_str() {

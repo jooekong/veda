@@ -2,10 +2,10 @@ mod csv;
 mod jsonl;
 mod text;
 
-use std::sync::Arc;
 use arrow::array::RecordBatch;
 use arrow::datatypes::{DataType, Field, Schema};
 use datafusion::common::Result;
+use std::sync::Arc;
 
 pub const MAX_SINGLE_FILE_BYTES: usize = 50 * 1024 * 1024; // 50MB
 
@@ -19,7 +19,10 @@ pub enum FileFormat {
 
 pub fn detect_format(path: &str) -> FileFormat {
     match path.rsplit('.').next().map(|e| e.to_ascii_lowercase()) {
-        Some(ref ext) if ext == "csv" => FileFormat::Csv { delimiter: b',', has_header: true },
+        Some(ref ext) if ext == "csv" => FileFormat::Csv {
+            delimiter: b',',
+            has_header: true,
+        },
         Some(ref ext) if ext == "tsv" => FileFormat::Tsv,
         Some(ref ext) if ext == "jsonl" || ext == "ndjson" => FileFormat::JsonLines,
         _ => FileFormat::PlainText,
@@ -28,7 +31,10 @@ pub fn detect_format(path: &str) -> FileFormat {
 
 pub fn parse_file(content: &str, path: &str, format: &FileFormat) -> Result<RecordBatch> {
     match format {
-        FileFormat::Csv { delimiter, has_header } => csv::parse_csv(content, *delimiter, *has_header, path),
+        FileFormat::Csv {
+            delimiter,
+            has_header,
+        } => csv::parse_csv(content, *delimiter, *has_header, path),
         FileFormat::Tsv => csv::parse_csv(content, b'\t', true, path),
         FileFormat::JsonLines => jsonl::parse_jsonl(content, path),
         FileFormat::PlainText => text::parse_text(content, path),

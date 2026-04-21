@@ -34,8 +34,8 @@ fn workspace_root() -> PathBuf {
 
 fn load_milvus() -> (String, Option<String>, Option<String>) {
     let path = workspace_root().join("config/test.toml");
-    let raw = std::fs::read_to_string(&path)
-        .unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
+    let raw =
+        std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
     let cfg: TestToml = toml::from_str(&raw).expect("parse test.toml [milvus]");
     (cfg.milvus.url, cfg.milvus.token, cfg.milvus.db)
 }
@@ -89,10 +89,7 @@ async fn milvus_init_upsert_search_delete() {
     };
     let _ = store.hybrid_search(&hy).await.expect("hybrid");
 
-    store
-        .delete_chunks(&ws, &fid)
-        .await
-        .expect("delete_chunks");
+    store.delete_chunks(&ws, &fid).await.expect("delete_chunks");
 
     req.query_vector = Some(vec);
     let mut gone = false;
@@ -104,7 +101,10 @@ async fn milvus_init_upsert_search_delete() {
             break;
         }
     }
-    assert!(gone, "vector rows for file_id should disappear after delete");
+    assert!(
+        gone,
+        "vector rows for file_id should disappear after delete"
+    );
 }
 
 #[tokio::test]

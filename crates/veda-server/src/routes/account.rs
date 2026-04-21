@@ -18,7 +18,7 @@ use veda_types::{
     Workspace, WorkspaceKey, WorkspaceStatus,
 };
 
-use crate::auth::{AuthAccount, create_jwt};
+use crate::auth::{create_jwt, AuthAccount};
 use crate::error::AppError;
 use crate::state::AppState;
 
@@ -26,7 +26,10 @@ pub fn routes() -> Router<Arc<AppState>> {
     Router::new()
         .route("/v1/accounts", post(create_account))
         .route("/v1/accounts/login", post(login))
-        .route("/v1/workspaces", post(create_workspace).get(list_workspaces))
+        .route(
+            "/v1/workspaces",
+            post(create_workspace).get(list_workspaces),
+        )
         .route("/v1/workspaces/{id}", delete(delete_workspace))
         .route("/v1/workspaces/{id}/keys", post(create_workspace_key))
         .route("/v1/workspaces/{id}/token", post(create_token))

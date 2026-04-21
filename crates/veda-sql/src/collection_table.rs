@@ -2,9 +2,7 @@ use std::any::Any;
 use std::fmt::{self, Debug, Formatter};
 use std::sync::Arc;
 
-use arrow::array::{
-    BooleanBuilder, Float64Builder, Int64Builder, RecordBatch, StringBuilder,
-};
+use arrow::array::{BooleanBuilder, Float64Builder, Int64Builder, RecordBatch, StringBuilder};
 use arrow::datatypes::{DataType, Field, Schema, SchemaRef};
 use async_trait::async_trait;
 use datafusion::catalog::Session;
@@ -16,8 +14,8 @@ use datafusion::physical_expr::EquivalenceProperties;
 use datafusion::physical_plan::execution_plan::{Boundedness, EmissionType};
 use datafusion::physical_plan::memory::MemoryStream;
 use datafusion::physical_plan::{
-    DisplayAs, DisplayFormatType, ExecutionPlan, Partitioning, PlanProperties,
-    SendableRecordBatchStream, project_schema,
+    project_schema, DisplayAs, DisplayFormatType, ExecutionPlan, Partitioning, PlanProperties,
+    SendableRecordBatchStream,
 };
 use veda_core::store::CollectionVectorStore;
 use veda_types::{CollectionSchema, FieldDefinition};
@@ -50,12 +48,17 @@ impl CollectionTable {
         workspace_id: String,
         collection: CollectionSchema,
     ) -> Self {
-        let fields: Vec<FieldDefinition> = serde_json::from_value(
-            collection.schema_json.clone(),
-        ).unwrap_or_default();
+        let fields: Vec<FieldDefinition> =
+            serde_json::from_value(collection.schema_json.clone()).unwrap_or_default();
         let schema = build_schema(&fields);
         let milvus_name = collection.milvus_name();
-        Self { coll_vector, workspace_id, collection, milvus_name, schema }
+        Self {
+            coll_vector,
+            workspace_id,
+            collection,
+            milvus_name,
+            schema,
+        }
     }
 }
 
@@ -67,11 +70,17 @@ impl Debug for CollectionTable {
 
 #[async_trait]
 impl TableProvider for CollectionTable {
-    fn as_any(&self) -> &dyn Any { self }
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
 
-    fn schema(&self) -> SchemaRef { self.schema.clone() }
+    fn schema(&self) -> SchemaRef {
+        self.schema.clone()
+    }
 
-    fn table_type(&self) -> TableType { TableType::Base }
+    fn table_type(&self) -> TableType {
+        TableType::Base
+    }
 
     async fn scan(
         &self,
@@ -81,12 +90,9 @@ impl TableProvider for CollectionTable {
         limit: Option<usize>,
     ) -> Result<Arc<dyn ExecutionPlan>> {
         let query_limit = limit.unwrap_or(16384).min(16384);
-        let rows = self.coll_vector
-            .query_collection(
-                &self.milvus_name,
-                &self.workspace_id,
-                query_limit,
-            )
+        let rows = self
+            .coll_vector
+            .query_collection(&self.milvus_name, &self.workspace_id, query_limit)
             .await
             .map_err(|e| datafusion::error::DataFusionError::External(Box::new(e)))?;
 
@@ -119,7 +125,12 @@ impl CollectionExec {
             EmissionType::Incremental,
             Boundedness::Bounded,
         );
-        Self { rows, full_schema, projected_schema, cache: Arc::new(cache) }
+        Self {
+            rows,
+            full_schema,
+            projected_schema,
+            cache: Arc::new(cache),
+        }
     }
 }
 
@@ -130,14 +141,24 @@ impl DisplayAs for CollectionExec {
 }
 
 impl ExecutionPlan for CollectionExec {
-    fn as_any(&self) -> &dyn Any { self }
-    fn name(&self) -> &'static str { "CollectionExec" }
-    fn properties(&self) -> &Arc<PlanProperties> { &self.cache }
-    fn children(&self) -> Vec<&Arc<dyn ExecutionPlan>> { vec![] }
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+    fn name(&self) -> &'static str {
+        "CollectionExec"
+    }
+    fn properties(&self) -> &Arc<PlanProperties> {
+        &self.cache
+    }
+    fn children(&self) -> Vec<&Arc<dyn ExecutionPlan>> {
+        vec![]
+    }
     fn with_new_children(
         self: Arc<Self>,
         _: Vec<Arc<dyn ExecutionPlan>>,
-    ) -> Result<Arc<dyn ExecutionPlan>> { Ok(self) }
+    ) -> Result<Arc<dyn ExecutionPlan>> {
+        Ok(self)
+    }
 
     fn execute(
         &self,
@@ -212,7 +233,10 @@ impl ExecutionPlan for CollectionExec {
         let projected = if self.full_schema == self.projected_schema {
             batch
         } else {
-            let indices: Vec<usize> = self.projected_schema.fields().iter()
+            let indices: Vec<usize> = self
+                .projected_schema
+                .fields()
+                .iter()
                 .filter_map(|f| self.full_schema.index_of(f.name()).ok())
                 .collect();
             batch.project(&indices)?

@@ -17,7 +17,11 @@ pub fn parse_jsonl(content: &str, path: &str) -> Result<RecordBatch> {
             continue;
         }
         if serde_json::from_str::<serde_json::Value>(trimmed).is_err() {
-            warn!(path = path, line_number = i + 1, "skipping invalid JSON line");
+            warn!(
+                path = path,
+                line_number = i + 1,
+                "skipping invalid JSON line"
+            );
             continue;
         }
         ln_b.append_value((i + 1) as i64);

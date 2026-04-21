@@ -1,6 +1,6 @@
 use serde_json;
-use veda_types::*;
 use veda_types::errors::ApiResponse;
+use veda_types::*;
 
 #[test]
 fn enum_serde_roundtrip() {

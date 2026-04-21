@@ -19,7 +19,8 @@ async fn execute_sql(
     auth: AuthWorkspace,
     Json(req): Json<SqlRequest>,
 ) -> std::result::Result<Json<ApiResponse<Vec<serde_json::Value>>>, AppError> {
-    let batches = state.sql_engine
+    let batches = state
+        .sql_engine
         .execute(&auth.workspace_id, auth.read_only, &req.sql)
         .await?;
 
@@ -27,12 +28,12 @@ async fn execute_sql(
     for batch in &batches {
         let buf = Vec::new();
         let mut writer = arrow::json::LineDelimitedWriter::new(buf);
-        writer.write(batch).map_err(|e| {
-            AppError(veda_types::VedaError::Storage(e.to_string()))
-        })?;
-        writer.finish().map_err(|e| {
-            AppError(veda_types::VedaError::Storage(e.to_string()))
-        })?;
+        writer
+            .write(batch)
+            .map_err(|e| AppError(veda_types::VedaError::Storage(e.to_string())))?;
+        writer
+            .finish()
+            .map_err(|e| AppError(veda_types::VedaError::Storage(e.to_string())))?;
         let bytes = writer.into_inner();
         let text = String::from_utf8_lossy(&bytes);
         for line in text.lines() {

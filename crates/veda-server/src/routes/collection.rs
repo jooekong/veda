@@ -12,8 +12,14 @@ use crate::state::AppState;
 
 pub fn routes() -> Router<Arc<AppState>> {
     Router::new()
-        .route("/v1/collections", post(create_collection).get(list_collections))
-        .route("/v1/collections/{name}", get(describe_collection).delete(delete_collection))
+        .route(
+            "/v1/collections",
+            post(create_collection).get(list_collections),
+        )
+        .route(
+            "/v1/collections/{name}",
+            get(describe_collection).delete(delete_collection),
+        )
         .route("/v1/collections/{name}/rows", post(insert_rows))
         .route("/v1/collections/{name}/search", post(search_collection))
 }
@@ -29,7 +35,13 @@ async fn create_collection(
     let ct = req.collection_type.unwrap_or(CollectionType::Structured);
     let schema = state
         .collection_service
-        .create(&auth.workspace_id, &req.name, ct, &req.fields, req.embedding_source.as_deref())
+        .create(
+            &auth.workspace_id,
+            &req.name,
+            ct,
+            &req.fields,
+            req.embedding_source.as_deref(),
+        )
         .await?;
     Ok(Json(ApiResponse::ok(schema)))
 }
@@ -47,7 +59,10 @@ async fn describe_collection(
     auth: AuthWorkspace,
     Path(name): Path<String>,
 ) -> Result<Json<ApiResponse<CollectionSchema>>, AppError> {
-    let schema = state.collection_service.get(&auth.workspace_id, &name).await?;
+    let schema = state
+        .collection_service
+        .get(&auth.workspace_id, &name)
+        .await?;
     Ok(Json(ApiResponse::ok(schema)))
 }
 
@@ -79,7 +94,9 @@ async fn insert_rows(
         .collection_service
         .insert_rows(&auth.workspace_id, &name, &req.rows)
         .await?;
-    Ok(Json(ApiResponse::ok(serde_json::json!({ "inserted": count }))))
+    Ok(Json(ApiResponse::ok(
+        serde_json::json!({ "inserted": count }),
+    )))
 }
 
 async fn search_collection(

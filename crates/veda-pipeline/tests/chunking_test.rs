@@ -10,7 +10,11 @@ fn semantic_chunk_splits_on_markdown_headings() {
     assert!(chunks[0].content.contains("intro line"));
     assert!(!chunks[0].content.contains("Section B"));
 
-    let joined: String = chunks.iter().map(|c| c.content.as_str()).collect::<Vec<_>>().join("\n---\n");
+    let joined: String = chunks
+        .iter()
+        .map(|c| c.content.as_str())
+        .collect::<Vec<_>>()
+        .join("\n---\n");
     assert!(joined.contains("Section A") || chunks.iter().any(|c| c.content.contains("Section A")));
     assert!(chunks.iter().any(|c| c.content.contains("Section B")));
 }

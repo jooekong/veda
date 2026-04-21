@@ -115,14 +115,11 @@ impl EmbeddingService for EmbeddingProvider {
 
         if !status.is_success() {
             let msg = String::from_utf8_lossy(&bytes).into_owned();
-            return Err(VedaError::EmbeddingFailed(format!(
-                "HTTP {status}: {msg}"
-            )));
+            return Err(VedaError::EmbeddingFailed(format!("HTTP {status}: {msg}")));
         }
 
-        let parsed: EmbeddingResponse = serde_json::from_slice(&bytes).map_err(|e| {
-            VedaError::EmbeddingFailed(format!("invalid embedding JSON: {e}"))
-        })?;
+        let parsed: EmbeddingResponse = serde_json::from_slice(&bytes)
+            .map_err(|e| VedaError::EmbeddingFailed(format!("invalid embedding JSON: {e}")))?;
 
         if parsed.data.len() != texts.len() {
             return Err(VedaError::EmbeddingFailed(format!(

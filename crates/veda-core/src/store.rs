@@ -6,10 +6,12 @@ use veda_types::*;
 #[async_trait]
 pub trait MetadataStore: Send + Sync {
     async fn get_dentry(&self, workspace_id: &str, path: &str) -> Result<Option<Dentry>>;
-    async fn list_dentries(&self, workspace_id: &str, parent_path: &str)
-        -> Result<Vec<Dentry>>;
-    async fn list_dentries_under(&self, workspace_id: &str, path_prefix: &str)
-        -> Result<Vec<Dentry>> {
+    async fn list_dentries(&self, workspace_id: &str, parent_path: &str) -> Result<Vec<Dentry>>;
+    async fn list_dentries_under(
+        &self,
+        workspace_id: &str,
+        path_prefix: &str,
+    ) -> Result<Vec<Dentry>> {
         let mut all = Vec::new();
         let mut queue = vec![path_prefix.to_string()];
         while let Some(dir) = queue.pop() {
@@ -78,11 +80,8 @@ pub trait MetadataTx: Send {
         workspace_id: &str,
         path_prefix: &str,
     ) -> Result<Vec<Dentry>>;
-    async fn delete_dentries_under(
-        &mut self,
-        workspace_id: &str,
-        parent_path: &str,
-    ) -> Result<u64>;
+    async fn delete_dentries_under(&mut self, workspace_id: &str, parent_path: &str)
+        -> Result<u64>;
     async fn rename_dentry(
         &mut self,
         workspace_id: &str,

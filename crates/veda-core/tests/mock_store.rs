@@ -2,8 +2,8 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
-use veda_types::*;
 use veda_core::store::*;
+use veda_types::*;
 
 // ── In-memory MetadataStore ────────────────────────────
 
@@ -40,11 +40,7 @@ impl MetadataStore for MockMetadataStore {
             .cloned())
     }
 
-    async fn list_dentries(
-        &self,
-        workspace_id: &str,
-        parent_path: &str,
-    ) -> Result<Vec<Dentry>> {
+    async fn list_dentries(&self, workspace_id: &str, parent_path: &str) -> Result<Vec<Dentry>> {
         let st = self.state.lock().unwrap();
         Ok(st
             .dentries
@@ -61,9 +57,12 @@ impl MetadataStore for MockMetadataStore {
     ) -> Result<Vec<Dentry>> {
         let st = self.state.lock().unwrap();
         if path_prefix == "/" {
-            return Ok(st.dentries.iter()
+            return Ok(st
+                .dentries
+                .iter()
                 .filter(|d| d.workspace_id == workspace_id)
-                .cloned().collect());
+                .cloned()
+                .collect());
         }
         let prefix = format!("{path_prefix}/");
         Ok(st
@@ -141,9 +140,7 @@ impl MetadataStore for MockMetadataStore {
             .filter(|e| {
                 e.workspace_id == workspace_id
                     && e.id > since_id
-                    && path_prefix
-                        .map(|p| e.path.starts_with(p))
-                        .unwrap_or(true)
+                    && path_prefix.map(|p| e.path.starts_with(p)).unwrap_or(true)
             })
             .cloned()
             .collect();
@@ -158,15 +155,25 @@ impl MetadataStore for MockMetadataStore {
         let mut total_dirs: i64 = 0;
         let mut total_bytes: i64 = 0;
         for d in &st.dentries {
-            if d.workspace_id != workspace_id { continue; }
-            if d.is_dir { total_dirs += 1; } else { total_files += 1; }
+            if d.workspace_id != workspace_id {
+                continue;
+            }
+            if d.is_dir {
+                total_dirs += 1;
+            } else {
+                total_files += 1;
+            }
         }
         for f in &st.files {
             if f.workspace_id == workspace_id {
                 total_bytes += f.size_bytes;
             }
         }
-        Ok(StorageStats { total_files, total_directories: total_dirs, total_bytes })
+        Ok(StorageStats {
+            total_files,
+            total_directories: total_dirs,
+            total_bytes,
+        })
     }
 
     async fn begin_tx(&self) -> Result<Box<dyn MetadataTx>> {
@@ -233,7 +240,9 @@ impl MetadataTx for MockTx {
         Ok(st
             .dentries
             .iter()
-            .filter(|d| d.workspace_id == workspace_id && d.path.starts_with(&format!("{path_prefix}/")))
+            .filter(|d| {
+                d.workspace_id == workspace_id && d.path.starts_with(&format!("{path_prefix}/"))
+            })
             .cloned()
             .collect())
     }
@@ -394,4 +403,3 @@ impl MetadataTx for MockTx {
         Ok(())
     }
 }
-
