@@ -245,6 +245,38 @@ impl FsService {
         }
     }
 
+    /// Query file system events since a given ID.
+    pub async fn query_events(
+        &self,
+        workspace_id: &str,
+        since_id: i64,
+        limit: usize,
+    ) -> Result<Vec<FsEvent>> {
+        self.meta
+            .query_fs_events(workspace_id, since_id, None, limit)
+            .await
+    }
+
+    /// Read a byte range from a file. Returns (data, total_size).
+    pub async fn read_file_range(
+        &self,
+        workspace_id: &str,
+        raw_path: &str,
+        offset: u64,
+        length: u64,
+    ) -> Result<(Vec<u8>, u64)> {
+        let content = self.read_file(workspace_id, raw_path).await?;
+        let bytes = content.as_bytes();
+        let total = bytes.len() as u64;
+
+        if offset >= total {
+            return Ok((Vec::new(), total));
+        }
+
+        let end = std::cmp::min(offset.saturating_add(length), total) as usize;
+        Ok((bytes[offset as usize..end].to_vec(), total))
+    }
+
     pub async fn read_file_lines(
         &self,
         workspace_id: &str,

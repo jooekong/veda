@@ -178,4 +178,25 @@ impl VedaClient {
         let body = resp.text().map_err(|e| ClientError::Io(e.to_string()))?;
         Self::check_status(status, &body)
     }
+
+    /// Read a byte range from a file. Returns the raw bytes.
+    pub fn read_range(&self, path: &str, offset: u64, length: u64) -> Result<Vec<u8>> {
+        let path = path.trim_start_matches('/');
+        let end = offset + length - 1;
+        let resp = self.http.get(format!("{}/v1/fs/{path}", self.base))
+            .bearer_auth(&self.key)
+            .header("Range", format!("bytes={offset}-{end}"))
+            .send()
+            .map_err(|e| ClientError::Io(e.to_string()))?;
+        let status = resp.status();
+        if status == reqwest::StatusCode::NOT_FOUND {
+            return Err(ClientError::NotFound);
+        }
+        if !status.is_success() && status.as_u16() != 206 {
+            return Err(ClientError::Io(format!("HTTP {status}")));
+        }
+        resp.bytes()
+            .map(|b| b.to_vec())
+            .map_err(|e| ClientError::Io(e.to_string()))
+    }
 }

@@ -599,3 +599,22 @@ async fn copy_overwrite_decrements_old_ref_count() {
         "old file should be cleaned up when ref_count reaches 0"
     );
 }
+
+#[tokio::test]
+async fn read_file_range_returns_partial_content() {
+    let (svc, _state) = make_service();
+    svc.write_file("ws1", "/range.txt", "Hello, World!")
+        .await
+        .unwrap();
+
+    let (data, total) = svc.read_file_range("ws1", "/range.txt", 0, 5).await.unwrap();
+    assert_eq!(total, 13);
+    assert_eq!(data, b"Hello");
+
+    let (data, _) = svc.read_file_range("ws1", "/range.txt", 7, 6).await.unwrap();
+    assert_eq!(data, b"World!");
+
+    // offset beyond file size returns empty
+    let (data, _) = svc.read_file_range("ws1", "/range.txt", 100, 10).await.unwrap();
+    assert!(data.is_empty());
+}

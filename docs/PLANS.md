@@ -115,6 +115,17 @@
 - [x] InodeTable（inode ↔ path 双向映射 + attr TTL 缓存）
 - [x] fuser::Filesystem 实现（lookup/getattr/readdir/read/write/create/mkdir/unlink/rmdir/rename/setattr/flush/release）
 - [x] 写缓冲机制（open → buffer → flush/release 时 PUT）
+- [x] 子命令架构（mount/umount）
+- [x] 后台挂载（fork+setsid daemon 化，pipe 通知 parent 就绪）
+- [x] umount 命令（macOS umount / Linux fusermount3）
+- [x] 消除 flush+release 双写（dirty flag）
+- [x] mount 选项（--cache-size/--attr-ttl/--allow-other/--read-only/--debug/--foreground）
+- [x] read-only 模式（写操作返回 EROFS）
+- [x] LRU 读缓存（小文件全量缓存，大文件 Range read）
+- [x] server 端 Range header 支持（206 Partial Content）
+- [x] server 端 SSE 事件端点（GET /v1/events）
+- [x] FUSE 端 SSE watcher（后台线程，远程变更时失效 attr+read cache）
+- [x] FsService.query_events / read_file_range 新 API
 
 ---
 

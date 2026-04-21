@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use axum::extract::rejection::StringRejection;
 use axum::extract::{DefaultBodyLimit, Path, Query, State};
+use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post, put};
 use axum::{Json, Router};
@@ -116,6 +117,7 @@ async fn read_file(
     auth: AuthWorkspace,
     Path(path): Path<String>,
     Query(q): Query<FsQuery>,
+    headers: HeaderMap,
 ) -> Result<Response, AppError> {
     let path = format!("/{path}");
 
@@ -147,11 +149,60 @@ async fn read_file(
         return Ok(content.into_response());
     }
 
+    // Handle Range header for partial reads
+    if let Some(range_val) = headers.get(header::RANGE) {
+        if let Ok(range_str) = range_val.to_str() {
+            if let Some((offset, length)) = parse_range_header(range_str) {
+                let (data, total) = state
+                    .fs_service
+                    .read_file_range(&auth.workspace_id, &path, offset, length)
+                    .await?;
+                if data.is_empty() {
+                    return Ok((
+                        StatusCode::RANGE_NOT_SATISFIABLE,
+                        [(header::CONTENT_RANGE, format!("bytes */{total}"))],
+                    )
+                        .into_response());
+                }
+                let end = offset + data.len() as u64 - 1;
+                return Ok((
+                    StatusCode::PARTIAL_CONTENT,
+                    [
+                        (header::CONTENT_RANGE, format!("bytes {offset}-{end}/{total}")),
+                        (header::CONTENT_LENGTH, data.len().to_string()),
+                    ],
+                    data,
+                )
+                    .into_response());
+            }
+        }
+    }
+
     let content = state
         .fs_service
         .read_file(&auth.workspace_id, &path)
         .await?;
     Ok(content.into_response())
+}
+
+/// Parse "bytes=start-end" or "bytes=start-" range header.
+fn parse_range_header(s: &str) -> Option<(u64, u64)> {
+    let s = s.strip_prefix("bytes=")?;
+    let parts: Vec<&str> = s.splitn(2, '-').collect();
+    if parts.len() != 2 {
+        return None;
+    }
+    let start: u64 = parts[0].parse().ok()?;
+    if parts[1].is_empty() {
+        // "bytes=start-" → read from start to end (use a large length)
+        Some((start, u64::MAX))
+    } else {
+        let end: u64 = parts[1].parse().ok()?;
+        if end < start {
+            return None;
+        }
+        Some((start, end - start + 1))
+    }
 }
 
 async fn stat_file(
@@ -231,4 +282,29 @@ async fn mkdir(
         .mkdir(&auth.workspace_id, &body.path)
         .await?;
     Ok(Json(ApiResponse::ok(())))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_range_basic() {
+        assert_eq!(parse_range_header("bytes=0-99"), Some((0, 100)));
+        assert_eq!(parse_range_header("bytes=100-199"), Some((100, 100)));
+    }
+
+    #[test]
+    fn parse_range_open_end() {
+        let (offset, length) = parse_range_header("bytes=500-").unwrap();
+        assert_eq!(offset, 500);
+        assert_eq!(length, u64::MAX);
+    }
+
+    #[test]
+    fn parse_range_invalid() {
+        assert!(parse_range_header("invalid").is_none());
+        assert!(parse_range_header("bytes=abc-def").is_none());
+        assert!(parse_range_header("bytes=100-50").is_none());
+    }
 }

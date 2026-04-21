@@ -1,5 +1,6 @@
 pub mod account;
 pub mod collection;
+pub mod events;
 pub mod fs;
 pub mod search;
 pub mod sql;
@@ -15,6 +16,7 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/v1/health", get(health))
         .merge(account::routes())
         .merge(fs::routes())
+        .merge(events::routes())
         .merge(search::routes())
         .merge(collection::routes())
         .merge(sql::routes())

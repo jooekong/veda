@@ -33,7 +33,8 @@ veda-fuse       FUSE 挂载（不在默认 workspace）      (已实现)
 - `veda-server`：ServerConfig（TOML 加载）；JWT 签发/验证；API Key + Workspace Key 认证中间件；Account/Workspace/File/Search/Collection/SQL 全部 REST 路由；Worker（outbox 消费 + chunk sync）；graceful shutdown；1 个 HTTP 集成测试
 - `veda-server`：新增 `POST /v1/fs/{path}` append 路由
 - `veda-cli`：clap 命令行解析；account create/login；workspace create/list/use；cp/cat/ls/mv/rm/mkdir/append；search；collection CRUD；sql；config 管理；$HOME/.config/veda/config.toml 持久化
-- `veda-fuse`：FUSE 文件系统挂载（fuser 0.17）；blocking HTTP 客户端（stat/read/write/list/delete/mkdir/rename）；InodeTable（inode ↔ path 双向映射 + attr TTL 缓存）；写缓冲（open → write buffer → flush/release 时 PUT）；lookup/getattr/readdir/read/write/create/mkdir/unlink/rmdir/rename/setattr（truncate）；clap CLI 入口；需要 macFUSE（macOS）或 libfuse（Linux）
+- `veda-fuse`：FUSE 文件系统挂载（fuser 0.14）；子命令 mount/umount；daemon 化（fork+setsid，pipe 通知 parent）；blocking HTTP 客户端（stat/read/write/list/delete/mkdir/rename/read_range）；InodeTable（inode ↔ path 双向映射 + 可配置 attr TTL）；WriteHandle（dirty 标记消除 flush+release 双写）；LRU ReadCache（小文件全量缓存，大文件 Range read）；SSE watcher（后台线程连接 /v1/events，远程变更时失效 attr+read cache）；mount 选项（--cache-size/--attr-ttl/--allow-other/--read-only/--debug）；需要 macFUSE（macOS）或 libfuse（Linux）
+- `veda-server`：新增 `GET /v1/events` SSE 端点（轮询 veda_fs_events 表，cursor-based）；`GET /v1/fs/{path}` 支持 `Range` header 返回 206 Partial Content
 
 ## 测试策略
 
@@ -43,7 +44,6 @@ veda-fuse       FUSE 挂载（不在默认 workspace）      (已实现)
 
 ## 待实现
 
-- WebSocket 实时事件推送
 - Reconciler（MySQL ↔ Milvus 数据对比自愈）
 - Prometheus metrics 导出
 - PDF text extraction / Image OCR

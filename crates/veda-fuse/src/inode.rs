@@ -4,22 +4,27 @@ use std::time::{Duration, Instant};
 use fuser::FileAttr;
 
 pub const ROOT_INO: u64 = 1;
-const ATTR_TTL: Duration = Duration::from_secs(5);
 
 pub struct InodeTable {
     next_ino: u64,
     ino_to_path: HashMap<u64, String>,
     path_to_ino: HashMap<String, u64>,
     attr_cache: HashMap<u64, (FileAttr, Instant)>,
+    attr_ttl: Duration,
 }
 
 impl InodeTable {
     pub fn new() -> Self {
+        Self::new_with_ttl(Duration::from_secs(5))
+    }
+
+    pub fn new_with_ttl(attr_ttl: Duration) -> Self {
         let mut t = Self {
             next_ino: 2,
             ino_to_path: HashMap::new(),
             path_to_ino: HashMap::new(),
             attr_cache: HashMap::new(),
+            attr_ttl,
         };
         t.ino_to_path.insert(ROOT_INO, "/".to_string());
         t.path_to_ino.insert("/".to_string(), ROOT_INO);
@@ -41,9 +46,13 @@ impl InodeTable {
         self.ino_to_path.get(&ino).map(|s| s.as_str())
     }
 
+    pub fn get_ino(&self, path: &str) -> Option<u64> {
+        self.path_to_ino.get(path).copied()
+    }
+
     pub fn get_cached_attr(&self, ino: u64) -> Option<FileAttr> {
         if let Some((attr, ts)) = self.attr_cache.get(&ino) {
-            if ts.elapsed() < ATTR_TTL {
+            if ts.elapsed() < self.attr_ttl {
                 return Some(*attr);
             }
         }
