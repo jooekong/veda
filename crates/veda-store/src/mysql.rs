@@ -660,6 +660,9 @@ impl MetadataStore for MysqlStore {
             .map_err(storage_err)?)
     }
 
+    /// Returns chunks overlapping the line range [start_line, end_line].
+    /// Unlike a naive `start_line BETWEEN a AND b`, we also include the chunk
+    /// that *contains* `start_line` (its own `start_line` may be less than `a`).
     async fn get_file_chunks(
         &self,
         file_id: &str,
@@ -671,8 +674,13 @@ impl MetadataStore for MysqlStore {
         );
         let mut rows = match (start_line, end_line) {
             (Some(a), Some(b)) => {
-                q.push_str(" AND start_line >= ? AND start_line <= ? ORDER BY chunk_index");
+                q.push_str(
+                    " AND chunk_index >= COALESCE((SELECT MAX(chunk_index) \
+                       FROM veda_file_chunks WHERE file_id = ? AND start_line <= ?), 0) \
+                       AND start_line <= ? ORDER BY chunk_index",
+                );
                 sqlx::query(&q)
+                    .bind(file_id)
                     .bind(file_id)
                     .bind(a)
                     .bind(b)
@@ -680,8 +688,13 @@ impl MetadataStore for MysqlStore {
                     .await
             }
             (Some(a), None) => {
-                q.push_str(" AND start_line >= ? ORDER BY chunk_index");
+                q.push_str(
+                    " AND chunk_index >= COALESCE((SELECT MAX(chunk_index) \
+                       FROM veda_file_chunks WHERE file_id = ? AND start_line <= ?), 0) \
+                       ORDER BY chunk_index",
+                );
                 sqlx::query(&q)
+                    .bind(file_id)
                     .bind(file_id)
                     .bind(a)
                     .fetch_all(&self.pool)
@@ -1078,6 +1091,8 @@ impl MetadataTx for MysqlMetadataTx {
             .map_err(storage_err)?)
     }
 
+    /// Returns chunks overlapping the line range [start_line, end_line].
+    /// See the readonly impl for the semantics rationale.
     async fn get_file_chunks(
         &mut self,
         file_id: &str,
@@ -1090,8 +1105,13 @@ impl MetadataTx for MysqlMetadataTx {
         );
         let rows = match (start_line, end_line) {
             (Some(a), Some(b)) => {
-                q.push_str(" AND start_line >= ? AND start_line <= ? ORDER BY chunk_index");
+                q.push_str(
+                    " AND chunk_index >= COALESCE((SELECT MAX(chunk_index) \
+                       FROM veda_file_chunks WHERE file_id = ? AND start_line <= ?), 0) \
+                       AND start_line <= ? ORDER BY chunk_index",
+                );
                 sqlx::query(&q)
+                    .bind(file_id)
                     .bind(file_id)
                     .bind(a)
                     .bind(b)
@@ -1099,8 +1119,13 @@ impl MetadataTx for MysqlMetadataTx {
                     .await
             }
             (Some(a), None) => {
-                q.push_str(" AND start_line >= ? ORDER BY chunk_index");
+                q.push_str(
+                    " AND chunk_index >= COALESCE((SELECT MAX(chunk_index) \
+                       FROM veda_file_chunks WHERE file_id = ? AND start_line <= ?), 0) \
+                       ORDER BY chunk_index",
+                );
                 sqlx::query(&q)
+                    .bind(file_id)
                     .bind(file_id)
                     .bind(a)
                     .fetch_all(t.as_mut())

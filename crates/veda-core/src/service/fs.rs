@@ -11,6 +11,7 @@ use crate::store::MetadataStore;
 const INLINE_THRESHOLD: i64 = 256 * 1024;
 const CHUNK_SIZE: usize = 256 * 1024;
 const MAX_FILE_BYTES: i64 = 50 * 1024 * 1024;
+const MAX_LINE_RANGE: i32 = 100_000;
 
 pub struct FsService {
     meta: Arc<dyn MetadataStore>,
@@ -204,37 +205,41 @@ impl FsService {
         })
     }
 
-    pub async fn read_file(&self, workspace_id: &str, raw_path: &str) -> Result<String> {
+    async fn resolve_file(
+        &self,
+        workspace_id: &str,
+        raw_path: &str,
+    ) -> Result<(String, FileRecord)> {
         let norm = path::normalize(raw_path)?;
         let dentry = self
             .meta
             .get_dentry(workspace_id, &norm)
             .await?
             .ok_or_else(|| VedaError::NotFound(norm.clone()))?;
-
         if dentry.is_dir {
             return Err(VedaError::InvalidPath(format!("{norm} is a directory")));
         }
-
         let file_id = dentry
             .file_id
-            .as_deref()
             .ok_or_else(|| VedaError::NotFound(norm.clone()))?;
-
         let file = self
             .meta
-            .get_file(file_id)
+            .get_file(&file_id)
             .await?
-            .ok_or_else(|| VedaError::NotFound(file_id.to_string()))?;
+            .ok_or(VedaError::NotFound(norm))?;
+        Ok((file_id, file))
+    }
 
+    pub async fn read_file(&self, workspace_id: &str, raw_path: &str) -> Result<String> {
+        let (file_id, file) = self.resolve_file(workspace_id, raw_path).await?;
         match file.storage_type {
             StorageType::Inline => self
                 .meta
-                .get_file_content(file_id)
+                .get_file_content(&file_id)
                 .await?
                 .ok_or_else(|| VedaError::NotFound(format!("content for {file_id}"))),
             StorageType::Chunked => {
-                let chunks = self.meta.get_file_chunks(file_id, None, None).await?;
+                let chunks = self.meta.get_file_chunks(&file_id, None, None).await?;
                 Ok(chunks.into_iter().map(|c| c.content).collect::<String>())
             }
         }
@@ -252,45 +257,53 @@ impl FsService {
                 "invalid line range {start}..{end}"
             )));
         }
-
-        let norm = path::normalize(raw_path)?;
-        let dentry = self
-            .meta
-            .get_dentry(workspace_id, &norm)
-            .await?
-            .ok_or_else(|| VedaError::NotFound(norm.clone()))?;
-        if dentry.is_dir {
-            return Err(VedaError::InvalidPath(format!("{norm} is a directory")));
+        if end - start + 1 > MAX_LINE_RANGE {
+            return Err(VedaError::InvalidInput(format!(
+                "line range exceeds {MAX_LINE_RANGE}"
+            )));
         }
-        let file_id = dentry
-            .file_id
-            .as_deref()
-            .ok_or_else(|| VedaError::NotFound(norm.clone()))?;
-        let file = self
-            .meta
-            .get_file(file_id)
-            .await?
-            .ok_or_else(|| VedaError::NotFound(file_id.to_string()))?;
 
-        let content = match file.storage_type {
-            StorageType::Inline => self
-                .meta
-                .get_file_content(file_id)
-                .await?
-                .ok_or_else(|| VedaError::NotFound(format!("content for {file_id}")))?,
-            StorageType::Chunked => {
-                let chunks = self.meta.get_file_chunks(file_id, None, Some(end)).await?;
-                chunks.into_iter().map(|c| c.content).collect::<String>()
+        let (file_id, file) = self.resolve_file(workspace_id, raw_path).await?;
+
+        // early-return when the requested range lies beyond EOF
+        if let Some(lc) = file.line_count {
+            if start > lc {
+                return Ok(String::new());
             }
-        };
-
-        let lines: Vec<&str> = content.lines().collect();
-        let s = (start - 1) as usize;
-        let e = (end as usize).min(lines.len());
-        if s >= lines.len() {
-            return Ok(String::new());
         }
-        Ok(lines[s..e].join("\n"))
+        let effective_end = file.line_count.map_or(end, |lc| end.min(lc));
+        let skip = (start - 1) as usize;
+        let take = (effective_end - start + 1) as usize;
+
+        match file.storage_type {
+            StorageType::Inline => {
+                let content = self
+                    .meta
+                    .get_file_content(&file_id)
+                    .await?
+                    .ok_or_else(|| VedaError::NotFound(format!("content for {file_id}")))?;
+                Ok(join_lines(content.lines().skip(skip).take(take)))
+            }
+            StorageType::Chunked => {
+                // get_file_chunks returns chunks overlapping [start, effective_end];
+                // the first chunk may contain lines before `start`, so rebase the skip.
+                let chunks = self
+                    .meta
+                    .get_file_chunks(&file_id, Some(start), Some(effective_end))
+                    .await?;
+                let Some(first) = chunks.first() else {
+                    return Ok(String::new());
+                };
+                let skip_in_chunks = (start - first.start_line).max(0) as usize;
+                Ok(join_lines(
+                    chunks
+                        .iter()
+                        .flat_map(|c| c.content.lines())
+                        .skip(skip_in_chunks)
+                        .take(take),
+                ))
+            }
+        }
     }
 
     pub async fn list_dir(&self, workspace_id: &str, raw_path: &str) -> Result<Vec<api::DirEntry>> {
@@ -909,6 +922,19 @@ impl FsService {
 
 // ── Helpers ────────────────────────────────────────────
 
+fn join_lines<'a, I: Iterator<Item = &'a str>>(mut it: I) -> String {
+    let Some(first) = it.next() else {
+        return String::new();
+    };
+    let mut out = String::with_capacity(first.len() + 64);
+    out.push_str(first);
+    for line in it {
+        out.push('\n');
+        out.push_str(line);
+    }
+    out
+}
+
 async fn write_content(
     tx: &mut dyn crate::store::MetadataTx,
     file_id: &str,
@@ -935,6 +961,16 @@ fn split_into_chunks(file_id: &str, content: &str) -> Vec<FileChunk> {
         if end < bytes.len() {
             if let Some(nl) = bytes[offset..end].iter().rposition(|&b| b == b'\n') {
                 end = offset + nl + 1;
+            } else {
+                // No newline within CHUNK_SIZE — a single line exceeds the chunk.
+                // Extend the chunk boundary to the next '\n' (or EOF) so that every
+                // chunk ends on a line boundary. This keeps `start_line` unique per
+                // chunk, which is a precondition for the `MAX(chunk_index) WHERE
+                // start_line <= ?` lookup to correctly identify a chunk by line.
+                match bytes[end..].iter().position(|&b| b == b'\n') {
+                    Some(nl) => end += nl + 1,
+                    None => end = bytes.len(),
+                }
             }
         }
 

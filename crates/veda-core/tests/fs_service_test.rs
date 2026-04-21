@@ -245,6 +245,213 @@ async fn read_lines() {
 }
 
 #[tokio::test]
+async fn read_lines_whole_file() {
+    let (svc, _) = make_service();
+    svc.write_file("ws1", "/f.txt", "a\nb\nc").await.unwrap();
+
+    let lines = svc.read_file_lines("ws1", "/f.txt", 1, 3).await.unwrap();
+    assert_eq!(lines, "a\nb\nc");
+}
+
+#[tokio::test]
+async fn read_lines_past_eof_returns_empty() {
+    let (svc, _) = make_service();
+    svc.write_file("ws1", "/f.txt", "a\nb\nc").await.unwrap();
+
+    let lines = svc.read_file_lines("ws1", "/f.txt", 10, 20).await.unwrap();
+    assert_eq!(lines, "");
+}
+
+#[tokio::test]
+async fn read_lines_clamps_end_to_eof() {
+    let (svc, _) = make_service();
+    svc.write_file("ws1", "/f.txt", "a\nb\nc").await.unwrap();
+
+    // end=100 is beyond EOF; should return through last line without error
+    let lines = svc.read_file_lines("ws1", "/f.txt", 2, 100).await.unwrap();
+    assert_eq!(lines, "b\nc");
+}
+
+#[tokio::test]
+async fn read_lines_invalid_range_rejected() {
+    let (svc, _) = make_service();
+    svc.write_file("ws1", "/f.txt", "a\nb").await.unwrap();
+
+    assert!(matches!(
+        svc.read_file_lines("ws1", "/f.txt", 0, 1).await,
+        Err(VedaError::InvalidInput(_))
+    ));
+    assert!(matches!(
+        svc.read_file_lines("ws1", "/f.txt", 5, 2).await,
+        Err(VedaError::InvalidInput(_))
+    ));
+}
+
+#[tokio::test]
+async fn read_lines_range_too_large_rejected() {
+    let (svc, _) = make_service();
+    svc.write_file("ws1", "/f.txt", "a").await.unwrap();
+
+    // 100_001 lines requested > MAX_LINE_RANGE (100_000)
+    assert!(matches!(
+        svc.read_file_lines("ws1", "/f.txt", 1, 100_001).await,
+        Err(VedaError::InvalidInput(_))
+    ));
+}
+
+#[tokio::test]
+async fn read_lines_on_directory_rejected() {
+    let (svc, _) = make_service();
+    svc.write_file("ws1", "/dir/f.txt", "x").await.unwrap();
+
+    assert!(matches!(
+        svc.read_file_lines("ws1", "/dir", 1, 1).await,
+        Err(VedaError::InvalidPath(_))
+    ));
+}
+
+#[tokio::test]
+async fn read_lines_nonexistent_rejected() {
+    let (svc, _) = make_service();
+    assert!(matches!(
+        svc.read_file_lines("ws1", "/nope.txt", 1, 1).await,
+        Err(VedaError::NotFound(_))
+    ));
+}
+
+#[tokio::test]
+async fn read_lines_chunked_across_chunks() {
+    // Force chunked storage by exceeding INLINE_THRESHOLD (256 KB).
+    // Each line is 100 bytes including '\n' → 3000 lines ≈ 300 KB → multiple chunks.
+    let (svc, state) = make_service();
+    let line_body = "x".repeat(99);
+    let content: String = (0..3000)
+        .map(|i| format!("{:04}{}\n", i, &line_body[4..]))
+        .collect();
+    svc.write_file("ws1", "/big.txt", &content).await.unwrap();
+
+    // verify storage is actually chunked
+    {
+        let st = state.lock().unwrap();
+        let file = st
+            .files
+            .iter()
+            .find(|f| f.workspace_id == "ws1")
+            .unwrap();
+        assert!(matches!(file.storage_type, StorageType::Chunked));
+        // should have at least 2 chunks
+        let chunk_count = st.file_chunks.iter().filter(|c| c.file_id == file.id).count();
+        assert!(chunk_count >= 2, "expected multiple chunks, got {chunk_count}");
+    }
+
+    // read 3 lines near the end, which must span into a later chunk
+    let out = svc.read_file_lines("ws1", "/big.txt", 2800, 2802).await.unwrap();
+    let expected: String = (2799..2802)
+        .map(|i| format!("{:04}{}", i, &line_body[4..]))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert_eq!(out, expected);
+
+    // read starting from the very first line
+    let head = svc.read_file_lines("ws1", "/big.txt", 1, 2).await.unwrap();
+    let expected_head: String = (0..2)
+        .map(|i| format!("{:04}{}", i, &line_body[4..]))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert_eq!(head, expected_head);
+}
+
+#[tokio::test]
+async fn read_lines_chunked_oversized_single_line() {
+    // A single line larger than CHUNK_SIZE (256 KB) must still be readable in full,
+    // and must not break the `start_line` uniqueness relied on by the SQL optimizer.
+    let (svc, state) = make_service();
+    let long_line = "z".repeat(300 * 1024); // 300 KB, no '\n' inside
+    let content = format!("{long_line}\nshort\n");
+    svc.write_file("ws1", "/oversized.txt", &content)
+        .await
+        .unwrap();
+
+    // verify storage went chunked and start_line values are unique across chunks
+    {
+        let st = state.lock().unwrap();
+        let file = st
+            .files
+            .iter()
+            .find(|f| f.workspace_id == "ws1")
+            .unwrap();
+        assert!(matches!(file.storage_type, StorageType::Chunked));
+        let starts: Vec<i32> = st
+            .file_chunks
+            .iter()
+            .filter(|c| c.file_id == file.id)
+            .map(|c| c.start_line)
+            .collect();
+        let mut uniq = starts.clone();
+        uniq.sort();
+        uniq.dedup();
+        assert_eq!(
+            starts.len(),
+            uniq.len(),
+            "chunk start_lines must be unique, got {starts:?}"
+        );
+    }
+
+    // line 1 is the 300 KB line — must be returned fully, not a fragment
+    let line1 = svc
+        .read_file_lines("ws1", "/oversized.txt", 1, 1)
+        .await
+        .unwrap();
+    assert_eq!(line1, long_line);
+
+    // line 2 is "short"
+    let line2 = svc
+        .read_file_lines("ws1", "/oversized.txt", 2, 2)
+        .await
+        .unwrap();
+    assert_eq!(line2, "short");
+}
+
+#[tokio::test]
+async fn read_lines_chunked_fetches_only_overlapping_chunks() {
+    // Verifies the SQL-semantics fix: requesting lines deep in the file should
+    // only return the chunk containing them, not every chunk from index 0.
+    let (svc, state) = make_service();
+    let line_body = "y".repeat(99);
+    let content: String = (0..3000)
+        .map(|i| format!("{:04}{}\n", i, &line_body[4..]))
+        .collect();
+    svc.write_file("ws1", "/big.txt", &content).await.unwrap();
+
+    let file_id = {
+        let st = state.lock().unwrap();
+        st.files.iter().find(|f| f.workspace_id == "ws1").unwrap().id.clone()
+    };
+
+    // directly probe the store with Some(start), Some(end) near the end
+    let store = {
+        // borrow the same state by wrapping a fresh store over it
+        let shared = state.clone();
+        mock_store::MockMetadataStore { state: shared }
+    };
+    use veda_core::store::MetadataStore;
+    let all = store.get_file_chunks(&file_id, None, None).await.unwrap();
+    let sliced = store
+        .get_file_chunks(&file_id, Some(2800), Some(2802))
+        .await
+        .unwrap();
+    assert!(
+        sliced.len() < all.len(),
+        "expected overlap-filter to prune chunks; sliced={}, all={}",
+        sliced.len(),
+        all.len()
+    );
+    // the first sliced chunk must cover line 2800
+    let first = sliced.first().unwrap();
+    assert!(first.start_line <= 2800);
+}
+
+#[tokio::test]
 async fn fs_events_emitted() {
     let (svc, state) = make_service();
     svc.write_file("ws1", "/ev.txt", "hi").await.unwrap();

@@ -29,6 +29,29 @@ impl MockMetadataStore {
     }
 }
 
+/// Mirrors the MySQL impl: returns chunks overlapping the line range [start, end].
+/// The "containing" chunk (whose own start_line may be before `start`) is included.
+fn filter_overlap(
+    mut chunks: Vec<FileChunk>,
+    start_line: Option<i32>,
+    end_line: Option<i32>,
+) -> Vec<FileChunk> {
+    if let Some(b) = end_line {
+        chunks.retain(|c| c.start_line <= b);
+    }
+    if let Some(a) = start_line {
+        // keep the largest chunk_index among those with start_line <= a, and all after it
+        let base_idx = chunks
+            .iter()
+            .filter(|c| c.start_line <= a)
+            .map(|c| c.chunk_index)
+            .max()
+            .unwrap_or(0);
+        chunks.retain(|c| c.chunk_index >= base_idx);
+    }
+    chunks
+}
+
 #[async_trait]
 impl MetadataStore for MockMetadataStore {
     async fn get_dentry(&self, workspace_id: &str, path: &str) -> Result<Option<Dentry>> {
@@ -86,8 +109,8 @@ impl MetadataStore for MockMetadataStore {
     async fn get_file_chunks(
         &self,
         file_id: &str,
-        _start_line: Option<i32>,
-        _end_line: Option<i32>,
+        start_line: Option<i32>,
+        end_line: Option<i32>,
     ) -> Result<Vec<FileChunk>> {
         let st = self.state.lock().unwrap();
         let mut chunks: Vec<FileChunk> = st
@@ -97,7 +120,7 @@ impl MetadataStore for MockMetadataStore {
             .cloned()
             .collect();
         chunks.sort_by_key(|c| c.chunk_index);
-        Ok(chunks)
+        Ok(filter_overlap(chunks, start_line, end_line))
     }
 
     async fn find_file_by_checksum(
@@ -344,8 +367,8 @@ impl MetadataTx for MockTx {
     async fn get_file_chunks(
         &mut self,
         file_id: &str,
-        _start_line: Option<i32>,
-        _end_line: Option<i32>,
+        start_line: Option<i32>,
+        end_line: Option<i32>,
     ) -> Result<Vec<FileChunk>> {
         let st = self.state.lock().unwrap();
         let mut chunks: Vec<_> = st
@@ -355,7 +378,7 @@ impl MetadataTx for MockTx {
             .cloned()
             .collect();
         chunks.sort_by_key(|c| c.chunk_index);
-        Ok(chunks)
+        Ok(filter_overlap(chunks, start_line, end_line))
     }
 
     async fn insert_file_content(&mut self, file_id: &str, content: &str) -> Result<()> {
