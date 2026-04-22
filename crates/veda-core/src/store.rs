@@ -145,7 +145,6 @@ pub trait VectorStore: Send + Sync {
     async fn upsert_chunks(&self, chunks: &[ChunkWithEmbedding]) -> Result<()>;
     async fn delete_chunks(&self, workspace_id: &str, file_id: &str) -> Result<()>;
     async fn search(&self, req: &SearchRequest) -> Result<Vec<SearchHit>>;
-    async fn hybrid_search(&self, req: &HybridSearchRequest) -> Result<Vec<SearchHit>>;
 
     async fn init_collections(&self, embedding_dim: u32) -> Result<()>;
 }

@@ -105,7 +105,7 @@ fn cmd_mount(args: MountArgs) -> anyhow::Result<()> {
     if args.foreground {
         init_tracing(args.debug);
         info!(mount = %args.mountpoint, server = %args.server, "mounting (foreground)");
-        return mount_and_serve(client, &args.mountpoint, &args.server, &args.key, config, &mount_opts);
+        return mount_and_serve(client, &args.mountpoint, &args.server, &args.key, config, &mount_opts, None);
     }
 
     // Daemonize: parent waits for child to signal readiness via pipe.
@@ -125,7 +125,7 @@ fn cmd_mount(args: MountArgs) -> anyhow::Result<()> {
             init_tracing(args.debug);
             info!(mount = %args.mountpoint, server = %args.server, "mounting (background)");
 
-            let result = mount_and_serve_with_notify(client, &args.mountpoint, &args.server, &args.key, config, &mount_opts, write_raw);
+            let result = mount_and_serve(client, &args.mountpoint, &args.server, &args.key, config, &mount_opts, Some(write_raw));
             if let Err(ref e) = result {
                 tracing::error!("mount failed: {e}");
             }
@@ -159,29 +159,9 @@ fn mount_and_serve(
     key: &str,
     config: fs::FuseConfig,
     opts: &MountOpts,
+    notify_fd: Option<RawFd>,
 ) -> anyhow::Result<()> {
-    let vedafs = fs::VedaFs::new(client, config, None);
-    let mut watcher = sse::SseWatcher::start(
-        server, key,
-        vedafs.inodes(), vedafs.read_cache(),
-    );
-    let options = build_fuse_options(opts);
-    install_signal_handler();
-    let result = fuser::mount2(vedafs, mountpoint, &options);
-    watcher.stop();
-    result.map_err(Into::into)
-}
-
-fn mount_and_serve_with_notify(
-    client: client::VedaClient,
-    mountpoint: &str,
-    server: &str,
-    key: &str,
-    config: fs::FuseConfig,
-    opts: &MountOpts,
-    notify_fd: RawFd,
-) -> anyhow::Result<()> {
-    let vedafs = fs::VedaFs::new(client, config, Some(notify_fd));
+    let vedafs = fs::VedaFs::new(client, config, notify_fd);
     let mut watcher = sse::SseWatcher::start(
         server, key,
         vedafs.inodes(), vedafs.read_cache(),

@@ -4,7 +4,7 @@ use axum::extract::{Path, State};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use veda_types::api::{CollectionSearchRequest, CreateCollectionRequest, InsertRowsRequest};
-use veda_types::{ApiResponse, CollectionSchema, CollectionType, VedaError};
+use veda_types::{ApiResponse, CollectionSchema, CollectionType};
 
 use crate::auth::AuthWorkspace;
 use crate::error::AppError;
@@ -29,9 +29,7 @@ async fn create_collection(
     auth: AuthWorkspace,
     Json(req): Json<CreateCollectionRequest>,
 ) -> Result<Json<ApiResponse<CollectionSchema>>, AppError> {
-    if auth.read_only {
-        return Err(VedaError::PermissionDenied.into());
-    }
+    auth.require_write()?;
     let ct = req.collection_type.unwrap_or(CollectionType::Structured);
     let schema = state
         .collection_service
@@ -71,9 +69,7 @@ async fn delete_collection(
     auth: AuthWorkspace,
     Path(name): Path<String>,
 ) -> Result<Json<ApiResponse<()>>, AppError> {
-    if auth.read_only {
-        return Err(VedaError::PermissionDenied.into());
-    }
+    auth.require_write()?;
     state
         .collection_service
         .delete(&auth.workspace_id, &name)
@@ -87,9 +83,7 @@ async fn insert_rows(
     Path(name): Path<String>,
     Json(req): Json<InsertRowsRequest>,
 ) -> Result<Json<ApiResponse<serde_json::Value>>, AppError> {
-    if auth.read_only {
-        return Err(VedaError::PermissionDenied.into());
-    }
+    auth.require_write()?;
     let count = state
         .collection_service
         .insert_rows(&auth.workspace_id, &name, &req.rows)

@@ -536,6 +536,125 @@ async fn get_file_conn(
     row.map(|r| row_to_file(&r)).transpose()
 }
 
+async fn list_dentries_under_conn(
+    conn: &mut sqlx::MySqlConnection,
+    workspace_id: &str,
+    path_prefix: &str,
+) -> Result<Vec<Dentry>> {
+    let rows = if path_prefix == "/" {
+        sqlx::query(
+            r#"SELECT id, workspace_id, parent_path, name, path, file_id, is_dir, created_at, updated_at
+               FROM veda_dentries WHERE workspace_id = ? ORDER BY path"#,
+        )
+        .bind(workspace_id)
+        .fetch_all(&mut *conn)
+        .await
+        .map_err(storage_err)?
+    } else {
+        let like = format!("{}/%", escape_like(path_prefix));
+        sqlx::query(
+            r#"SELECT id, workspace_id, parent_path, name, path, file_id, is_dir, created_at, updated_at
+               FROM veda_dentries WHERE workspace_id = ? AND path LIKE ? ESCAPE '\\' ORDER BY path"#,
+        )
+        .bind(workspace_id)
+        .bind(&like)
+        .fetch_all(&mut *conn)
+        .await
+        .map_err(storage_err)?
+    };
+    rows.iter().map(|r| row_to_dentry(r)).collect()
+}
+
+async fn get_file_chunks_conn(
+    conn: &mut sqlx::MySqlConnection,
+    file_id: &str,
+    start_line: Option<i32>,
+    end_line: Option<i32>,
+) -> Result<Vec<FileChunk>> {
+    let mut q = String::from(
+        r#"SELECT file_id, chunk_index, start_line, line_count, byte_len, chunk_sha256, content FROM veda_file_chunks WHERE file_id = ?"#,
+    );
+    let rows = match (start_line, end_line) {
+        (Some(a), Some(b)) => {
+            q.push_str(
+                " AND chunk_index >= COALESCE((SELECT MAX(chunk_index) \
+                   FROM veda_file_chunks WHERE file_id = ? AND start_line <= ?), 0) \
+                   AND start_line <= ? ORDER BY chunk_index",
+            );
+            sqlx::query(&q)
+                .bind(file_id)
+                .bind(file_id)
+                .bind(a)
+                .bind(b)
+                .fetch_all(&mut *conn)
+                .await
+        }
+        (Some(a), None) => {
+            q.push_str(
+                " AND chunk_index >= COALESCE((SELECT MAX(chunk_index) \
+                   FROM veda_file_chunks WHERE file_id = ? AND start_line <= ?), 0) \
+                   ORDER BY chunk_index",
+            );
+            sqlx::query(&q)
+                .bind(file_id)
+                .bind(file_id)
+                .bind(a)
+                .fetch_all(&mut *conn)
+                .await
+        }
+        (None, Some(b)) => {
+            q.push_str(" AND start_line <= ? ORDER BY chunk_index");
+            sqlx::query(&q)
+                .bind(file_id)
+                .bind(b)
+                .fetch_all(&mut *conn)
+                .await
+        }
+        (None, None) => {
+            q.push_str(" ORDER BY chunk_index");
+            sqlx::query(&q)
+                .bind(file_id)
+                .fetch_all(&mut *conn)
+                .await
+        }
+    }
+    .map_err(storage_err)?;
+    rows.iter().map(|r| row_to_file_chunk(r)).collect()
+}
+
+async fn insert_fs_event_conn(conn: &mut sqlx::MySqlConnection, event: &FsEvent) -> Result<()> {
+    let et = fs_event_type_str(event.event_type);
+    if event.id == 0 {
+        sqlx::query(
+            r#"INSERT INTO veda_fs_events (workspace_id, event_type, path, file_id, created_at)
+               VALUES (?, ?, ?, ?, ?)"#,
+        )
+        .bind(&event.workspace_id)
+        .bind(et)
+        .bind(&event.path)
+        .bind(&event.file_id)
+        .bind(event.created_at.naive_utc())
+        .execute(&mut *conn)
+        .await
+        .map_err(storage_err)?;
+    } else {
+        sqlx::query(
+            r#"INSERT INTO veda_fs_events (id, workspace_id, event_type, path, file_id, created_at)
+               VALUES (?, ?, ?, ?, ?, ?)"#,
+        )
+        .bind(event.id)
+        .bind(&event.workspace_id)
+        .bind(et)
+        .bind(&event.path)
+        .bind(&event.file_id)
+        .bind(event.created_at.naive_utc())
+        .execute(&mut *conn)
+        .await
+        .map_err(storage_err)?;
+    }
+    Ok(())
+}
+
 async fn insert_outbox_conn(conn: &mut sqlx::MySqlConnection, event: &OutboxEvent) -> Result<()> {
     let payload = serde_json::to_string(&event.payload).map_err(|e| storage_err(e.to_string()))?;
     let status = outbox_status_str(event.status);
@@ -610,32 +729,8 @@ impl MetadataStore for MysqlStore {
         workspace_id: &str,
         path_prefix: &str,
     ) -> Result<Vec<Dentry>> {
-        let mut rows = if path_prefix == "/" {
-            sqlx::query(
-                r#"SELECT id, workspace_id, parent_path, name, path, file_id, is_dir, created_at, updated_at
-                   FROM veda_dentries WHERE workspace_id = ? ORDER BY path"#,
-            )
-            .bind(workspace_id)
-            .fetch_all(&self.pool)
-            .await
-            .map_err(storage_err)?
-        } else {
-            let like = format!("{}/%", escape_like(path_prefix));
-            sqlx::query(
-                r#"SELECT id, workspace_id, parent_path, name, path, file_id, is_dir, created_at, updated_at
-                   FROM veda_dentries WHERE workspace_id = ? AND path LIKE ? ESCAPE '\\' ORDER BY path"#,
-            )
-            .bind(workspace_id)
-            .bind(&like)
-            .fetch_all(&self.pool)
-            .await
-            .map_err(storage_err)?
-        };
-        let mut out = Vec::with_capacity(rows.len());
-        for r in rows.drain(..) {
-            out.push(row_to_dentry(&r)?);
-        }
-        Ok(out)
+        let mut conn = self.pool.acquire().await.map_err(storage_err)?;
+        list_dentries_under_conn(&mut *conn, workspace_id, path_prefix).await
     }
 
     async fn get_file(&self, file_id: &str) -> Result<Option<FileRecord>> {
@@ -674,65 +769,14 @@ impl MetadataStore for MysqlStore {
             .map_err(storage_err)?)
     }
 
-    /// Returns chunks overlapping the line range [start_line, end_line].
-    /// Unlike a naive `start_line BETWEEN a AND b`, we also include the chunk
-    /// that *contains* `start_line` (its own `start_line` may be less than `a`).
     async fn get_file_chunks(
         &self,
         file_id: &str,
         start_line: Option<i32>,
         end_line: Option<i32>,
     ) -> Result<Vec<FileChunk>> {
-        let mut q = String::from(
-            r#"SELECT file_id, chunk_index, start_line, line_count, byte_len, chunk_sha256, content FROM veda_file_chunks WHERE file_id = ?"#,
-        );
-        let mut rows = match (start_line, end_line) {
-            (Some(a), Some(b)) => {
-                q.push_str(
-                    " AND chunk_index >= COALESCE((SELECT MAX(chunk_index) \
-                       FROM veda_file_chunks WHERE file_id = ? AND start_line <= ?), 0) \
-                       AND start_line <= ? ORDER BY chunk_index",
-                );
-                sqlx::query(&q)
-                    .bind(file_id)
-                    .bind(file_id)
-                    .bind(a)
-                    .bind(b)
-                    .fetch_all(&self.pool)
-                    .await
-            }
-            (Some(a), None) => {
-                q.push_str(
-                    " AND chunk_index >= COALESCE((SELECT MAX(chunk_index) \
-                       FROM veda_file_chunks WHERE file_id = ? AND start_line <= ?), 0) \
-                       ORDER BY chunk_index",
-                );
-                sqlx::query(&q)
-                    .bind(file_id)
-                    .bind(file_id)
-                    .bind(a)
-                    .fetch_all(&self.pool)
-                    .await
-            }
-            (None, Some(b)) => {
-                q.push_str(" AND start_line <= ? ORDER BY chunk_index");
-                sqlx::query(&q)
-                    .bind(file_id)
-                    .bind(b)
-                    .fetch_all(&self.pool)
-                    .await
-            }
-            (None, None) => {
-                q.push_str(" ORDER BY chunk_index");
-                sqlx::query(&q).bind(file_id).fetch_all(&self.pool).await
-            }
-        }
-        .map_err(storage_err)?;
-        let mut v = Vec::with_capacity(rows.len());
-        for r in rows.drain(..) {
-            v.push(row_to_file_chunk(&r)?);
-        }
-        Ok(v)
+        let mut conn = self.pool.acquire().await.map_err(storage_err)?;
+        get_file_chunks_conn(&mut *conn, file_id, start_line, end_line).await
     }
 
     async fn find_file_by_checksum(
@@ -931,32 +975,7 @@ impl MetadataTx for MysqlMetadataTx {
         path_prefix: &str,
     ) -> Result<Vec<Dentry>> {
         let t = self.tx_mut()?;
-        let rows = if path_prefix == "/" {
-            sqlx::query(
-                r#"SELECT id, workspace_id, parent_path, name, path, file_id, is_dir, created_at, updated_at
-                   FROM veda_dentries WHERE workspace_id = ? ORDER BY path"#,
-            )
-            .bind(workspace_id)
-            .fetch_all(t.as_mut())
-            .await
-            .map_err(storage_err)?
-        } else {
-            let like = format!("{}/%", escape_like(path_prefix));
-            sqlx::query(
-                r#"SELECT id, workspace_id, parent_path, name, path, file_id, is_dir, created_at, updated_at
-                   FROM veda_dentries WHERE workspace_id = ? AND path LIKE ? ESCAPE '\\' ORDER BY path"#,
-            )
-            .bind(workspace_id)
-            .bind(&like)
-            .fetch_all(t.as_mut())
-            .await
-            .map_err(storage_err)?
-        };
-        let mut out = Vec::with_capacity(rows.len());
-        for r in &rows {
-            out.push(row_to_dentry(r)?);
-        }
-        Ok(out)
+        list_dentries_under_conn(t.as_mut(), workspace_id, path_prefix).await
     }
 
     async fn delete_dentries_under(
@@ -1131,8 +1150,6 @@ impl MetadataTx for MysqlMetadataTx {
             .map_err(storage_err)?)
     }
 
-    /// Returns chunks overlapping the line range [start_line, end_line].
-    /// See the readonly impl for the semantics rationale.
     async fn get_file_chunks(
         &mut self,
         file_id: &str,
@@ -1140,53 +1157,7 @@ impl MetadataTx for MysqlMetadataTx {
         end_line: Option<i32>,
     ) -> Result<Vec<FileChunk>> {
         let t = self.tx_mut()?;
-        let mut q = String::from(
-            r#"SELECT file_id, chunk_index, start_line, line_count, byte_len, chunk_sha256, content FROM veda_file_chunks WHERE file_id = ?"#,
-        );
-        let rows = match (start_line, end_line) {
-            (Some(a), Some(b)) => {
-                q.push_str(
-                    " AND chunk_index >= COALESCE((SELECT MAX(chunk_index) \
-                       FROM veda_file_chunks WHERE file_id = ? AND start_line <= ?), 0) \
-                       AND start_line <= ? ORDER BY chunk_index",
-                );
-                sqlx::query(&q)
-                    .bind(file_id)
-                    .bind(file_id)
-                    .bind(a)
-                    .bind(b)
-                    .fetch_all(t.as_mut())
-                    .await
-            }
-            (Some(a), None) => {
-                q.push_str(
-                    " AND chunk_index >= COALESCE((SELECT MAX(chunk_index) \
-                       FROM veda_file_chunks WHERE file_id = ? AND start_line <= ?), 0) \
-                       ORDER BY chunk_index",
-                );
-                sqlx::query(&q)
-                    .bind(file_id)
-                    .bind(file_id)
-                    .bind(a)
-                    .fetch_all(t.as_mut())
-                    .await
-            }
-            (None, Some(b)) => {
-                q.push_str(" AND start_line <= ? ORDER BY chunk_index");
-                sqlx::query(&q)
-                    .bind(file_id)
-                    .bind(b)
-                    .fetch_all(t.as_mut())
-                    .await
-            }
-            (None, None) => {
-                q.push_str(" ORDER BY chunk_index");
-                sqlx::query(&q).bind(file_id).fetch_all(t.as_mut()).await
-            }
-        }
-        .map_err(storage_err)?;
-
-        rows.into_iter().map(|r| row_to_file_chunk(&r)).collect()
+        get_file_chunks_conn(t.as_mut(), file_id, start_line, end_line).await
     }
 
     async fn insert_file_content(&mut self, file_id: &str, content: &str) -> Result<()> {
@@ -1281,36 +1252,7 @@ impl MetadataTx for MysqlMetadataTx {
 
     async fn insert_fs_event(&mut self, event: &FsEvent) -> Result<()> {
         let t = self.tx_mut()?;
-        let et = fs_event_type_str(event.event_type);
-        if event.id == 0 {
-            sqlx::query(
-                r#"INSERT INTO veda_fs_events (workspace_id, event_type, path, file_id, created_at)
-                   VALUES (?, ?, ?, ?, ?)"#,
-            )
-            .bind(&event.workspace_id)
-            .bind(et)
-            .bind(&event.path)
-            .bind(&event.file_id)
-            .bind(event.created_at.naive_utc())
-            .execute(t.as_mut())
-            .await
-            .map_err(storage_err)?;
-        } else {
-            sqlx::query(
-                r#"INSERT INTO veda_fs_events (id, workspace_id, event_type, path, file_id, created_at)
-                   VALUES (?, ?, ?, ?, ?, ?)"#,
-            )
-            .bind(event.id)
-            .bind(&event.workspace_id)
-            .bind(et)
-            .bind(&event.path)
-            .bind(&event.file_id)
-            .bind(event.created_at.naive_utc())
-            .execute(t.as_mut())
-            .await
-            .map_err(storage_err)?;
-        }
-        Ok(())
+        insert_fs_event_conn(t.as_mut(), event).await
     }
 
     async fn commit(mut self: Box<Self>) -> Result<()> {

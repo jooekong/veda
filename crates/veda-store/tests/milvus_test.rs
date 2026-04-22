@@ -8,9 +8,7 @@ use serde::Deserialize;
 use uuid::Uuid;
 use veda_core::store::{CollectionVectorStore, VectorStore};
 use veda_store::MilvusStore;
-use veda_types::{
-    ChunkWithEmbedding, FieldDefinition, HybridSearchRequest, SearchMode, SearchRequest,
-};
+use veda_types::{ChunkWithEmbedding, FieldDefinition, SearchMode, SearchRequest};
 
 #[derive(Debug, Deserialize)]
 struct MilvusSection {
@@ -80,14 +78,15 @@ async fn milvus_init_upsert_search_delete() {
     }
     assert!(found, "upserted chunk should be searchable");
 
-    let hy = HybridSearchRequest {
+    let hy = SearchRequest {
         workspace_id: ws.clone(),
-        query_vector: vec.clone(),
-        query_text: Some("hello".into()),
+        query: "hello".into(),
         mode: SearchMode::Hybrid,
         limit: 5,
+        path_prefix: None,
+        query_vector: Some(vec.clone()),
     };
-    let _ = store.hybrid_search(&hy).await.expect("hybrid");
+    let _ = store.search(&hy).await.expect("hybrid");
 
     store.delete_chunks(&ws, &fid).await.expect("delete_chunks");
 

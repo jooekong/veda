@@ -151,14 +151,7 @@ async fn delete_workspace(
     auth: AuthAccount,
     Path(id): Path<String>,
 ) -> Result<Json<ApiResponse<()>>, AppError> {
-    let ws = state
-        .auth_store
-        .get_workspace(&id)
-        .await?
-        .ok_or_else(|| VedaError::NotFound("workspace".into()))?;
-    if ws.account_id != auth.account_id {
-        return Err(VedaError::PermissionDenied.into());
-    }
+    let _ws = auth.load_owned_workspace(&state, &id).await?;
     state.auth_store.delete_workspace(&id).await?;
     Ok(Json(ApiResponse::ok(())))
 }
@@ -169,14 +162,7 @@ async fn create_workspace_key(
     Path(ws_id): Path<String>,
     Json(body): Json<serde_json::Value>,
 ) -> Result<Json<ApiResponse<serde_json::Value>>, AppError> {
-    let ws = state
-        .auth_store
-        .get_workspace(&ws_id)
-        .await?
-        .ok_or_else(|| VedaError::NotFound("workspace".into()))?;
-    if ws.account_id != auth.account_id {
-        return Err(VedaError::PermissionDenied.into());
-    }
+    let _ws = auth.load_owned_workspace(&state, &ws_id).await?;
 
     let name = body
         .get("name")
@@ -217,14 +203,7 @@ async fn create_token(
     auth: AuthAccount,
     Path(ws_id): Path<String>,
 ) -> Result<Json<ApiResponse<WorkspaceTokenResponse>>, AppError> {
-    let ws = state
-        .auth_store
-        .get_workspace(&ws_id)
-        .await?
-        .ok_or_else(|| VedaError::NotFound("workspace".into()))?;
-    if ws.account_id != auth.account_id {
-        return Err(VedaError::PermissionDenied.into());
-    }
+    let _ws = auth.load_owned_workspace(&state, &ws_id).await?;
     let (token, expires_at) = create_jwt(&state.jwt_secret, &ws_id, &auth.account_id, 24)
         .map_err(|e| VedaError::Internal(e.to_string()))?;
     Ok(Json(ApiResponse::ok(WorkspaceTokenResponse {

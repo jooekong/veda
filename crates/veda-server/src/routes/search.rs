@@ -32,15 +32,7 @@ async fn search(
             req.path_prefix.as_deref(),
         )
         .await?;
-    let results: Vec<SearchResultItem> = hits
-        .into_iter()
-        .map(|h| SearchResultItem {
-            path: h.path.unwrap_or_default(),
-            chunk_index: h.chunk_index,
-            content: h.content,
-            score: h.score,
-        })
-        .collect();
+    let results: Vec<SearchResultItem> = hits.into_iter().map(SearchResultItem::from).collect();
 
     Ok(Json(ApiResponse::ok(results)))
 }

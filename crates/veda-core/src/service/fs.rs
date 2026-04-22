@@ -314,74 +314,8 @@ impl FsService {
                         });
                     }
 
-                    if f.ref_count > 1 {
-                        let new_file_id = Uuid::new_v4().to_string();
-                        let now = Utc::now();
-                        let new_file = FileRecord {
-                            id: new_file_id.clone(),
-                            workspace_id: workspace_id.to_string(),
-                            size_bytes: meta.size,
-                            mime_type: f.mime_type.clone(),
-                            storage_type: meta.storage_type(),
-                            source_type: f.source_type,
-                            line_count: Some(meta.line_count),
-                            checksum_sha256: meta.sha256.clone(),
-                            revision: f.revision + 1,
-                            ref_count: 1,
-                            created_at: now,
-                            updated_at: now,
-                        };
-                        tx.insert_file(&new_file).await?;
-                        persist_write_meta(&mut *tx, &new_file_id, &meta).await?;
-                        cleanup_file_if_orphan(&mut *tx, workspace_id, fid).await?;
-                        tx.update_dentry_file_id(workspace_id, &norm, &new_file_id)
-                            .await?;
-
-                        let outbox =
-                            make_outbox(workspace_id, OutboxEventType::ChunkSync, &new_file_id);
-                        tx.insert_outbox(&outbox).await?;
-                        let evt = make_fs_event(
-                            workspace_id,
-                            FsEventType::Update,
-                            &norm,
-                            Some(&new_file_id),
-                        );
-                        tx.insert_fs_event(&evt).await?;
-                        tx.commit().await?;
-                        return Ok(api::WriteFileResponse {
-                            file_id: new_file_id,
-                            revision: new_file.revision,
-                            content_unchanged: false,
-                        });
-                    }
-
-                    let new_rev = f.revision + 1;
-                    tx.delete_file_content(fid).await?;
-                    tx.delete_file_chunks(fid).await?;
-                    persist_write_meta(&mut *tx, fid, &meta).await?;
-                    tx.update_file_revision(
-                        fid,
-                        f.revision,
-                        new_rev,
-                        meta.size,
-                        &meta.sha256,
-                        Some(meta.line_count),
-                        meta.storage_type(),
-                    )
-                    .await?;
-
-                    let outbox = make_outbox(workspace_id, OutboxEventType::ChunkSync, fid);
-                    tx.insert_outbox(&outbox).await?;
-
-                    let evt = make_fs_event(workspace_id, FsEventType::Update, &norm, Some(fid));
-                    tx.insert_fs_event(&evt).await?;
-
-                    tx.commit().await?;
-                    return Ok(api::WriteFileResponse {
-                        file_id: fid.clone(),
-                        revision: new_rev,
-                        content_unchanged: false,
-                    });
+                    return finalize_full_rewrite(tx, workspace_id, &norm, &f, fid, &meta)
+                        .await;
                 }
             }
         }

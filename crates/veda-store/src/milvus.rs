@@ -6,8 +6,7 @@ use serde_json::{json, Value};
 use tracing::warn;
 use veda_core::store::{CollectionVectorStore, VectorStore};
 use veda_types::{
-    ChunkWithEmbedding, FieldDefinition, HybridSearchRequest, Result, SearchHit, SearchMode,
-    SearchRequest, VedaError,
+    ChunkWithEmbedding, FieldDefinition, Result, SearchHit, SearchMode, SearchRequest, VedaError,
 };
 
 const COLLECTION: &str = "veda_chunks";
@@ -281,13 +280,14 @@ impl MilvusStore {
 
     async fn hybrid_search_remote(
         &self,
-        req: &HybridSearchRequest,
+        req: &SearchRequest,
     ) -> Result<Option<Vec<SearchHit>>> {
+        let qv = req.query_vector.as_ref().unwrap();
         let ws = milvus_quote(&req.workspace_id);
         let base_filter = format!("workspace_id == {ws}");
         let lim = req.limit.min(16_383).max(1);
         let search_obj = json!({
-            "data": [req.query_vector.clone()],
+            "data": [qv],
             "annsField": "vector",
             "filter": base_filter.clone(),
             "limit": lim,
@@ -451,38 +451,28 @@ impl VectorStore for MilvusStore {
                 self.query_fulltext(&req.workspace_id, &req.query, req.limit)
                     .await
             }
-            SearchMode::Semantic | SearchMode::Hybrid => {
-                let Some(ref v) = req.query_vector else {
-                    return Err(VedaError::InvalidInput(
-                        "search requires query_vector for vector modes".into(),
-                    ));
-                };
+            SearchMode::Semantic => {
+                let v = req.query_vector.as_ref().ok_or_else(|| {
+                    VedaError::InvalidInput("search requires query_vector for vector modes".into())
+                })?;
+                self.ann_search(&req.workspace_id, v, req.limit, None).await
+            }
+            SearchMode::Hybrid => {
+                let v = req.query_vector.as_ref().ok_or_else(|| {
+                    VedaError::InvalidInput("search requires query_vector for vector modes".into())
+                })?;
                 if v.is_empty() {
                     return Err(VedaError::InvalidInput(
                         "query_vector must be non-empty".into(),
                     ));
                 }
-                self.ann_search(&req.workspace_id, v, req.limit, None).await
+                if let Some(hits) = self.hybrid_search_remote(req).await? {
+                    return Ok(hits);
+                }
+                self.ann_search(&req.workspace_id, v, req.limit, Some(&req.query))
+                    .await
             }
         }
-    }
-
-    async fn hybrid_search(&self, req: &HybridSearchRequest) -> Result<Vec<SearchHit>> {
-        if req.query_vector.is_empty() {
-            return Err(VedaError::InvalidInput(
-                "query_vector must be non-empty".into(),
-            ));
-        }
-        if let Some(hits) = self.hybrid_search_remote(req).await? {
-            return Ok(hits);
-        }
-        self.ann_search(
-            &req.workspace_id,
-            &req.query_vector,
-            req.limit,
-            req.query_text.as_deref(),
-        )
-        .await
     }
 
     async fn init_collections(&self, embedding_dim: u32) -> Result<()> {

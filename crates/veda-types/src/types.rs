@@ -288,17 +288,6 @@ pub struct SearchHit {
     pub path: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct HybridSearchRequest {
-    pub workspace_id: String,
-    pub query_vector: Vec<f32>,
-    pub query_text: Option<String>,
-    #[serde(default)]
-    pub mode: SearchMode,
-    #[serde(default = "default_search_limit")]
-    pub limit: usize,
-}
-
 // ── Vector / Embedding ─────────────────────────────────
 
 #[derive(Debug, Clone)]

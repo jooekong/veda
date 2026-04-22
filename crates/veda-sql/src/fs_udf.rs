@@ -130,6 +130,25 @@ fn not_found_to_none(e: &VedaError) -> bool {
     matches!(e, VedaError::NotFound(_))
 }
 
+pub(crate) fn bounded_read_file(
+    fs: &FsService,
+    ws: &str,
+    path: &str,
+) -> std::result::Result<String, VedaError> {
+    let info = block_on(fs.stat(ws, path))?;
+    if let Some(sz) = info.size_bytes {
+        if sz as usize > MAX_SINGLE_FILE_BYTES {
+            return Err(VedaError::QuotaExceeded(format!(
+                "file {} is {} bytes, exceeds {}MB limit",
+                path,
+                sz,
+                MAX_SINGLE_FILE_BYTES / 1024 / 1024
+            )));
+        }
+    }
+    block_on(fs.read_file(ws, path))
+}
+
 fn check_write_allowed(ctx: &FsUdfContext) -> Result<()> {
     if ctx.read_only {
         return Err(datafusion::error::DataFusionError::Execution(
@@ -186,27 +205,7 @@ impl ScalarUDFImpl for FsScalarUdf {
                 let paths = get_string_values(&args.args, 0, num_rows)?;
                 let mut builder = StringBuilder::new();
                 for path in &paths {
-                    let stat = block_on(fs.stat(ws, path));
-                    match stat {
-                        Ok(info) => {
-                            if let Some(sz) = info.size_bytes {
-                                if sz as usize > MAX_SINGLE_FILE_BYTES {
-                                    return Err(exec_err(VedaError::QuotaExceeded(format!(
-                                        "file {} is {} bytes, exceeds {}MB limit",
-                                        path,
-                                        sz,
-                                        MAX_SINGLE_FILE_BYTES / 1024 / 1024
-                                    ))));
-                                }
-                            }
-                        }
-                        Err(ref e) if not_found_to_none(e) => {
-                            builder.append_null();
-                            continue;
-                        }
-                        Err(e) => return Err(exec_err(e)),
-                    }
-                    match block_on(fs.read_file(ws, path)) {
+                    match bounded_read_file(fs, ws, path) {
                         Ok(content) => builder.append_value(&content),
                         Err(ref e) if not_found_to_none(e) => builder.append_null(),
                         Err(e) => return Err(exec_err(e)),

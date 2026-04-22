@@ -75,9 +75,7 @@ async fn write_file(
     headers: HeaderMap,
     body: Bytes,
 ) -> Result<Response, AppError> {
-    if auth.read_only {
-        return Err(VedaError::PermissionDenied.into());
-    }
+    auth.require_write()?;
     let body = std::str::from_utf8(&body).map_err(|_| {
         AppError(VedaError::InvalidInput(
             "file content must be valid UTF-8".into(),
@@ -129,9 +127,7 @@ async fn append_file(
     Path(path): Path<String>,
     body: Bytes,
 ) -> Result<Json<ApiResponse<WriteFileResponse>>, AppError> {
-    if auth.read_only {
-        return Err(VedaError::PermissionDenied.into());
-    }
+    auth.require_write()?;
     let body = std::str::from_utf8(&body).map_err(|_| {
         AppError(VedaError::InvalidInput(
             "file content must be valid UTF-8".into(),
@@ -256,9 +252,7 @@ async fn delete_file(
     auth: AuthWorkspace,
     Path(path): Path<String>,
 ) -> Result<Json<ApiResponse<()>>, AppError> {
-    if auth.read_only {
-        return Err(VedaError::PermissionDenied.into());
-    }
+    auth.require_write()?;
     let path = format!("/{path}");
     let _count = state.fs_service.delete(&auth.workspace_id, &path).await?;
     Ok(Json(ApiResponse::ok(())))
@@ -275,9 +269,7 @@ async fn copy_file(
     auth: AuthWorkspace,
     Json(body): Json<CopyRenameBody>,
 ) -> Result<Json<ApiResponse<()>>, AppError> {
-    if auth.read_only {
-        return Err(VedaError::PermissionDenied.into());
-    }
+    auth.require_write()?;
     state
         .fs_service
         .copy_file(&auth.workspace_id, &body.from, &body.to)
@@ -290,9 +282,7 @@ async fn rename_file(
     auth: AuthWorkspace,
     Json(body): Json<CopyRenameBody>,
 ) -> Result<Json<ApiResponse<()>>, AppError> {
-    if auth.read_only {
-        return Err(VedaError::PermissionDenied.into());
-    }
+    auth.require_write()?;
     state
         .fs_service
         .rename(&auth.workspace_id, &body.from, &body.to)
@@ -310,9 +300,7 @@ async fn mkdir(
     auth: AuthWorkspace,
     Json(body): Json<MkdirBody>,
 ) -> Result<Json<ApiResponse<()>>, AppError> {
-    if auth.read_only {
-        return Err(VedaError::PermissionDenied.into());
-    }
+    auth.require_write()?;
     state
         .fs_service
         .mkdir(&auth.workspace_id, &body.path)

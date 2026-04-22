@@ -94,6 +94,33 @@ pub struct AuthWorkspace {
     pub read_only: bool,
 }
 
+impl AuthWorkspace {
+    pub fn require_write(&self) -> Result<(), crate::error::AppError> {
+        if self.read_only {
+            return Err(veda_types::VedaError::PermissionDenied.into());
+        }
+        Ok(())
+    }
+}
+
+impl AuthAccount {
+    pub async fn load_owned_workspace(
+        &self,
+        state: &AppState,
+        ws_id: &str,
+    ) -> Result<veda_types::Workspace, crate::error::AppError> {
+        let ws = state
+            .auth_store
+            .get_workspace(ws_id)
+            .await?
+            .ok_or_else(|| veda_types::VedaError::NotFound("workspace".into()))?;
+        if ws.account_id != self.account_id {
+            return Err(veda_types::VedaError::PermissionDenied.into());
+        }
+        Ok(ws)
+    }
+}
+
 impl FromRequestParts<Arc<AppState>> for AuthWorkspace {
     type Rejection = Response;
 

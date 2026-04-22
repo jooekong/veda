@@ -39,48 +39,25 @@ impl SearchService {
             limit
         };
 
-        let mut hits = match mode {
-            SearchMode::Semantic => {
+        let query_vector = match mode {
+            SearchMode::Semantic | SearchMode::Hybrid => {
                 let vectors = self.embedding.embed(&[query.to_string()]).await?;
-                let query_vector = vectors.into_iter().next().ok_or_else(|| {
+                Some(vectors.into_iter().next().ok_or_else(|| {
                     VedaError::EmbeddingFailed("empty embedding result".to_string())
-                })?;
-                let req = SearchRequest {
-                    workspace_id: workspace_id.to_string(),
-                    query: query.to_string(),
-                    mode: SearchMode::Semantic,
-                    limit: fetch_limit,
-                    path_prefix: path_prefix.map(|s| s.to_string()),
-                    query_vector: Some(query_vector),
-                };
-                self.vector.search(&req).await?
+                })?)
             }
-            SearchMode::Fulltext => {
-                let req = SearchRequest {
-                    workspace_id: workspace_id.to_string(),
-                    query: query.to_string(),
-                    mode: SearchMode::Fulltext,
-                    limit: fetch_limit,
-                    path_prefix: path_prefix.map(|s| s.to_string()),
-                    query_vector: None,
-                };
-                self.vector.search(&req).await?
-            }
-            SearchMode::Hybrid => {
-                let vectors = self.embedding.embed(&[query.to_string()]).await?;
-                let query_vector = vectors.into_iter().next().ok_or_else(|| {
-                    VedaError::EmbeddingFailed("empty embedding result".to_string())
-                })?;
-                let req = HybridSearchRequest {
-                    workspace_id: workspace_id.to_string(),
-                    query_vector,
-                    query_text: Some(query.to_string()),
-                    mode: SearchMode::Hybrid,
-                    limit: fetch_limit,
-                };
-                self.vector.hybrid_search(&req).await?
-            }
+            SearchMode::Fulltext => None,
         };
+
+        let req = SearchRequest {
+            workspace_id: workspace_id.to_string(),
+            query: query.to_string(),
+            mode,
+            limit: fetch_limit,
+            path_prefix: path_prefix.map(|s| s.to_string()),
+            query_vector,
+        };
+        let mut hits = self.vector.search(&req).await?;
 
         for hit in &mut hits {
             if hit.path.is_none() {

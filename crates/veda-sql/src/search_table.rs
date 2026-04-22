@@ -141,48 +141,24 @@ impl VedaSearchFactory {
     ) -> veda_types::Result<Vec<SearchHit>> {
         let ws = &self.workspace_id;
 
-        let mut hits = match mode {
-            SearchMode::Semantic => {
+        let query_vector = match mode {
+            SearchMode::Semantic | SearchMode::Hybrid => {
                 let vectors = self.embedding.embed(&[query.to_string()]).await?;
-                let query_vector = vectors.into_iter().next().ok_or_else(|| {
+                Some(vectors.into_iter().next().ok_or_else(|| {
                     VedaError::EmbeddingFailed("empty embedding result".to_string())
-                })?;
-                let req = SearchRequest {
-                    workspace_id: ws.to_string(),
-                    query: query.to_string(),
-                    mode: SearchMode::Semantic,
-                    limit,
-                    path_prefix: None,
-                    query_vector: Some(query_vector),
-                };
-                self.vector.search(&req).await?
+                })?)
             }
-            SearchMode::Fulltext => {
-                let req = SearchRequest {
-                    workspace_id: ws.to_string(),
-                    query: query.to_string(),
-                    mode: SearchMode::Fulltext,
-                    limit,
-                    path_prefix: None,
-                    query_vector: None,
-                };
-                self.vector.search(&req).await?
-            }
-            SearchMode::Hybrid => {
-                let vectors = self.embedding.embed(&[query.to_string()]).await?;
-                let query_vector = vectors.into_iter().next().ok_or_else(|| {
-                    VedaError::EmbeddingFailed("empty embedding result".to_string())
-                })?;
-                let req = HybridSearchRequest {
-                    workspace_id: ws.to_string(),
-                    query_vector,
-                    query_text: Some(query.to_string()),
-                    mode: SearchMode::Hybrid,
-                    limit,
-                };
-                self.vector.hybrid_search(&req).await?
-            }
+            SearchMode::Fulltext => None,
         };
+        let req = SearchRequest {
+            workspace_id: ws.to_string(),
+            query: query.to_string(),
+            mode,
+            limit,
+            path_prefix: None,
+            query_vector,
+        };
+        let mut hits = self.vector.search(&req).await?;
 
         for hit in &mut hits {
             if hit.path.is_none() {

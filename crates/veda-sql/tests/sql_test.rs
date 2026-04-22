@@ -460,9 +460,6 @@ impl VectorStore for MockVector {
     async fn search(&self, _req: &SearchRequest) -> Result<Vec<SearchHit>> {
         Ok(self.hits.lock().unwrap().clone())
     }
-    async fn hybrid_search(&self, _req: &HybridSearchRequest) -> Result<Vec<SearchHit>> {
-        Ok(self.hits.lock().unwrap().clone())
-    }
     async fn init_collections(&self, _dim: u32) -> Result<()> {
         Ok(())
     }

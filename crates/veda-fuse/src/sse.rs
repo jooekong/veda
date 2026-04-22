@@ -5,6 +5,7 @@ use std::time::Duration;
 use tracing::{debug, info, warn};
 
 use crate::cache::ReadCache;
+use crate::fs::parent_path;
 use crate::inode::InodeTable;
 
 const RECONNECT_MIN: Duration = Duration::from_secs(1);
@@ -150,21 +151,10 @@ fn invalidate_caches(
         if let Some(ino) = table.get_ino(path) {
             table.invalidate(ino);
         }
-        let parent = parent_dir(path);
+        let parent = parent_path(path);
         if let Some(parent_ino) = table.get_ino(parent) {
             table.invalidate(parent_ino);
         }
-    }
-}
-
-fn parent_dir(path: &str) -> &str {
-    if path == "/" {
-        return "/";
-    }
-    match path.rfind('/') {
-        Some(0) => "/",
-        Some(i) => &path[..i],
-        None => "/",
     }
 }
 
@@ -173,11 +163,11 @@ mod tests {
     use super::*;
 
     #[test]
-    fn parent_dir_root() {
-        assert_eq!(parent_dir("/"), "/");
-        assert_eq!(parent_dir("/a.txt"), "/");
-        assert_eq!(parent_dir("/docs/a.txt"), "/docs");
-        assert_eq!(parent_dir("/a/b/c"), "/a/b");
+    fn parent_path_root() {
+        assert_eq!(parent_path("/"), "/");
+        assert_eq!(parent_path("/a.txt"), "/");
+        assert_eq!(parent_path("/docs/a.txt"), "/docs");
+        assert_eq!(parent_path("/a/b/c"), "/a/b");
     }
 
     #[test]

@@ -16,6 +16,15 @@ use crate::inode::InodeTable;
 
 const BLOCK_SIZE: u32 = 512;
 
+pub(crate) fn parent_path(path: &str) -> &str {
+    if path == "/" { return "/"; }
+    match path.rfind('/') {
+        Some(0) => "/",
+        Some(i) => &path[..i],
+        None => "/",
+    }
+}
+
 pub struct FuseConfig {
     pub attr_ttl: Duration,
     pub read_only: bool,
@@ -64,15 +73,6 @@ impl VedaFs {
         let fh = self.next_fh;
         self.next_fh += 1;
         fh
-    }
-
-    fn parent_path(path: &str) -> &str {
-        if path == "/" { return "/"; }
-        match path.rfind('/') {
-            Some(0) => "/",
-            Some(i) => &path[..i],
-            None => "/",
-        }
     }
 
     fn make_attr(info: &FileInfo, ino: u64) -> FileAttr {
@@ -295,7 +295,7 @@ impl Filesystem for VedaFs {
             Ok(e) => e,
             Err(ref e) => { reply.error(Self::err_to_errno(e)); return; }
         };
-        let parent_ino = self.inode_get_or_create(Self::parent_path(&path));
+        let parent_ino = self.inode_get_or_create(parent_path(&path));
         let mut full_entries = vec![
             (ino, FileType::Directory, ".".to_string()),
             (parent_ino, FileType::Directory, "..".to_string()),

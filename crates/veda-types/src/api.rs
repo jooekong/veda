@@ -1,7 +1,7 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-use crate::types::{CollectionType, FieldDefinition, SearchMode};
+use crate::types::{CollectionType, FieldDefinition, SearchHit, SearchMode};
 
 // ── Account ────────────────────────────────────────────
 
@@ -90,6 +90,17 @@ pub struct SearchResultItem {
     pub chunk_index: i32,
     pub content: String,
     pub score: f32,
+}
+
+impl From<SearchHit> for SearchResultItem {
+    fn from(h: SearchHit) -> Self {
+        Self {
+            path: h.path.unwrap_or_default(),
+            chunk_index: h.chunk_index,
+            content: h.content,
+            score: h.score,
+        }
+    }
 }
 
 // ── Collection ─────────────────────────────────────────

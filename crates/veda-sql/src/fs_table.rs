@@ -12,7 +12,7 @@ use datafusion::logical_expr::Expr;
 use veda_core::service::fs::FsService;
 use veda_types::Dentry;
 
-use crate::format::{self, FileFormat, MAX_SINGLE_FILE_BYTES};
+use crate::format::{self, FileFormat};
 use crate::fs_udf;
 
 const MAX_GLOB_TOTAL_READ: usize = 100 * 1024 * 1024; // 100MB
@@ -147,23 +147,8 @@ fn build_dir_listing_batch(dentries: &[Dentry], fs: &FsService, _ws: &str) -> Re
 }
 
 fn read_single_file(fs: &FsService, ws: &str, path: &str, fmt: &FileFormat) -> Result<RecordBatch> {
-    let info = fs_udf::block_on(fs.stat(ws, path))
+    let content = fs_udf::bounded_read_file(fs, ws, path)
         .map_err(|e| datafusion::error::DataFusionError::Execution(e.to_string()))?;
-
-    if let Some(sz) = info.size_bytes {
-        if sz as usize > MAX_SINGLE_FILE_BYTES {
-            return Err(datafusion::error::DataFusionError::Execution(format!(
-                "file {} is {} bytes, exceeds {}MB limit",
-                path,
-                sz,
-                MAX_SINGLE_FILE_BYTES / 1024 / 1024
-            )));
-        }
-    }
-
-    let content = fs_udf::block_on(fs.read_file(ws, path))
-        .map_err(|e| datafusion::error::DataFusionError::Execution(e.to_string()))?;
-
     format::parse_file(&content, path, fmt)
 }
 
