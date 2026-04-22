@@ -201,6 +201,14 @@ pub struct FileChunk {
     pub file_id: String,
     pub chunk_index: i32,
     pub start_line: i32,
+    /// Lines contained in this chunk (number of '\n' in `content`).
+    pub line_count: i32,
+    /// Byte length of `content` — the exact bytes stored, used to reconstruct
+    /// size / byte offsets without re-scanning the text.
+    pub byte_len: i32,
+    /// sha256 of `content.as_bytes()`. Enables append to skip re-hashing
+    /// chunks whose content did not change.
+    pub chunk_sha256: String,
     pub content: String,
 }
 

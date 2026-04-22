@@ -1,4 +1,4 @@
-use veda_pipeline::chunking::{semantic_chunk, storage_chunk, DEFAULT_SEMANTIC_MAX_TOKENS};
+use veda_pipeline::chunking::{semantic_chunk, DEFAULT_SEMANTIC_MAX_TOKENS};
 
 #[test]
 fn semantic_chunk_splits_on_markdown_headings() {
@@ -41,43 +41,6 @@ fn semantic_chunk_sliding_window_for_long_section() {
 }
 
 #[test]
-fn storage_chunk_aligns_to_newlines() {
-    let line = format!("{}\n", "x".repeat(80));
-    let mut body = String::new();
-    for _ in 0..30 {
-        body.push_str(&line);
-    }
-    let chunk_size = 250;
-    let chunks = storage_chunk(&body, chunk_size);
-
-    assert!(chunks.len() >= 2);
-    for c in chunks.iter().take(chunks.len().saturating_sub(1)) {
-        assert!(
-            c.content.ends_with('\n'),
-            "non-terminal chunks should end on a newline boundary, got chunk_index={}",
-            c.chunk_index
-        );
-    }
-}
-
-#[test]
-fn storage_chunk_start_line_tracking() {
-    let content = "AAAAAAAA\nBBBBBBBB\n";
-    let chunks = storage_chunk(content, 9);
-
-    assert_eq!(chunks.len(), 2);
-    assert_eq!(chunks[0].start_line, 1);
-    assert_eq!(chunks[0].content, "AAAAAAAA\n");
-    assert_eq!(chunks[1].start_line, 2);
-    assert_eq!(chunks[1].content, "BBBBBBBB\n");
-}
-
-#[test]
 fn semantic_chunk_empty_input() {
     assert!(semantic_chunk("", DEFAULT_SEMANTIC_MAX_TOKENS).is_empty());
-}
-
-#[test]
-fn storage_chunk_empty_input() {
-    assert!(storage_chunk("", 256).is_empty());
 }

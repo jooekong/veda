@@ -413,6 +413,27 @@ impl MetadataTx for MockTx {
         Ok(())
     }
 
+    async fn delete_file_chunks_from(
+        &mut self,
+        file_id: &str,
+        from_chunk_index: i32,
+    ) -> Result<()> {
+        let mut st = self.state.lock().unwrap();
+        st.file_chunks
+            .retain(|c| !(c.file_id == file_id && c.chunk_index >= from_chunk_index));
+        Ok(())
+    }
+
+    async fn get_last_file_chunk(&mut self, file_id: &str) -> Result<Option<FileChunk>> {
+        let st = self.state.lock().unwrap();
+        Ok(st
+            .file_chunks
+            .iter()
+            .filter(|c| c.file_id == file_id)
+            .max_by_key(|c| c.chunk_index)
+            .cloned())
+    }
+
     async fn insert_outbox(&mut self, event: &OutboxEvent) -> Result<()> {
         let mut st = self.state.lock().unwrap();
         st.outbox.push(event.clone());

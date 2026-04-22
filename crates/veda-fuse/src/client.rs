@@ -118,9 +118,16 @@ impl VedaClient {
         content: &[u8],
         expected_rev: Option<i32>,
     ) -> Result<Option<i32>> {
+        use sha2::{Digest, Sha256};
         let path = path.trim_start_matches('/');
+        let digest = {
+            let mut h = Sha256::new();
+            h.update(content);
+            format!("{:x}", h.finalize())
+        };
         let mut req = self.http.put(format!("{}/v1/fs/{path}", self.base))
             .bearer_auth(&self.key)
+            .header("If-None-Match", format!("\"{digest}\""))
             .body(content.to_vec());
         if let Some(rev) = expected_rev {
             req = req.header("If-Match", format!("\"{rev}\""));

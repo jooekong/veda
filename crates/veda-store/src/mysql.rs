@@ -13,8 +13,10 @@ use veda_types::{
 
 fn storage_err(e: impl std::fmt::Display) -> VedaError {
     let msg = e.to_string();
-    if msg.contains("1213") || msg.contains("Deadlock")
-        || msg.contains("1205") || msg.contains("Lock wait timeout")
+    if msg.contains("1213")
+        || msg.contains("Deadlock")
+        || msg.contains("1205")
+        || msg.contains("Lock wait timeout")
     {
         return VedaError::Deadlock(msg);
     }
@@ -327,6 +329,9 @@ fn row_to_file_chunk(row: &sqlx::mysql::MySqlRow) -> Result<FileChunk> {
         file_id: row.try_get("file_id").map_err(storage_err)?,
         chunk_index: row.try_get("chunk_index").map_err(storage_err)?,
         start_line: row.try_get("start_line").map_err(storage_err)?,
+        line_count: row.try_get("line_count").map_err(storage_err)?,
+        byte_len: row.try_get("byte_len").map_err(storage_err)?,
+        chunk_sha256: row.try_get("chunk_sha256").map_err(storage_err)?,
         content: row.try_get("content").map_err(storage_err)?,
     })
 }
@@ -401,6 +406,9 @@ impl MysqlStore {
     file_id VARCHAR(36) NOT NULL,
     chunk_index INT NOT NULL,
     start_line INT NOT NULL,
+    line_count INT NOT NULL,
+    byte_len INT NOT NULL,
+    chunk_sha256 VARCHAR(64) NOT NULL,
     content MEDIUMTEXT NOT NULL,
     PRIMARY KEY (file_id, chunk_index),
     INDEX idx_line_lookup (file_id, start_line)
@@ -676,7 +684,7 @@ impl MetadataStore for MysqlStore {
         end_line: Option<i32>,
     ) -> Result<Vec<FileChunk>> {
         let mut q = String::from(
-            r#"SELECT file_id, chunk_index, start_line, content FROM veda_file_chunks WHERE file_id = ?"#,
+            r#"SELECT file_id, chunk_index, start_line, line_count, byte_len, chunk_sha256, content FROM veda_file_chunks WHERE file_id = ?"#,
         );
         let mut rows = match (start_line, end_line) {
             (Some(a), Some(b)) => {
@@ -1133,7 +1141,7 @@ impl MetadataTx for MysqlMetadataTx {
     ) -> Result<Vec<FileChunk>> {
         let t = self.tx_mut()?;
         let mut q = String::from(
-            r#"SELECT file_id, chunk_index, start_line, content FROM veda_file_chunks WHERE file_id = ?"#,
+            r#"SELECT file_id, chunk_index, start_line, line_count, byte_len, chunk_sha256, content FROM veda_file_chunks WHERE file_id = ?"#,
         );
         let rows = match (start_line, end_line) {
             (Some(a), Some(b)) => {
@@ -1209,12 +1217,16 @@ impl MetadataTx for MysqlMetadataTx {
         let t = self.tx_mut()?;
         for c in chunks {
             sqlx::query(
-                r#"INSERT INTO veda_file_chunks (file_id, chunk_index, start_line, content)
-                   VALUES (?, ?, ?, ?)"#,
+                r#"INSERT INTO veda_file_chunks
+                     (file_id, chunk_index, start_line, line_count, byte_len, chunk_sha256, content)
+                   VALUES (?, ?, ?, ?, ?, ?, ?)"#,
             )
             .bind(&c.file_id)
             .bind(c.chunk_index)
             .bind(c.start_line)
+            .bind(c.line_count)
+            .bind(c.byte_len)
+            .bind(&c.chunk_sha256)
             .bind(&c.content)
             .execute(t.as_mut())
             .await
@@ -1231,6 +1243,35 @@ impl MetadataTx for MysqlMetadataTx {
             .await
             .map_err(storage_err)?;
         Ok(())
+    }
+
+    async fn delete_file_chunks_from(
+        &mut self,
+        file_id: &str,
+        from_chunk_index: i32,
+    ) -> Result<()> {
+        let t = self.tx_mut()?;
+        sqlx::query(r#"DELETE FROM veda_file_chunks WHERE file_id = ? AND chunk_index >= ?"#)
+            .bind(file_id)
+            .bind(from_chunk_index)
+            .execute(t.as_mut())
+            .await
+            .map_err(storage_err)?;
+        Ok(())
+    }
+
+    async fn get_last_file_chunk(&mut self, file_id: &str) -> Result<Option<FileChunk>> {
+        let t = self.tx_mut()?;
+        let row = sqlx::query(
+            r#"SELECT file_id, chunk_index, start_line, line_count, byte_len, chunk_sha256, content
+               FROM veda_file_chunks WHERE file_id = ?
+               ORDER BY chunk_index DESC LIMIT 1"#,
+        )
+        .bind(file_id)
+        .fetch_optional(t.as_mut())
+        .await
+        .map_err(storage_err)?;
+        row.map(|r| row_to_file_chunk(&r)).transpose()
     }
 
     async fn insert_outbox(&mut self, event: &OutboxEvent) -> Result<()> {

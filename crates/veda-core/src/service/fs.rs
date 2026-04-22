@@ -1,10 +1,10 @@
 use std::sync::Arc;
 
 use chrono::Utc;
+use sha2::{Digest, Sha256};
 use uuid::Uuid;
 use veda_types::*;
 
-use crate::checksum::sha256_hex;
 use crate::path;
 use crate::service::retry_on_deadlock;
 use crate::store::{MetadataStore, MetadataTx};
@@ -13,6 +13,198 @@ const INLINE_THRESHOLD: i64 = 256 * 1024;
 const CHUNK_SIZE: usize = 256 * 1024;
 const MAX_FILE_BYTES: i64 = 50 * 1024 * 1024;
 const MAX_LINE_RANGE: i32 = 100_000;
+
+/// Per-write precomputed metadata: full-content hash, size, line count,
+/// and either an inline string or chunk list ready to persist.
+///
+/// Produced in a single pass over the bytes via [`compute_write_meta`].
+struct WriteMeta {
+    sha256: String,
+    size: i64,
+    line_count: i32,
+    payload: WritePayload,
+}
+
+enum WritePayload {
+    /// size <= INLINE_THRESHOLD → stored as a single row.
+    Inline { content: String },
+    /// size > INLINE_THRESHOLD → chunked; `file_id` is empty and must be set by caller.
+    Chunked { chunks: Vec<FileChunk> },
+}
+
+impl WriteMeta {
+    fn storage_type(&self) -> StorageType {
+        match self.payload {
+            WritePayload::Inline { .. } => StorageType::Inline,
+            WritePayload::Chunked { .. } => StorageType::Chunked,
+        }
+    }
+}
+
+/// Async wrapper that runs CPU-heavy hashing + chunk-splitting on the blocking
+/// thread pool so it does not starve the tokio runtime worker threads.
+async fn compute_write_meta(content: String) -> Result<WriteMeta> {
+    tokio::task::spawn_blocking(move || {
+        compute_write_meta_blocking(content, CHUNK_SIZE, INLINE_THRESHOLD)
+    })
+    .await
+    .map_err(|e| VedaError::Internal(format!("hash task join failed: {e}")))
+}
+
+/// Single-pass metadata computation.
+///
+/// Walks `content` once per chunk slice to produce:
+/// - full-content sha256 (fed chunk-by-chunk into one hasher),
+/// - per-chunk sha256 for incremental-append bookkeeping,
+/// - chunk boundaries aligned to '\n' so `start_line` is unique per chunk
+///   (falling back to the next '\n' when a single line exceeds `chunk_size`).
+fn compute_write_meta_blocking(
+    content: String,
+    chunk_size: usize,
+    inline_threshold: i64,
+) -> WriteMeta {
+    let size = content.len() as i64;
+    let bytes = content.as_bytes();
+
+    // Inline: one hash pass + one line-count pass (both cache-hot on ≤256 KB).
+    if size <= inline_threshold {
+        let mut hasher = Sha256::new();
+        hasher.update(bytes);
+        let sha256 = format!("{:x}", hasher.finalize());
+        let line_count = content.lines().count().min(i32::MAX as usize) as i32;
+        return WriteMeta {
+            sha256,
+            size,
+            line_count,
+            payload: WritePayload::Inline { content },
+        };
+    }
+
+    let (chunks, full_sha, line_count) = split_and_hash(bytes, chunk_size, 0, 1);
+
+    WriteMeta {
+        sha256: full_sha,
+        size,
+        line_count,
+        payload: WritePayload::Chunked { chunks },
+    }
+}
+
+/// Split `bytes` into '\n'-aligned chunks, computing each chunk's sha256,
+/// the full-buffer sha256 (one combined hasher), and the total line count
+/// under `str::lines()` semantics. Chunks carry empty `file_id` — the caller
+/// fills it in before persisting.
+fn split_and_hash(
+    bytes: &[u8],
+    chunk_size: usize,
+    start_chunk_index: i32,
+    start_line: i32,
+) -> (Vec<FileChunk>, String, i32) {
+    let mut full_hasher = Sha256::new();
+    let mut chunks: Vec<FileChunk> = Vec::new();
+    let mut offset = 0usize;
+    let mut chunk_index = start_chunk_index;
+    let mut current_line = start_line;
+    let chunk_size = chunk_size.max(1);
+
+    while offset < bytes.len() {
+        let mut end = (offset + chunk_size).min(bytes.len());
+        if end < bytes.len() {
+            if let Some(nl) = bytes[offset..end].iter().rposition(|&b| b == b'\n') {
+                end = offset + nl + 1;
+            } else {
+                // A single line exceeds `chunk_size`; extend to the next '\n'
+                // (or EOF). Preserves the invariant that every non-final chunk
+                // ends on '\n', which keeps `start_line` unique across chunks.
+                match bytes[end..].iter().position(|&b| b == b'\n') {
+                    Some(nl) => end += nl + 1,
+                    None => end = bytes.len(),
+                }
+            }
+        }
+
+        let slice = &bytes[offset..end];
+        full_hasher.update(slice);
+        let mut chunk_hasher = Sha256::new();
+        chunk_hasher.update(slice);
+        let chunk_sha256 = format!("{:x}", chunk_hasher.finalize());
+        let nl_count = slice.iter().filter(|&&b| b == b'\n').count() as i32;
+        // SAFETY: chunk boundaries land on '\n' bytes or EOF — always on a
+        // UTF-8 char boundary for valid UTF-8 input.
+        let chunk_content = std::str::from_utf8(slice)
+            .expect("chunk boundary must align with UTF-8")
+            .to_string();
+
+        chunks.push(FileChunk {
+            file_id: String::new(),
+            chunk_index,
+            start_line: current_line,
+            line_count: nl_count,
+            byte_len: slice.len() as i32,
+            chunk_sha256,
+            content: chunk_content,
+        });
+
+        current_line += nl_count;
+        chunk_index += 1;
+        offset = end;
+    }
+
+    let full_sha = format!("{:x}", full_hasher.finalize());
+    let trailing_partial = bytes.last().map(|&b| b != b'\n').unwrap_or(false);
+    let newline_total: i32 = chunks.iter().map(|c| c.line_count).sum();
+    let line_count = newline_total + if trailing_partial { 1 } else { 0 };
+
+    (chunks, full_sha, line_count)
+}
+
+/// Result of an incremental chunked append: new full-content sha256, total
+/// line_count, and the tail chunks that replace the old last chunk onwards.
+struct AppendMeta {
+    sha256: String,
+    line_count: i32,
+    tail_chunks: Vec<FileChunk>,
+}
+
+/// Compute new file metadata given the tail rewrite.
+///
+/// `all_chunks` includes every existing chunk (we only read content of those
+/// with `chunk_index < last_chunk_idx`); the last chunk's content is passed
+/// separately already-merged into `tail`. Runs on the blocking thread pool.
+fn compute_append_meta_blocking(
+    all_chunks: &[FileChunk],
+    last_chunk_idx: i32,
+    tail_start_line: i32,
+    tail: String,
+    chunk_size: usize,
+) -> AppendMeta {
+    // Feed every pre-tail chunk's bytes into the full-content hasher in order.
+    let mut hasher = Sha256::new();
+    let mut before: Vec<&FileChunk> = all_chunks
+        .iter()
+        .filter(|c| c.chunk_index < last_chunk_idx)
+        .collect();
+    before.sort_by_key(|c| c.chunk_index);
+    for c in &before {
+        hasher.update(c.content.as_bytes());
+    }
+
+    let (tail_chunks, _tail_only_sha, _tail_lines_with_trailing) =
+        split_and_hash(tail.as_bytes(), chunk_size, last_chunk_idx, tail_start_line);
+    hasher.update(tail.as_bytes());
+    let sha256 = format!("{:x}", hasher.finalize());
+
+    let before_newlines: i32 = before.iter().map(|c| c.line_count).sum();
+    let tail_newlines: i32 = tail_chunks.iter().map(|c| c.line_count).sum();
+    let trailing_partial = tail.as_bytes().last().map(|&b| b != b'\n').unwrap_or(false);
+    let line_count = before_newlines + tail_newlines + if trailing_partial { 1 } else { 0 };
+
+    AppendMeta {
+        sha256,
+        line_count,
+        tail_chunks,
+    }
+}
 
 pub struct FsService {
     meta: Arc<dyn MetadataStore>,
@@ -33,21 +225,8 @@ impl FsService {
         raw_path: &str,
         content: &str,
         expected_revision: Option<i32>,
+        if_none_match_sha256: Option<&str>,
     ) -> Result<api::WriteFileResponse> {
-        let ws = workspace_id.to_string();
-        let p = raw_path.to_string();
-        let c = content.to_string();
-        retry_on_deadlock(|| self.write_file_once(&ws, &p, &c, expected_revision)).await
-    }
-
-    async fn write_file_once(
-        &self,
-        workspace_id: &str,
-        raw_path: &str,
-        content: &str,
-        expected_revision: Option<i32>,
-    ) -> Result<api::WriteFileResponse> {
-        let norm = path::normalize(raw_path)?;
         let size = content.len() as i64;
         if size > MAX_FILE_BYTES {
             return Err(VedaError::QuotaExceeded(format!(
@@ -56,8 +235,56 @@ impl FsService {
                 MAX_FILE_BYTES / 1024 / 1024,
             )));
         }
-        let checksum = sha256_hex(content.as_bytes());
-        let line_count = Some(content.lines().count().min(i32::MAX as usize) as i32);
+
+        // Fast-path precheck: if the client asserts an exact sha256 and it
+        // matches the currently stored one, we can skip hashing the body and
+        // the whole DB write altogether.
+        if let Some(client_hash) = if_none_match_sha256 {
+            let norm = path::normalize(raw_path)?;
+            if let Some(existing) = self.meta.get_dentry(workspace_id, &norm).await? {
+                if !existing.is_dir {
+                    if let Some(fid) = existing.file_id.as_deref() {
+                        if let Some(f) = self.meta.get_file(fid).await? {
+                            if f.checksum_sha256 == client_hash {
+                                // Still enforce If-Match revision when set.
+                                if let Some(expected) = expected_revision {
+                                    if f.revision != expected {
+                                        return Err(VedaError::PreconditionFailed(format!(
+                                            "revision mismatch: expected {expected}, actual {}",
+                                            f.revision
+                                        )));
+                                    }
+                                }
+                                return Ok(api::WriteFileResponse {
+                                    file_id: fid.to_string(),
+                                    revision: f.revision,
+                                    content_unchanged: true,
+                                });
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Hash + split chunks once, off the tokio runtime threads.
+        let meta = compute_write_meta(content.to_string()).await?;
+
+        let ws = workspace_id.to_string();
+        let p = raw_path.to_string();
+        let meta = Arc::new(meta);
+        retry_on_deadlock(|| self.write_file_once(&ws, &p, Arc::clone(&meta), expected_revision))
+            .await
+    }
+
+    async fn write_file_once(
+        &self,
+        workspace_id: &str,
+        raw_path: &str,
+        meta: Arc<WriteMeta>,
+        expected_revision: Option<i32>,
+    ) -> Result<api::WriteFileResponse> {
+        let norm = path::normalize(raw_path)?;
 
         let mut tx = self.meta.begin_tx().await?;
         let existing = tx.get_dentry(workspace_id, &norm).await?;
@@ -78,7 +305,7 @@ impl FsService {
                         }
                     }
 
-                    if f.checksum_sha256 == checksum {
+                    if f.checksum_sha256 == meta.sha256 {
                         tx.commit().await?;
                         return Ok(api::WriteFileResponse {
                             file_id: fid.clone(),
@@ -89,28 +316,23 @@ impl FsService {
 
                     if f.ref_count > 1 {
                         let new_file_id = Uuid::new_v4().to_string();
-                        let new_storage_type = if size <= INLINE_THRESHOLD {
-                            StorageType::Inline
-                        } else {
-                            StorageType::Chunked
-                        };
                         let now = Utc::now();
                         let new_file = FileRecord {
                             id: new_file_id.clone(),
                             workspace_id: workspace_id.to_string(),
-                            size_bytes: size,
+                            size_bytes: meta.size,
                             mime_type: f.mime_type.clone(),
-                            storage_type: new_storage_type,
+                            storage_type: meta.storage_type(),
                             source_type: f.source_type,
-                            line_count,
-                            checksum_sha256: checksum.clone(),
+                            line_count: Some(meta.line_count),
+                            checksum_sha256: meta.sha256.clone(),
                             revision: f.revision + 1,
                             ref_count: 1,
                             created_at: now,
                             updated_at: now,
                         };
                         tx.insert_file(&new_file).await?;
-                        write_content(&mut *tx, &new_file_id, content, size).await?;
+                        persist_write_meta(&mut *tx, &new_file_id, &meta).await?;
                         cleanup_file_if_orphan(&mut *tx, workspace_id, fid).await?;
                         tx.update_dentry_file_id(workspace_id, &norm, &new_file_id)
                             .await?;
@@ -134,22 +356,17 @@ impl FsService {
                     }
 
                     let new_rev = f.revision + 1;
-                    let new_storage_type = if size <= INLINE_THRESHOLD {
-                        StorageType::Inline
-                    } else {
-                        StorageType::Chunked
-                    };
                     tx.delete_file_content(fid).await?;
                     tx.delete_file_chunks(fid).await?;
-                    write_content(&mut *tx, fid, content, size).await?;
+                    persist_write_meta(&mut *tx, fid, &meta).await?;
                     tx.update_file_revision(
                         fid,
                         f.revision,
                         new_rev,
-                        size,
-                        &checksum,
-                        line_count,
-                        new_storage_type,
+                        meta.size,
+                        &meta.sha256,
+                        Some(meta.line_count),
+                        meta.storage_type(),
                     )
                     .await?;
 
@@ -180,28 +397,23 @@ impl FsService {
 
         let file_id = Uuid::new_v4().to_string();
         let now = Utc::now();
-        let storage_type = if size <= INLINE_THRESHOLD {
-            StorageType::Inline
-        } else {
-            StorageType::Chunked
-        };
 
         let file = FileRecord {
             id: file_id.clone(),
             workspace_id: workspace_id.to_string(),
-            size_bytes: size,
+            size_bytes: meta.size,
             mime_type: "text/plain".to_string(),
-            storage_type,
+            storage_type: meta.storage_type(),
             source_type: SourceType::Text,
-            line_count,
-            checksum_sha256: checksum.clone(),
+            line_count: Some(meta.line_count),
+            checksum_sha256: meta.sha256.clone(),
             revision: 1,
             ref_count: 1,
             created_at: now,
             updated_at: now,
         };
         tx.insert_file(&file).await?;
-        write_content(&mut *tx, &file_id, content, size).await?;
+        persist_write_meta(&mut *tx, &file_id, &meta).await?;
 
         if existing.is_some() {
             tx.update_dentry_file_id(workspace_id, &norm, &file_id)
@@ -741,188 +953,148 @@ impl FsService {
     ) -> Result<api::WriteFileResponse> {
         let norm = path::normalize(raw_path)?;
         let mut tx = self.meta.begin_tx().await?;
-
         let existing = tx.get_dentry(workspace_id, &norm).await?;
 
-        // Read existing content and keep the file record for reuse
-        let (new_content, existing_file) = match existing {
-            Some(ref d) if d.is_dir => {
+        // Fast-fail: append to a directory
+        if let Some(ref d) = existing {
+            if d.is_dir {
                 return Err(VedaError::AlreadyExists(format!("{norm} is a directory")));
             }
-            Some(ref d) if d.file_id.is_some() => {
-                let fid = d.file_id.as_deref().unwrap();
-                let file = tx
-                    .get_file(fid)
-                    .await?
-                    .ok_or_else(|| VedaError::NotFound(fid.to_string()))?;
+        }
 
-                if file.size_bytes + content.len() as i64 > MAX_FILE_BYTES {
-                    return Err(VedaError::QuotaExceeded(format!(
-                        "append would exceed {}MB limit (current {} + append {})",
-                        MAX_FILE_BYTES / 1024 / 1024,
-                        file.size_bytes,
-                        content.len()
-                    )));
-                }
-
-                let mut old = match file.storage_type {
-                    StorageType::Inline => tx.get_file_content(fid).await?.unwrap_or_default(),
-                    StorageType::Chunked => {
-                        let chunks = tx.get_file_chunks(fid, None, None).await?;
-                        chunks.into_iter().map(|c| c.content).collect::<String>()
-                    }
-                };
-                old.push_str(content);
-                (old, Some(file))
-            }
-            _ => (content.to_string(), None),
+        // No existing file → append-as-create: reuse the write path directly.
+        let dentry_with_file = existing
+            .as_ref()
+            .and_then(|d| d.file_id.as_deref().map(|fid| (d, fid)));
+        let Some((_, fid)) = dentry_with_file else {
+            tx.rollback().await.ok();
+            let meta = compute_write_meta(content.to_string()).await?;
+            let ws = workspace_id.to_string();
+            let p = raw_path.to_string();
+            let meta = Arc::new(meta);
+            return retry_on_deadlock(|| self.write_file_once(&ws, &p, Arc::clone(&meta), None))
+                .await;
         };
 
-        let checksum = sha256_hex(new_content.as_bytes());
-        let size = new_content.len() as i64;
-        let line_count = Some(new_content.lines().count().min(i32::MAX as usize) as i32);
+        let file = tx
+            .get_file(fid)
+            .await?
+            .ok_or_else(|| VedaError::NotFound(fid.to_string()))?;
 
-        if let Some(ref dentry) = existing {
-            if let Some(ref fid) = dentry.file_id {
-                let f = existing_file.as_ref().unwrap();
+        let new_size = file.size_bytes + content.len() as i64;
+        if new_size > MAX_FILE_BYTES {
+            return Err(VedaError::QuotaExceeded(format!(
+                "append would exceed {}MB limit (current {} + append {})",
+                MAX_FILE_BYTES / 1024 / 1024,
+                file.size_bytes,
+                content.len()
+            )));
+        }
 
-                if f.checksum_sha256 == checksum {
-                    tx.commit().await?;
-                    return Ok(api::WriteFileResponse {
-                        file_id: fid.clone(),
-                        revision: f.revision,
-                        content_unchanged: true,
-                    });
-                }
+        if content.is_empty() {
+            tx.commit().await?;
+            return Ok(api::WriteFileResponse {
+                file_id: fid.to_string(),
+                revision: file.revision,
+                content_unchanged: true,
+            });
+        }
 
-                if f.ref_count > 1 {
-                    // COW: fork a new file record instead of mutating the shared one
-                    let new_file_id = Uuid::new_v4().to_string();
-                    let new_storage_type = if size <= INLINE_THRESHOLD {
-                        StorageType::Inline
-                    } else {
-                        StorageType::Chunked
-                    };
-                    let now = Utc::now();
-                    let new_file = FileRecord {
-                        id: new_file_id.clone(),
-                        workspace_id: workspace_id.to_string(),
-                        size_bytes: size,
-                        mime_type: f.mime_type.clone(),
-                        storage_type: new_storage_type,
-                        source_type: f.source_type,
-                        line_count,
-                        checksum_sha256: checksum.clone(),
-                        revision: f.revision + 1,
-                        ref_count: 1,
-                        created_at: now,
-                        updated_at: now,
-                    };
-                    tx.insert_file(&new_file).await?;
-                    write_content(&mut *tx, &new_file_id, &new_content, size).await?;
-                    cleanup_file_if_orphan(&mut *tx, workspace_id, fid).await?;
-                    tx.update_dentry_file_id(workspace_id, &norm, &new_file_id)
-                        .await?;
+        // Shared file (ref_count > 1) or transition from inline to chunked
+        // would make in-place delta writes unsafe or complex. Fall back to a
+        // full-rewrite path: read all existing bytes, concat with the new
+        // content, and go through the regular single-pass pipeline.
+        let old_is_chunked = matches!(file.storage_type, StorageType::Chunked);
+        let will_stay_chunked = old_is_chunked && new_size > INLINE_THRESHOLD;
+        let can_incremental = file.ref_count == 1 && will_stay_chunked;
 
-                    let outbox =
-                        make_outbox(workspace_id, OutboxEventType::ChunkSync, &new_file_id);
-                    tx.insert_outbox(&outbox).await?;
-                    let evt =
-                        make_fs_event(workspace_id, FsEventType::Update, &norm, Some(&new_file_id));
-                    tx.insert_fs_event(&evt).await?;
-                    tx.commit().await?;
-                    return Ok(api::WriteFileResponse {
-                        file_id: new_file_id,
-                        revision: new_file.revision,
-                        content_unchanged: false,
-                    });
-                }
+        if !can_incremental {
+            let mut merged = read_full_content(&mut *tx, fid, &file).await?;
+            merged.push_str(content);
+            let meta = compute_write_meta(merged).await?;
 
-                let new_rev = f.revision + 1;
-                let new_storage_type = if size <= INLINE_THRESHOLD {
-                    StorageType::Inline
-                } else {
-                    StorageType::Chunked
-                };
-                tx.delete_file_content(fid).await?;
-                tx.delete_file_chunks(fid).await?;
-                write_content(&mut *tx, fid, &new_content, size).await?;
-                tx.update_file_revision(
-                    fid,
-                    f.revision,
-                    new_rev,
-                    size,
-                    &checksum,
-                    line_count,
-                    new_storage_type,
-                )
-                .await?;
-
-                let outbox = make_outbox(workspace_id, OutboxEventType::ChunkSync, fid);
-                tx.insert_outbox(&outbox).await?;
-                let evt = make_fs_event(workspace_id, FsEventType::Update, &norm, Some(fid));
-                tx.insert_fs_event(&evt).await?;
+            if meta.sha256 == file.checksum_sha256 {
                 tx.commit().await?;
                 return Ok(api::WriteFileResponse {
-                    file_id: fid.clone(),
-                    revision: new_rev,
-                    content_unchanged: false,
+                    file_id: fid.to_string(),
+                    revision: file.revision,
+                    content_unchanged: true,
                 });
             }
+
+            return finalize_full_rewrite(tx, workspace_id, &norm, &file, fid, &meta).await;
         }
 
-        let file_id = Uuid::new_v4().to_string();
-        let now = Utc::now();
-        let storage_type = if size <= INLINE_THRESHOLD {
-            StorageType::Inline
-        } else {
-            StorageType::Chunked
-        };
-        let file = FileRecord {
-            id: file_id.clone(),
-            workspace_id: workspace_id.to_string(),
-            size_bytes: size,
-            mime_type: "text/plain".to_string(),
-            storage_type,
-            source_type: SourceType::Text,
-            line_count,
-            checksum_sha256: checksum,
-            revision: 1,
-            ref_count: 1,
-            created_at: now,
-            updated_at: now,
-        };
-        tx.insert_file(&file).await?;
-        write_content(&mut *tx, &file_id, &new_content, size).await?;
+        // Incremental chunked append: rehash streaming + only re-chunk the tail.
+        let last = tx
+            .get_last_file_chunk(fid)
+            .await?
+            .ok_or_else(|| VedaError::Internal("chunked file missing last chunk".into()))?;
+        let all_chunks = tx.get_file_chunks(fid, None, None).await?;
 
-        if existing.is_some() {
-            tx.update_dentry_file_id(workspace_id, &norm, &file_id)
-                .await?;
-        } else {
-            ensure_parents(&mut *tx, workspace_id, &norm).await?;
-            let dentry = Dentry {
-                id: Uuid::new_v4().to_string(),
-                workspace_id: workspace_id.to_string(),
-                parent_path: path::parent(&norm).to_string(),
-                name: path::filename(&norm).to_string(),
-                path: norm.clone(),
-                file_id: Some(file_id.clone()),
-                is_dir: false,
-                created_at: now,
-                updated_at: now,
-            };
-            tx.insert_dentry(&dentry).await?;
+        let fid_string = fid.to_string();
+        let file_rev = file.revision;
+        let file_checksum = file.checksum_sha256.clone();
+        let last_chunk_idx = last.chunk_index;
+        let last_start_line = last.start_line;
+        let mut tail = String::with_capacity(last.content.len() + content.len());
+        tail.push_str(&last.content);
+        tail.push_str(content);
+
+        let append_meta = tokio::task::spawn_blocking(move || {
+            compute_append_meta_blocking(
+                &all_chunks,
+                last_chunk_idx,
+                last_start_line,
+                tail,
+                CHUNK_SIZE,
+            )
+        })
+        .await
+        .map_err(|e| VedaError::Internal(format!("append hash task join failed: {e}")))?;
+
+        if append_meta.sha256 == file_checksum {
+            tx.commit().await?;
+            return Ok(api::WriteFileResponse {
+                file_id: fid_string,
+                revision: file_rev,
+                content_unchanged: true,
+            });
         }
 
-        let outbox = make_outbox(workspace_id, OutboxEventType::ChunkSync, &file_id);
+        tx.delete_file_chunks_from(&fid_string, last_chunk_idx)
+            .await?;
+        let tail_with_fid: Vec<FileChunk> = append_meta
+            .tail_chunks
+            .into_iter()
+            .map(|mut c| {
+                c.file_id = fid_string.clone();
+                c
+            })
+            .collect();
+        tx.insert_file_chunks(&tail_with_fid).await?;
+
+        let new_rev = file_rev + 1;
+        tx.update_file_revision(
+            &fid_string,
+            file_rev,
+            new_rev,
+            new_size,
+            &append_meta.sha256,
+            Some(append_meta.line_count),
+            StorageType::Chunked,
+        )
+        .await?;
+
+        let outbox = make_outbox(workspace_id, OutboxEventType::ChunkSync, &fid_string);
         tx.insert_outbox(&outbox).await?;
-        let evt = make_fs_event(workspace_id, FsEventType::Create, &norm, Some(&file_id));
+        let evt = make_fs_event(workspace_id, FsEventType::Update, &norm, Some(&fid_string));
         tx.insert_fs_event(&evt).await?;
         tx.commit().await?;
 
         Ok(api::WriteFileResponse {
-            file_id,
-            revision: 1,
+            file_id: fid_string,
+            revision: new_rev,
             content_unchanged: false,
         })
     }
@@ -1028,61 +1200,129 @@ async fn cleanup_file_if_orphan(
     Ok(())
 }
 
-async fn write_content(
+/// Write a pre-computed [`WriteMeta`] under the given `file_id`.
+///
+/// For chunked payloads, the chunks' `file_id` is rewritten to the target id.
+async fn persist_write_meta(
     tx: &mut dyn MetadataTx,
     file_id: &str,
-    content: &str,
-    size: i64,
+    meta: &WriteMeta,
 ) -> Result<()> {
-    if size <= INLINE_THRESHOLD {
-        tx.insert_file_content(file_id, content).await
-    } else {
-        let chunks = split_into_chunks(file_id, content);
-        tx.insert_file_chunks(&chunks).await
+    match &meta.payload {
+        WritePayload::Inline { content } => tx.insert_file_content(file_id, content).await,
+        WritePayload::Chunked { chunks } => {
+            let with_id: Vec<FileChunk> = chunks
+                .iter()
+                .map(|c| FileChunk {
+                    file_id: file_id.to_string(),
+                    ..c.clone()
+                })
+                .collect();
+            tx.insert_file_chunks(&with_id).await
+        }
     }
 }
 
-fn split_into_chunks(file_id: &str, content: &str) -> Vec<FileChunk> {
-    let bytes = content.as_bytes();
-    let mut chunks = Vec::new();
-    let mut offset = 0;
-    let mut chunk_index = 0;
-    let mut current_line = 1i32;
-
-    while offset < bytes.len() {
-        let mut end = (offset + CHUNK_SIZE).min(bytes.len());
-        if end < bytes.len() {
-            if let Some(nl) = bytes[offset..end].iter().rposition(|&b| b == b'\n') {
-                end = offset + nl + 1;
-            } else {
-                // No newline within CHUNK_SIZE — a single line exceeds the chunk.
-                // Extend the chunk boundary to the next '\n' (or EOF) so that every
-                // chunk ends on a line boundary. This keeps `start_line` unique per
-                // chunk, which is a precondition for the `MAX(chunk_index) WHERE
-                // start_line <= ?` lookup to correctly identify a chunk by line.
-                match bytes[end..].iter().position(|&b| b == b'\n') {
-                    Some(nl) => end += nl + 1,
-                    None => end = bytes.len(),
-                }
+/// Read a file's full content regardless of storage type.
+async fn read_full_content(
+    tx: &mut dyn MetadataTx,
+    file_id: &str,
+    file: &FileRecord,
+) -> Result<String> {
+    Ok(match file.storage_type {
+        StorageType::Inline => tx.get_file_content(file_id).await?.unwrap_or_default(),
+        StorageType::Chunked => {
+            let chunks = tx.get_file_chunks(file_id, None, None).await?;
+            let total: usize = chunks.iter().map(|c| c.content.len()).sum();
+            let mut s = String::with_capacity(total);
+            for c in chunks {
+                s.push_str(&c.content);
             }
+            s
         }
+    })
+}
 
-        let chunk_content = String::from_utf8_lossy(&bytes[offset..end]).to_string();
-        let line_count = chunk_content.matches('\n').count() as i32;
+/// Apply a fresh [`WriteMeta`] to an existing dentry, handling ref_count-driven
+/// COW forking. Consumes `tx` and commits internally on success.
+async fn finalize_full_rewrite(
+    mut tx: Box<dyn MetadataTx>,
+    workspace_id: &str,
+    norm_path: &str,
+    old_file: &FileRecord,
+    old_file_id: &str,
+    meta: &WriteMeta,
+) -> Result<api::WriteFileResponse> {
+    if old_file.ref_count > 1 {
+        let new_file_id = Uuid::new_v4().to_string();
+        let now = Utc::now();
+        let new_file = FileRecord {
+            id: new_file_id.clone(),
+            workspace_id: workspace_id.to_string(),
+            size_bytes: meta.size,
+            mime_type: old_file.mime_type.clone(),
+            storage_type: meta.storage_type(),
+            source_type: old_file.source_type,
+            line_count: Some(meta.line_count),
+            checksum_sha256: meta.sha256.clone(),
+            revision: old_file.revision + 1,
+            ref_count: 1,
+            created_at: now,
+            updated_at: now,
+        };
+        tx.insert_file(&new_file).await?;
+        persist_write_meta(&mut *tx, &new_file_id, meta).await?;
+        cleanup_file_if_orphan(&mut *tx, workspace_id, old_file_id).await?;
+        tx.update_dentry_file_id(workspace_id, norm_path, &new_file_id)
+            .await?;
 
-        chunks.push(FileChunk {
-            file_id: file_id.to_string(),
-            chunk_index,
-            start_line: current_line,
-            content: chunk_content,
+        let outbox = make_outbox(workspace_id, OutboxEventType::ChunkSync, &new_file_id);
+        tx.insert_outbox(&outbox).await?;
+        let evt = make_fs_event(
+            workspace_id,
+            FsEventType::Update,
+            norm_path,
+            Some(&new_file_id),
+        );
+        tx.insert_fs_event(&evt).await?;
+        tx.commit().await?;
+        return Ok(api::WriteFileResponse {
+            file_id: new_file_id,
+            revision: new_file.revision,
+            content_unchanged: false,
         });
-
-        current_line += line_count;
-        chunk_index += 1;
-        offset = end;
     }
 
-    chunks
+    let new_rev = old_file.revision + 1;
+    tx.delete_file_content(old_file_id).await?;
+    tx.delete_file_chunks(old_file_id).await?;
+    persist_write_meta(&mut *tx, old_file_id, meta).await?;
+    tx.update_file_revision(
+        old_file_id,
+        old_file.revision,
+        new_rev,
+        meta.size,
+        &meta.sha256,
+        Some(meta.line_count),
+        meta.storage_type(),
+    )
+    .await?;
+
+    let outbox = make_outbox(workspace_id, OutboxEventType::ChunkSync, old_file_id);
+    tx.insert_outbox(&outbox).await?;
+    let evt = make_fs_event(
+        workspace_id,
+        FsEventType::Update,
+        norm_path,
+        Some(old_file_id),
+    );
+    tx.insert_fs_event(&evt).await?;
+    tx.commit().await?;
+    Ok(api::WriteFileResponse {
+        file_id: old_file_id.to_string(),
+        revision: new_rev,
+        content_unchanged: false,
+    })
 }
 
 async fn ensure_parents(

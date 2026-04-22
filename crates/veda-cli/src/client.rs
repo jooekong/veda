@@ -1,8 +1,15 @@
 use anyhow::{bail, Context, Result};
+use sha2::{Digest, Sha256};
 
 pub struct Client {
     base: String,
     http: reqwest::Client,
+}
+
+fn sha256_hex(data: &[u8]) -> String {
+    let mut h = Sha256::new();
+    h.update(data);
+    format!("{:x}", h.finalize())
 }
 
 impl Client {
@@ -90,10 +97,15 @@ impl Client {
         content: &str,
     ) -> Result<serde_json::Value> {
         let path = path.trim_start_matches('/');
+        // Pre-hash and send If-None-Match so the server can short-circuit the
+        // write when the content already matches what's stored (no dedup of
+        // chunks, no revision bump).
+        let digest = sha256_hex(content.as_bytes());
         let resp = self
             .http
             .put(format!("{}/v1/fs/{path}", self.base))
             .bearer_auth(ws_key)
+            .header("If-None-Match", format!("\"{digest}\""))
             .body(content.to_string())
             .send()
             .await?;

@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use axum::extract::rejection::StringRejection;
+use axum::body::Bytes;
 use axum::extract::{DefaultBodyLimit, Path, Query, State};
 use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
@@ -73,21 +73,28 @@ async fn write_file(
     auth: AuthWorkspace,
     Path(path): Path<String>,
     headers: HeaderMap,
-    body: Result<String, StringRejection>,
+    body: Bytes,
 ) -> Result<Response, AppError> {
     if auth.read_only {
         return Err(VedaError::PermissionDenied.into());
     }
-    let body = body.map_err(|_| {
-        AppError(VedaError::PayloadTooLarge(format!(
-            "max file size is {MAX_BODY_MB}MB"
-        )))
+    let body = std::str::from_utf8(&body).map_err(|_| {
+        AppError(VedaError::InvalidInput(
+            "file content must be valid UTF-8".into(),
+        ))
     })?;
     let path = format!("/{path}");
     let expected_rev = parse_if_match(&headers);
+    let if_none_match = parse_if_none_match_sha256(&headers);
     let resp = state
         .fs_service
-        .write_file(&auth.workspace_id, &path, &body, expected_rev)
+        .write_file(
+            &auth.workspace_id,
+            &path,
+            body,
+            expected_rev,
+            if_none_match.as_deref(),
+        )
         .await?;
 
     let mut r = Json(ApiResponse::ok(resp.clone())).into_response();
@@ -104,24 +111,36 @@ fn parse_if_match(h: &HeaderMap) -> Option<i32> {
     v.parse().ok()
 }
 
+/// Parse `If-None-Match: "<sha256>"` where the etag is the hex digest of the
+/// payload's sha256. Empty/wildcard/malformed values are ignored (treated as
+/// absent), so a bad header never accidentally enables the short-circuit.
+fn parse_if_none_match_sha256(h: &HeaderMap) -> Option<String> {
+    let v = h.get(header::IF_NONE_MATCH)?.to_str().ok()?;
+    let trimmed = v.trim().trim_matches('"');
+    if trimmed.len() != 64 || !trimmed.chars().all(|c| c.is_ascii_hexdigit()) {
+        return None;
+    }
+    Some(trimmed.to_ascii_lowercase())
+}
+
 async fn append_file(
     State(state): State<Arc<AppState>>,
     auth: AuthWorkspace,
     Path(path): Path<String>,
-    body: Result<String, StringRejection>,
+    body: Bytes,
 ) -> Result<Json<ApiResponse<WriteFileResponse>>, AppError> {
     if auth.read_only {
         return Err(VedaError::PermissionDenied.into());
     }
-    let body = body.map_err(|_| {
-        AppError(VedaError::PayloadTooLarge(format!(
-            "max file size is {MAX_BODY_MB}MB"
-        )))
+    let body = std::str::from_utf8(&body).map_err(|_| {
+        AppError(VedaError::InvalidInput(
+            "file content must be valid UTF-8".into(),
+        ))
     })?;
     let path = format!("/{path}");
     let resp = state
         .fs_service
-        .append_file(&auth.workspace_id, &path, &body)
+        .append_file(&auth.workspace_id, &path, body)
         .await?;
     Ok(Json(ApiResponse::ok(resp)))
 }
@@ -182,7 +201,10 @@ async fn read_file(
                 return Ok((
                     StatusCode::PARTIAL_CONTENT,
                     [
-                        (header::CONTENT_RANGE, format!("bytes {offset}-{end}/{total}")),
+                        (
+                            header::CONTENT_RANGE,
+                            format!("bytes {offset}-{end}/{total}"),
+                        ),
                         (header::CONTENT_LENGTH, data.len().to_string()),
                     ],
                     data,

@@ -284,6 +284,9 @@ async fn mysql_checksum_lookup_and_delete_file() {
         file_id: fid.clone(),
         chunk_index: 0,
         start_line: 1,
+        line_count: 1,
+        byte_len: 1,
+        chunk_sha256: "2d711642b726b04401627ca9fbac32f5c8530fb1903cc4db02258717921a4881".into(),
         content: "x".into(),
     }])
     .await

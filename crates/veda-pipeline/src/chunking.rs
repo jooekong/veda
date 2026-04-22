@@ -1,4 +1,4 @@
-use veda_types::{FileChunk, SemanticChunk};
+use veda_types::SemanticChunk;
 
 /// Default `max_tokens` for [`semantic_chunk`] when callers want ~512-token sections.
 pub const DEFAULT_SEMANTIC_MAX_TOKENS: usize = 512;
@@ -104,60 +104,4 @@ pub fn semantic_chunk(text: &str, max_tokens: usize) -> Vec<SemanticChunk> {
     }
 
     out
-}
-
-/// Count logical lines covered by a chunk (1-based line numbering for the next chunk).
-fn lines_spanned_by_chunk(chunk: &str) -> i32 {
-    if chunk.is_empty() {
-        return 0;
-    }
-    let newlines = chunk.bytes().filter(|&b| b == b'\n').count() as i32;
-    if chunk.ends_with('\n') {
-        newlines
-    } else {
-        newlines + 1
-    }
-}
-
-/// Split large text at byte boundaries near `chunk_size`, backing up to the last newline when possible.
-/// `start_line` is 1-based for the first line in each chunk.
-///
-/// `file_id` is empty; callers can map chunks and set `file_id` when persisting.
-pub fn storage_chunk(content: &str, chunk_size: usize) -> Vec<FileChunk> {
-    if content.is_empty() {
-        return Vec::new();
-    }
-
-    let bytes = content.as_bytes();
-    let mut offset = 0usize;
-    let mut chunk_index: i32 = 0;
-    let mut current_line: i32 = 1;
-    let chunk_size = chunk_size.max(1);
-
-    let mut chunks = Vec::new();
-
-    while offset < bytes.len() {
-        let mut end = (offset + chunk_size).min(bytes.len());
-        if end < bytes.len() {
-            if let Some(rel_nl) = bytes[offset..end].iter().rposition(|&b| b == b'\n') {
-                end = offset + rel_nl + 1;
-            }
-        }
-
-        let chunk_content = String::from_utf8_lossy(&bytes[offset..end]).into_owned();
-        let line_span = lines_spanned_by_chunk(&chunk_content);
-
-        chunks.push(FileChunk {
-            file_id: String::new(),
-            chunk_index,
-            start_line: current_line,
-            content: chunk_content,
-        });
-
-        current_line += line_span;
-        chunk_index += 1;
-        offset = end;
-    }
-
-    chunks
 }
