@@ -11,8 +11,14 @@ use veda_types::{
     Workspace, WorkspaceKey, WorkspaceStatus,
 };
 
-fn storage_err(e: impl ToString) -> VedaError {
-    VedaError::Storage(e.to_string())
+fn storage_err(e: impl std::fmt::Display) -> VedaError {
+    let msg = e.to_string();
+    if msg.contains("1213") || msg.contains("Deadlock")
+        || msg.contains("1205") || msg.contains("Lock wait timeout")
+    {
+        return VedaError::Deadlock(msg);
+    }
+    VedaError::Storage(msg)
 }
 
 fn escape_like(s: &str) -> String {
@@ -844,7 +850,16 @@ impl MysqlMetadataTx {
 impl MetadataTx for MysqlMetadataTx {
     async fn get_dentry(&mut self, workspace_id: &str, path: &str) -> Result<Option<Dentry>> {
         let t = self.tx_mut()?;
-        get_dentry_conn(t.as_mut(), workspace_id, path).await
+        let row = sqlx::query(
+            r#"SELECT id, workspace_id, parent_path, name, path, file_id, is_dir, created_at, updated_at
+               FROM veda_dentries WHERE workspace_id = ? AND path = ? FOR UPDATE"#,
+        )
+        .bind(workspace_id)
+        .bind(path)
+        .fetch_optional(t.as_mut())
+        .await
+        .map_err(storage_err)?;
+        row.map(|r| row_to_dentry(&r)).transpose()
     }
 
     async fn insert_dentry(&mut self, dentry: &Dentry) -> Result<()> {
@@ -987,7 +1002,16 @@ impl MetadataTx for MysqlMetadataTx {
 
     async fn get_file(&mut self, file_id: &str) -> Result<Option<FileRecord>> {
         let t = self.tx_mut()?;
-        get_file_conn(t.as_mut(), file_id).await
+        let row = sqlx::query(
+            r#"SELECT id, workspace_id, size_bytes, mime_type, storage_type, source_type,
+                      line_count, checksum_sha256, revision, ref_count, created_at, updated_at
+               FROM veda_files WHERE id = ? FOR UPDATE"#,
+        )
+        .bind(file_id)
+        .fetch_optional(t.as_mut())
+        .await
+        .map_err(storage_err)?;
+        row.map(|r| row_to_file(&r)).transpose()
     }
 
     async fn insert_file(&mut self, file: &FileRecord) -> Result<()> {
@@ -1019,26 +1043,34 @@ impl MetadataTx for MysqlMetadataTx {
     async fn update_file_revision(
         &mut self,
         file_id: &str,
-        revision: i32,
+        expected_rev: i32,
+        new_rev: i32,
         size_bytes: i64,
         checksum: &str,
         line_count: Option<i32>,
         storage_type: StorageType,
     ) -> Result<()> {
         let t = self.tx_mut()?;
-        sqlx::query(
-            r#"UPDATE veda_files SET revision = ?, size_bytes = ?, checksum_sha256 = ?, line_count = ?, storage_type = ?
-               WHERE id = ?"#,
+        let r = sqlx::query(
+            r#"UPDATE veda_files
+               SET revision = ?, size_bytes = ?, checksum_sha256 = ?, line_count = ?, storage_type = ?
+               WHERE id = ? AND revision = ?"#,
         )
-        .bind(revision)
+        .bind(new_rev)
         .bind(size_bytes)
         .bind(checksum)
         .bind(line_count)
         .bind(storage_type_str(storage_type))
         .bind(file_id)
+        .bind(expected_rev)
         .execute(t.as_mut())
         .await
         .map_err(storage_err)?;
+        if r.rows_affected() == 0 {
+            return Err(VedaError::PreconditionFailed(format!(
+                "file {file_id} revision mismatch (expected {expected_rev})"
+            )));
+        }
         Ok(())
     }
 

@@ -204,7 +204,7 @@ async fn h_write(
         Some(w) => w,
         None => return StatusCode::UNAUTHORIZED.into_response(),
     };
-    match st.fs.write_file(&ws, &format!("/{p}"), &body).await {
+    match st.fs.write_file(&ws, &format!("/{p}"), &body, None).await {
         Ok(r) => Json(veda_types::ApiResponse::ok(r)).into_response(),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
     }

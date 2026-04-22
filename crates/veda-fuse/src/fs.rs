@@ -36,6 +36,7 @@ struct WriteHandle {
     ino: u64,
     buf: Vec<u8>,
     dirty: bool,
+    base_rev: Option<i32>,
 }
 
 pub struct VedaFs {
@@ -100,6 +101,7 @@ impl VedaFs {
             ClientError::NotFound => libc::ENOENT,
             ClientError::AlreadyExists => libc::EEXIST,
             ClientError::PermissionDenied => libc::EACCES,
+            ClientError::Conflict => libc::EBUSY,
             ClientError::Io(_) => libc::EIO,
         }
     }
@@ -168,18 +170,31 @@ impl VedaFs {
             Some(p) => p,
             None => return Err(libc::ENOENT),
         };
-        // Clone the buffer to avoid holding a borrow on write_handles during HTTP call
-        let buf = self.write_handles.get(&fh).unwrap().buf.clone();
-        if let Err(ref e) = self.client.write_file(&path, &buf) {
-            warn!(path = %path, err = %e, "flush failed");
-            return Err(Self::err_to_errno(e));
+        let (buf, base_rev) = {
+            let h = self.write_handles.get(&fh).unwrap();
+            (h.buf.clone(), h.base_rev)
+        };
+        match self.client.write_file(&path, &buf, base_rev) {
+            Ok(new_rev) => {
+                if let Some(handle) = self.write_handles.get_mut(&fh) {
+                    handle.dirty = false;
+                    if new_rev.is_some() {
+                        handle.base_rev = new_rev;
+                    }
+                }
+                self.inode_invalidate(ino);
+                self.cache_invalidate(&path);
+                Ok(())
+            }
+            Err(ClientError::Conflict) => {
+                warn!(path = %path, "flush conflict: remote revised since open");
+                Err(libc::EBUSY)
+            }
+            Err(ref e) => {
+                warn!(path = %path, err = %e, "flush failed");
+                Err(Self::err_to_errno(e))
+            }
         }
-        if let Some(handle) = self.write_handles.get_mut(&fh) {
-            handle.dirty = false;
-        }
-        self.inode_invalidate(ino);
-        self.cache_invalidate(&path);
-        Ok(())
     }
 }
 
@@ -241,7 +256,7 @@ impl Filesystem for VedaFs {
                 None => { reply.error(libc::ENOENT); return; }
             };
             if new_size == 0 {
-                if let Err(ref e) = self.client.write_file(&path, b"") {
+                if let Err(ref e) = self.client.write_file(&path, b"", None) {
                     reply.error(Self::err_to_errno(e)); return;
                 }
             } else {
@@ -251,7 +266,7 @@ impl Filesystem for VedaFs {
                         let target = new_size as usize;
                         if target < bytes.len() { bytes.truncate(target); }
                         else if target > bytes.len() { bytes.resize(target, 0); }
-                        if let Err(ref e) = self.client.write_file(&path, &bytes) {
+                        if let Err(ref e) = self.client.write_file(&path, &bytes, None) {
                             reply.error(Self::err_to_errno(e)); return;
                         }
                     }
@@ -305,16 +320,24 @@ impl Filesystem for VedaFs {
                 Some(p) => p,
                 None => { reply.error(libc::ENOENT); return; }
             };
-            let existing = if (flags & libc::O_TRUNC) != 0 {
-                Vec::new()
-            } else {
-                match self.client.read_file(&path) {
-                    Ok(content) => content.into_bytes(),
-                    Err(ClientError::NotFound) => Vec::new(),
-                    Err(ref e) => { reply.error(Self::err_to_errno(e)); return; }
+            let (existing, base_rev) = match self.client.stat(&path) {
+                Ok(info) => {
+                    let rev = info.revision;
+                    if (flags & libc::O_TRUNC) != 0 {
+                        (Vec::new(), rev)
+                    } else {
+                        let buf = match self.client.read_file(&path) {
+                            Ok(content) => content.into_bytes(),
+                            Err(ClientError::NotFound) => Vec::new(),
+                            Err(ref e) => { reply.error(Self::err_to_errno(e)); return; }
+                        };
+                        (buf, rev)
+                    }
                 }
+                Err(ClientError::NotFound) => (Vec::new(), None),
+                Err(ref e) => { reply.error(Self::err_to_errno(e)); return; }
             };
-            self.write_handles.insert(fh, WriteHandle { ino, buf: existing, dirty: false });
+            self.write_handles.insert(fh, WriteHandle { ino, buf: existing, dirty: false, base_rev });
         }
         reply.opened(fh, 0);
     }
@@ -378,7 +401,7 @@ impl Filesystem for VedaFs {
         reply: ReplyWrite,
     ) {
         let handle = self.write_handles.entry(fh).or_insert_with(|| WriteHandle {
-            ino, buf: Vec::new(), dirty: false,
+            ino, buf: Vec::new(), dirty: false, base_rev: None,
         });
         let offset = offset as usize;
         if offset > handle.buf.len() { handle.buf.resize(offset, 0); }
@@ -422,15 +445,16 @@ impl Filesystem for VedaFs {
             Some(p) => p, None => { reply.error(libc::ENOENT); return; }
         };
         let child_path = Self::resolve_child_path(&parent_path, name_str);
-        if let Err(ref e) = self.client.write_file(&child_path, b"") {
-            reply.error(Self::err_to_errno(e)); return;
-        }
+        let base_rev = match self.client.write_file(&child_path, b"", None) {
+            Ok(rev) => rev,
+            Err(ref e) => { reply.error(Self::err_to_errno(e)); return; }
+        };
         let fh = self.alloc_fh();
         let ino = self.inode_get_or_create(&child_path);
-        let info = FileInfo { path: child_path, is_dir: false, size_bytes: Some(0) };
+        let info = FileInfo { path: child_path, is_dir: false, size_bytes: Some(0), revision: base_rev };
         let attr = Self::make_attr(&info, ino);
         self.inode_set_attr(ino, attr);
-        self.write_handles.insert(fh, WriteHandle { ino, buf: Vec::new(), dirty: false });
+        self.write_handles.insert(fh, WriteHandle { ino, buf: Vec::new(), dirty: false, base_rev });
         reply.created(&self.config.attr_ttl, &attr, 0, fh, 0);
     }
 
@@ -450,7 +474,7 @@ impl Filesystem for VedaFs {
             reply.error(Self::err_to_errno(e)); return;
         }
         let ino = self.inode_get_or_create(&child_path);
-        let info = FileInfo { path: child_path, is_dir: true, size_bytes: None };
+        let info = FileInfo { path: child_path, is_dir: true, size_bytes: None, revision: None };
         let attr = Self::make_attr(&info, ino);
         self.inode_set_attr(ino, attr);
         reply.entry(&self.config.attr_ttl, &attr, 0);

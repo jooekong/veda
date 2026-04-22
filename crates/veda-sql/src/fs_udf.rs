@@ -226,7 +226,7 @@ impl ScalarUDFImpl for FsScalarUdf {
                         path = path,
                         bytes = content.len()
                     );
-                    block_on(fs.write_file(ws, path, content)).map_err(exec_err)?;
+                    block_on(fs.write_file(ws, path, content, None)).map_err(exec_err)?;
                     builder.append_value(content.len() as i64);
                 }
                 Ok(ColumnarValue::Array(Arc::new(builder.finish())))

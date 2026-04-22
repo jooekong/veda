@@ -72,8 +72,9 @@ async fn write_file(
     State(state): State<Arc<AppState>>,
     auth: AuthWorkspace,
     Path(path): Path<String>,
+    headers: HeaderMap,
     body: Result<String, StringRejection>,
-) -> Result<Json<ApiResponse<WriteFileResponse>>, AppError> {
+) -> Result<Response, AppError> {
     if auth.read_only {
         return Err(VedaError::PermissionDenied.into());
     }
@@ -83,11 +84,24 @@ async fn write_file(
         )))
     })?;
     let path = format!("/{path}");
+    let expected_rev = parse_if_match(&headers);
     let resp = state
         .fs_service
-        .write_file(&auth.workspace_id, &path, &body)
+        .write_file(&auth.workspace_id, &path, &body, expected_rev)
         .await?;
-    Ok(Json(ApiResponse::ok(resp)))
+
+    let mut r = Json(ApiResponse::ok(resp.clone())).into_response();
+    r.headers_mut().insert(
+        header::ETAG,
+        header::HeaderValue::from_str(&format!("\"{}\"", resp.revision)).unwrap(),
+    );
+    Ok(r)
+}
+
+fn parse_if_match(h: &HeaderMap) -> Option<i32> {
+    let v = h.get(header::IF_MATCH)?.to_str().ok()?;
+    let v = v.trim().trim_matches('"');
+    v.parse().ok()
 }
 
 async fn append_file(

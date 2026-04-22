@@ -22,6 +22,10 @@ impl IntoResponse for AppError {
                 StatusCode::PAYLOAD_TOO_LARGE,
                 format!("payload too large: {p}"),
             ),
+            VedaError::PreconditionFailed(p) => (
+                StatusCode::PRECONDITION_FAILED,
+                format!("precondition failed: {p}"),
+            ),
             _ => {
                 error!(err = %self.0, "internal error");
                 (

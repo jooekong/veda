@@ -15,7 +15,7 @@ fn make_service() -> (FsService, Arc<std::sync::Mutex<mock_store::MockState>>) {
 async fn write_and_read() {
     let (svc, _state) = make_service();
     let resp = svc
-        .write_file("ws1", "/hello.txt", "hello world")
+        .write_file("ws1", "/hello.txt", "hello world", None)
         .await
         .unwrap();
     assert!(!resp.content_unchanged);
@@ -28,7 +28,7 @@ async fn write_and_read() {
 #[tokio::test]
 async fn write_creates_parent_dirs() {
     let (svc, state) = make_service();
-    svc.write_file("ws1", "/a/b/c.txt", "deep").await.unwrap();
+    svc.write_file("ws1", "/a/b/c.txt", "deep", None).await.unwrap();
 
     let st = state.lock().unwrap();
     let dirs: Vec<&str> = st
@@ -44,11 +44,11 @@ async fn write_creates_parent_dirs() {
 #[tokio::test]
 async fn dedup_same_content() {
     let (svc, _) = make_service();
-    let r1 = svc.write_file("ws1", "/f.txt", "same").await.unwrap();
+    let r1 = svc.write_file("ws1", "/f.txt", "same", None).await.unwrap();
     assert!(!r1.content_unchanged);
     assert_eq!(r1.revision, 1);
 
-    let r2 = svc.write_file("ws1", "/f.txt", "same").await.unwrap();
+    let r2 = svc.write_file("ws1", "/f.txt", "same", None).await.unwrap();
     assert!(r2.content_unchanged);
     assert_eq!(r2.revision, 1);
 }
@@ -56,10 +56,10 @@ async fn dedup_same_content() {
 #[tokio::test]
 async fn overwrite_bumps_revision() {
     let (svc, _) = make_service();
-    let r1 = svc.write_file("ws1", "/f.txt", "v1").await.unwrap();
+    let r1 = svc.write_file("ws1", "/f.txt", "v1", None).await.unwrap();
     assert_eq!(r1.revision, 1);
 
-    let r2 = svc.write_file("ws1", "/f.txt", "v2").await.unwrap();
+    let r2 = svc.write_file("ws1", "/f.txt", "v2", None).await.unwrap();
     assert!(!r2.content_unchanged);
     assert_eq!(r2.revision, 2);
 
@@ -70,8 +70,8 @@ async fn overwrite_bumps_revision() {
 #[tokio::test]
 async fn overwrite_enqueues_outbox() {
     let (svc, state) = make_service();
-    svc.write_file("ws1", "/f.txt", "v1").await.unwrap();
-    svc.write_file("ws1", "/f.txt", "v2").await.unwrap();
+    svc.write_file("ws1", "/f.txt", "v1", None).await.unwrap();
+    svc.write_file("ws1", "/f.txt", "v2", None).await.unwrap();
 
     let st = state.lock().unwrap();
     let sync_events: Vec<_> = st
@@ -93,14 +93,14 @@ async fn read_nonexistent_returns_not_found() {
 async fn write_to_dir_path_fails() {
     let (svc, _) = make_service();
     svc.mkdir("ws1", "/mydir").await.unwrap();
-    let result = svc.write_file("ws1", "/mydir", "oops").await;
+    let result = svc.write_file("ws1", "/mydir", "oops", None).await;
     assert!(matches!(result, Err(VedaError::AlreadyExists(_))));
 }
 
 #[tokio::test]
 async fn delete_file() {
     let (svc, state) = make_service();
-    svc.write_file("ws1", "/del.txt", "gone").await.unwrap();
+    svc.write_file("ws1", "/del.txt", "gone", None).await.unwrap();
     svc.delete("ws1", "/del.txt").await.unwrap();
 
     let result = svc.read_file("ws1", "/del.txt").await;
@@ -136,8 +136,8 @@ async fn delete_root_fails() {
 async fn mkdir_and_list() {
     let (svc, _) = make_service();
     svc.mkdir("ws1", "/docs").await.unwrap();
-    svc.write_file("ws1", "/docs/a.txt", "a").await.unwrap();
-    svc.write_file("ws1", "/docs/b.txt", "b").await.unwrap();
+    svc.write_file("ws1", "/docs/a.txt", "a", None).await.unwrap();
+    svc.write_file("ws1", "/docs/b.txt", "b", None).await.unwrap();
 
     let entries = svc.list_dir("ws1", "/docs").await.unwrap();
     assert_eq!(entries.len(), 2);
@@ -156,7 +156,7 @@ async fn mkdir_idempotent() {
 #[tokio::test]
 async fn stat_file() {
     let (svc, _) = make_service();
-    svc.write_file("ws1", "/s.txt", "stat me").await.unwrap();
+    svc.write_file("ws1", "/s.txt", "stat me", None).await.unwrap();
 
     let info = svc.stat("ws1", "/s.txt").await.unwrap();
     assert!(!info.is_dir);
@@ -193,7 +193,7 @@ async fn stat_root_virtual() {
 #[tokio::test]
 async fn copy_file_cow() {
     let (svc, state) = make_service();
-    svc.write_file("ws1", "/orig.txt", "shared").await.unwrap();
+    svc.write_file("ws1", "/orig.txt", "shared", None).await.unwrap();
     let resp = svc
         .copy_file("ws1", "/orig.txt", "/copy.txt")
         .await
@@ -212,7 +212,7 @@ async fn copy_file_cow() {
 #[tokio::test]
 async fn rename_file() {
     let (svc, _) = make_service();
-    svc.write_file("ws1", "/old.txt", "move me").await.unwrap();
+    svc.write_file("ws1", "/old.txt", "move me", None).await.unwrap();
     svc.rename("ws1", "/old.txt", "/new.txt").await.unwrap();
 
     let result = svc.read_file("ws1", "/old.txt").await;
@@ -225,8 +225,8 @@ async fn rename_file() {
 #[tokio::test]
 async fn rename_to_existing_fails() {
     let (svc, _) = make_service();
-    svc.write_file("ws1", "/a.txt", "a").await.unwrap();
-    svc.write_file("ws1", "/b.txt", "b").await.unwrap();
+    svc.write_file("ws1", "/a.txt", "a", None).await.unwrap();
+    svc.write_file("ws1", "/b.txt", "b", None).await.unwrap();
     let result = svc.rename("ws1", "/a.txt", "/b.txt").await;
     assert!(matches!(result, Err(VedaError::AlreadyExists(_))));
 }
@@ -235,7 +235,7 @@ async fn rename_to_existing_fails() {
 async fn read_lines() {
     let (svc, _) = make_service();
     let content = "line1\nline2\nline3\nline4\nline5\n";
-    svc.write_file("ws1", "/lines.txt", content).await.unwrap();
+    svc.write_file("ws1", "/lines.txt", content, None).await.unwrap();
 
     let lines = svc
         .read_file_lines("ws1", "/lines.txt", 2, 4)
@@ -247,7 +247,7 @@ async fn read_lines() {
 #[tokio::test]
 async fn read_lines_whole_file() {
     let (svc, _) = make_service();
-    svc.write_file("ws1", "/f.txt", "a\nb\nc").await.unwrap();
+    svc.write_file("ws1", "/f.txt", "a\nb\nc", None).await.unwrap();
 
     let lines = svc.read_file_lines("ws1", "/f.txt", 1, 3).await.unwrap();
     assert_eq!(lines, "a\nb\nc");
@@ -256,7 +256,7 @@ async fn read_lines_whole_file() {
 #[tokio::test]
 async fn read_lines_past_eof_returns_empty() {
     let (svc, _) = make_service();
-    svc.write_file("ws1", "/f.txt", "a\nb\nc").await.unwrap();
+    svc.write_file("ws1", "/f.txt", "a\nb\nc", None).await.unwrap();
 
     let lines = svc.read_file_lines("ws1", "/f.txt", 10, 20).await.unwrap();
     assert_eq!(lines, "");
@@ -265,7 +265,7 @@ async fn read_lines_past_eof_returns_empty() {
 #[tokio::test]
 async fn read_lines_clamps_end_to_eof() {
     let (svc, _) = make_service();
-    svc.write_file("ws1", "/f.txt", "a\nb\nc").await.unwrap();
+    svc.write_file("ws1", "/f.txt", "a\nb\nc", None).await.unwrap();
 
     // end=100 is beyond EOF; should return through last line without error
     let lines = svc.read_file_lines("ws1", "/f.txt", 2, 100).await.unwrap();
@@ -275,7 +275,7 @@ async fn read_lines_clamps_end_to_eof() {
 #[tokio::test]
 async fn read_lines_invalid_range_rejected() {
     let (svc, _) = make_service();
-    svc.write_file("ws1", "/f.txt", "a\nb").await.unwrap();
+    svc.write_file("ws1", "/f.txt", "a\nb", None).await.unwrap();
 
     assert!(matches!(
         svc.read_file_lines("ws1", "/f.txt", 0, 1).await,
@@ -290,7 +290,7 @@ async fn read_lines_invalid_range_rejected() {
 #[tokio::test]
 async fn read_lines_range_too_large_rejected() {
     let (svc, _) = make_service();
-    svc.write_file("ws1", "/f.txt", "a").await.unwrap();
+    svc.write_file("ws1", "/f.txt", "a", None).await.unwrap();
 
     // 100_001 lines requested > MAX_LINE_RANGE (100_000)
     assert!(matches!(
@@ -302,7 +302,7 @@ async fn read_lines_range_too_large_rejected() {
 #[tokio::test]
 async fn read_lines_on_directory_rejected() {
     let (svc, _) = make_service();
-    svc.write_file("ws1", "/dir/f.txt", "x").await.unwrap();
+    svc.write_file("ws1", "/dir/f.txt", "x", None).await.unwrap();
 
     assert!(matches!(
         svc.read_file_lines("ws1", "/dir", 1, 1).await,
@@ -328,7 +328,7 @@ async fn read_lines_chunked_across_chunks() {
     let content: String = (0..3000)
         .map(|i| format!("{:04}{}\n", i, &line_body[4..]))
         .collect();
-    svc.write_file("ws1", "/big.txt", &content).await.unwrap();
+    svc.write_file("ws1", "/big.txt", &content, None).await.unwrap();
 
     // verify storage is actually chunked
     {
@@ -368,7 +368,7 @@ async fn read_lines_chunked_oversized_single_line() {
     let (svc, state) = make_service();
     let long_line = "z".repeat(300 * 1024); // 300 KB, no '\n' inside
     let content = format!("{long_line}\nshort\n");
-    svc.write_file("ws1", "/oversized.txt", &content)
+    svc.write_file("ws1", "/oversized.txt", &content, None)
         .await
         .unwrap();
 
@@ -421,7 +421,7 @@ async fn read_lines_chunked_fetches_only_overlapping_chunks() {
     let content: String = (0..3000)
         .map(|i| format!("{:04}{}\n", i, &line_body[4..]))
         .collect();
-    svc.write_file("ws1", "/big.txt", &content).await.unwrap();
+    svc.write_file("ws1", "/big.txt", &content, None).await.unwrap();
 
     let file_id = {
         let st = state.lock().unwrap();
@@ -454,7 +454,7 @@ async fn read_lines_chunked_fetches_only_overlapping_chunks() {
 #[tokio::test]
 async fn fs_events_emitted() {
     let (svc, state) = make_service();
-    svc.write_file("ws1", "/ev.txt", "hi").await.unwrap();
+    svc.write_file("ws1", "/ev.txt", "hi", None).await.unwrap();
     svc.delete("ws1", "/ev.txt").await.unwrap();
 
     let st = state.lock().unwrap();
@@ -466,7 +466,7 @@ async fn fs_events_emitted() {
 #[tokio::test]
 async fn workspace_isolation() {
     let (svc, _) = make_service();
-    svc.write_file("ws1", "/secret.txt", "ws1 data")
+    svc.write_file("ws1", "/secret.txt", "ws1 data", None)
         .await
         .unwrap();
 
@@ -477,8 +477,8 @@ async fn workspace_isolation() {
 #[tokio::test]
 async fn delete_dir_cleans_up_child_files() {
     let (svc, state) = make_service();
-    svc.write_file("ws1", "/docs/a.txt", "aaa").await.unwrap();
-    svc.write_file("ws1", "/docs/b.txt", "bbb").await.unwrap();
+    svc.write_file("ws1", "/docs/a.txt", "aaa", None).await.unwrap();
+    svc.write_file("ws1", "/docs/b.txt", "bbb", None).await.unwrap();
 
     svc.delete("ws1", "/docs").await.unwrap();
 
@@ -503,7 +503,7 @@ async fn delete_dir_cleans_up_child_files() {
 #[tokio::test]
 async fn append_file_cow_isolation() {
     let (svc, _state) = make_service();
-    svc.write_file("ws1", "/orig.txt", "hello").await.unwrap();
+    svc.write_file("ws1", "/orig.txt", "hello", None).await.unwrap();
     svc.copy_file("ws1", "/orig.txt", "/copy.txt")
         .await
         .unwrap();
@@ -537,7 +537,7 @@ async fn append_creates_new_file() {
 #[tokio::test]
 async fn append_to_existing_file() {
     let (svc, _) = make_service();
-    svc.write_file("ws1", "/log.txt", "line1\n").await.unwrap();
+    svc.write_file("ws1", "/log.txt", "line1\n", None).await.unwrap();
     let resp = svc.append_file("ws1", "/log.txt", "line2\n").await.unwrap();
     assert_eq!(resp.revision, 2);
     assert!(!resp.content_unchanged);
@@ -550,7 +550,7 @@ async fn append_to_existing_file() {
 async fn write_file_size_limit() {
     let (svc, _) = make_service();
     let big = "x".repeat(51 * 1024 * 1024);
-    let result = svc.write_file("ws1", "/big.txt", &big).await;
+    let result = svc.write_file("ws1", "/big.txt", &big, None).await;
     match &result {
         Err(VedaError::QuotaExceeded(msg)) => {
             assert!(msg.contains("50MB"), "error should mention limit: {msg}");
@@ -562,7 +562,7 @@ async fn write_file_size_limit() {
 #[tokio::test]
 async fn list_dir_root() {
     let (svc, _) = make_service();
-    svc.write_file("ws1", "/a.txt", "a").await.unwrap();
+    svc.write_file("ws1", "/a.txt", "a", None).await.unwrap();
     svc.mkdir("ws1", "/subdir").await.unwrap();
 
     for path in ["/", "", "/.", "///"] {
@@ -577,8 +577,8 @@ async fn list_dir_root() {
 #[tokio::test]
 async fn copy_overwrite_decrements_old_ref_count() {
     let (svc, state) = make_service();
-    svc.write_file("ws1", "/a.txt", "content_a").await.unwrap();
-    svc.write_file("ws1", "/b.txt", "content_b").await.unwrap();
+    svc.write_file("ws1", "/a.txt", "content_a", None).await.unwrap();
+    svc.write_file("ws1", "/b.txt", "content_b", None).await.unwrap();
 
     let old_file_id = {
         let st = state.lock().unwrap();
@@ -603,7 +603,7 @@ async fn copy_overwrite_decrements_old_ref_count() {
 #[tokio::test]
 async fn read_file_range_returns_partial_content() {
     let (svc, _state) = make_service();
-    svc.write_file("ws1", "/range.txt", "Hello, World!")
+    svc.write_file("ws1", "/range.txt", "Hello, World!", None)
         .await
         .unwrap();
 

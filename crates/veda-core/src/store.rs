@@ -97,7 +97,8 @@ pub trait MetadataTx: Send {
     async fn update_file_revision(
         &mut self,
         file_id: &str,
-        revision: i32,
+        expected_rev: i32,
+        new_rev: i32,
         size_bytes: i64,
         checksum: &str,
         line_count: Option<i32>,

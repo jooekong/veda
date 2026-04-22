@@ -318,7 +318,8 @@ impl MetadataTx for MockTx {
     async fn update_file_revision(
         &mut self,
         file_id: &str,
-        revision: i32,
+        expected_rev: i32,
+        new_rev: i32,
         size_bytes: i64,
         checksum: &str,
         line_count: Option<i32>,
@@ -326,7 +327,13 @@ impl MetadataTx for MockTx {
     ) -> Result<()> {
         let mut st = self.state.lock().unwrap();
         if let Some(f) = st.files.iter_mut().find(|f| f.id == file_id) {
-            f.revision = revision;
+            if f.revision != expected_rev {
+                return Err(VedaError::PreconditionFailed(format!(
+                    "file {file_id} revision mismatch (expected {expected_rev}, actual {})",
+                    f.revision
+                )));
+            }
+            f.revision = new_rev;
             f.size_bytes = size_bytes;
             f.checksum_sha256 = checksum.to_string();
             f.line_count = line_count;

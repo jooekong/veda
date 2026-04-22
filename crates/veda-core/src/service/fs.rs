@@ -6,7 +6,8 @@ use veda_types::*;
 
 use crate::checksum::sha256_hex;
 use crate::path;
-use crate::store::MetadataStore;
+use crate::service::retry_on_deadlock;
+use crate::store::{MetadataStore, MetadataTx};
 
 const INLINE_THRESHOLD: i64 = 256 * 1024;
 const CHUNK_SIZE: usize = 256 * 1024;
@@ -31,6 +32,20 @@ impl FsService {
         workspace_id: &str,
         raw_path: &str,
         content: &str,
+        expected_revision: Option<i32>,
+    ) -> Result<api::WriteFileResponse> {
+        let ws = workspace_id.to_string();
+        let p = raw_path.to_string();
+        let c = content.to_string();
+        retry_on_deadlock(|| self.write_file_once(&ws, &p, &c, expected_revision)).await
+    }
+
+    async fn write_file_once(
+        &self,
+        workspace_id: &str,
+        raw_path: &str,
+        content: &str,
+        expected_revision: Option<i32>,
     ) -> Result<api::WriteFileResponse> {
         let norm = path::normalize(raw_path)?;
         let size = content.len() as i64;
@@ -54,6 +69,15 @@ impl FsService {
             if let Some(ref fid) = dentry.file_id {
                 let file = tx.get_file(fid).await?;
                 if let Some(f) = file {
+                    if let Some(expected) = expected_revision {
+                        if f.revision != expected {
+                            return Err(VedaError::PreconditionFailed(format!(
+                                "revision mismatch: expected {expected}, actual {}",
+                                f.revision
+                            )));
+                        }
+                    }
+
                     if f.checksum_sha256 == checksum {
                         tx.commit().await?;
                         return Ok(api::WriteFileResponse {
@@ -64,7 +88,6 @@ impl FsService {
                     }
 
                     if f.ref_count > 1 {
-                        // COW: fork a new file record instead of mutating the shared one
                         let new_file_id = Uuid::new_v4().to_string();
                         let new_storage_type = if size <= INLINE_THRESHOLD {
                             StorageType::Inline
@@ -88,7 +111,7 @@ impl FsService {
                         };
                         tx.insert_file(&new_file).await?;
                         write_content(&mut *tx, &new_file_id, content, size).await?;
-                        tx.decrement_ref_count(fid).await?;
+                        cleanup_file_if_orphan(&mut *tx, workspace_id, fid).await?;
                         tx.update_dentry_file_id(workspace_id, &norm, &new_file_id)
                             .await?;
 
@@ -121,6 +144,7 @@ impl FsService {
                     write_content(&mut *tx, fid, content, size).await?;
                     tx.update_file_revision(
                         fid,
+                        f.revision,
                         new_rev,
                         size,
                         &checksum,
@@ -145,7 +169,15 @@ impl FsService {
             }
         }
 
-        // new file
+        // Caller expects an existing file but it doesn't exist
+        if let Some(expected) = expected_revision {
+            if expected != 0 {
+                return Err(VedaError::PreconditionFailed(format!(
+                    "file not found; expected revision {expected}"
+                )));
+            }
+        }
+
         let file_id = Uuid::new_v4().to_string();
         let now = Utc::now();
         let storage_type = if size <= INLINE_THRESHOLD {
@@ -695,6 +727,18 @@ impl FsService {
         raw_path: &str,
         content: &str,
     ) -> Result<api::WriteFileResponse> {
+        let ws = workspace_id.to_string();
+        let p = raw_path.to_string();
+        let c = content.to_string();
+        retry_on_deadlock(|| self.append_file_once(&ws, &p, &c)).await
+    }
+
+    async fn append_file_once(
+        &self,
+        workspace_id: &str,
+        raw_path: &str,
+        content: &str,
+    ) -> Result<api::WriteFileResponse> {
         let norm = path::normalize(raw_path)?;
         let mut tx = self.meta.begin_tx().await?;
 
@@ -776,7 +820,7 @@ impl FsService {
                     };
                     tx.insert_file(&new_file).await?;
                     write_content(&mut *tx, &new_file_id, &new_content, size).await?;
-                    tx.decrement_ref_count(fid).await?;
+                    cleanup_file_if_orphan(&mut *tx, workspace_id, fid).await?;
                     tx.update_dentry_file_id(workspace_id, &norm, &new_file_id)
                         .await?;
 
@@ -805,6 +849,7 @@ impl FsService {
                 write_content(&mut *tx, fid, &new_content, size).await?;
                 tx.update_file_revision(
                     fid,
+                    f.revision,
                     new_rev,
                     size,
                     &checksum,
@@ -967,8 +1012,24 @@ fn join_lines<'a, I: Iterator<Item = &'a str>>(mut it: I) -> String {
     out
 }
 
+async fn cleanup_file_if_orphan(
+    tx: &mut dyn MetadataTx,
+    workspace_id: &str,
+    file_id: &str,
+) -> Result<()> {
+    let remaining = tx.decrement_ref_count(file_id).await?;
+    if remaining <= 0 {
+        tx.delete_file_content(file_id).await?;
+        tx.delete_file_chunks(file_id).await?;
+        let outbox = make_outbox(workspace_id, OutboxEventType::ChunkDelete, file_id);
+        tx.insert_outbox(&outbox).await?;
+        tx.delete_file(file_id).await?;
+    }
+    Ok(())
+}
+
 async fn write_content(
-    tx: &mut dyn crate::store::MetadataTx,
+    tx: &mut dyn MetadataTx,
     file_id: &str,
     content: &str,
     size: i64,
@@ -1025,7 +1086,7 @@ fn split_into_chunks(file_id: &str, content: &str) -> Vec<FileChunk> {
 }
 
 async fn ensure_parents(
-    tx: &mut dyn crate::store::MetadataTx,
+    tx: &mut dyn MetadataTx,
     workspace_id: &str,
     full_path: &str,
 ) -> Result<()> {

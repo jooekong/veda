@@ -12,6 +12,7 @@ pub struct FileInfo {
     pub path: String,
     pub is_dir: bool,
     pub size_bytes: Option<i64>,
+    pub revision: Option<i32>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -27,6 +28,7 @@ pub enum ClientError {
     NotFound,
     AlreadyExists,
     PermissionDenied,
+    Conflict,
     Io(String),
 }
 
@@ -36,6 +38,7 @@ impl std::fmt::Display for ClientError {
             Self::NotFound => write!(f, "not found"),
             Self::AlreadyExists => write!(f, "already exists"),
             Self::PermissionDenied => write!(f, "permission denied"),
+            Self::Conflict => write!(f, "conflict"),
             Self::Io(s) => write!(f, "{s}"),
         }
     }
@@ -66,6 +69,7 @@ impl VedaClient {
             404 => Err(ClientError::NotFound),
             409 => Err(ClientError::AlreadyExists),
             403 => Err(ClientError::PermissionDenied),
+            412 => Err(ClientError::Conflict),
             _ => Err(ClientError::Io(format!("HTTP {status}: {body}"))),
         }
     }
@@ -108,16 +112,27 @@ impl VedaClient {
         Ok(body)
     }
 
-    pub fn write_file(&self, path: &str, content: &[u8]) -> Result<()> {
+    pub fn write_file(
+        &self,
+        path: &str,
+        content: &[u8],
+        expected_rev: Option<i32>,
+    ) -> Result<Option<i32>> {
         let path = path.trim_start_matches('/');
-        let resp = self.http.put(format!("{}/v1/fs/{path}", self.base))
+        let mut req = self.http.put(format!("{}/v1/fs/{path}", self.base))
             .bearer_auth(&self.key)
-            .body(content.to_vec())
-            .send()
-            .map_err(|e| ClientError::Io(e.to_string()))?;
+            .body(content.to_vec());
+        if let Some(rev) = expected_rev {
+            req = req.header("If-Match", format!("\"{rev}\""));
+        }
+        let resp = req.send().map_err(|e| ClientError::Io(e.to_string()))?;
         let status = resp.status();
+        let etag = resp.headers().get("ETag")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.trim().trim_matches('"').parse::<i32>().ok());
         let body = resp.text().map_err(|e| ClientError::Io(e.to_string()))?;
-        Self::check_status(status, &body)
+        Self::check_status(status, &body)?;
+        Ok(etag)
     }
 
     pub fn list_dir(&self, path: &str) -> Result<Vec<DirEntry>> {

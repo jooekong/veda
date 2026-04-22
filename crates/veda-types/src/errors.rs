@@ -26,6 +26,12 @@ pub enum VedaError {
     #[error("embedding failed: {0}")]
     EmbeddingFailed(String),
 
+    #[error("precondition failed: {0}")]
+    PreconditionFailed(String),
+
+    #[error("deadlock: {0}")]
+    Deadlock(String),
+
     #[error("storage error: {0}")]
     Storage(String),
 

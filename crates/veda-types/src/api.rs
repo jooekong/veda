@@ -67,7 +67,7 @@ pub struct DirEntry {
     pub mime_type: Option<String>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct WriteFileResponse {
     pub file_id: String,
     pub revision: i32,
