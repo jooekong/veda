@@ -172,32 +172,28 @@ struct AppendMeta {
 /// with `chunk_index < last_chunk_idx`); the last chunk's content is passed
 /// separately already-merged into `tail`. Runs on the blocking thread pool.
 fn compute_append_meta_blocking(
-    all_chunks: &[FileChunk],
+    old_sha256: &str,
+    before_line_count: i32,
     last_chunk_idx: i32,
     tail_start_line: i32,
     tail: String,
     chunk_size: usize,
 ) -> AppendMeta {
-    // Feed every pre-tail chunk's bytes into the full-content hasher in order.
-    let mut hasher = Sha256::new();
-    let mut before: Vec<&FileChunk> = all_chunks
-        .iter()
-        .filter(|c| c.chunk_index < last_chunk_idx)
-        .collect();
-    before.sort_by_key(|c| c.chunk_index);
-    for c in &before {
-        hasher.update(c.content.as_bytes());
-    }
-
     let (tail_chunks, _tail_only_sha, _tail_lines_with_trailing) =
         split_and_hash(tail.as_bytes(), chunk_size, last_chunk_idx, tail_start_line);
+
+    // Derive a deterministic checksum without re-reading all prior chunks.
+    // Not a true content hash — will be recalculated on the next full write.
+    let mut hasher = Sha256::new();
+    hasher.update(b"append:");
+    hasher.update(old_sha256.as_bytes());
+    hasher.update(b":");
     hasher.update(tail.as_bytes());
     let sha256 = format!("{:x}", hasher.finalize());
 
-    let before_newlines: i32 = before.iter().map(|c| c.line_count).sum();
     let tail_newlines: i32 = tail_chunks.iter().map(|c| c.line_count).sum();
     let trailing_partial = tail.as_bytes().last().map(|&b| b != b'\n').unwrap_or(false);
-    let line_count = before_newlines + tail_newlines + if trailing_partial { 1 } else { 0 };
+    let line_count = before_line_count + tail_newlines + if trailing_partial { 1 } else { 0 };
 
     AppendMeta {
         sha256,
@@ -550,35 +546,12 @@ impl FsService {
         max_entries: usize,
     ) -> Result<Vec<Dentry>> {
         let norm = path::normalize(raw_path)?;
-        let mut all = Vec::new();
-        let top = self.meta.list_dentries(workspace_id, &norm).await?;
-        let mut queue: Vec<String> = Vec::new();
-        for d in top {
-            if d.is_dir {
-                queue.push(d.path.clone());
-            }
-            all.push(d);
-            if all.len() > max_entries {
-                return Err(VedaError::QuotaExceeded(format!(
-                    "directory listing exceeded {} entries",
-                    max_entries
-                )));
-            }
-        }
-        while let Some(dir) = queue.pop() {
-            let children = self.meta.list_dentries(workspace_id, &dir).await?;
-            for c in children {
-                if c.is_dir {
-                    queue.push(c.path.clone());
-                }
-                all.push(c);
-                if all.len() > max_entries {
-                    return Err(VedaError::QuotaExceeded(format!(
-                        "directory listing exceeded {} entries",
-                        max_entries
-                    )));
-                }
-            }
+        let all = self.meta.list_dentries_under(workspace_id, &norm).await?;
+        if all.len() > max_entries {
+            return Err(VedaError::QuotaExceeded(format!(
+                "directory listing exceeded {} entries",
+                max_entries
+            )));
         }
         Ok(all)
     }
@@ -672,6 +645,7 @@ impl FsService {
 
         let mut file_ids_to_cleanup: Vec<String> = Vec::new();
         let mut deleted_count: u64 = 1; // the target dentry itself
+        let mut child_events: Vec<FsEvent> = Vec::new();
 
         if dentry.is_dir {
             let children = tx.list_dentries_under(workspace_id, &norm).await?;
@@ -680,6 +654,12 @@ impl FsService {
                 if let Some(ref fid) = child.file_id {
                     file_ids_to_cleanup.push(fid.clone());
                 }
+                child_events.push(make_fs_event(
+                    workspace_id,
+                    FsEventType::Delete,
+                    &child.path,
+                    child.file_id.as_deref(),
+                ));
             }
             tx.delete_dentries_under(workspace_id, &norm).await?;
         }
@@ -708,6 +688,9 @@ impl FsService {
             dentry.file_id.as_deref(),
         );
         tx.insert_fs_event(&evt).await?;
+        if !child_events.is_empty() {
+            tx.insert_fs_events(&child_events).await?;
+        }
         tx.commit().await?;
         Ok(deleted_count)
     }
@@ -959,25 +942,26 @@ impl FsService {
             return finalize_full_rewrite(tx, workspace_id, &norm, &file, fid, &meta).await;
         }
 
-        // Incremental chunked append: rehash streaming + only re-chunk the tail.
+        // Incremental chunked append: only re-chunk the tail, no full-file re-read.
         let last = tx
             .get_last_file_chunk(fid)
             .await?
             .ok_or_else(|| VedaError::Internal("chunked file missing last chunk".into()))?;
-        let all_chunks = tx.get_file_chunks(fid, None, None).await?;
 
         let fid_string = fid.to_string();
         let file_rev = file.revision;
         let file_checksum = file.checksum_sha256.clone();
         let last_chunk_idx = last.chunk_index;
         let last_start_line = last.start_line;
+        let before_line_count = file.line_count.unwrap_or(0) - last.line_count;
         let mut tail = String::with_capacity(last.content.len() + content.len());
         tail.push_str(&last.content);
         tail.push_str(content);
 
         let append_meta = tokio::task::spawn_blocking(move || {
             compute_append_meta_blocking(
-                &all_chunks,
+                &file_checksum,
+                before_line_count,
                 last_chunk_idx,
                 last_start_line,
                 tail,
@@ -986,15 +970,6 @@ impl FsService {
         })
         .await
         .map_err(|e| VedaError::Internal(format!("append hash task join failed: {e}")))?;
-
-        if append_meta.sha256 == file_checksum {
-            tx.commit().await?;
-            return Ok(api::WriteFileResponse {
-                file_id: fid_string,
-                revision: file_rev,
-                content_unchanged: true,
-            });
-        }
 
         tx.delete_file_chunks_from(&fid_string, last_chunk_idx)
             .await?;
@@ -1061,12 +1036,6 @@ impl FsService {
             ));
         }
 
-        let children = if src_dentry.is_dir {
-            tx.list_dentries_under(workspace_id, &src).await?
-        } else {
-            Vec::new()
-        };
-
         ensure_parents(&mut *tx, workspace_id, &dst).await?;
 
         tx.rename_dentry(
@@ -1078,17 +1047,19 @@ impl FsService {
         )
         .await?;
 
-        for child in &children {
-            let new_child_path = format!("{dst}{}", &child.path[src.len()..]);
-            let new_parent = path::parent(&new_child_path).to_string();
-            tx.rename_dentry(
-                workspace_id,
-                &child.path,
-                &new_child_path,
-                &new_parent,
-                &child.name,
-            )
-            .await?;
+        let mut child_events: Vec<FsEvent> = Vec::new();
+        if src_dentry.is_dir {
+            let children = tx.list_dentries_under(workspace_id, &src).await?;
+            for child in &children {
+                let new_child_path = format!("{dst}{}", &child.path[src.len()..]);
+                child_events.push(make_fs_event(
+                    workspace_id,
+                    FsEventType::Move,
+                    &new_child_path,
+                    child.file_id.as_deref(),
+                ));
+            }
+            tx.rename_dentries_under(workspace_id, &src, &dst).await?;
         }
 
         let evt = make_fs_event(
@@ -1098,6 +1069,9 @@ impl FsService {
             src_dentry.file_id.as_deref(),
         );
         tx.insert_fs_event(&evt).await?;
+        if !child_events.is_empty() {
+            tx.insert_fs_events(&child_events).await?;
+        }
         tx.commit().await?;
         Ok(())
     }

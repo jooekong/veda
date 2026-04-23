@@ -13,6 +13,7 @@ use crate::auth::AuthWorkspace;
 use crate::state::AppState;
 
 const POLL_INTERVAL: Duration = Duration::from_secs(1);
+const MAX_BACKOFF: Duration = Duration::from_secs(30);
 const BATCH_SIZE: usize = 100;
 
 pub fn routes() -> Router<Arc<AppState>> {
@@ -33,6 +34,7 @@ async fn sse_events(
     let mut cursor = q.since_id.unwrap_or(0);
 
     let stream = async_stream::stream! {
+        let mut backoff = POLL_INTERVAL;
         loop {
             match state
                 .fs_service
@@ -40,6 +42,7 @@ async fn sse_events(
                 .await
             {
                 Ok(events) => {
+                    backoff = POLL_INTERVAL;
                     for event in events {
                         cursor = event.id;
                         let data = serde_json::json!({
@@ -54,10 +57,11 @@ async fn sse_events(
                     }
                 }
                 Err(e) => {
-                    tracing::warn!(err = %e, "SSE poll error");
+                    tracing::warn!(err = %e, backoff_ms = backoff.as_millis(), "SSE poll error");
+                    backoff = (backoff * 2).min(MAX_BACKOFF);
                 }
             }
-            tokio::time::sleep(POLL_INTERVAL).await;
+            tokio::time::sleep(backoff).await;
         }
     };
 

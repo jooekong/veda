@@ -4,16 +4,19 @@ use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
 use chrono::{Duration, Utc};
-use jsonwebtoken::{decode, encode, DecodingKey, EncodingKey, Header, Validation};
+use jsonwebtoken::{decode, encode, Algorithm, DecodingKey, EncodingKey, Header, Validation};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use veda_types::ApiResponse;
 
 use crate::state::AppState;
 
+const JWT_ISSUER: &str = "veda";
+
 #[derive(Debug, Serialize, Deserialize)]
 pub struct JwtClaims {
     pub sub: String,
+    pub iss: String,
     pub workspace_id: String,
     pub account_id: String,
     pub exp: i64,
@@ -28,6 +31,7 @@ pub fn create_jwt(
     let expires_at = Utc::now() + Duration::hours(ttl_hours);
     let claims = JwtClaims {
         sub: workspace_id.to_string(),
+        iss: JWT_ISSUER.to_string(),
         workspace_id: workspace_id.to_string(),
         account_id: account_id.to_string(),
         exp: expires_at.timestamp(),
@@ -41,13 +45,22 @@ pub fn create_jwt(
 }
 
 pub fn verify_jwt(secret: &str, token: &str) -> Option<JwtClaims> {
+    let mut validation = Validation::new(Algorithm::HS256);
+    validation.set_issuer(&[JWT_ISSUER]);
     decode::<JwtClaims>(
         token,
         &DecodingKey::from_secret(secret.as_bytes()),
-        &Validation::default(),
+        &validation,
     )
     .ok()
     .map(|d| d.claims)
+}
+
+pub fn validate_jwt_secret(secret: &str) -> anyhow::Result<()> {
+    if secret.len() < 32 {
+        anyhow::bail!("jwt_secret must be at least 32 bytes");
+    }
+    Ok(())
 }
 
 pub struct AuthAccount {

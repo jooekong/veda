@@ -90,6 +90,14 @@ pub trait MetadataTx: Send {
         new_parent: &str,
         new_name: &str,
     ) -> Result<()>;
+    /// Batch-rename all dentries under `old_prefix` to `new_prefix` in a single
+    /// statement. E.g. renaming `/a` to `/b` rewrites `/a/x` → `/b/x`.
+    async fn rename_dentries_under(
+        &mut self,
+        workspace_id: &str,
+        old_prefix: &str,
+        new_prefix: &str,
+    ) -> Result<u64>;
 
     // file ops
     async fn get_file(&mut self, file_id: &str) -> Result<Option<FileRecord>>;
@@ -133,6 +141,12 @@ pub trait MetadataTx: Send {
 
     // fs event
     async fn insert_fs_event(&mut self, event: &FsEvent) -> Result<()>;
+    async fn insert_fs_events(&mut self, events: &[FsEvent]) -> Result<()> {
+        for e in events {
+            self.insert_fs_event(e).await?;
+        }
+        Ok(())
+    }
 
     async fn commit(self: Box<Self>) -> Result<()>;
     async fn rollback(self: Box<Self>) -> Result<()>;

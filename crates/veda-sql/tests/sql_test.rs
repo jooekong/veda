@@ -216,6 +216,19 @@ impl MetadataTx for MockMetaFullTx {
         }
         Ok(())
     }
+    async fn rename_dentries_under(&mut self, ws: &str, old_prefix: &str, new_prefix: &str) -> Result<u64> {
+        let mut st = self.dentries.lock().unwrap();
+        let prefix = format!("{old_prefix}/");
+        let mut count = 0u64;
+        for d in st.iter_mut() {
+            if d.workspace_id == ws && d.path.starts_with(&prefix) {
+                d.path = format!("{new_prefix}{}", &d.path[old_prefix.len()..]);
+                d.parent_path = format!("{new_prefix}{}", &d.parent_path[old_prefix.len()..]);
+                count += 1;
+            }
+        }
+        Ok(count)
+    }
     async fn get_file(&mut self, id: &str) -> Result<Option<FileRecord>> {
         Ok(self
             .files

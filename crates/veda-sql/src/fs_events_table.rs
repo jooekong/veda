@@ -146,11 +146,7 @@ impl TableFunctionImpl for VedaFsEventsFactory {
             ],
         )?;
 
-        let table = if n > 0 {
-            MemTable::try_new(schema, vec![vec![batch]])?
-        } else {
-            MemTable::try_new(schema, vec![vec![]])?
-        };
+        let table = MemTable::try_new(schema, vec![vec![batch]])?;
 
         Ok(Arc::new(table))
     }

@@ -380,7 +380,8 @@ impl MysqlStore {
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
     UNIQUE INDEX idx_ws_path (workspace_id, path_hash),
-    INDEX idx_parent (workspace_id, parent_path(255))
+    INDEX idx_parent (workspace_id, parent_path(255)),
+    INDEX idx_ws_path_prefix (workspace_id, path(255))
 )"#,
             r#"CREATE TABLE IF NOT EXISTS veda_files (
     id VARCHAR(36) PRIMARY KEY,
@@ -495,6 +496,16 @@ impl MysqlStore {
                 .await
                 .map_err(|e| VedaError::Storage(e.to_string()))?;
         }
+
+        // Idempotent index additions for existing databases.
+        let migrations = [
+            "CREATE INDEX idx_ws_path_prefix ON veda_dentries (workspace_id, path(255))",
+        ];
+        for m in migrations {
+            // Ignore "duplicate key name" errors for idempotency.
+            let _ = sqlx::query(m).execute(&self.pool).await;
+        }
+
         Ok(())
     }
 
@@ -1027,6 +1038,33 @@ impl MetadataTx for MysqlMetadataTx {
         Ok(())
     }
 
+    async fn rename_dentries_under(
+        &mut self,
+        workspace_id: &str,
+        old_prefix: &str,
+        new_prefix: &str,
+    ) -> Result<u64> {
+        let t = self.tx_mut()?;
+        let old_len = old_prefix.len() as i32 + 1; // 1-based SUBSTRING offset
+        let like = format!("{}/%", escape_like(old_prefix));
+        let r = sqlx::query(
+            r#"UPDATE veda_dentries
+               SET path = CONCAT(?, SUBSTRING(path, ?)),
+                   parent_path = CONCAT(?, SUBSTRING(parent_path, ?))
+               WHERE workspace_id = ? AND path LIKE ? ESCAPE '\\'"#,
+        )
+        .bind(new_prefix)
+        .bind(old_len)
+        .bind(new_prefix)
+        .bind(old_len)
+        .bind(workspace_id)
+        .bind(&like)
+        .execute(t.as_mut())
+        .await
+        .map_err(storage_err)?;
+        Ok(r.rows_affected())
+    }
+
     async fn get_file(&mut self, file_id: &str) -> Result<Option<FileRecord>> {
         let t = self.tx_mut()?;
         let row = sqlx::query(
@@ -1103,18 +1141,21 @@ impl MetadataTx for MysqlMetadataTx {
 
     async fn decrement_ref_count(&mut self, file_id: &str) -> Result<i32> {
         let t = self.tx_mut()?;
-        sqlx::query(r#"UPDATE veda_files SET ref_count = ref_count - 1 WHERE id = ?"#)
-            .bind(file_id)
-            .execute(t.as_mut())
-            .await
-            .map_err(storage_err)?;
-        let row = sqlx::query(r#"SELECT ref_count FROM veda_files WHERE id = ?"#)
+        let row = sqlx::query(r#"SELECT ref_count FROM veda_files WHERE id = ? FOR UPDATE"#)
             .bind(file_id)
             .fetch_optional(t.as_mut())
             .await
             .map_err(storage_err)?;
         let r = row.ok_or_else(|| VedaError::NotFound(file_id.to_string()))?;
-        Ok(r.try_get::<i32, _>("ref_count").map_err(storage_err)?)
+        let current: i32 = r.try_get("ref_count").map_err(storage_err)?;
+        let new_count = current - 1;
+        sqlx::query(r#"UPDATE veda_files SET ref_count = ? WHERE id = ?"#)
+            .bind(new_count)
+            .bind(file_id)
+            .execute(t.as_mut())
+            .await
+            .map_err(storage_err)?;
+        Ok(new_count)
     }
 
     async fn increment_ref_count(&mut self, file_id: &str) -> Result<()> {
@@ -1185,24 +1226,29 @@ impl MetadataTx for MysqlMetadataTx {
     }
 
     async fn insert_file_chunks(&mut self, chunks: &[FileChunk]) -> Result<()> {
-        let t = self.tx_mut()?;
-        for c in chunks {
-            sqlx::query(
-                r#"INSERT INTO veda_file_chunks
-                     (file_id, chunk_index, start_line, line_count, byte_len, chunk_sha256, content)
-                   VALUES (?, ?, ?, ?, ?, ?, ?)"#,
-            )
-            .bind(&c.file_id)
-            .bind(c.chunk_index)
-            .bind(c.start_line)
-            .bind(c.line_count)
-            .bind(c.byte_len)
-            .bind(&c.chunk_sha256)
-            .bind(&c.content)
-            .execute(t.as_mut())
-            .await
-            .map_err(storage_err)?;
+        if chunks.is_empty() {
+            return Ok(());
         }
+        let t = self.tx_mut()?;
+        let placeholders: Vec<&str> = chunks.iter().map(|_| "(?, ?, ?, ?, ?, ?, ?)").collect();
+        let sql = format!(
+            "INSERT INTO veda_file_chunks \
+             (file_id, chunk_index, start_line, line_count, byte_len, chunk_sha256, content) \
+             VALUES {}",
+            placeholders.join(", ")
+        );
+        let mut q = sqlx::query(&sql);
+        for c in chunks {
+            q = q
+                .bind(&c.file_id)
+                .bind(c.chunk_index)
+                .bind(c.start_line)
+                .bind(c.line_count)
+                .bind(c.byte_len)
+                .bind(&c.chunk_sha256)
+                .bind(&c.content);
+        }
+        q.execute(t.as_mut()).await.map_err(storage_err)?;
         Ok(())
     }
 
@@ -1253,6 +1299,32 @@ impl MetadataTx for MysqlMetadataTx {
     async fn insert_fs_event(&mut self, event: &FsEvent) -> Result<()> {
         let t = self.tx_mut()?;
         insert_fs_event_conn(t.as_mut(), event).await
+    }
+
+    async fn insert_fs_events(&mut self, events: &[FsEvent]) -> Result<()> {
+        if events.is_empty() {
+            return Ok(());
+        }
+        let t = self.tx_mut()?;
+        let placeholders: Vec<&str> = events
+            .iter()
+            .map(|_| "(?, ?, ?, ?, ?)")
+            .collect();
+        let sql = format!(
+            "INSERT INTO veda_fs_events (workspace_id, event_type, path, file_id, created_at) VALUES {}",
+            placeholders.join(", ")
+        );
+        let mut q = sqlx::query(&sql);
+        for e in events {
+            q = q
+                .bind(&e.workspace_id)
+                .bind(fs_event_type_str(e.event_type))
+                .bind(&e.path)
+                .bind(&e.file_id)
+                .bind(e.created_at.naive_utc());
+        }
+        q.execute(t.as_mut()).await.map_err(storage_err)?;
+        Ok(())
     }
 
     async fn commit(mut self: Box<Self>) -> Result<()> {
@@ -1368,14 +1440,13 @@ impl TaskQueue for MysqlStore {
             .map_err(storage_err)?;
         } else {
             let backoff_secs: i64 = (30 * (1i64 << next_retry.min(10))).min(3600);
-            let sql = format!(
+            sqlx::query(
                 "UPDATE veda_outbox SET status = 'pending', retry_count = ?, payload = CAST(? AS JSON), \
-                 available_at = DATE_ADD(UTC_TIMESTAMP(), INTERVAL {} SECOND), lease_until = NULL WHERE id = ?",
-                backoff_secs
-            );
-            sqlx::query(&sql)
+                 available_at = DATE_ADD(UTC_TIMESTAMP(), INTERVAL ? SECOND), lease_until = NULL WHERE id = ?",
+            )
                 .bind(next_retry)
                 .bind(&payload_str)
+                .bind(backoff_secs)
                 .bind(task_id)
                 .execute(&self.pool)
                 .await

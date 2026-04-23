@@ -82,7 +82,7 @@ async fn write_file(
         ))
     })?;
     let path = format!("/{path}");
-    let expected_rev = parse_if_match(&headers);
+    let expected_rev = parse_if_match(&headers)?;
     let if_none_match = parse_if_none_match_sha256(&headers);
     let resp = state
         .fs_service
@@ -103,10 +103,18 @@ async fn write_file(
     Ok(r)
 }
 
-fn parse_if_match(h: &HeaderMap) -> Option<i32> {
-    let v = h.get(header::IF_MATCH)?.to_str().ok()?;
+fn parse_if_match(h: &HeaderMap) -> Result<Option<i32>, AppError> {
+    let Some(raw) = h.get(header::IF_MATCH) else {
+        return Ok(None);
+    };
+    let v = raw
+        .to_str()
+        .map_err(|_| VedaError::InvalidInput("invalid If-Match header".into()))?;
     let v = v.trim().trim_matches('"');
-    v.parse().ok()
+    let rev: i32 = v
+        .parse()
+        .map_err(|_| VedaError::InvalidInput(format!("malformed If-Match value: {v}")))?;
+    Ok(Some(rev))
 }
 
 /// Parse `If-None-Match: "<sha256>"` where the etag is the hex digest of the

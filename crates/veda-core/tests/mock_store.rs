@@ -304,6 +304,25 @@ impl MetadataTx for MockTx {
         Ok(())
     }
 
+    async fn rename_dentries_under(
+        &mut self,
+        workspace_id: &str,
+        old_prefix: &str,
+        new_prefix: &str,
+    ) -> Result<u64> {
+        let mut st = self.state.lock().unwrap();
+        let prefix_with_slash = format!("{old_prefix}/");
+        let mut count = 0u64;
+        for d in st.dentries.iter_mut() {
+            if d.workspace_id == workspace_id && d.path.starts_with(&prefix_with_slash) {
+                d.path = format!("{new_prefix}{}", &d.path[old_prefix.len()..]);
+                d.parent_path = format!("{new_prefix}{}", &d.parent_path[old_prefix.len()..]);
+                count += 1;
+            }
+        }
+        Ok(count)
+    }
+
     async fn get_file(&mut self, file_id: &str) -> Result<Option<FileRecord>> {
         let st = self.state.lock().unwrap();
         Ok(st.files.iter().find(|f| f.id == file_id).cloned())

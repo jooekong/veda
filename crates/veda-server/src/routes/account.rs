@@ -100,6 +100,14 @@ async fn login(
         .verify_password(req.password.as_bytes(), &parsed)
         .map_err(|_| VedaError::PermissionDenied)?;
 
+    // Revoke previous login keys to prevent unbounded accumulation.
+    let old_keys = state.auth_store.list_api_keys(&account.id).await?;
+    for k in &old_keys {
+        if k.name == "login" && k.status == KeyStatus::Active {
+            state.auth_store.revoke_api_key(&k.id).await?;
+        }
+    }
+
     let raw_key = format!("vk_{}", Uuid::new_v4().to_string().replace('-', ""));
     let key_hash = sha256_hex(raw_key.as_bytes());
     let now = Utc::now();

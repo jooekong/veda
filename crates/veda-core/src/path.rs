@@ -41,12 +41,33 @@ fn validate_segment(seg: &str) -> Result<()> {
             "path segment exceeds 255 bytes".to_string(),
         ));
     }
-    if seg.contains('\0') || seg.contains(':') {
-        return Err(VedaError::InvalidPath(format!(
-            "invalid character in segment: {seg}"
-        )));
+    for c in seg.chars() {
+        if c == '\0' || c == ':' || c.is_control() || is_bidi_control(c) {
+            return Err(VedaError::InvalidPath(format!(
+                "invalid character in segment: {seg}"
+            )));
+        }
     }
     Ok(())
+}
+
+fn is_bidi_control(c: char) -> bool {
+    matches!(
+        c,
+        '\u{200E}'  // LRM
+        | '\u{200F}' // RLM
+        | '\u{202A}' // LRE
+        | '\u{202B}' // RLE
+        | '\u{202C}' // PDF
+        | '\u{202D}' // LRO
+        | '\u{202E}' // RLO
+        | '\u{2066}' // LRI
+        | '\u{2067}' // RLI
+        | '\u{2068}' // FSI
+        | '\u{2069}' // PDI
+        | '\u{2028}' // Line separator
+        | '\u{2029}' // Paragraph separator
+    )
 }
 
 pub fn parent(path: &str) -> &str {
@@ -109,6 +130,10 @@ mod tests {
     fn normalize_invalid_chars() {
         assert!(normalize("/foo\0bar").is_err());
         assert!(normalize("/foo:bar").is_err());
+        assert!(normalize("/foo\nbar").is_err());
+        assert!(normalize("/foo\rbar").is_err());
+        assert!(normalize("/foo\u{202E}bar").is_err()); // RLO
+        assert!(normalize("/foo\u{200F}bar").is_err()); // RLM
     }
 
     #[test]

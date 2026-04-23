@@ -412,15 +412,6 @@ impl VectorStore for MilvusStore {
         });
         let _ = self.post_v2("/v2/vectordb/entities/delete", del).await;
 
-        if let Err(e) = self
-            .post_v2(
-                "/v2/vectordb/collections/flush",
-                json!({ "collectionName": COLLECTION }),
-            )
-            .await
-        {
-            warn!(err = %e, "milvus flush failed after upsert");
-        }
         Ok(())
     }
 
@@ -433,15 +424,6 @@ impl VectorStore for MilvusStore {
             "filter": filter
         });
         self.post_v2("/v2/vectordb/entities/delete", body).await?;
-        if let Err(e) = self
-            .post_v2(
-                "/v2/vectordb/collections/flush",
-                json!({ "collectionName": COLLECTION }),
-            )
-            .await
-        {
-            warn!(err = %e, "milvus flush failed after delete");
-        }
         Ok(())
     }
 
@@ -618,12 +600,6 @@ impl CollectionVectorStore for MilvusStore {
             "data": data
         });
         self.post_v2("/v2/vectordb/entities/insert", body).await?;
-        let _ = self
-            .post_v2(
-                "/v2/vectordb/collections/flush",
-                json!({ "collectionName": collection_name }),
-            )
-            .await;
         Ok(())
     }
 

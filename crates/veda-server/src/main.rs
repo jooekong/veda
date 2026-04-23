@@ -31,6 +31,7 @@ async fn main() -> anyhow::Result<()> {
         .nth(1)
         .unwrap_or_else(|| "config/server.toml".into());
     let cfg = ServerConfig::load(&config_path)?;
+    auth::validate_jwt_secret(&cfg.jwt_secret)?;
     info!(listen = %cfg.listen, "starting veda-server");
 
     let mysql = Arc::new(MysqlStore::new(&cfg.mysql.database_url).await?);
