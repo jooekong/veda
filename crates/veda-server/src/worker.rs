@@ -1,6 +1,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use futures::stream::{self, StreamExt};
 use tokio::sync::watch;
 use tokio::time::sleep;
 use tracing::{error, info, warn};
@@ -56,12 +57,15 @@ impl Worker {
                 sleep(self.poll_interval).await;
             }
             Ok(tasks) => {
-                for task in tasks {
-                    if let Err(e) = self.process_task(&task).await {
-                        error!(task_id = task.id, err = %e, "task failed");
-                        let _ = self.task_queue.fail(task.id, &e.to_string()).await;
-                    }
-                }
+                let concurrency = self.batch_size.max(1);
+                stream::iter(tasks)
+                    .for_each_concurrent(concurrency, |task| async move {
+                        if let Err(e) = self.process_task(&task).await {
+                            error!(task_id = task.id, err = %e, "task failed");
+                            let _ = self.task_queue.fail(task.id, &e.to_string()).await;
+                        }
+                    })
+                    .await;
             }
             Err(e) => {
                 warn!(err = %e, "claim failed");

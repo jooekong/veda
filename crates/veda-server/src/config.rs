@@ -15,6 +15,12 @@ pub struct ServerConfig {
 #[derive(Debug, Deserialize)]
 pub struct MysqlConfig {
     pub database_url: String,
+    #[serde(default = "default_max_connections")]
+    pub max_connections: u32,
+}
+
+fn default_max_connections() -> u32 {
+    50
 }
 
 #[derive(Debug, Deserialize)]

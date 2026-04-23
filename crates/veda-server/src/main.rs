@@ -34,7 +34,9 @@ async fn main() -> anyhow::Result<()> {
     auth::validate_jwt_secret(&cfg.jwt_secret)?;
     info!(listen = %cfg.listen, "starting veda-server");
 
-    let mysql = Arc::new(MysqlStore::new(&cfg.mysql.database_url).await?);
+    let mysql = Arc::new(
+        MysqlStore::with_max_connections(&cfg.mysql.database_url, cfg.mysql.max_connections).await?,
+    );
     mysql.migrate().await?;
 
     let milvus = Arc::new(MilvusStore::new(

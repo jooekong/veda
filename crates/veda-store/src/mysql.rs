@@ -20,11 +20,7 @@ const FS_EVENT_INSERT_BATCH: usize = 500;
 
 fn storage_err(e: impl std::fmt::Display) -> VedaError {
     let msg = e.to_string();
-    if msg.contains("1213")
-        || msg.contains("Deadlock")
-        || msg.contains("1205")
-        || msg.contains("Lock wait timeout")
-    {
+    if msg.contains("1213") || msg.contains("Deadlock") {
         return VedaError::Deadlock(msg);
     }
     VedaError::Storage(msg)
@@ -367,7 +363,13 @@ pub struct MysqlStore {
 
 impl MysqlStore {
     pub async fn new(database_url: &str) -> Result<Self> {
-        let pool = MySqlPool::connect(database_url)
+        Self::with_max_connections(database_url, 50).await
+    }
+
+    pub async fn with_max_connections(database_url: &str, max_connections: u32) -> Result<Self> {
+        let pool = sqlx::pool::PoolOptions::<sqlx::MySql>::new()
+            .max_connections(max_connections)
+            .connect(database_url)
             .await
             .map_err(|e| VedaError::Storage(e.to_string()))?;
         Ok(Self { pool })
@@ -504,13 +506,16 @@ impl MysqlStore {
                 .map_err(|e| VedaError::Storage(e.to_string()))?;
         }
 
-        // Idempotent index additions for existing databases.
         let migrations = [
             "CREATE INDEX idx_ws_path_prefix ON veda_dentries (workspace_id, path(255))",
         ];
         for m in migrations {
-            // Ignore "duplicate key name" errors for idempotency.
-            let _ = sqlx::query(m).execute(&self.pool).await;
+            match sqlx::query(m).execute(&self.pool).await {
+                Ok(_) => {}
+                Err(sqlx::Error::Database(ref db_err))
+                    if db_err.code().as_deref() == Some("1061") => {}
+                Err(e) => return Err(VedaError::Storage(e.to_string())),
+            }
         }
 
         Ok(())
@@ -829,6 +834,33 @@ impl MetadataStore for MysqlStore {
         .await
         .map_err(storage_err)?;
         Ok(row.map(|r| r.0))
+    }
+
+    async fn get_dentry_paths_by_file_ids(
+        &self,
+        workspace_id: &str,
+        file_ids: &[String],
+    ) -> Result<std::collections::HashMap<String, String>> {
+        if file_ids.is_empty() {
+            return Ok(std::collections::HashMap::new());
+        }
+        let placeholders = vec!["?"; file_ids.len()].join(",");
+        let sql = format!(
+            "SELECT file_id, path FROM veda_dentries \
+             WHERE workspace_id = ? AND file_id IN ({placeholders})"
+        );
+        let mut q = sqlx::query(&sql).bind(workspace_id);
+        for id in file_ids {
+            q = q.bind(id);
+        }
+        let rows = q.fetch_all(&self.pool).await.map_err(storage_err)?;
+        let mut map = std::collections::HashMap::with_capacity(rows.len());
+        for r in &rows {
+            let fid: String = r.try_get("file_id").map_err(storage_err)?;
+            let path: String = r.try_get("path").map_err(storage_err)?;
+            map.entry(fid).or_insert(path);
+        }
+        Ok(map)
     }
 
     async fn query_fs_events(
@@ -1386,18 +1418,43 @@ impl TaskQueue for MysqlStore {
         .fetch_all(&mut *tx)
         .await
         .map_err(storage_err)?;
-        let mut ids = Vec::new();
         let mut events = Vec::new();
+        let mut dead_ids = Vec::new();
         for r in &rows {
-            let id: i64 = r.try_get("id").map_err(storage_err)?;
-            ids.push(id);
-            events.push(row_to_outbox(r)?);
+            let evt = row_to_outbox(r)?;
+            let was_processing = evt.status == OutboxStatus::Processing;
+            if was_processing {
+                let next_retry = evt.retry_count + 1;
+                if next_retry >= evt.max_retries {
+                    dead_ids.push(evt.id);
+                    continue;
+                }
+                sqlx::query(
+                    r#"UPDATE veda_outbox SET status = 'processing', retry_count = ?,
+                       lease_until = DATE_ADD(UTC_TIMESTAMP(), INTERVAL 10 MINUTE)
+                       WHERE id = ?"#,
+                )
+                .bind(next_retry)
+                .bind(evt.id)
+                .execute(&mut *tx)
+                .await
+                .map_err(storage_err)?;
+            } else {
+                sqlx::query(
+                    r#"UPDATE veda_outbox SET status = 'processing',
+                       lease_until = DATE_ADD(UTC_TIMESTAMP(), INTERVAL 10 MINUTE)
+                       WHERE id = ?"#,
+                )
+                .bind(evt.id)
+                .execute(&mut *tx)
+                .await
+                .map_err(storage_err)?;
+            }
+            events.push(evt);
         }
-        for id in &ids {
+        for id in &dead_ids {
             sqlx::query(
-                r#"UPDATE veda_outbox SET status = 'processing',
-                   lease_until = DATE_ADD(UTC_TIMESTAMP(), INTERVAL 10 MINUTE)
-                   WHERE id = ?"#,
+                r#"UPDATE veda_outbox SET status = 'dead', lease_until = NULL WHERE id = ?"#,
             )
             .bind(id)
             .execute(&mut *tx)

@@ -52,6 +52,19 @@ pub trait MetadataStore: Send + Sync {
         workspace_id: &str,
         file_id: &str,
     ) -> Result<Option<String>>;
+    async fn get_dentry_paths_by_file_ids(
+        &self,
+        workspace_id: &str,
+        file_ids: &[String],
+    ) -> Result<std::collections::HashMap<String, String>> {
+        let mut map = std::collections::HashMap::new();
+        for fid in file_ids {
+            if let Some(p) = self.get_dentry_path_by_file_id(workspace_id, fid).await? {
+                map.insert(fid.clone(), p);
+            }
+        }
+        Ok(map)
+    }
     async fn query_fs_events(
         &self,
         workspace_id: &str,

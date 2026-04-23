@@ -59,17 +59,26 @@ impl SearchService {
         };
         let mut hits = self.vector.search(&req).await?;
 
-        for hit in &mut hits {
-            if hit.path.is_none() {
-                match self
-                    .meta
-                    .get_dentry_path_by_file_id(workspace_id, &hit.file_id)
-                    .await
-                {
-                    Ok(p) => hit.path = p,
-                    Err(e) => {
-                        warn!(file_id = %hit.file_id, err = %e, "failed to resolve path for search hit");
+        let missing_fids: Vec<String> = hits
+            .iter()
+            .filter(|h| h.path.is_none())
+            .map(|h| h.file_id.clone())
+            .collect();
+        if !missing_fids.is_empty() {
+            match self
+                .meta
+                .get_dentry_paths_by_file_ids(workspace_id, &missing_fids)
+                .await
+            {
+                Ok(path_map) => {
+                    for hit in &mut hits {
+                        if hit.path.is_none() {
+                            hit.path = path_map.get(&hit.file_id).cloned();
+                        }
                     }
+                }
+                Err(e) => {
+                    warn!(err = %e, "failed to batch-resolve paths for search hits");
                 }
             }
         }

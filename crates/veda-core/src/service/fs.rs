@@ -1251,7 +1251,12 @@ async fn ensure_parents(
     }
 
     let existing = tx.get_dentry(workspace_id, parent).await?;
-    if existing.is_some() {
+    if let Some(d) = existing {
+        if !d.is_dir {
+            return Err(VedaError::InvalidPath(format!(
+                "{parent} exists as a file"
+            )));
+        }
         return Ok(());
     }
 
