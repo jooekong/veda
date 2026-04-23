@@ -30,7 +30,7 @@ veda-fuse       FUSE 挂载（不在默认 workspace）      (已实现)
 - `veda-store`：MysqlStore（MetadataStore + MetadataTx + TaskQueue + AuthStore + CollectionMetaStore 实现，含 schema migration）；MilvusStore（VectorStore + CollectionVectorStore 实现，REST v2 client）；10 个 MySQL 集成测试 + 2 个 Milvus 集成测试
 - `veda-pipeline`：EmbeddingProvider（OpenAI 兼容 HTTP）；semantic_chunk（heading-based + sliding window）；storage_chunk（256KB 边界 + start_line）；extract_text（text/plain 占位）；6 个 chunking 单元测试 + 4 个 embedding 集成测试
 - `veda-sql`：VedaSqlEngine（DataFusion session 管理）；FilesTable（递归 dentry 枚举）；CollectionTable（Milvus 查询 → Arrow）；8 个 FS SQL 标量函数（veda_read/write/append/exists/size/mtime/remove/mkdir，友好错误消息）；`embedding()` UDF（文本 → JSON 向量）；`veda_fs()` Table Function（目录列举 / 文件读取 / glob 匹配，CSV/TSV/JSONL/plain text 自动解析）；`search()` UDTF（向量搜索，支持 hybrid/semantic/fulltext 模式 + limit 参数）；`veda_fs_events()` Table Function（事件查询，支持 since_id/path_prefix/limit）；`veda_storage_stats()` Table Function（文件/目录/字节统计）；支持 SELECT/WHERE/COUNT/JOIN 等标准 SQL；37 个 mock 单元测试
-- `veda-server`：ServerConfig（TOML 加载）；JWT 签发/验证；API Key + Workspace Key 认证中间件；Account/Workspace/File/Search/Collection/SQL 全部 REST 路由；Worker（outbox 消费 + chunk sync）；graceful shutdown；1 个 HTTP 集成测试
+- `veda-server`：ServerConfig（TOML 加载）；JWT 签发/验证；API Key + Workspace Key 认证中间件；Account/Workspace/File/Search/Collection/SQL 全部 REST 路由；Worker（outbox 消费 + chunk sync）；graceful shutdown；4 个 HTTP 端到端集成测试（fs CRUD/stat/mkdir/copy/rename/append/CAS/range/auth）
 - `veda-server`：新增 `POST /v1/fs/{path}` append 路由
 - `veda-cli`：clap 命令行解析；account create/login；workspace create/list/use；cp/cat/ls/mv/rm/mkdir/append；search；collection CRUD；sql；config 管理；$HOME/.config/veda/config.toml 持久化
 - `veda-fuse`：FUSE 文件系统挂载（fuser 0.14）；子命令 mount/umount；daemon 化（fork+setsid，pipe 通知 parent）；blocking HTTP 客户端（stat/read/write/list/delete/mkdir/rename/read_range）；InodeTable（inode ↔ path 双向映射 + 可配置 attr TTL）；WriteHandle（dirty 标记消除 flush+release 双写）；LRU ReadCache（小文件全量缓存，大文件 Range read）；SSE watcher（后台线程连接 /v1/events，远程变更时失效 attr+read cache）；mount 选项（--cache-size/--attr-ttl/--allow-other/--read-only/--debug）；需要 macFUSE（macOS）或 libfuse（Linux）
@@ -47,7 +47,7 @@ veda-fuse       FUSE 挂载（不在默认 workspace）      (已实现)
 - Reconciler（MySQL ↔ Milvus 数据对比自愈）
 - Prometheus metrics 导出
 - PDF text extraction / Image OCR
-- 端到端测试、Docker Compose、K8s Helm chart
+- CLI/FUSE 端到端测试、Docker Compose、K8s Helm chart
 
 ## 关键设计决策
 

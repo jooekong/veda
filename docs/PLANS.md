@@ -131,7 +131,8 @@
 
 ## Phase 8: 稳定化
 
-- [ ] 端到端测试
+- [x] 端到端测试（Server FS API：CRUD/stat/mkdir/copy/rename/append/CAS/range/auth）
+- [ ] 端到端测试（CLI/FUSE smoke）
 - [ ] 文档完善
 - [ ] Docker Compose 开发环境
 - [ ] K8s Helm chart
