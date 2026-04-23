@@ -18,8 +18,14 @@ struct MilvusSection {
 }
 
 #[derive(Debug, Deserialize)]
+struct EmbeddingSection {
+    dimension: Option<u32>,
+}
+
+#[derive(Debug, Deserialize)]
 struct TestToml {
     milvus: MilvusSection,
+    embedding: Option<EmbeddingSection>,
 }
 
 fn workspace_root() -> PathBuf {
@@ -38,12 +44,20 @@ fn load_milvus() -> (String, Option<String>, Option<String>) {
     (cfg.milvus.url, cfg.milvus.token, cfg.milvus.db)
 }
 
+fn load_embedding_dim() -> u32 {
+    let path = workspace_root().join("config/test.toml");
+    let raw =
+        std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
+    let cfg: TestToml = toml::from_str(&raw).expect("parse test.toml");
+    cfg.embedding.and_then(|e| e.dimension).unwrap_or(1024)
+}
+
 #[tokio::test]
 #[ignore]
 async fn milvus_init_upsert_search_delete() {
     let (url, token, db) = load_milvus();
     let store = MilvusStore::new(&url, token, db);
-    let dim = 8u32;
+    let dim = load_embedding_dim();
     store.init_collections(dim).await.expect("init");
 
     let ws = format!("ws_{}", Uuid::new_v4());
@@ -126,7 +140,7 @@ async fn milvus_dynamic_collection_crud() {
         },
     ];
 
-    let dim = 8u32;
+    let dim = load_embedding_dim();
     store
         .create_dynamic_collection(&coll_name, &fields, dim)
         .await

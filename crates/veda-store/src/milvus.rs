@@ -271,7 +271,8 @@ impl MilvusStore {
             "filter": filter,
             "limit": lim,
             "outputFields": ["id", "workspace_id", "file_id", "chunk_index", "content"],
-            "searchParams": { "metricType": "COSINE" }
+            "searchParams": { "metricType": "COSINE" },
+            "consistencyLevel": "Strong"
         });
         let v = self.post("/v2/vectordb/entities/search", body).await?;
         let rows = flatten_entity_rows(v.get("data"));
@@ -304,7 +305,8 @@ impl MilvusStore {
                 "params": { "k": 60 }
             },
             "limit": lim,
-            "outputFields": ["id", "workspace_id", "file_id", "chunk_index", "content"]
+            "outputFields": ["id", "workspace_id", "file_id", "chunk_index", "content"],
+            "consistencyLevel": "Strong"
         });
         match self
             .post("/v2/vectordb/entities/hybrid_search", body)
@@ -345,7 +347,8 @@ impl MilvusStore {
             "collectionName": COLLECTION,
             "filter": filter,
             "limit": lim,
-            "outputFields": ["id", "file_id", "chunk_index", "content"]
+            "outputFields": ["id", "file_id", "chunk_index", "content"],
+            "consistencyLevel": "Strong"
         });
         let v = self.post("/v2/vectordb/entities/query", body).await?;
         let rows = flatten_entity_rows(v.get("data"));
@@ -620,7 +623,8 @@ impl CollectionVectorStore for MilvusStore {
             "filter": filter,
             "limit": lim,
             "outputFields": ["*"],
-            "searchParams": { "metricType": "COSINE" }
+            "searchParams": { "metricType": "COSINE" },
+            "consistencyLevel": "Strong"
         });
         let v = self.post("/v2/vectordb/entities/search", body).await?;
         Ok(flatten_entity_rows(v.get("data")))
@@ -639,7 +643,8 @@ impl CollectionVectorStore for MilvusStore {
             "collectionName": collection_name,
             "filter": filter,
             "limit": lim,
-            "outputFields": ["*"]
+            "outputFields": ["*"],
+            "consistencyLevel": "Strong"
         });
         let v = self.post("/v2/vectordb/entities/query", body).await?;
         Ok(flatten_entity_rows(v.get("data")))
