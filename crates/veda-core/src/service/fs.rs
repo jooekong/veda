@@ -941,25 +941,26 @@ impl FsService {
         }
 
         // Incremental chunked append: only re-chunk the tail, no full-file re-read.
-        let last = tx
-            .get_last_file_chunk(fid)
-            .await?
-            .ok_or_else(|| VedaError::Internal("chunked file missing last chunk".into()))?;
+        // We still need all chunk contents for the full-file SHA256 recomputation.
+        let chunks = tx.get_file_chunks(fid, None, None).await?;
+        let last = chunks
+            .last()
+            .ok_or_else(|| VedaError::Internal("chunked file missing last chunk".into()))?
+            .clone();
 
         let fid_string = fid.to_string();
         let file_rev = file.revision;
         let last_chunk_idx = last.chunk_index;
         let last_start_line = last.start_line;
-        let before_line_count = file.line_count.unwrap_or(0) - last.line_count;
-        // Re-hash full content: stream pre-tail chunk bytes + merged tail into
-        // the hasher so checksum_sha256 remains a true content hash after append.
-        let pre_tail_contents: Vec<String> = tx
-            .get_file_chunks(fid, None, None)
-            .await?
-            .into_iter()
-            .filter(|c| c.chunk_index < last_chunk_idx)
-            .map(|c| c.content)
-            .collect();
+
+        let mut before_line_count = 0i32;
+        let mut pre_tail_contents = Vec::new();
+        for c in chunks {
+            if c.chunk_index < last_chunk_idx {
+                before_line_count += c.line_count;
+                pre_tail_contents.push(c.content);
+            }
+        }
         let mut tail = String::with_capacity(last.content.len() + content.len());
         tail.push_str(&last.content);
         tail.push_str(content);

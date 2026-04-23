@@ -11,6 +11,7 @@ impl IntoResponse for AppError {
         let (status, msg) = match &self.0 {
             VedaError::NotFound(p) => (StatusCode::NOT_FOUND, format!("not found: {p}")),
             VedaError::AlreadyExists(p) => (StatusCode::CONFLICT, format!("already exists: {p}")),
+            VedaError::Unauthorized(m) => (StatusCode::UNAUTHORIZED, format!("unauthorized: {m}")),
             VedaError::PermissionDenied => (StatusCode::FORBIDDEN, "permission denied".to_string()),
             VedaError::InvalidPath(p) => (StatusCode::BAD_REQUEST, format!("invalid path: {p}")),
             VedaError::InvalidInput(p) => (StatusCode::BAD_REQUEST, format!("invalid input: {p}")),

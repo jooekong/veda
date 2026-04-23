@@ -203,6 +203,9 @@ impl VedaClient {
 
     /// Read a byte range from a file. Returns the raw bytes.
     pub fn read_range(&self, path: &str, offset: u64, length: u64) -> Result<Vec<u8>> {
+        if length == 0 {
+            return Ok(Vec::new());
+        }
         let path = path.trim_start_matches('/');
         let end = offset + length - 1;
         let resp = self.http.get(format!("{}/v1/fs/{path}", self.base))

@@ -139,6 +139,9 @@ fn veda_error_to_response(err: veda_types::VedaError) -> Response {
         veda_types::VedaError::AlreadyExists(p) => {
             (StatusCode::CONFLICT, format!("already exists: {p}"))
         }
+        veda_types::VedaError::Unauthorized(m) => {
+            (StatusCode::UNAUTHORIZED, format!("unauthorized: {m}"))
+        }
         veda_types::VedaError::PermissionDenied => {
             (StatusCode::FORBIDDEN, "permission denied".to_string())
         }

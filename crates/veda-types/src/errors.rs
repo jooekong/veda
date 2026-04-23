@@ -8,6 +8,9 @@ pub enum VedaError {
     #[error("already exists: {0}")]
     AlreadyExists(String),
 
+    #[error("unauthorized: {0}")]
+    Unauthorized(String),
+
     #[error("permission denied")]
     PermissionDenied,
 

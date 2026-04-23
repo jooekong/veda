@@ -90,7 +90,7 @@ impl MilvusStore {
         }
     }
 
-    async fn post_v2(&self, path: &str, mut body: Value) -> Result<Value> {
+    async fn post(&self, path: &str, mut body: Value) -> Result<Value> {
         self.inject_db(&mut body);
         let resp = self
             .http
@@ -129,7 +129,7 @@ impl MilvusStore {
 
     async fn collection_exists(&self) -> Result<bool> {
         let v = self
-            .post_v2(
+            .post(
                 "/v2/vectordb/collections/has",
                 json!({ "collectionName": COLLECTION }),
             )
@@ -177,7 +177,7 @@ impl MilvusStore {
                 ]
             }
         });
-        self.post_v2("/v2/vectordb/collections/create", body)
+        self.post("/v2/vectordb/collections/create", body)
             .await?;
         Ok(())
     }
@@ -193,7 +193,7 @@ impl MilvusStore {
             }]
         });
         match self
-            .post_v2("/v2/vectordb/indexes/create", index_body)
+            .post("/v2/vectordb/indexes/create", index_body)
             .await
         {
             Ok(_) => Ok(()),
@@ -273,7 +273,7 @@ impl MilvusStore {
             "outputFields": ["id", "workspace_id", "file_id", "chunk_index", "content"],
             "searchParams": { "metricType": "COSINE" }
         });
-        let v = self.post_v2("/v2/vectordb/entities/search", body).await?;
+        let v = self.post("/v2/vectordb/entities/search", body).await?;
         let rows = flatten_entity_rows(v.get("data"));
         Ok(Self::rows_to_hits(&rows, limit))
     }
@@ -307,7 +307,7 @@ impl MilvusStore {
             "outputFields": ["id", "workspace_id", "file_id", "chunk_index", "content"]
         });
         match self
-            .post_v2("/v2/vectordb/entities/hybrid_search", body)
+            .post("/v2/vectordb/entities/hybrid_search", body)
             .await
         {
             Ok(v) => {
@@ -347,7 +347,7 @@ impl MilvusStore {
             "limit": lim,
             "outputFields": ["id", "file_id", "chunk_index", "content"]
         });
-        let v = self.post_v2("/v2/vectordb/entities/query", body).await?;
+        let v = self.post("/v2/vectordb/entities/query", body).await?;
         let rows = flatten_entity_rows(v.get("data"));
         let mut hits = Vec::new();
         for row in rows.iter().take(limit) {
@@ -396,7 +396,7 @@ impl VectorStore for MilvusStore {
             "collectionName": COLLECTION,
             "data": data
         });
-        self.post_v2("/v2/vectordb/entities/upsert", body).await?;
+        self.post("/v2/vectordb/entities/upsert", body).await?;
 
         // 2. Delete stale chunks (indices beyond the new set) — safe because new data is persisted
         let max_index = chunks.iter().map(|c| c.chunk_index).max().unwrap_or(0);
@@ -410,7 +410,7 @@ impl VectorStore for MilvusStore {
             "collectionName": COLLECTION,
             "filter": filter
         });
-        let _ = self.post_v2("/v2/vectordb/entities/delete", del).await;
+        self.post("/v2/vectordb/entities/delete", del).await?;
 
         Ok(())
     }
@@ -423,7 +423,7 @@ impl VectorStore for MilvusStore {
             "collectionName": COLLECTION,
             "filter": filter
         });
-        self.post_v2("/v2/vectordb/entities/delete", body).await?;
+        self.post("/v2/vectordb/entities/delete", body).await?;
         Ok(())
     }
 
@@ -462,7 +462,7 @@ impl VectorStore for MilvusStore {
             self.create_collection(embedding_dim).await?;
         }
         self.ensure_vector_index().await?;
-        self.post_v2(
+        self.post(
             "/v2/vectordb/collections/load",
             json!({ "collectionName": COLLECTION }),
         )
@@ -531,7 +531,7 @@ impl CollectionVectorStore for MilvusStore {
                 "fields": schema_fields,
             }
         });
-        self.post_v2("/v2/vectordb/collections/create", body)
+        self.post("/v2/vectordb/collections/create", body)
             .await?;
 
         let idx = json!({
@@ -543,7 +543,7 @@ impl CollectionVectorStore for MilvusStore {
                 "indexName": "vector"
             }]
         });
-        match self.post_v2("/v2/vectordb/indexes/create", idx).await {
+        match self.post("/v2/vectordb/indexes/create", idx).await {
             Ok(_) => {}
             Err(e) => {
                 let m = e.to_string();
@@ -556,7 +556,7 @@ impl CollectionVectorStore for MilvusStore {
             }
         }
 
-        self.post_v2(
+        self.post(
             "/v2/vectordb/collections/load",
             json!({ "collectionName": name }),
         )
@@ -565,7 +565,7 @@ impl CollectionVectorStore for MilvusStore {
     }
 
     async fn drop_dynamic_collection(&self, name: &str) -> Result<()> {
-        self.post_v2(
+        self.post(
             "/v2/vectordb/collections/drop",
             json!({ "collectionName": name }),
         )
@@ -599,7 +599,7 @@ impl CollectionVectorStore for MilvusStore {
             "collectionName": collection_name,
             "data": data
         });
-        self.post_v2("/v2/vectordb/entities/insert", body).await?;
+        self.post("/v2/vectordb/entities/insert", body).await?;
         Ok(())
     }
 
@@ -622,7 +622,7 @@ impl CollectionVectorStore for MilvusStore {
             "outputFields": ["*"],
             "searchParams": { "metricType": "COSINE" }
         });
-        let v = self.post_v2("/v2/vectordb/entities/search", body).await?;
+        let v = self.post("/v2/vectordb/entities/search", body).await?;
         Ok(flatten_entity_rows(v.get("data")))
     }
 
@@ -641,7 +641,7 @@ impl CollectionVectorStore for MilvusStore {
             "limit": lim,
             "outputFields": ["*"]
         });
-        let v = self.post_v2("/v2/vectordb/entities/query", body).await?;
+        let v = self.post("/v2/vectordb/entities/query", body).await?;
         Ok(flatten_entity_rows(v.get("data")))
     }
 }

@@ -1156,6 +1156,12 @@ impl MetadataTx for MysqlMetadataTx {
             .map_err(storage_err)?;
         let r = row.ok_or_else(|| VedaError::NotFound(file_id.to_string()))?;
         let current: i32 = r.try_get("ref_count").map_err(storage_err)?;
+        if current <= 0 {
+            return Err(VedaError::Internal(format!(
+                "ref_count already {} for file {file_id}",
+                current
+            )));
+        }
         let new_count = current - 1;
         sqlx::query(r#"UPDATE veda_files SET ref_count = ? WHERE id = ?"#)
             .bind(new_count)

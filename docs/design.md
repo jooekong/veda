@@ -6,18 +6,20 @@
 
 ## 设计约束
 
-| 维度 | 决策 |
-|------|------|
-| 规模 | 中型团队（5-50人），10万-100万文件，需要高可用 |
-| 部署 | Kubernetes |
-| 文件类型 | 文本 + PDF/图片（提取文本，**不存原始二进制**） |
-| 一致性 | 最终一致 + 异常 Outbox 自愈，不做分布式强一致 |
-| 多租户 | 共享数据库，行级隔离（`workspace_id`） |
-| Worker | 内嵌 tokio task（可配置禁用，独立部署） |
-| API | REST + WebSocket（文件系统事件） |
-| SQL 引擎 | DataFusion |
-| 存储 | 不引入 S3，文本存 MySQL，语义 chunk 存 Milvus |
-| 测试 | trait 抽象 + mock 单测 + testcontainers 集成测试 |
+
+| 维度     | 决策                                       |
+| ------ | ---------------------------------------- |
+| 规模     | 中型团队（5-50人），10万-100万文件，需要高可用             |
+| 部署     | Kubernetes                               |
+| 文件类型   | 文本 + PDF/图片（提取文本，**不存原始二进制**）            |
+| 一致性    | 最终一致 + 异常 Outbox 自愈，不做分布式强一致             |
+| 多租户    | 共享数据库，行级隔离（`workspace_id`）               |
+| Worker | 内嵌 tokio task（可配置禁用，独立部署）                |
+| API    | REST + WebSocket（文件系统事件）                 |
+| SQL 引擎 | DataFusion                               |
+| 存储     | 不引入 S3，文本存 MySQL，语义 chunk 存 Milvus       |
+| 测试     | trait 抽象 + mock 单测 + testcontainers 集成测试 |
+
 
 ---
 
@@ -54,14 +56,16 @@ veda-core           (依赖 veda-types + async-trait + sha2)
 
 ### 1.3 拆分理由
 
-| Crate | 拆分收益 |
-|-------|---------|
-| `veda-types` | 零编译依赖，CLI/FUSE 只依赖它，不拉存储层 |
-| `veda-core` | 业务逻辑可独立单测（mock trait），不需要 MySQL/Milvus |
-| `veda-store` | 隔离 `sqlx` + Milvus HTTP 客户端，可独立集成测试 |
-| `veda-pipeline` | 隔离 `pdf-extract`/OCR 重依赖，改路由不触发重编译 |
-| `veda-sql` | 隔离 DataFusion + Arrow（占编译时间 60%+）|
-| `veda-server` | 薄壳，只做 Axum 路由/中间件/启动 |
+
+| Crate           | 拆分收益                                   |
+| --------------- | -------------------------------------- |
+| `veda-types`    | 零编译依赖，CLI/FUSE 只依赖它，不拉存储层              |
+| `veda-core`     | 业务逻辑可独立单测（mock trait），不需要 MySQL/Milvus |
+| `veda-store`    | 隔离 `sqlx` + Milvus HTTP 客户端，可独立集成测试    |
+| `veda-pipeline` | 隔离 `pdf-extract`/OCR 重依赖，改路由不触发重编译     |
+| `veda-sql`      | 隔离 DataFusion + Arrow（占编译时间 60%+）      |
+| `veda-server`   | 薄壳，只做 Axum 路由/中间件/启动                   |
+
 
 ---
 
@@ -71,13 +75,15 @@ veda-core           (依赖 veda-types + async-trait + sha2)
 
 ### 2.1 概念映射
 
-| db9 | Veda | 说明 |
-|-----|------|------|
-| Customer | Account | 顶层用户/组织，可自助注册 |
-| Database | Workspace | 独立的文件树 + 向量空间 |
-| API Token | API Key | 账户级管理凭证（创建/删除 workspace） |
-| Connect Token | Workspace Token (JWT) | 数据面凭证（文件 CRUD、搜索） |
-| Connect Key | Workspace Key | 长期数据面凭证（CI/agent 用） |
+
+| db9           | Veda                  | 说明                       |
+| ------------- | --------------------- | ------------------------ |
+| Customer      | Account               | 顶层用户/组织，可自助注册            |
+| Database      | Workspace             | 独立的文件树 + 向量空间            |
+| API Token     | API Key               | 账户级管理凭证（创建/删除 workspace） |
+| Connect Token | Workspace Token (JWT) | 数据面凭证（文件 CRUD、搜索）        |
+| Connect Key   | Workspace Key         | 长期数据面凭证（CI/agent 用）      |
+
 
 ### 2.2 凭证体系
 
@@ -116,6 +122,7 @@ POST /v1/search                  → 用 JWT 或 Workspace Key 搜索
 ```
 
 **Key 存储方式：**
+
 - API Key / Workspace Key 都是 `SHA256(random_bytes)` 生成
 - DB 中存 `SHA256(key)` hash，不存明文
 - 验证时 `SHA256(request_key) == stored_hash`
@@ -279,15 +286,17 @@ CREATE TABLE fs_events (
 
 Collection: `veda_chunks`
 
-| 字段 | 类型 | 说明 |
-|------|------|------|
-| `id` | VARCHAR(36) PK | chunk ID |
-| `workspace_id` | VARCHAR(36) | partition key |
-| `file_id` | VARCHAR(36) | 所属文件 |
-| `chunk_index` | INT | 语义块序号 |
-| `content` | VARCHAR(65535) | 文本内容 |
-| `vector` | FLOAT_VECTOR(dim) | dense embedding |
+
+| 字段              | 类型                  | 说明                 |
+| --------------- | ------------------- | ------------------ |
+| `id`            | VARCHAR(36) PK      | chunk ID           |
+| `workspace_id`  | VARCHAR(36)         | partition key      |
+| `file_id`       | VARCHAR(36)         | 所属文件               |
+| `chunk_index`   | INT                 | 语义块序号              |
+| `content`       | VARCHAR(65535)      | 文本内容               |
+| `vector`        | FLOAT_VECTOR(dim)   | dense embedding    |
 | `sparse_vector` | SPARSE_FLOAT_VECTOR | BM25 sparse vector |
+
 
 索引：HNSW (dense) + SPARSE_INVERTED_INDEX (sparse) + BM25 function
 
@@ -303,15 +312,17 @@ collection create articles --field "title:string:index" --field "content:string:
 
 生成的 Milvus collection:
 
-| 字段 | 类型 | 说明 |
-|------|------|------|
-| `id` | VARCHAR(36) PK | row ID |
-| `workspace_id` | VARCHAR(36) | partition key |
-| `title` | VARCHAR(65535) | 用户字段，带 index |
-| `content` | VARCHAR(65535) | 用户字段，标记为 embed 源 |
-| `category` | VARCHAR(65535) | 用户字段，带 index |
-| `vector` | FLOAT_VECTOR(dim) | 从 content 字段同步生成 |
-| `sparse_vector` | SPARSE_FLOAT_VECTOR | BM25 |
+
+| 字段              | 类型                  | 说明               |
+| --------------- | ------------------- | ---------------- |
+| `id`            | VARCHAR(36) PK      | row ID           |
+| `workspace_id`  | VARCHAR(36)         | partition key    |
+| `title`         | VARCHAR(65535)      | 用户字段，带 index     |
+| `content`       | VARCHAR(65535)      | 用户字段，标记为 embed 源 |
+| `category`      | VARCHAR(65535)      | 用户字段，带 index     |
+| `vector`        | FLOAT_VECTOR(dim)   | 从 content 字段同步生成 |
+| `sparse_vector` | SPARSE_FLOAT_VECTOR | BM25             |
+
 
 **关键：Structured Collection 数据只存 Milvus，MySQL 只存 `collection_schemas` 元数据。**
 
@@ -321,13 +332,15 @@ embedding 是**同步**的（INSERT 时立即调用 embedding API），不走 ou
 
 Collection: `veda_vectors_{dim}`
 
-| 字段 | 类型 | 说明 |
-|------|------|------|
-| `id` | VARCHAR(36) PK | vector ID |
-| `workspace_id` | VARCHAR(36) | partition key |
-| `collection_id` | VARCHAR(36) | 逻辑分组 |
-| `vector` | FLOAT_VECTOR(dim) | 用户提供的向量 |
-| `payload` | JSON | 用户附加数据 |
+
+| 字段              | 类型                | 说明            |
+| --------------- | ----------------- | ------------- |
+| `id`            | VARCHAR(36) PK    | vector ID     |
+| `workspace_id`  | VARCHAR(36)       | partition key |
+| `collection_id` | VARCHAR(36)       | 逻辑分组          |
+| `vector`        | FLOAT_VECTOR(dim) | 用户提供的向量       |
+| `payload`       | JSON              | 用户附加数据        |
+
 
 ---
 
@@ -368,13 +381,15 @@ PUT /v1/fs/main.rs (content = "fn main() {}")
 
 节省的资源：
 
-| 跳过的操作 | 说明 |
-|---|---|
-| UPDATE files | 不更新 revision、content、updated_at |
-| file_contents / file_chunks | 不写内容 |
-| INSERT outbox | 不触发 re-embedding |
-| INSERT fs_events | 不发 WebSocket 事件 |
-| Milvus upsert | 不触发向量重建 |
+
+| 跳过的操作                       | 说明                              |
+| --------------------------- | ------------------------------- |
+| UPDATE files                | 不更新 revision、content、updated_at |
+| file_contents / file_chunks | 不写内容                            |
+| INSERT outbox               | 不触发 re-embedding                |
+| INSERT fs_events            | 不发 WebSocket 事件                 |
+| Milvus upsert               | 不触发向量重建                         |
+
 
 ### 5.3 按行号读取
 
@@ -587,35 +602,39 @@ async fn write_file(...) -> Result<Json<ApiResponse<FileInfo>>, AppError> {
 
 ### 9.1 管控面
 
-| Method | Path | Auth | 说明 |
-|--------|------|------|------|
-| POST | `/v1/accounts` | 无 | 注册 |
-| POST | `/v1/accounts/login` | 无 | 登录，返回 API Key |
-| POST | `/v1/workspaces` | API Key | 创建 workspace |
-| GET | `/v1/workspaces` | API Key | 列出 workspace |
-| DELETE | `/v1/workspaces/{id}` | API Key | 删除 workspace |
-| POST | `/v1/workspaces/{id}/keys` | API Key | 创建 Workspace Key |
-| POST | `/v1/workspaces/{id}/token` | API Key | 换取短期 JWT |
+
+| Method | Path                        | Auth    | 说明               |
+| ------ | --------------------------- | ------- | ---------------- |
+| POST   | `/v1/accounts`              | 无       | 注册               |
+| POST   | `/v1/accounts/login`        | 无       | 登录，返回 API Key    |
+| POST   | `/v1/workspaces`            | API Key | 创建 workspace     |
+| GET    | `/v1/workspaces`            | API Key | 列出 workspace     |
+| DELETE | `/v1/workspaces/{id}`       | API Key | 删除 workspace     |
+| POST   | `/v1/workspaces/{id}/keys`  | API Key | 创建 Workspace Key |
+| POST   | `/v1/workspaces/{id}/token` | API Key | 换取短期 JWT         |
+
 
 ### 9.2 数据面
 
-| Method | Path | Auth | 说明 |
-|--------|------|------|------|
-| PUT | `/v1/fs/{path}` | JWT/WK | 写文件 |
-| GET | `/v1/fs/{path}` | JWT/WK | 读文件 |
-| GET | `/v1/fs/{path}?lines=N:M` | JWT/WK | 按行读取 |
-| GET | `/v1/fs/{path}?list` | JWT/WK | 列目录 |
-| HEAD | `/v1/fs/{path}` | JWT/WK | 文件 stat |
-| DELETE | `/v1/fs/{path}` | JWT/WK | 删除 |
-| POST | `/v1/fs/{path}?copy&to={dest}` | JWT/WK | 复制 |
-| POST | `/v1/fs/{path}?rename&to={dest}` | JWT/WK | 移动/重命名 |
-| POST | `/v1/search` | JWT/WK | 搜索 |
-| POST | `/v1/collections` | JWT/WK | 创建 collection |
-| GET | `/v1/collections` | JWT/WK | 列出 collection |
-| POST | `/v1/collections/{name}/rows` | JWT/WK | 插入行 |
-| POST | `/v1/collections/{name}/search` | JWT/WK | 搜索 collection |
-| POST | `/v1/sql` | JWT/WK | 执行 SQL |
-| WS | `/v1/ws/events` | JWT/WK | 实时文件事件 |
+
+| Method | Path                             | Auth   | 说明            |
+| ------ | -------------------------------- | ------ | ------------- |
+| PUT    | `/v1/fs/{path}`                  | JWT/WK | 写文件           |
+| GET    | `/v1/fs/{path}`                  | JWT/WK | 读文件           |
+| GET    | `/v1/fs/{path}?lines=N:M`        | JWT/WK | 按行读取          |
+| GET    | `/v1/fs/{path}?list`             | JWT/WK | 列目录           |
+| HEAD   | `/v1/fs/{path}`                  | JWT/WK | 文件 stat       |
+| DELETE | `/v1/fs/{path}`                  | JWT/WK | 删除            |
+| POST   | `/v1/fs/{path}?copy&to={dest}`   | JWT/WK | 复制            |
+| POST   | `/v1/fs/{path}?rename&to={dest}` | JWT/WK | 移动/重命名        |
+| POST   | `/v1/search`                     | JWT/WK | 搜索            |
+| POST   | `/v1/collections`                | JWT/WK | 创建 collection |
+| GET    | `/v1/collections`                | JWT/WK | 列出 collection |
+| POST   | `/v1/collections/{name}/rows`    | JWT/WK | 插入行           |
+| POST   | `/v1/collections/{name}/search`  | JWT/WK | 搜索 collection |
+| POST   | `/v1/sql`                        | JWT/WK | 执行 SQL        |
+| WS     | `/v1/ws/events`                  | JWT/WK | 实时文件事件        |
+
 
 ---
 
@@ -623,11 +642,13 @@ async fn write_file(...) -> Result<Json<ApiResponse<FileInfo>>, AppError> {
 
 ### 10.1 三种模式
 
-| 模式 | 实现 | 适用场景 |
-|------|------|---------|
-| hybrid（默认） | dense + sparse，RRF 融合 | 通用 |
-| semantic | dense cosine similarity | 语义相似 |
-| fulltext | BM25 sparse | 精确关键词 |
+
+| 模式         | 实现                      | 适用场景  |
+| ---------- | ----------------------- | ----- |
+| hybrid（默认） | dense + sparse，RRF 融合   | 通用    |
+| semantic   | dense cosine similarity | 语义相似  |
+| fulltext   | BM25 sparse             | 精确关键词 |
+
 
 ### 10.2 Hybrid Search RRF 融合
 
@@ -640,6 +661,7 @@ score(doc) = Σ 1 / (k + rank_in_retriever_i)
 ### 10.3 Fallback 机制
 
 Milvus 2.4 以下不支持 BM25 sparse：
+
 - hybrid → 退化为 semantic
 - fulltext → 返回错误提示升级 Milvus
 
@@ -691,6 +713,7 @@ tokio::select! {
 ### 11.3 Reconciler
 
 每 5 分钟执行：
+
 1. 重置超时的 `processing` 任务
 2. 标记 `dead` letter（retry >= max_retries）
 3. MySQL ↔ Milvus 数据对比，补发缺失的 outbox 事件
@@ -701,37 +724,43 @@ tokio::select! {
 
 ### 12.1 功能验收
 
-| 能力 | 验收标准 |
-|------|---------|
-| 文件 CRUD | cp/cat/ls/mv/rm/mkdir 全部工作 |
-| 搜索 | hybrid/semantic/fulltext 三种模式 |
-| Structured Collection | 创建/插入/搜索/SQL 查询 |
-| Raw Vector | 插入/搜索自定义向量 |
-| 多租户 | workspace 间完全隔离，不可跨 workspace 访问 |
-| 认证 | API Key + Workspace Token + Workspace Key |
-| 大文件 | >256KB 文件正确分块存储和读取 |
-| 行号读取 | `?lines=N:M` 正确返回指定行 |
-| 去重 | 相同内容不重复写入 |
-| WebSocket | 文件变更实时推送 |
+
+| 能力                    | 验收标准                                      |
+| --------------------- | ----------------------------------------- |
+| 文件 CRUD               | cp/cat/ls/mv/rm/mkdir 全部工作                |
+| 搜索                    | hybrid/semantic/fulltext 三种模式             |
+| Structured Collection | 创建/插入/搜索/SQL 查询                           |
+| Raw Vector            | 插入/搜索自定义向量                                |
+| 多租户                   | workspace 间完全隔离，不可跨 workspace 访问          |
+| 认证                    | API Key + Workspace Token + Workspace Key |
+| 大文件                   | >256KB 文件正确分块存储和读取                        |
+| 行号读取                  | `?lines=N:M` 正确返回指定行                      |
+| 去重                    | 相同内容不重复写入                                 |
+| WebSocket             | 文件变更实时推送                                  |
+
 
 ### 12.2 性能验收
 
-| 指标 | 目标 |
-|------|------|
-| 文件写入（<256KB） | p99 < 50ms |
-| 文件读取（<256KB） | p99 < 20ms |
-| 搜索（10万文件） | p99 < 500ms |
-| Outbox 处理延迟 | 平均 < 30s（取决于 embedding API） |
-| Collection INSERT | p99 < 2s（含同步 embedding） |
+
+| 指标                | 目标                          |
+| ----------------- | --------------------------- |
+| 文件写入（<256KB）      | p99 < 50ms                  |
+| 文件读取（<256KB）      | p99 < 20ms                  |
+| 搜索（10万文件）         | p99 < 500ms                 |
+| Outbox 处理延迟       | 平均 < 30s（取决于 embedding API） |
+| Collection INSERT | p99 < 2s（含同步 embedding）     |
+
 
 ### 12.3 可靠性验收
 
-| 场景 | 预期行为 |
-|------|---------|
-| Worker crash | Outbox 任务不丢失，重启后继续处理 |
-| Embedding API 超时 | 重试 + 指数退避，不阻塞其他任务 |
-| MySQL ↔ Milvus 不一致 | Reconciler 5分钟内自愈 |
-| Milvus 短暂不可用 | Outbox 缓冲写入，恢复后补追 |
+
+| 场景                 | 预期行为                 |
+| ------------------ | -------------------- |
+| Worker crash       | Outbox 任务不丢失，重启后继续处理 |
+| Embedding API 超时   | 重试 + 指数退避，不阻塞其他任务    |
+| MySQL ↔ Milvus 不一致 | Reconciler 5分钟内自愈    |
+| Milvus 短暂不可用       | Outbox 缓冲写入，恢复后补追    |
+
 
 ---
 
@@ -780,3 +809,4 @@ poll_interval_ms = 1000
 batch_size = 10
 reconcile_interval_secs = 300
 ```
+

@@ -169,7 +169,7 @@ fn read_glob_files(fs: &FsService, ws: &str, dentries: &[Dentry]) -> Result<Vec<
             first_format = Some(fmt.clone());
         }
 
-        let content = fs_udf::block_on(fs.read_file(ws, &d.path))
+        let content = fs_udf::bounded_read_file(fs, ws, &d.path)
             .map_err(|e| datafusion::error::DataFusionError::Execution(e.to_string()))?;
 
         total_read += content.len();

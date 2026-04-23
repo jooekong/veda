@@ -89,16 +89,17 @@ async fn login(
         .auth_store
         .get_account_by_email(&req.email)
         .await?
-        .ok_or(VedaError::PermissionDenied)?;
+        .ok_or_else(|| VedaError::Unauthorized("invalid email or password".into()))?;
 
     let hash_str = account
         .password_hash
         .as_deref()
-        .ok_or(VedaError::PermissionDenied)?;
-    let parsed = PasswordHash::new(hash_str).map_err(|_| VedaError::PermissionDenied)?;
+        .ok_or_else(|| VedaError::Unauthorized("invalid email or password".into()))?;
+    let parsed = PasswordHash::new(hash_str)
+        .map_err(|_| VedaError::Unauthorized("invalid email or password".into()))?;
     Argon2::default()
         .verify_password(req.password.as_bytes(), &parsed)
-        .map_err(|_| VedaError::PermissionDenied)?;
+        .map_err(|_| VedaError::Unauthorized("invalid email or password".into()))?;
 
     // Revoke previous login keys to prevent unbounded accumulation.
     let old_keys = state.auth_store.list_api_keys(&account.id).await?;
@@ -183,7 +184,13 @@ async fn create_workspace_key(
         .unwrap_or("readwrite");
     let permission = match perm {
         "read" => KeyPermission::Read,
-        _ => KeyPermission::ReadWrite,
+        "readwrite" => KeyPermission::ReadWrite,
+        other => {
+            return Err(VedaError::InvalidInput(format!(
+                "unknown permission '{other}', expected 'read' or 'readwrite'"
+            ))
+            .into())
+        }
     };
 
     let raw_key = format!("wk_{}", Uuid::new_v4().to_string().replace('-', ""));

@@ -12,7 +12,7 @@ pub struct CliConfig {
 }
 
 fn default_server_url() -> String {
-    "http://localhost:9009".into()
+    "http://localhost:3000".into()
 }
 
 impl Default for CliConfig {

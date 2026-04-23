@@ -542,6 +542,7 @@ impl Filesystem for VedaFs {
             Ok(()) => {
                 self.inode_rename(&old_path, &new_path);
                 self.cache_invalidate(&old_path);
+                self.cache_invalidate(&new_path);
                 reply.ok();
             }
             Err(ref e) => reply.error(Self::err_to_errno(e)),

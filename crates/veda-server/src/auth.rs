@@ -7,6 +7,7 @@ use chrono::{Duration, Utc};
 use jsonwebtoken::{decode, encode, Algorithm, DecodingKey, EncodingKey, Header, Validation};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
+use tracing::error;
 use veda_types::ApiResponse;
 
 use crate::state::AppState;
@@ -91,7 +92,10 @@ impl FromRequestParts<Arc<AppState>> for AuthAccount {
                 .auth_store
                 .get_api_key_by_hash(&key_hash)
                 .await
-                .map_err(|_| auth_err())?
+                .map_err(|e| {
+                    error!(err = %e, "auth store error");
+                    internal_err()
+                })?
                 .ok_or_else(auth_err)?;
 
             Ok(AuthAccount {
@@ -162,7 +166,10 @@ impl FromRequestParts<Arc<AppState>> for AuthWorkspace {
                         .auth_store
                         .get_workspace_key_by_hash(&key_hash)
                         .await
-                        .map_err(|_| auth_err())?
+                        .map_err(|e| {
+                            error!(err = %e, "auth store error");
+                            internal_err()
+                        })?
                         .ok_or_else(auth_err)?;
                     let read_only = wk.permission == veda_types::KeyPermission::Read;
                     (wk.workspace_id, String::new(), read_only)
@@ -172,7 +179,10 @@ impl FromRequestParts<Arc<AppState>> for AuthWorkspace {
                 .auth_store
                 .get_workspace(&workspace_id)
                 .await
-                .map_err(|_| auth_err())?
+                .map_err(|e| {
+                    error!(err = %e, "auth store error");
+                    internal_err()
+                })?
                 .ok_or_else(auth_err)?;
             if ws.status != veda_types::WorkspaceStatus::Active {
                 return Err(auth_err());
@@ -191,6 +201,14 @@ fn auth_err() -> Response {
     (
         StatusCode::UNAUTHORIZED,
         Json(ApiResponse::<()>::err("unauthorized")),
+    )
+        .into_response()
+}
+
+fn internal_err() -> Response {
+    (
+        StatusCode::INTERNAL_SERVER_ERROR,
+        Json(ApiResponse::<()>::err("internal server error")),
     )
         .into_response()
 }
