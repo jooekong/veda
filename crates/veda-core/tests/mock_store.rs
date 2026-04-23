@@ -136,6 +136,18 @@ impl MetadataStore for MockMetadataStore {
             .cloned())
     }
 
+    async fn insert_dentry_ignore(&self, dentry: &Dentry) -> Result<()> {
+        let mut st = self.state.lock().unwrap();
+        let exists = st
+            .dentries
+            .iter()
+            .any(|d| d.workspace_id == dentry.workspace_id && d.path == dentry.path);
+        if !exists {
+            st.dentries.push(dentry.clone());
+        }
+        Ok(())
+    }
+
     async fn get_dentry_path_by_file_id(
         &self,
         workspace_id: &str,

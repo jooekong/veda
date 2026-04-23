@@ -280,6 +280,8 @@ impl FsService {
     ) -> Result<api::WriteFileResponse> {
         let norm = path::normalize(raw_path)?;
 
+        ensure_parents(&*self.meta, workspace_id, &norm).await?;
+
         let mut tx = self.meta.begin_tx().await?;
         let existing = tx.get_dentry(workspace_id, &norm).await?;
 
@@ -347,7 +349,6 @@ impl FsService {
             tx.update_dentry_file_id(workspace_id, &norm, &file_id)
                 .await?;
         } else {
-            ensure_parents(&mut *tx, workspace_id, &norm).await?;
             let dentry = Dentry {
                 id: Uuid::new_v4().to_string(),
                 workspace_id: workspace_id.to_string(),
@@ -699,18 +700,15 @@ impl FsService {
             return Ok(());
         }
 
-        let mut tx = self.meta.begin_tx().await?;
-
-        let existing = tx.get_dentry(workspace_id, &norm).await?;
+        let existing = self.meta.get_dentry(workspace_id, &norm).await?;
         if let Some(d) = existing {
-            tx.commit().await?;
             if d.is_dir {
                 return Ok(());
             }
             return Err(VedaError::AlreadyExists(format!("{norm} exists as a file")));
         }
 
-        ensure_parents(&mut *tx, workspace_id, &norm).await?;
+        ensure_parents(&*self.meta, workspace_id, &norm).await?;
 
         let now = Utc::now();
         let dentry = Dentry {
@@ -724,17 +722,7 @@ impl FsService {
             created_at: now,
             updated_at: now,
         };
-        match tx.insert_dentry(&dentry).await {
-            Ok(()) => {
-                tx.commit().await?;
-                Ok(())
-            }
-            Err(VedaError::AlreadyExists(_)) => {
-                tx.rollback().await.ok();
-                Ok(())
-            }
-            Err(e) => Err(e),
-        }
+        self.meta.insert_dentry_ignore(&dentry).await
     }
 
     pub async fn copy_file(
@@ -751,6 +739,8 @@ impl FsService {
                 "source and destination are the same".to_string(),
             ));
         }
+
+        ensure_parents(&*self.meta, workspace_id, &dst).await?;
 
         let mut tx = self.meta.begin_tx().await?;
 
@@ -799,7 +789,6 @@ impl FsService {
         }
 
         tx.increment_ref_count(file_id).await?;
-        ensure_parents(&mut *tx, workspace_id, &dst).await?;
 
         if let Some(d) = existing_dst {
             if let Some(ref old_fid) = d.file_id {
@@ -1023,6 +1012,8 @@ impl FsService {
             return Ok(());
         }
 
+        ensure_parents(&*self.meta, workspace_id, &dst).await?;
+
         let mut tx = self.meta.begin_tx().await?;
 
         let src_dentry = tx
@@ -1042,8 +1033,6 @@ impl FsService {
                 "cannot move a directory into itself".to_string(),
             ));
         }
-
-        ensure_parents(&mut *tx, workspace_id, &dst).await?;
 
         tx.rename_dentry(
             workspace_id,
@@ -1241,7 +1230,7 @@ async fn finalize_full_rewrite(
 }
 
 async fn ensure_parents(
-    tx: &mut dyn MetadataTx,
+    store: &dyn MetadataStore,
     workspace_id: &str,
     full_path: &str,
 ) -> Result<()> {
@@ -1250,7 +1239,7 @@ async fn ensure_parents(
         return Ok(());
     }
 
-    let existing = tx.get_dentry(workspace_id, parent).await?;
+    let existing = store.get_dentry(workspace_id, parent).await?;
     if let Some(d) = existing {
         if !d.is_dir {
             return Err(VedaError::InvalidPath(format!(
@@ -1260,8 +1249,7 @@ async fn ensure_parents(
         return Ok(());
     }
 
-    // recursively create parents
-    Box::pin(ensure_parents(tx, workspace_id, parent)).await?;
+    Box::pin(ensure_parents(store, workspace_id, parent)).await?;
 
     let now = Utc::now();
     let dentry = Dentry {
@@ -1275,10 +1263,7 @@ async fn ensure_parents(
         created_at: now,
         updated_at: now,
     };
-    match tx.insert_dentry(&dentry).await {
-        Ok(()) | Err(VedaError::AlreadyExists(_)) => Ok(()),
-        Err(e) => Err(e),
-    }
+    store.insert_dentry_ignore(&dentry).await
 }
 
 fn make_outbox(workspace_id: &str, event_type: OutboxEventType, file_id: &str) -> OutboxEvent {

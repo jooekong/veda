@@ -47,6 +47,23 @@ pub trait MetadataStore: Send + Sync {
         workspace_id: &str,
         checksum: &str,
     ) -> Result<Option<FileRecord>>;
+    /// Idempotent directory insert: succeeds silently if the dentry already
+    /// exists. Used by `ensure_parents` outside a transaction so that parent
+    /// directory creation does not hold row locks.
+    async fn insert_dentry_ignore(&self, dentry: &Dentry) -> Result<()> {
+        let mut tx = self.begin_tx().await?;
+        match tx.insert_dentry(dentry).await {
+            Ok(()) => tx.commit().await,
+            Err(VedaError::AlreadyExists(_)) => {
+                tx.rollback().await.ok();
+                Ok(())
+            }
+            Err(e) => {
+                tx.rollback().await.ok();
+                Err(e)
+            }
+        }
+    }
     async fn get_dentry_path_by_file_id(
         &self,
         workspace_id: &str,

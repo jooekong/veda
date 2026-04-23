@@ -730,6 +730,29 @@ impl MetadataStore for MysqlStore {
         get_dentry_conn(&mut *conn, workspace_id, path).await
     }
 
+    async fn insert_dentry_ignore(&self, dentry: &Dentry) -> Result<()> {
+        match sqlx::query(
+            r#"INSERT IGNORE INTO veda_dentries
+            (id, workspace_id, parent_path, name, path, file_id, is_dir, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)"#,
+        )
+        .bind(&dentry.id)
+        .bind(&dentry.workspace_id)
+        .bind(&dentry.parent_path)
+        .bind(&dentry.name)
+        .bind(&dentry.path)
+        .bind(&dentry.file_id)
+        .bind(dentry.is_dir)
+        .bind(dentry.created_at.naive_utc())
+        .bind(dentry.updated_at.naive_utc())
+        .execute(&self.pool)
+        .await
+        {
+            Ok(_) => Ok(()),
+            Err(e) => Err(storage_err(e)),
+        }
+    }
+
     async fn list_dentries(&self, workspace_id: &str, parent_path: &str) -> Result<Vec<Dentry>> {
         let mut rows = sqlx::query(
             r#"SELECT id, workspace_id, parent_path, name, path, file_id, is_dir, created_at, updated_at
