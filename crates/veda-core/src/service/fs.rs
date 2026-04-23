@@ -168,28 +168,26 @@ struct AppendMeta {
 
 /// Compute new file metadata given the tail rewrite.
 ///
-/// `all_chunks` includes every existing chunk (we only read content of those
-/// with `chunk_index < last_chunk_idx`); the last chunk's content is passed
-/// separately already-merged into `tail`. Runs on the blocking thread pool.
+/// `pre_tail_contents` is the ordered content of every chunk before
+/// `last_chunk_idx`; the last chunk's content is passed separately already
+/// merged into `tail`. Runs on the blocking thread pool.
 fn compute_append_meta_blocking(
-    old_sha256: &str,
+    pre_tail_contents: &[String],
     before_line_count: i32,
     last_chunk_idx: i32,
     tail_start_line: i32,
     tail: String,
     chunk_size: usize,
 ) -> AppendMeta {
-    let (tail_chunks, _tail_only_sha, _tail_lines_with_trailing) =
-        split_and_hash(tail.as_bytes(), chunk_size, last_chunk_idx, tail_start_line);
-
-    // Derive a deterministic checksum without re-reading all prior chunks.
-    // Not a true content hash — will be recalculated on the next full write.
     let mut hasher = Sha256::new();
-    hasher.update(b"append:");
-    hasher.update(old_sha256.as_bytes());
-    hasher.update(b":");
+    for c in pre_tail_contents {
+        hasher.update(c.as_bytes());
+    }
     hasher.update(tail.as_bytes());
     let sha256 = format!("{:x}", hasher.finalize());
+
+    let (tail_chunks, _tail_only_sha, _tail_lines_with_trailing) =
+        split_and_hash(tail.as_bytes(), chunk_size, last_chunk_idx, tail_start_line);
 
     let tail_newlines: i32 = tail_chunks.iter().map(|c| c.line_count).sum();
     let trailing_partial = tail.as_bytes().last().map(|&b| b != b'\n').unwrap_or(false);
@@ -950,17 +948,25 @@ impl FsService {
 
         let fid_string = fid.to_string();
         let file_rev = file.revision;
-        let file_checksum = file.checksum_sha256.clone();
         let last_chunk_idx = last.chunk_index;
         let last_start_line = last.start_line;
         let before_line_count = file.line_count.unwrap_or(0) - last.line_count;
+        // Re-hash full content: stream pre-tail chunk bytes + merged tail into
+        // the hasher so checksum_sha256 remains a true content hash after append.
+        let pre_tail_contents: Vec<String> = tx
+            .get_file_chunks(fid, None, None)
+            .await?
+            .into_iter()
+            .filter(|c| c.chunk_index < last_chunk_idx)
+            .map(|c| c.content)
+            .collect();
         let mut tail = String::with_capacity(last.content.len() + content.len());
         tail.push_str(&last.content);
         tail.push_str(content);
 
         let append_meta = tokio::task::spawn_blocking(move || {
             compute_append_meta_blocking(
-                &file_checksum,
+                &pre_tail_contents,
                 before_line_count,
                 last_chunk_idx,
                 last_start_line,
@@ -1372,6 +1378,54 @@ fn glob_match_inner(pat: &[u8], s: &[u8]) -> bool {
         pi += 1;
     }
     pi == pat.len()
+}
+
+#[cfg(test)]
+mod append_hash_tests {
+    use super::*;
+
+    fn full_sha256(content: &str) -> String {
+        let mut h = Sha256::new();
+        h.update(content.as_bytes());
+        format!("{:x}", h.finalize())
+    }
+
+    #[test]
+    fn append_meta_produces_true_content_sha256() {
+        // Simulate a chunked file: two full chunks + a tail chunk.
+        let chunk0 = "aaaaaaaaaa"; // 10 bytes
+        let chunk1 = "bbbbbbbbbb"; // 10 bytes, last chunk (before append)
+        let appended = "cc\n";
+        let last_chunk_idx = 1;
+
+        // Merged tail = old last chunk content + appended content
+        let tail = format!("{chunk1}{appended}");
+        let pre_tail: Vec<String> = vec![chunk0.to_string()];
+
+        let meta = compute_append_meta_blocking(
+            &pre_tail,
+            0, // before_line_count
+            last_chunk_idx,
+            1, // tail_start_line
+            tail.clone(),
+            256 * 1024,
+        );
+
+        let reconstructed = format!("{chunk0}{chunk1}{appended}");
+        assert_eq!(
+            meta.sha256,
+            full_sha256(&reconstructed),
+            "append checksum must equal SHA-256 of full reconstructed content"
+        );
+    }
+
+    #[test]
+    fn append_meta_with_no_pre_tail_chunks() {
+        // Single-chunk file being appended: pre_tail is empty.
+        let tail = "hello world\n".to_string();
+        let meta = compute_append_meta_blocking(&[], 0, 0, 1, tail.clone(), 256 * 1024);
+        assert_eq!(meta.sha256, full_sha256(&tail));
+    }
 }
 
 #[cfg(test)]

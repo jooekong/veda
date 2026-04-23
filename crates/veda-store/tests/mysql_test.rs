@@ -577,3 +577,82 @@ async fn mysql_collection_schema_crud() {
         .execute(pool)
         .await;
 }
+
+#[tokio::test]
+#[ignore]
+async fn mysql_rename_dentries_under_unicode_prefix() {
+    // Regression: old byte-based SUBSTRING offset mis-computes slice for
+    // non-ASCII path prefixes. CHAR_LENGTH in SQL must see character count.
+    let url = load_mysql_url();
+    let store = MysqlStore::new(&url).await.expect("connect");
+    store.migrate().await.expect("migrate");
+    let ws = Uuid::new_v4().to_string();
+
+    let now = Utc::now();
+    let mk = |path: &str, name: &str, parent: &str, is_dir: bool| Dentry {
+        id: Uuid::new_v4().to_string(),
+        workspace_id: ws.clone(),
+        parent_path: parent.to_string(),
+        name: name.to_string(),
+        path: path.to_string(),
+        file_id: None,
+        is_dir,
+        created_at: now,
+        updated_at: now,
+    };
+
+    let mut tx = store.begin_tx().await.expect("begin");
+    tx.insert_dentry(&mk("/中文dir", "中文dir", "/", true))
+        .await
+        .expect("insert root dir");
+    tx.insert_dentry(&mk("/中文dir/a.txt", "a.txt", "/中文dir", false))
+        .await
+        .expect("insert a");
+    tx.insert_dentry(&mk("/中文dir/子目录", "子目录", "/中文dir", true))
+        .await
+        .expect("insert sub");
+    tx.insert_dentry(&mk(
+        "/中文dir/子目录/b.txt",
+        "b.txt",
+        "/中文dir/子目录",
+        false,
+    ))
+    .await
+    .expect("insert b");
+    Box::new(tx).commit().await.expect("commit");
+
+    let mut tx = store.begin_tx().await.expect("begin");
+    let n = tx
+        .rename_dentries_under(&ws, "/中文dir", "/renamed")
+        .await
+        .expect("rename");
+    assert_eq!(n, 3, "should rename 3 descendants");
+    Box::new(tx).commit().await.expect("commit");
+
+    let a = store
+        .get_dentry(&ws, "/renamed/a.txt")
+        .await
+        .expect("get")
+        .expect("a exists");
+    assert_eq!(a.parent_path, "/renamed");
+
+    let sub = store
+        .get_dentry(&ws, "/renamed/子目录")
+        .await
+        .expect("get")
+        .expect("sub exists");
+    assert_eq!(sub.parent_path, "/renamed");
+
+    let b = store
+        .get_dentry(&ws, "/renamed/子目录/b.txt")
+        .await
+        .expect("get")
+        .expect("b exists");
+    assert_eq!(b.parent_path, "/renamed/子目录");
+
+    // Ensure old paths are gone
+    assert!(store.get_dentry(&ws, "/中文dir/a.txt").await.unwrap().is_none());
+    assert!(store.get_dentry(&ws, "/中文dir/子目录/b.txt").await.unwrap().is_none());
+
+    cleanup_workspace(&store, &ws).await;
+}

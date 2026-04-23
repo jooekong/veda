@@ -11,6 +11,13 @@ use veda_types::{
     Workspace, WorkspaceKey, WorkspaceStatus,
 };
 
+// Batched INSERT sizes chosen to stay well under a conservative
+// max_allowed_packet=16MB. File chunks can each carry CHUNK_SIZE bytes
+// (256KB), so 50 rows ≈ 12.5MB payload before overhead. FS events are
+// tiny rows; 500 per batch keeps throughput high without risking the cap.
+const CHUNK_INSERT_BATCH: usize = 50;
+const FS_EVENT_INSERT_BATCH: usize = 500;
+
 fn storage_err(e: impl std::fmt::Display) -> VedaError {
     let msg = e.to_string();
     if msg.contains("1213")
@@ -1045,18 +1052,19 @@ impl MetadataTx for MysqlMetadataTx {
         new_prefix: &str,
     ) -> Result<u64> {
         let t = self.tx_mut()?;
-        let old_len = old_prefix.len() as i32 + 1; // 1-based SUBSTRING offset
+        // CHAR_LENGTH (not Rust's byte len) — MySQL SUBSTRING on VARCHAR uses
+        // character offsets, so Unicode paths need character-based slicing.
         let like = format!("{}/%", escape_like(old_prefix));
         let r = sqlx::query(
             r#"UPDATE veda_dentries
-               SET path = CONCAT(?, SUBSTRING(path, ?)),
-                   parent_path = CONCAT(?, SUBSTRING(parent_path, ?))
+               SET path = CONCAT(?, SUBSTRING(path, CHAR_LENGTH(?) + 1)),
+                   parent_path = CONCAT(?, SUBSTRING(parent_path, CHAR_LENGTH(?) + 1))
                WHERE workspace_id = ? AND path LIKE ? ESCAPE '\\'"#,
         )
         .bind(new_prefix)
-        .bind(old_len)
+        .bind(old_prefix)
         .bind(new_prefix)
-        .bind(old_len)
+        .bind(old_prefix)
         .bind(workspace_id)
         .bind(&like)
         .execute(t.as_mut())
@@ -1230,25 +1238,28 @@ impl MetadataTx for MysqlMetadataTx {
             return Ok(());
         }
         let t = self.tx_mut()?;
-        let placeholders: Vec<&str> = chunks.iter().map(|_| "(?, ?, ?, ?, ?, ?, ?)").collect();
-        let sql = format!(
-            "INSERT INTO veda_file_chunks \
-             (file_id, chunk_index, start_line, line_count, byte_len, chunk_sha256, content) \
-             VALUES {}",
-            placeholders.join(", ")
-        );
-        let mut q = sqlx::query(&sql);
-        for c in chunks {
-            q = q
-                .bind(&c.file_id)
-                .bind(c.chunk_index)
-                .bind(c.start_line)
-                .bind(c.line_count)
-                .bind(c.byte_len)
-                .bind(&c.chunk_sha256)
-                .bind(&c.content);
+        for batch in chunks.chunks(CHUNK_INSERT_BATCH) {
+            let placeholders: Vec<&str> =
+                batch.iter().map(|_| "(?, ?, ?, ?, ?, ?, ?)").collect();
+            let sql = format!(
+                "INSERT INTO veda_file_chunks \
+                 (file_id, chunk_index, start_line, line_count, byte_len, chunk_sha256, content) \
+                 VALUES {}",
+                placeholders.join(", ")
+            );
+            let mut q = sqlx::query(&sql);
+            for c in batch {
+                q = q
+                    .bind(&c.file_id)
+                    .bind(c.chunk_index)
+                    .bind(c.start_line)
+                    .bind(c.line_count)
+                    .bind(c.byte_len)
+                    .bind(&c.chunk_sha256)
+                    .bind(&c.content);
+            }
+            q.execute(t.as_mut()).await.map_err(storage_err)?;
         }
-        q.execute(t.as_mut()).await.map_err(storage_err)?;
         Ok(())
     }
 
@@ -1306,24 +1317,23 @@ impl MetadataTx for MysqlMetadataTx {
             return Ok(());
         }
         let t = self.tx_mut()?;
-        let placeholders: Vec<&str> = events
-            .iter()
-            .map(|_| "(?, ?, ?, ?, ?)")
-            .collect();
-        let sql = format!(
-            "INSERT INTO veda_fs_events (workspace_id, event_type, path, file_id, created_at) VALUES {}",
-            placeholders.join(", ")
-        );
-        let mut q = sqlx::query(&sql);
-        for e in events {
-            q = q
-                .bind(&e.workspace_id)
-                .bind(fs_event_type_str(e.event_type))
-                .bind(&e.path)
-                .bind(&e.file_id)
-                .bind(e.created_at.naive_utc());
+        for batch in events.chunks(FS_EVENT_INSERT_BATCH) {
+            let placeholders: Vec<&str> = batch.iter().map(|_| "(?, ?, ?, ?, ?)").collect();
+            let sql = format!(
+                "INSERT INTO veda_fs_events (workspace_id, event_type, path, file_id, created_at) VALUES {}",
+                placeholders.join(", ")
+            );
+            let mut q = sqlx::query(&sql);
+            for e in batch {
+                q = q
+                    .bind(&e.workspace_id)
+                    .bind(fs_event_type_str(e.event_type))
+                    .bind(&e.path)
+                    .bind(&e.file_id)
+                    .bind(e.created_at.naive_utc());
+            }
+            q.execute(t.as_mut()).await.map_err(storage_err)?;
         }
-        q.execute(t.as_mut()).await.map_err(storage_err)?;
         Ok(())
     }
 
