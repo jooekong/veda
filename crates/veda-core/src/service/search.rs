@@ -44,10 +44,13 @@ impl SearchService {
         &self,
         workspace_id: &str,
         query: &str,
-        _mode: SearchMode,
+        mode: SearchMode,
         limit: usize,
         path_prefix: Option<&str>,
     ) -> Result<Vec<SearchHit>> {
+        if mode != SearchMode::Semantic {
+            warn!(requested_mode = ?mode, "abstract/overview search always uses semantic mode, ignoring requested mode");
+        }
         let limit = if limit == 0 { 10 } else { limit };
         let fetch_limit = if path_prefix.is_some() { limit * 3 } else { limit };
 
@@ -89,9 +92,13 @@ impl SearchService {
             .search_abstract(workspace_id, query, mode, limit, path_prefix)
             .await?;
 
-        for hit in &mut hits {
-            if let Some(summary) = self.meta.get_summary_by_file(&hit.file_id).await? {
-                hit.l1_overview = Some(summary.l1_overview);
+        let file_ids: Vec<String> = hits.iter().map(|h| h.file_id.clone()).collect();
+        if !file_ids.is_empty() {
+            let summaries = self.meta.get_summaries_by_file_ids(&file_ids).await?;
+            for hit in &mut hits {
+                if let Some(summary) = summaries.get(&hit.file_id) {
+                    hit.l1_overview = Some(summary.l1_overview.clone());
+                }
             }
         }
         Ok(hits)

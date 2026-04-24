@@ -110,20 +110,4 @@ impl LlmService for LlmProvider {
     async fn summarize(&self, content: &str, max_tokens: usize) -> Result<String> {
         self.chat(content, max_tokens).await
     }
-
-    async fn generate_overview(
-        &self,
-        content: &str,
-        child_abstracts: &[String],
-    ) -> Result<String> {
-        let mut prompt = String::from("Generate a structured overview.\n\nContent:\n");
-        prompt.push_str(content);
-        if !child_abstracts.is_empty() {
-            prompt.push_str("\n\nChild summaries:\n");
-            for (i, a) in child_abstracts.iter().enumerate() {
-                prompt.push_str(&format!("{}. {}\n", i + 1, a));
-            }
-        }
-        self.chat(&prompt, 2048).await
-    }
 }

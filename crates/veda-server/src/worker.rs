@@ -20,6 +20,7 @@ pub struct Worker {
     llm: Option<Arc<dyn LlmService>>,
     batch_size: usize,
     poll_interval: Duration,
+    max_overview_tokens: usize,
 }
 
 impl Worker {
@@ -31,6 +32,7 @@ impl Worker {
         llm: Option<Arc<dyn LlmService>>,
         batch_size: usize,
         poll_interval_secs: u64,
+        max_overview_tokens: usize,
     ) -> Self {
         Self {
             meta,
@@ -40,6 +42,7 @@ impl Worker {
             llm,
             batch_size,
             poll_interval: Duration::from_secs(poll_interval_secs),
+            max_overview_tokens,
         }
     }
 
@@ -196,6 +199,19 @@ impl Worker {
         workspace_id: &str,
         file_id: &str,
     ) -> veda_types::Result<()> {
+        if self
+            .task_queue
+            .has_pending_event(
+                OutboxEventType::SummarySync,
+                workspace_id,
+                "file_id",
+                file_id,
+            )
+            .await?
+        {
+            info!(file_id, "summary_sync already pending, skipping enqueue");
+            return Ok(());
+        }
         let now = Utc::now();
         let event = OutboxEvent {
             id: 0,
@@ -243,8 +259,11 @@ impl Worker {
             return Ok(());
         }
 
-        let l0 = summary::generate_l0(llm.as_ref(), &content).await?;
-        let l1 = summary::generate_l1(llm.as_ref(), &content).await?;
+        let max_tokens = self.max_overview_tokens;
+        let (l0, l1) = tokio::try_join!(
+            summary::generate_l0(llm.as_ref(), &content),
+            summary::generate_l1(llm.as_ref(), &content, max_tokens),
+        )?;
 
         let summary_id = uuid::Uuid::new_v4().to_string();
         let now = Utc::now();
@@ -295,6 +314,19 @@ impl Worker {
         dentry_id: &str,
         parent_path: &str,
     ) -> veda_types::Result<()> {
+        if self
+            .task_queue
+            .has_pending_event(
+                OutboxEventType::DirSummarySync,
+                workspace_id,
+                "dentry_id",
+                dentry_id,
+            )
+            .await?
+        {
+            info!(dentry_id, "dir_summary_sync already pending, skipping enqueue");
+            return Ok(());
+        }
         let now = Utc::now();
         let event = OutboxEvent {
             id: 0,
@@ -331,7 +363,9 @@ impl Worker {
         }
 
         let child_l0s: Vec<String> = child_summaries.iter().map(|s| s.l0_abstract.clone()).collect();
-        let (l0, l1) = summary::aggregate_dir_summary(llm.as_ref(), &child_l0s).await?;
+        let max_tokens = self.max_overview_tokens;
+        let (l0, l1) =
+            summary::aggregate_dir_summary(llm.as_ref(), &child_l0s, max_tokens).await?;
 
         let summary_id = uuid::Uuid::new_v4().to_string();
         let now = Utc::now();
@@ -347,6 +381,18 @@ impl Worker {
             updated_at: now,
         };
         self.meta.upsert_summary(&dir_summary).await?;
+
+        let embeddings = self.embedding.embed(&[l0.clone()]).await?;
+        if let Some(vector) = embeddings.into_iter().next() {
+            let summary_emb = SummaryWithEmbedding {
+                id: dentry_id.to_string(),
+                workspace_id: workspace_id.to_string(),
+                summary_type: "dir".to_string(),
+                content: l0,
+                vector,
+            };
+            self.vector.upsert_summaries(&[summary_emb]).await?;
+        }
 
         // Recurse: trigger parent directory aggregation (stop at root)
         let parent = parent_path_of(dir_path);

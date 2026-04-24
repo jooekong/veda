@@ -94,6 +94,18 @@ pub trait MetadataStore: Send + Sync {
 
     // summary ops (L0/L1)
     async fn get_summary_by_file(&self, file_id: &str) -> Result<Option<FileSummary>>;
+    async fn get_summaries_by_file_ids(
+        &self,
+        file_ids: &[String],
+    ) -> Result<std::collections::HashMap<String, FileSummary>> {
+        let mut map = std::collections::HashMap::new();
+        for fid in file_ids {
+            if let Some(s) = self.get_summary_by_file(fid).await? {
+                map.insert(fid.clone(), s);
+            }
+        }
+        Ok(map)
+    }
     async fn get_summary_by_dentry(&self, dentry_id: &str) -> Result<Option<FileSummary>>;
     async fn upsert_summary(&self, summary: &FileSummary) -> Result<()>;
     async fn delete_summary_by_file(&self, file_id: &str) -> Result<()>;
@@ -216,6 +228,13 @@ pub trait TaskQueue: Send + Sync {
     async fn claim(&self, batch_size: usize) -> Result<Vec<OutboxEvent>>;
     async fn complete(&self, task_id: i64) -> Result<()>;
     async fn fail(&self, task_id: i64, error: &str) -> Result<()>;
+    async fn has_pending_event(
+        &self,
+        event_type: OutboxEventType,
+        workspace_id: &str,
+        payload_key: &str,
+        payload_value: &str,
+    ) -> Result<bool>;
 }
 
 // ── Collection Meta Store ──────────────────────────────
@@ -306,9 +325,4 @@ pub trait EmbeddingService: Send + Sync {
 #[async_trait]
 pub trait LlmService: Send + Sync {
     async fn summarize(&self, content: &str, max_tokens: usize) -> Result<String>;
-    async fn generate_overview(
-        &self,
-        content: &str,
-        child_abstracts: &[String],
-    ) -> Result<String>;
 }

@@ -977,6 +977,34 @@ impl MetadataStore for MysqlStore {
         row.map(|r| row_to_summary(&r)).transpose()
     }
 
+    async fn get_summaries_by_file_ids(
+        &self,
+        file_ids: &[String],
+    ) -> Result<std::collections::HashMap<String, FileSummary>> {
+        if file_ids.is_empty() {
+            return Ok(std::collections::HashMap::new());
+        }
+        let placeholders = vec!["?"; file_ids.len()].join(",");
+        let sql = format!(
+            r#"SELECT id, workspace_id, file_id, dentry_id, l0_abstract, l1_overview,
+                      status, created_at, updated_at
+               FROM veda_summaries WHERE file_id IN ({placeholders})"#
+        );
+        let mut q = sqlx::query(&sql);
+        for fid in file_ids {
+            q = q.bind(fid);
+        }
+        let rows = q.fetch_all(&self.pool).await.map_err(storage_err)?;
+        let mut map = std::collections::HashMap::new();
+        for r in &rows {
+            let s = row_to_summary(r)?;
+            if let Some(fid) = &s.file_id {
+                map.insert(fid.clone(), s);
+            }
+        }
+        Ok(map)
+    }
+
     async fn get_summary_by_dentry(&self, dentry_id: &str) -> Result<Option<FileSummary>> {
         let row = sqlx::query(
             r#"SELECT id, workspace_id, file_id, dentry_id, l0_abstract, l1_overview,
@@ -1005,7 +1033,7 @@ impl MetadataStore for MysqlStore {
         .bind(&summary.dentry_id)
         .bind(&summary.l0_abstract)
         .bind(&summary.l1_overview)
-        .bind(serde_json::to_string(&summary.status).unwrap().trim_matches('"'))
+        .bind(summary_status_str(summary.status))
         .execute(&self.pool)
         .await
         .map_err(storage_err)?;
@@ -1030,18 +1058,31 @@ impl MetadataStore for MysqlStore {
             r#"SELECT s.id, s.workspace_id, s.file_id, s.dentry_id, s.l0_abstract, s.l1_overview,
                       s.status, s.created_at, s.updated_at
                FROM veda_summaries s
-               INNER JOIN veda_dentries d ON (
-                   (s.file_id IS NOT NULL AND d.file_id = s.file_id)
-                   OR (s.dentry_id IS NOT NULL AND d.id = s.dentry_id)
-               )
-               WHERE d.workspace_id = ? AND d.parent_path = ? AND s.status = 'ready'"#,
+               INNER JOIN veda_dentries d ON s.file_id = d.file_id
+               WHERE s.file_id IS NOT NULL AND d.workspace_id = ? AND d.parent_path = ? AND s.status = 'ready'
+             UNION ALL
+             SELECT s.id, s.workspace_id, s.file_id, s.dentry_id, s.l0_abstract, s.l1_overview,
+                      s.status, s.created_at, s.updated_at
+               FROM veda_summaries s
+               INNER JOIN veda_dentries d ON s.dentry_id = d.id
+               WHERE s.dentry_id IS NOT NULL AND d.workspace_id = ? AND d.parent_path = ? AND s.status = 'ready'"#,
         )
+        .bind(workspace_id)
+        .bind(parent_path)
         .bind(workspace_id)
         .bind(parent_path)
         .fetch_all(&self.pool)
         .await
         .map_err(storage_err)?;
         rows.iter().map(|r| row_to_summary(r)).collect()
+    }
+}
+
+fn summary_status_str(s: SummaryStatus) -> &'static str {
+    match s {
+        SummaryStatus::Pending => "pending",
+        SummaryStatus::Ready => "ready",
+        SummaryStatus::Failed => "failed",
     }
 }
 
@@ -1655,6 +1696,30 @@ impl TaskQueue for MysqlStore {
                 .map_err(storage_err)?;
         }
         Ok(())
+    }
+
+    async fn has_pending_event(
+        &self,
+        event_type: OutboxEventType,
+        workspace_id: &str,
+        payload_key: &str,
+        payload_value: &str,
+    ) -> Result<bool> {
+        let et = outbox_event_type_str(event_type);
+        let json_path = format!("$.{payload_key}");
+        let row: Option<(i64,)> = sqlx::query_as(
+            r#"SELECT COUNT(*) FROM veda_outbox
+               WHERE event_type = ? AND workspace_id = ? AND status IN ('pending','processing')
+                 AND JSON_UNQUOTE(JSON_EXTRACT(payload, ?)) = ?"#,
+        )
+        .bind(et)
+        .bind(workspace_id)
+        .bind(&json_path)
+        .bind(payload_value)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(storage_err)?;
+        Ok(row.map(|r| r.0 > 0).unwrap_or(false))
     }
 }
 

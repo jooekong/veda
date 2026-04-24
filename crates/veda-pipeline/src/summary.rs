@@ -56,15 +56,20 @@ pub async fn generate_l0(llm: &dyn LlmService, content: &str) -> Result<String> 
     llm.summarize(&prompt, 150).await
 }
 
-pub async fn generate_l1(llm: &dyn LlmService, content: &str) -> Result<String> {
+pub async fn generate_l1(
+    llm: &dyn LlmService,
+    content: &str,
+    max_tokens: usize,
+) -> Result<String> {
     let truncated = truncate_content(content, 12_000);
     let prompt = L1_PROMPT.replace("{content}", &truncated);
-    llm.summarize(&prompt, 2048).await
+    llm.summarize(&prompt, max_tokens).await
 }
 
 pub async fn aggregate_dir_summary(
     llm: &dyn LlmService,
     child_l0s: &[String],
+    max_overview_tokens: usize,
 ) -> Result<(String, String)> {
     let children_text = child_l0s
         .iter()
@@ -74,7 +79,7 @@ pub async fn aggregate_dir_summary(
         .join("\n");
 
     let l1_prompt = L1_DIR_PROMPT.replace("{children}", &children_text);
-    let l1 = llm.summarize(&l1_prompt, 2048).await?;
+    let l1 = llm.summarize(&l1_prompt, max_overview_tokens).await?;
 
     let l0_prompt = DIR_L0_PROMPT.replace("{overview}", &l1);
     let l0 = llm.summarize(&l0_prompt, 150).await?;
@@ -111,13 +116,6 @@ mod tests {
         async fn summarize(&self, content: &str, _max_tokens: usize) -> Result<String> {
             Ok(format!("SUMMARY: {}", &content[..content.len().min(50)]))
         }
-        async fn generate_overview(
-            &self,
-            _content: &str,
-            _child_abstracts: &[String],
-        ) -> Result<String> {
-            Ok("mock overview".to_string())
-        }
     }
 
     #[test]
@@ -146,7 +144,8 @@ mod tests {
     #[tokio::test]
     async fn generate_l1_returns_summary() {
         let llm = MockLlm;
-        let result = generate_l1(&llm, "# Chapter 1\nSome content\n# Chapter 2\nMore content").await;
+        let result =
+            generate_l1(&llm, "# Chapter 1\nSome content\n# Chapter 2\nMore content", 2048).await;
         assert!(result.is_ok());
     }
 
@@ -157,7 +156,7 @@ mod tests {
             "API authentication guide".to_string(),
             "Database schema reference".to_string(),
         ];
-        let result = aggregate_dir_summary(&llm, &children).await;
+        let result = aggregate_dir_summary(&llm, &children, 2048).await;
         assert!(result.is_ok());
         let (l0, l1) = result.unwrap();
         assert!(!l0.is_empty());

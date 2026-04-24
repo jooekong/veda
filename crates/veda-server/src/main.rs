@@ -93,6 +93,7 @@ async fn main() -> anyhow::Result<()> {
     };
 
     let worker_handle = if cfg.worker.enabled {
+        let max_overview_tokens = cfg.llm.as_ref().map(|c| c.max_summary_tokens).unwrap_or(2048);
         let w = Worker::new(
             mysql.clone(),
             mysql.clone(),
@@ -101,6 +102,7 @@ async fn main() -> anyhow::Result<()> {
             llm.clone(),
             cfg.worker.batch_size,
             cfg.worker.poll_interval_secs,
+            max_overview_tokens,
         );
         Some(tokio::spawn(async move {
             w.run(shutdown_rx).await;

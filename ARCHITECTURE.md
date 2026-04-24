@@ -62,9 +62,11 @@ veda-fuse       FUSE 挂载（不在默认 workspace）      (已实现)
 - VedaError::Storage 使用 String（而非 anyhow::Error）避免 lib crate 兼容问题
 - **三层信息模型 (Tiered Context Loading)**：
   - L0 Abstract (~100 tokens)：文件/目录的一句话摘要，存入 Milvus 做向量搜索
-  - L1 Overview (~2k tokens)：结构化概览，按需从 MySQL 加载
+  - L1 Overview (~2k tokens，可通过 `max_summary_tokens` 配置)：结构化概览，按需从 MySQL 批量加载
   - L2 Full (原文 chunk)：现有 chunk 搜索
-  - 写入流程：ChunkSync → SummarySync (LLM 生成 L0+L1) → DirSummarySync (自底向上聚合)
+  - 写入流程：ChunkSync → SummarySync (LLM 并行生成 L0+L1) → DirSummarySync (自底向上聚合，含去重防抖)
+  - 文件和目录的 L0 均写入 Milvus `veda_summaries` 集合（Abstract 搜索可命中目录）
+  - SummarySync / DirSummarySync 入队前检查去重，避免重复 LLM 调用
   - 搜索 API：`detail_level` 参数控制返回粒度，Abstract/Overview/Full 三级
   - LLM 配置可选，未配置时 summary 功能自动禁用
 
