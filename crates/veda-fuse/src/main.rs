@@ -140,6 +140,10 @@ fn build_fuse_options(opts: &MountOpts) -> Vec<fuser::MountOption> {
         fuser::MountOption::FSName("veda".to_string()),
         fuser::MountOption::DefaultPermissions,
     ];
+    if cfg!(target_os = "macos") {
+        options.push(fuser::MountOption::CUSTOM("noappledouble".into()));
+        options.push(fuser::MountOption::CUSTOM("noapplexattr".into()));
+    }
     if opts.foreground {
         options.push(fuser::MountOption::AutoUnmount);
     }

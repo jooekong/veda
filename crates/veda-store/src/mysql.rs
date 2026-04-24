@@ -506,18 +506,6 @@ impl MysqlStore {
                 .map_err(|e| VedaError::Storage(e.to_string()))?;
         }
 
-        let migrations = [
-            "CREATE INDEX idx_ws_path_prefix ON veda_dentries (workspace_id, path(255))",
-        ];
-        for m in migrations {
-            match sqlx::query(m).execute(&self.pool).await {
-                Ok(_) => {}
-                Err(sqlx::Error::Database(ref db_err))
-                    if db_err.code().as_deref() == Some("1061") => {}
-                Err(e) => return Err(VedaError::Storage(e.to_string())),
-            }
-        }
-
         Ok(())
     }
 

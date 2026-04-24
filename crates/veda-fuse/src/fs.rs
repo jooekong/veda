@@ -1,17 +1,17 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::ffi::OsStr;
 use std::os::fd::RawFd;
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, SystemTime};
+use std::time::{Duration, Instant, SystemTime};
 
 use fuser::{
-    FileAttr, FileType, Filesystem, ReplyAttr, ReplyCreate, ReplyData, ReplyDirectory, ReplyEmpty,
-    ReplyEntry, ReplyOpen, ReplyWrite, Request,
+    FileAttr, FileType, Filesystem, ReplyAttr, ReplyCreate, ReplyData, ReplyDirectory,
+    ReplyDirectoryPlus, ReplyEmpty, ReplyEntry, ReplyOpen, ReplyWrite, Request,
 };
 use tracing::{debug, warn};
 
 use crate::cache::ReadCache;
-use crate::client::{ClientError, FileInfo, VedaClient};
+use crate::client::{ClientError, DirEntry, FileInfo, VedaClient};
 use crate::inode::InodeTable;
 
 const BLOCK_SIZE: u32 = 512;
@@ -48,6 +48,12 @@ struct WriteHandle {
     base_rev: Option<i32>,
 }
 
+struct DirCacheEntry {
+    entries: Vec<DirEntry>,
+    child_names: HashSet<String>,
+    fetched_at: Instant,
+}
+
 pub struct VedaFs {
     client: VedaClient,
     inodes: Arc<Mutex<InodeTable>>,
@@ -55,6 +61,7 @@ pub struct VedaFs {
     read_cache: Arc<Mutex<ReadCache>>,
     next_fh: u64,
     write_handles: HashMap<u64, WriteHandle>,
+    dir_cache: HashMap<u64, DirCacheEntry>,
     /// File descriptor to signal parent process that mount succeeded (daemon mode).
     notify_fd: Option<RawFd>,
 }
@@ -63,7 +70,7 @@ impl VedaFs {
     pub fn new(client: VedaClient, config: FuseConfig, notify_fd: Option<RawFd>) -> Self {
         let read_cache = Arc::new(Mutex::new(ReadCache::new(config.cache_size_mb)));
         let inodes = Arc::new(Mutex::new(InodeTable::new_with_ttl(config.attr_ttl)));
-        Self { client, inodes, config, read_cache, next_fh: 1, write_handles: HashMap::new(), notify_fd }
+        Self { client, inodes, config, read_cache, next_fh: 1, write_handles: HashMap::new(), dir_cache: HashMap::new(), notify_fd }
     }
 
     pub fn inodes(&self) -> Arc<Mutex<InodeTable>> { self.inodes.clone() }
@@ -96,6 +103,21 @@ impl VedaFs {
         if parent_path == "/" { format!("/{name}") } else { format!("{parent_path}/{name}") }
     }
 
+    fn attr_from_dir_entry(de: &DirEntry, ino: u64) -> FileAttr {
+        let info = FileInfo {
+            path: de.path.clone(),
+            is_dir: de.is_dir,
+            size_bytes: de.size_bytes,
+            revision: None,
+        };
+        Self::make_attr(&info, ino)
+    }
+
+    fn dir_stub_attr(ino: u64) -> FileAttr {
+        let info = FileInfo { path: String::new(), is_dir: true, size_bytes: None, revision: None };
+        Self::make_attr(&info, ino)
+    }
+
     fn err_to_errno(e: &ClientError) -> i32 {
         match e {
             ClientError::NotFound => libc::ENOENT,
@@ -108,6 +130,10 @@ impl VedaFs {
 
     fn inode_get_path(&self, ino: u64) -> Option<String> {
         self.inodes.lock().unwrap().get_path(ino).map(|s| s.to_string())
+    }
+
+    fn inode_get_ino(&self, path: &str) -> Option<u64> {
+        self.inodes.lock().unwrap().get_ino(path)
     }
 
     fn inode_get_or_create(&self, path: &str) -> u64 {
@@ -148,6 +174,36 @@ impl VedaFs {
 
     fn cache_is_cacheable(&self, size: u64) -> bool {
         self.read_cache.lock().unwrap().is_cacheable_size(size)
+    }
+
+    /// Fetch directory listing, using TTL-based cache to avoid repeated HTTP calls.
+    fn fetch_dir(&mut self, ino: u64, path: &str) -> Result<Vec<DirEntry>, i32> {
+        let stale = match self.dir_cache.get(&ino) {
+            Some(c) => c.fetched_at.elapsed() >= self.config.attr_ttl,
+            None => true,
+        };
+        if stale {
+            let entries = self.client.list_dir(path).map_err(|ref e| Self::err_to_errno(e))?;
+            let child_names: HashSet<String> = entries.iter().map(|de| de.name.clone()).collect();
+            self.dir_cache.insert(ino, DirCacheEntry { entries, child_names, fetched_at: Instant::now() });
+        }
+        Ok(self.dir_cache.get(&ino).unwrap().entries.clone())
+    }
+
+    /// Check if a child name exists in a recently-listed directory.
+    /// Returns Some(true/false) if cache is fresh, None if stale/missing.
+    fn dir_cache_has_child(&self, parent_ino: u64, name: &str) -> Option<bool> {
+        self.dir_cache.get(&parent_ino).and_then(|c| {
+            if c.fetched_at.elapsed() < self.config.attr_ttl {
+                Some(c.child_names.contains(name))
+            } else {
+                None
+            }
+        })
+    }
+
+    fn invalidate_dir_cache(&mut self, parent_ino: u64) {
+        self.dir_cache.remove(&parent_ino);
     }
 
     fn stat_and_cache_attr(&self, path: &str, ino: u64) -> Result<FileAttr, i32> {
@@ -209,6 +265,20 @@ impl Filesystem for VedaFs {
             None => { reply.error(libc::ENOENT); return; }
         };
         let child_path = Self::resolve_child_path(&parent_path, name_str);
+
+        // Positive cache: reuse attr from a prior lookup or readdir.
+        if let Some(ino) = self.inode_get_ino(&child_path) {
+            if let Some(attr) = self.inode_get_attr(ino) {
+                reply.entry(&self.config.attr_ttl, &attr, 0);
+                return;
+            }
+        }
+
+        // Negative cache: parent was recently listed and this name wasn't in it.
+        if let Some(false) = self.dir_cache_has_child(parent, name_str) {
+            reply.error(libc::ENOENT);
+            return;
+        }
 
         match self.client.stat(&child_path) {
             Ok(info) => {
@@ -291,9 +361,9 @@ impl Filesystem for VedaFs {
             Some(p) => p,
             None => { reply.error(libc::ENOENT); return; }
         };
-        let entries = match self.client.list_dir(&path) {
+        let entries = match self.fetch_dir(ino, &path) {
             Ok(e) => e,
-            Err(ref e) => { reply.error(Self::err_to_errno(e)); return; }
+            Err(errno) => { reply.error(errno); return; }
         };
         let parent_ino = self.inode_get_or_create(parent_path(&path));
         let mut full_entries = vec![
@@ -302,11 +372,44 @@ impl Filesystem for VedaFs {
         ];
         for de in &entries {
             let child_ino = self.inode_get_or_create(&de.path);
+            let attr = Self::attr_from_dir_entry(de, child_ino);
+            self.inode_set_attr(child_ino, attr);
             let kind = if de.is_dir { FileType::Directory } else { FileType::RegularFile };
             full_entries.push((child_ino, kind, de.name.clone()));
         }
         for (i, (child_ino, kind, name)) in full_entries.iter().enumerate().skip(offset as usize) {
             if reply.add(*child_ino, (i + 1) as i64, *kind, name) { break; }
+        }
+        reply.ok();
+    }
+
+    fn readdirplus(
+        &mut self, _req: &Request<'_>, ino: u64, _fh: u64, offset: i64,
+        mut reply: ReplyDirectoryPlus,
+    ) {
+        let path = match self.inode_get_path(ino) {
+            Some(p) => p,
+            None => { reply.error(libc::ENOENT); return; }
+        };
+        let entries = match self.fetch_dir(ino, &path) {
+            Ok(e) => e,
+            Err(errno) => { reply.error(errno); return; }
+        };
+        let parent_ino = self.inode_get_or_create(parent_path(&path));
+        let self_attr = self.inode_get_attr(ino).unwrap_or_else(|| Self::dir_stub_attr(ino));
+        let parent_attr = self.inode_get_attr(parent_ino).unwrap_or_else(|| Self::dir_stub_attr(parent_ino));
+
+        let mut full: Vec<(u64, String, FileAttr)> = Vec::with_capacity(entries.len() + 2);
+        full.push((ino, ".".to_string(), self_attr));
+        full.push((parent_ino, "..".to_string(), parent_attr));
+        for de in &entries {
+            let child_ino = self.inode_get_or_create(&de.path);
+            let attr = Self::attr_from_dir_entry(de, child_ino);
+            self.inode_set_attr(child_ino, attr);
+            full.push((child_ino, de.name.clone(), attr));
+        }
+        for (i, (child_ino, name, attr)) in full.iter().enumerate().skip(offset as usize) {
+            if reply.add(*child_ino, (i + 1) as i64, name, &self.config.attr_ttl, attr, 0) { break; }
         }
         reply.ok();
     }
@@ -449,6 +552,7 @@ impl Filesystem for VedaFs {
             Ok(rev) => rev,
             Err(ref e) => { reply.error(Self::err_to_errno(e)); return; }
         };
+        self.invalidate_dir_cache(parent);
         let fh = self.alloc_fh();
         let ino = self.inode_get_or_create(&child_path);
         let info = FileInfo { path: child_path, is_dir: false, size_bytes: Some(0), revision: base_rev };
@@ -473,6 +577,7 @@ impl Filesystem for VedaFs {
         if let Err(ref e) = self.client.mkdir(&child_path) {
             reply.error(Self::err_to_errno(e)); return;
         }
+        self.invalidate_dir_cache(parent);
         let ino = self.inode_get_or_create(&child_path);
         let info = FileInfo { path: child_path, is_dir: true, size_bytes: None, revision: None };
         let attr = Self::make_attr(&info, ino);
@@ -491,6 +596,7 @@ impl Filesystem for VedaFs {
         let child_path = Self::resolve_child_path(&parent_path, name_str);
         match self.client.delete(&child_path) {
             Ok(()) => {
+                self.invalidate_dir_cache(parent);
                 self.inode_remove(&child_path);
                 self.cache_invalidate(&child_path);
                 reply.ok();
@@ -514,7 +620,11 @@ impl Filesystem for VedaFs {
             _ => {}
         }
         match self.client.delete(&child_path) {
-            Ok(()) => { self.inode_remove(&child_path); reply.ok(); }
+            Ok(()) => {
+                self.invalidate_dir_cache(parent);
+                self.inode_remove(&child_path);
+                reply.ok();
+            }
             Err(ref e) => reply.error(Self::err_to_errno(e)),
         }
     }
@@ -540,6 +650,8 @@ impl Filesystem for VedaFs {
         let new_path = Self::resolve_child_path(&newparent_path, newname_str);
         match self.client.rename(&old_path, &new_path) {
             Ok(()) => {
+                self.invalidate_dir_cache(parent);
+                self.invalidate_dir_cache(newparent);
                 self.inode_rename(&old_path, &new_path);
                 self.cache_invalidate(&old_path);
                 self.cache_invalidate(&new_path);
