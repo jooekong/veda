@@ -193,27 +193,42 @@ fn wait_for_child_ready(read_fd: RawFd, child: nix::unistd::Pid) -> anyhow::Resu
 }
 
 fn install_signal_handler(mountpoint: String) {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+    let triggered = Arc::new(AtomicBool::new(false));
     std::thread::spawn(move || {
         let mut signals = signal_hook::iterator::Signals::new([libc::SIGINT, libc::SIGTERM])
             .expect("failed to register signal handler");
         for sig in signals.forever() {
+            if triggered.swap(true, Ordering::SeqCst) {
+                // Already unmounting from a prior signal. Absorb the signal so the
+                // process doesn't fall back to default disposition (which for SIGINT
+                // would kill us before destroy() flushes dirty writes).
+                eprintln!("veda: received signal {sig} again, unmount already in progress...");
+                continue;
+            }
             eprintln!("\nveda: received signal {sig}, unmounting {mountpoint}...");
-            // Trigger graceful unmount: this causes the FUSE kernel loop to exit,
-            // fuser::mount2 returns, VedaFs::destroy runs, dirty write handles flush.
+            // Trigger graceful unmount: fuser::mount2's FUSE loop exits, mount2
+            // returns, VedaFs::destroy runs, dirty write handles flush.
+            //
+            // NOTE: on macOS `umount` blocks until the FS is idle; in practice
+            // fuser handles the unmount through the FUSE protocol so this
+            // returns quickly. On Linux, fusermount3 -u is asynchronous.
             let argv = umount_argv(&mountpoint);
+            // argv is non-empty by construction (see umount_argv_returns_nonempty).
             let _ = Command::new(&argv[0]).args(&argv[1..]).status();
 
             // Watchdog: if mount2 hasn't returned in 5s, force-exit so we don't
             // zombie forever on a wedged FS. Data may still be lost in that case.
+            // This thread is killed automatically if the main thread exits first
+            // (the normal path when mount2 returns cleanly).
             std::thread::spawn(|| {
                 std::thread::sleep(std::time::Duration::from_secs(5));
                 eprintln!("veda: unmount watchdog timeout, forcing exit");
                 std::process::exit(1);
             });
-
-            // Don't exit from the signal handler thread itself — let the main
-            // thread return from mount2 naturally so destroy() runs.
-            return;
+            // Continue the for-loop: a second signal now lands in the `triggered`
+            // branch above and is absorbed rather than killing the process.
         }
     });
 }
@@ -279,12 +294,17 @@ mod tests {
     }
 
     #[test]
-    fn graceful_unmount_builds_expected_argv_for_nonexistent_mount() {
-        // Unit test: we don't actually run the command (the mount doesn't exist),
-        // we just verify the argv we'd pass to Command::new matches what umount_argv produces.
-        let mp = "/tmp/veda-test-nonexistent-xyz123";
-        let argv = umount_argv(mp);
-        assert!(!argv.is_empty());
-        assert_eq!(argv.last().unwrap(), mp);
+    fn graceful_unmount_argv_uses_correct_binary_per_platform() {
+        let argv = umount_argv("/tmp/veda-test-xyz123");
+        if cfg!(target_os = "macos") {
+            assert_eq!(argv[0], "umount", "macOS should use umount(8)");
+        } else {
+            // Linux: prefers fusermount3 or fusermount when available, else umount.
+            let bin0 = &argv[0];
+            assert!(
+                bin0 == "fusermount3" || bin0 == "fusermount" || bin0 == "umount",
+                "unexpected umount binary on Linux: {bin0}"
+            );
+        }
     }
 }
