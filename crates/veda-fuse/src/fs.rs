@@ -113,6 +113,14 @@ impl VedaFs {
         Self::make_attr(&info, ino)
     }
 
+    /// True when a readdir entry has enough information to safely cache its attr.
+    /// Files without a known size must NOT be cached as size=0, since the server's
+    /// `list_dir` returns `size_bytes: None` and we would otherwise report 0 bytes
+    /// for every file under `attr_ttl`.
+    fn should_cache_attr(de: &DirEntry) -> bool {
+        de.is_dir || de.size_bytes.is_some()
+    }
+
     fn dir_stub_attr(ino: u64) -> FileAttr {
         let info = FileInfo { path: String::new(), is_dir: true, size_bytes: None, revision: None };
         Self::make_attr(&info, ino)
@@ -372,8 +380,10 @@ impl Filesystem for VedaFs {
         ];
         for de in &entries {
             let child_ino = self.inode_get_or_create(&de.path);
-            let attr = Self::attr_from_dir_entry(de, child_ino);
-            self.inode_set_attr(child_ino, attr);
+            if Self::should_cache_attr(de) {
+                let attr = Self::attr_from_dir_entry(de, child_ino);
+                self.inode_set_attr(child_ino, attr);
+            }
             let kind = if de.is_dir { FileType::Directory } else { FileType::RegularFile };
             full_entries.push((child_ino, kind, de.name.clone()));
         }
@@ -399,17 +409,24 @@ impl Filesystem for VedaFs {
         let self_attr = self.inode_get_attr(ino).unwrap_or_else(|| Self::dir_stub_attr(ino));
         let parent_attr = self.inode_get_attr(parent_ino).unwrap_or_else(|| Self::dir_stub_attr(parent_ino));
 
-        let mut full: Vec<(u64, String, FileAttr)> = Vec::with_capacity(entries.len() + 2);
-        full.push((ino, ".".to_string(), self_attr));
-        full.push((parent_ino, "..".to_string(), parent_attr));
+        // (ino, name, attr, cache_ok). When cache_ok=false we pass Duration::ZERO
+        // as TTL so the kernel immediately re-fetches via getattr.
+        let mut full: Vec<(u64, String, FileAttr, bool)> = Vec::with_capacity(entries.len() + 2);
+        full.push((ino, ".".to_string(), self_attr, true));
+        full.push((parent_ino, "..".to_string(), parent_attr, true));
         for de in &entries {
             let child_ino = self.inode_get_or_create(&de.path);
             let attr = Self::attr_from_dir_entry(de, child_ino);
-            self.inode_set_attr(child_ino, attr);
-            full.push((child_ino, de.name.clone(), attr));
+            let cache_ok = Self::should_cache_attr(de);
+            if cache_ok {
+                self.inode_set_attr(child_ino, attr);
+            }
+            full.push((child_ino, de.name.clone(), attr, cache_ok));
         }
-        for (i, (child_ino, name, attr)) in full.iter().enumerate().skip(offset as usize) {
-            if reply.add(*child_ino, (i + 1) as i64, name, &self.config.attr_ttl, attr, 0) { break; }
+        let zero_ttl = Duration::ZERO;
+        for (i, (child_ino, name, attr, cache_ok)) in full.iter().enumerate().skip(offset as usize) {
+            let ttl = if *cache_ok { &self.config.attr_ttl } else { &zero_ttl };
+            if reply.add(*child_ino, (i + 1) as i64, name, ttl, attr, 0) { break; }
         }
         reply.ok();
     }
@@ -697,5 +714,54 @@ impl Filesystem for VedaFs {
             }
         }
         self.write_handles.clear();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::client::DirEntry;
+
+    fn make_dir_entry(name: &str, is_dir: bool, size: Option<i64>) -> DirEntry {
+        DirEntry {
+            name: name.to_string(),
+            path: format!("/{name}"),
+            is_dir,
+            size_bytes: size,
+        }
+    }
+
+    #[test]
+    fn attr_from_dir_entry_uses_zero_when_size_missing() {
+        let de = make_dir_entry("a.txt", false, None);
+        let attr = VedaFs::attr_from_dir_entry(&de, 42);
+        // This documents the bug: when size is None, make_attr falls back to 0.
+        // The fix is NOT to change this helper, but to avoid caching the result.
+        assert_eq!(attr.size, 0);
+    }
+
+    #[test]
+    fn attr_from_dir_entry_preserves_size() {
+        let de = make_dir_entry("a.txt", false, Some(1234));
+        let attr = VedaFs::attr_from_dir_entry(&de, 42);
+        assert_eq!(attr.size, 1234);
+    }
+
+    #[test]
+    fn file_with_unknown_size_is_not_cached() {
+        let de = make_dir_entry("a.txt", false, None);
+        assert!(!VedaFs::should_cache_attr(&de), "files with unknown size must not be cached");
+    }
+
+    #[test]
+    fn file_with_known_size_is_cached() {
+        let de = make_dir_entry("a.txt", false, Some(100));
+        assert!(VedaFs::should_cache_attr(&de));
+    }
+
+    #[test]
+    fn directory_is_always_cached_even_with_none_size() {
+        let de = make_dir_entry("docs", true, None);
+        assert!(VedaFs::should_cache_attr(&de), "directories legitimately have size=0");
     }
 }
