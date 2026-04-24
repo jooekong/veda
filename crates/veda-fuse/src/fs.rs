@@ -48,11 +48,24 @@ struct WriteHandle {
     base_rev: Option<i32>,
 }
 
-struct DirCacheEntry {
-    entries: Vec<DirEntry>,
-    child_names: HashSet<String>,
-    fetched_at: Instant,
+pub struct DirCacheEntry {
+    pub entries: Vec<DirEntry>,
+    pub child_names: HashSet<String>,
+    pub fetched_at: Instant,
 }
+
+impl DirCacheEntry {
+    #[cfg(test)]
+    pub fn empty_for_test() -> Self {
+        Self {
+            entries: Vec::new(),
+            child_names: HashSet::new(),
+            fetched_at: Instant::now(),
+        }
+    }
+}
+
+pub type DirCacheMap = Arc<Mutex<HashMap<u64, DirCacheEntry>>>;
 
 pub struct VedaFs {
     client: VedaClient,
@@ -61,7 +74,7 @@ pub struct VedaFs {
     read_cache: Arc<Mutex<ReadCache>>,
     next_fh: u64,
     write_handles: HashMap<u64, WriteHandle>,
-    dir_cache: HashMap<u64, DirCacheEntry>,
+    dir_cache: DirCacheMap,
     /// File descriptor to signal parent process that mount succeeded (daemon mode).
     notify_fd: Option<RawFd>,
 }
@@ -70,11 +83,13 @@ impl VedaFs {
     pub fn new(client: VedaClient, config: FuseConfig, notify_fd: Option<RawFd>) -> Self {
         let read_cache = Arc::new(Mutex::new(ReadCache::new(config.cache_size_mb)));
         let inodes = Arc::new(Mutex::new(InodeTable::new_with_ttl(config.attr_ttl)));
-        Self { client, inodes, config, read_cache, next_fh: 1, write_handles: HashMap::new(), dir_cache: HashMap::new(), notify_fd }
+        let dir_cache: DirCacheMap = Arc::new(Mutex::new(HashMap::new()));
+        Self { client, inodes, config, read_cache, next_fh: 1, write_handles: HashMap::new(), dir_cache, notify_fd }
     }
 
     pub fn inodes(&self) -> Arc<Mutex<InodeTable>> { self.inodes.clone() }
     pub fn read_cache(&self) -> Arc<Mutex<ReadCache>> { self.read_cache.clone() }
+    pub fn dir_cache(&self) -> DirCacheMap { self.dir_cache.clone() }
 
     fn alloc_fh(&mut self) -> u64 {
         let fh = self.next_fh;
@@ -186,22 +201,29 @@ impl VedaFs {
 
     /// Fetch directory listing, using TTL-based cache to avoid repeated HTTP calls.
     fn fetch_dir(&mut self, ino: u64, path: &str) -> Result<Vec<DirEntry>, i32> {
-        let stale = match self.dir_cache.get(&ino) {
-            Some(c) => c.fetched_at.elapsed() >= self.config.attr_ttl,
-            None => true,
+        let stale = {
+            let dc = self.dir_cache.lock().unwrap();
+            match dc.get(&ino) {
+                Some(c) => c.fetched_at.elapsed() >= self.config.attr_ttl,
+                None => true,
+            }
         };
         if stale {
+            // NOTE: network I/O outside the lock.
             let entries = self.client.list_dir(path).map_err(|ref e| Self::err_to_errno(e))?;
             let child_names: HashSet<String> = entries.iter().map(|de| de.name.clone()).collect();
-            self.dir_cache.insert(ino, DirCacheEntry { entries, child_names, fetched_at: Instant::now() });
+            let mut dc = self.dir_cache.lock().unwrap();
+            dc.insert(ino, DirCacheEntry { entries, child_names, fetched_at: Instant::now() });
         }
-        Ok(self.dir_cache.get(&ino).unwrap().entries.clone())
+        let dc = self.dir_cache.lock().unwrap();
+        Ok(dc.get(&ino).unwrap().entries.clone())
     }
 
     /// Check if a child name exists in a recently-listed directory.
     /// Returns Some(true/false) if cache is fresh, None if stale/missing.
     fn dir_cache_has_child(&self, parent_ino: u64, name: &str) -> Option<bool> {
-        self.dir_cache.get(&parent_ino).and_then(|c| {
+        let dc = self.dir_cache.lock().unwrap();
+        dc.get(&parent_ino).and_then(|c| {
             if c.fetched_at.elapsed() < self.config.attr_ttl {
                 Some(c.child_names.contains(name))
             } else {
@@ -211,7 +233,7 @@ impl VedaFs {
     }
 
     fn invalidate_dir_cache(&mut self, parent_ino: u64) {
-        self.dir_cache.remove(&parent_ino);
+        self.dir_cache.lock().unwrap().remove(&parent_ino);
     }
 
     fn stat_and_cache_attr(&self, path: &str, ino: u64) -> Result<FileAttr, i32> {

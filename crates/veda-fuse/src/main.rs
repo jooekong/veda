@@ -164,7 +164,7 @@ fn mount_and_serve(
     let vedafs = fs::VedaFs::new(client, config, notify_fd);
     let mut watcher = sse::SseWatcher::start(
         server, key,
-        vedafs.inodes(), vedafs.read_cache(),
+        vedafs.inodes(), vedafs.read_cache(), vedafs.dir_cache(),
     );
     let options = build_fuse_options(opts);
     install_signal_handler(mountpoint.to_string());
