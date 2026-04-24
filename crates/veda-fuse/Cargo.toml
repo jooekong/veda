@@ -4,6 +4,10 @@ version = "0.1.0"
 edition = "2021"
 license = "MIT"
 
+[lib]
+name = "veda_fuse"
+path = "src/lib.rs"
+
 [[bin]]
 name = "veda-fuse"
 path = "src/main.rs"

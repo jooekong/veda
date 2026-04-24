@@ -100,16 +100,27 @@ impl VedaClient {
         api.data.ok_or_else(|| ClientError::Io("no data in response".into()))
     }
 
-    pub fn read_file(&self, path: &str) -> Result<String> {
+    pub fn read_file(&self, path: &str) -> Result<Vec<u8>> {
         let path = path.trim_start_matches('/');
         let resp = self.http.get(format!("{}/v1/fs/{path}", self.base))
             .bearer_auth(&self.key)
             .send()
             .map_err(|e| ClientError::Io(e.to_string()))?;
         let status = resp.status();
-        let body = resp.text().map_err(|e| ClientError::Io(e.to_string()))?;
-        Self::check_status(status, &body)?;
-        Ok(body)
+        if !status.is_success() {
+            // Error bodies are small + expected UTF-8; read as text for diagnostics.
+            let body = resp.text().unwrap_or_default();
+            return Err(match status.as_u16() {
+                404 => ClientError::NotFound,
+                409 => ClientError::AlreadyExists,
+                403 => ClientError::PermissionDenied,
+                412 => ClientError::Conflict,
+                _ => ClientError::Io(format!("HTTP {status}: {body}")),
+            });
+        }
+        resp.bytes()
+            .map(|b| b.to_vec())
+            .map_err(|e| ClientError::Io(e.to_string()))
     }
 
     pub fn write_file(

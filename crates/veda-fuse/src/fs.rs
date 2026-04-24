@@ -339,8 +339,7 @@ impl Filesystem for VedaFs {
                 }
             } else {
                 match self.client.read_file(&path) {
-                    Ok(content) => {
-                        let mut bytes = content.into_bytes();
+                    Ok(mut bytes) => {
                         let target = new_size as usize;
                         if target < bytes.len() { bytes.truncate(target); }
                         else if target > bytes.len() { bytes.resize(target, 0); }
@@ -447,7 +446,7 @@ impl Filesystem for VedaFs {
                         (Vec::new(), rev)
                     } else {
                         let buf = match self.client.read_file(&path) {
-                            Ok(content) => content.into_bytes(),
+                            Ok(bytes) => bytes,
                             Err(ClientError::NotFound) => Vec::new(),
                             Err(ref e) => { reply.error(Self::err_to_errno(e)); return; }
                         };
@@ -494,8 +493,7 @@ impl Filesystem for VedaFs {
         let file_size = self.inode_get_attr(ino).map(|a| a.size).unwrap_or(0);
         if self.cache_is_cacheable(file_size) {
             match self.client.read_file(&path) {
-                Ok(content) => {
-                    let bytes = content.into_bytes();
+                Ok(bytes) => {
                     let off = offset as usize;
                     if off >= bytes.len() { reply.data(&[]); }
                     else {

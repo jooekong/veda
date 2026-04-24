@@ -1,8 +1,4 @@
-mod cache;
-mod client;
-mod fs;
-mod inode;
-mod sse;
+use veda_fuse::{client, fs, sse};
 
 use std::os::fd::{AsRawFd, FromRawFd, RawFd};
 use std::process::Command;
