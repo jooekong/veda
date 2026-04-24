@@ -61,17 +61,23 @@ impl VedaClient {
         }
     }
 
+    /// Map an HTTP error status + body to a ClientError.
+    /// Caller must have already confirmed the status is not success.
+    fn map_error_status(status: reqwest::StatusCode, body: &str) -> ClientError {
+        match status.as_u16() {
+            404 => ClientError::NotFound,
+            409 => ClientError::AlreadyExists,
+            403 => ClientError::PermissionDenied,
+            412 => ClientError::Conflict,
+            _ => ClientError::Io(format!("HTTP {status}: {body}")),
+        }
+    }
+
     fn check_status(status: reqwest::StatusCode, body: &str) -> Result<()> {
         if status.is_success() {
             return Ok(());
         }
-        match status.as_u16() {
-            404 => Err(ClientError::NotFound),
-            409 => Err(ClientError::AlreadyExists),
-            403 => Err(ClientError::PermissionDenied),
-            412 => Err(ClientError::Conflict),
-            _ => Err(ClientError::Io(format!("HTTP {status}: {body}"))),
-        }
+        Err(Self::map_error_status(status, body))
     }
 
     pub fn stat(&self, path: &str) -> Result<FileInfo> {
@@ -110,13 +116,7 @@ impl VedaClient {
         if !status.is_success() {
             // Error bodies are small + expected UTF-8; read as text for diagnostics.
             let body = resp.text().unwrap_or_default();
-            return Err(match status.as_u16() {
-                404 => ClientError::NotFound,
-                409 => ClientError::AlreadyExists,
-                403 => ClientError::PermissionDenied,
-                412 => ClientError::Conflict,
-                _ => ClientError::Io(format!("HTTP {status}: {body}")),
-            });
+            return Err(Self::map_error_status(status, &body));
         }
         resp.bytes()
             .map(|b| b.to_vec())

@@ -14,8 +14,22 @@ fn spawn_mock(body: Vec<u8>) -> String {
     let port = listener.local_addr().unwrap().port();
     thread::spawn(move || {
         if let Ok((mut stream, _)) = listener.accept() {
-            let mut buf = [0u8; 4096];
-            let _ = stream.read(&mut buf); // read request line + headers
+            // Read request headers until we see the CRLFCRLF terminator.
+            // We don't need the body for this mock (GET has no body).
+            let mut header_buf: Vec<u8> = Vec::with_capacity(1024);
+            let mut chunk = [0u8; 512];
+            loop {
+                match stream.read(&mut chunk) {
+                    Ok(0) => break, // EOF
+                    Ok(n) => {
+                        header_buf.extend_from_slice(&chunk[..n]);
+                        if header_buf.windows(4).any(|w| w == b"\r\n\r\n") {
+                            break;
+                        }
+                    }
+                    Err(_) => break,
+                }
+            }
             let header = format!(
                 "HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
                 body.len()
