@@ -12,33 +12,39 @@
 
 ## Pre-flight
 
-- [x] **Step 0.1: Confirm starting baseline is green**
+- **Step 0.1: Confirm starting baseline is green**
 
 Run:
+
 ```bash
 cd /Users/konglingqiao/code/personal/veda/crates/veda-fuse && cargo build && cargo test
 ```
+
 Expected: build succeeds, existing tests in `cache.rs`, `main.rs`, `sse.rs` all pass. If any fail, stop and investigate before starting.
 
-- [x] **Step 0.2: Record current git status**
+- **Step 0.2: Record current git status**
 
 Run:
+
 ```bash
 cd /Users/konglingqiao/code/personal/veda && git status
 ```
+
 Expected: the three pre-existing dirty files (`crates/veda-fuse/src/fs.rs`, `crates/veda-fuse/src/main.rs`, `crates/veda-store/src/mysql.rs`) plus `docs/manual-test-sop.md` and `scripts/` untracked. Note the SHA: `git rev-parse HEAD` — we want every commit from this plan to stack cleanly on top.
 
 ---
 
 ## File Structure
 
-| File | Task | Responsibility |
-|---|---|---|
-| `crates/veda-fuse/src/fs.rs` | 1, 2, 4 | FUSE filesystem ops. Touched for readdir attr fix, `read_file` call sites, and making `dir_cache` shareable. |
-| `crates/veda-fuse/src/client.rs` | 2 | HTTP client. `read_file` signature changes from `Result<String>` to `Result<Vec<u8>>`. |
-| `crates/veda-fuse/src/sse.rs` | 4 | SSE watcher. Accept `dir_cache` arg and invalidate it on events. |
-| `crates/veda-fuse/src/main.rs` | 3 | Binary entry. Replace `exit(0)` signal handler with graceful unmount. |
-| `crates/veda-fuse/tests/binary_roundtrip.rs` | 2 (new) | Integration test using a local mock HTTP server to prove binary bytes survive round-trip. |
+
+| File                                         | Task    | Responsibility                                                                                               |
+| -------------------------------------------- | ------- | ------------------------------------------------------------------------------------------------------------ |
+| `crates/veda-fuse/src/fs.rs`                 | 1, 2, 4 | FUSE filesystem ops. Touched for readdir attr fix, `read_file` call sites, and making `dir_cache` shareable. |
+| `crates/veda-fuse/src/client.rs`             | 2       | HTTP client. `read_file` signature changes from `Result<String>` to `Result<Vec<u8>>`.                       |
+| `crates/veda-fuse/src/sse.rs`                | 4       | SSE watcher. Accept `dir_cache` arg and invalidate it on events.                                             |
+| `crates/veda-fuse/src/main.rs`               | 3       | Binary entry. Replace `exit(0)` signal handler with graceful unmount.                                        |
+| `crates/veda-fuse/tests/binary_roundtrip.rs` | 2 (new) | Integration test using a local mock HTTP server to prove binary bytes survive round-trip.                    |
+
 
 ---
 
@@ -49,11 +55,12 @@ Expected: the three pre-existing dirty files (`crates/veda-fuse/src/fs.rs`, `cra
 **Fix (Option A, client-side):** Only cache the attr when `de.size_bytes.is_some()` OR the entry is a directory (dirs legitimately have size=0). For `readdirplus`, also pass `ttl = Duration::ZERO` when size is unknown so the kernel doesn't cache it either — it will immediately issue a `getattr` which will do a real `client.stat`.
 
 **Files:**
+
 - Modify: `crates/veda-fuse/src/fs.rs` — `readdir` around line 373-379, `readdirplus` around line 405-412
 
 ### Steps
 
-- [x] **Step 1.1: Add the fs.rs test module skeleton**
+- **Step 1.1: Add the fs.rs test module skeleton**
 
 File: `crates/veda-fuse/src/fs.rs` — append at end of file.
 
@@ -90,15 +97,17 @@ mod tests {
 }
 ```
 
-- [x] **Step 1.2: Run the new tests to confirm the helper baseline works**
+- **Step 1.2: Run the new tests to confirm the helper baseline works**
 
 Run:
+
 ```bash
 cd /Users/konglingqiao/code/personal/veda/crates/veda-fuse && cargo test --lib fs::tests
 ```
+
 Expected: both tests PASS. These document the helper's current behavior; the real fix lives in the callers.
 
-- [x] **Step 1.3: Add a behavioral test for conditional attr caching**
+- **Step 1.3: Add a behavioral test for conditional attr caching**
 
 File: `crates/veda-fuse/src/fs.rs` — append inside the `mod tests` block (under the helpers).
 
@@ -128,15 +137,17 @@ File: `crates/veda-fuse/src/fs.rs` — append inside the `mod tests` block (unde
     }
 ```
 
-- [x] **Step 1.4: Run the behavioral tests to confirm they fail**
+- **Step 1.4: Run the behavioral tests to confirm they fail**
 
 Run:
+
 ```bash
 cd /Users/konglingqiao/code/personal/veda/crates/veda-fuse && cargo test --lib fs::tests::file_with_unknown_size_is_not_cached fs::tests::file_with_known_size_is_cached fs::tests::directory_is_always_cached_even_with_none_size
 ```
+
 Expected: FAIL with "cannot find function `should_cache_attr`" — because we haven't added it to the production code yet.
 
-- [x] **Step 1.5: Add `should_cache_attr` as a private `VedaFs` method and wire it into readdir/readdirplus**
+- **Step 1.5: Add `should_cache_attr` as a private `VedaFs` method and wire it into readdir/readdirplus**
 
 File: `crates/veda-fuse/src/fs.rs`.
 
@@ -155,6 +166,7 @@ File: `crates/veda-fuse/src/fs.rs`.
 **(b) Update `readdir` — replace the loop body at lines 373-379:**
 
 Before:
+
 ```rust
         for de in &entries {
             let child_ino = self.inode_get_or_create(&de.path);
@@ -166,6 +178,7 @@ Before:
 ```
 
 After:
+
 ```rust
         for de in &entries {
             let child_ino = self.inode_get_or_create(&de.path);
@@ -181,6 +194,7 @@ After:
 **(c) Update `readdirplus` — lines 402-413:**
 
 Before:
+
 ```rust
         let mut full: Vec<(u64, String, FileAttr)> = Vec::with_capacity(entries.len() + 2);
         full.push((ino, ".".to_string(), self_attr));
@@ -197,6 +211,7 @@ Before:
 ```
 
 After:
+
 ```rust
         // (ino, name, attr, cache_ok). When cache_ok=false we pass Duration::ZERO
         // as TTL so the kernel immediately re-fetches via getattr.
@@ -219,23 +234,26 @@ After:
         }
 ```
 
-- [x] **Step 1.6: Delete the test-only `should_cache_attr` shim from the test module**
+- **Step 1.6: Delete the test-only `should_cache_attr` shim from the test module**
 
 Remove the duplicated `fn should_cache_attr` from inside `mod tests` so the tests now reference `VedaFs::should_cache_attr`. Update each test to use `VedaFs::should_cache_attr(&de)` instead of bare `should_cache_attr(&de)`.
 
-- [x] **Step 1.7: Run all veda-fuse tests**
+- **Step 1.7: Run all veda-fuse tests**
 
 Run:
+
 ```bash
 cd /Users/konglingqiao/code/personal/veda/crates/veda-fuse && cargo test
 ```
+
 Expected: ALL PASS — the three new behavioral tests plus the two helper tests plus existing `cache`, `main`, `sse` tests.
 
-- [ ] **Step 1.8: Manual smoke test**
+- **Step 1.8: Manual smoke test**
 
 Document the manual verification steps the user should run (do not actually run them — they need a live mount).
 
 Run (user):
+
 ```bash
 # In one terminal, start veda-server (per existing docs/).
 # In another:
@@ -249,9 +267,10 @@ stat /tmp/veda/sizetest.bin
 # Expected: Size: 12345
 ```
 
-- [x] **Step 1.9: Commit**
+- **Step 1.9: Commit**
 
 Run:
+
 ```bash
 cd /Users/konglingqiao/code/personal/veda
 git add crates/veda-fuse/src/fs.rs
@@ -281,6 +300,7 @@ EOF
 **Fix:** Change the signature to return `Result<Vec<u8>>` via `resp.bytes()`. Update all 3 call sites in `fs.rs` to drop the now-redundant `.into_bytes()`. Add an integration test using a local mock HTTP server that serves non-UTF-8 bytes and verifies they round-trip cleanly.
 
 **Files:**
+
 - Modify: `crates/veda-fuse/src/client.rs:103-113`
 - Modify: `crates/veda-fuse/src/fs.rs:333, 432-433, 479-488`
 - Create: `crates/veda-fuse/tests/binary_roundtrip.rs`
@@ -288,7 +308,7 @@ EOF
 
 ### Steps
 
-- [x] **Step 2.1: Add dev-dependency for the mock server**
+- **Step 2.1: Add dev-dependency for the mock server**
 
 We use raw `std::net::TcpListener` to keep dep surface minimal — no new crates needed.
 
@@ -301,7 +321,7 @@ File: `crates/veda-fuse/Cargo.toml` — append:
 
 (This is effectively a no-op but documents the intent. Skip if the section would be empty.)
 
-- [x] **Step 2.2: Create the integration test file**
+- **Step 2.2: Create the integration test file**
 
 File: `crates/veda-fuse/tests/binary_roundtrip.rs` (new).
 
@@ -358,7 +378,7 @@ fn read_file_round_trips_empty_body() {
 }
 ```
 
-- [x] **Step 2.3: Expose the crate as a library for integration tests**
+- **Step 2.3: Expose the crate as a library for integration tests**
 
 Currently `veda-fuse` is binary-only (`[[bin]] name = "veda-fuse" path = "src/main.rs"`). To use `use veda_fuse::client::VedaClient` in `tests/`, add a library target that re-exports the modules.
 
@@ -383,6 +403,7 @@ path = "src/lib.rs"
 File: `crates/veda-fuse/src/main.rs` — change the module declarations to use the library instead:
 
 Before (lines 1-5):
+
 ```rust
 mod cache;
 mod client;
@@ -392,25 +413,29 @@ mod sse;
 ```
 
 After:
+
 ```rust
 use veda_fuse::{cache, client, fs, sse};
 ```
 
 (We drop `mod inode` because `main.rs` does not reference `inode` directly; if compile fails, add `inode` back.)
 
-- [x] **Step 2.4: Run the test — confirm it fails against current `read_file`**
+- **Step 2.4: Run the test — confirm it fails against current `read_file`**
 
 Run:
+
 ```bash
 cd /Users/konglingqiao/code/personal/veda/crates/veda-fuse && cargo test --test binary_roundtrip
 ```
+
 Expected: FAIL. Either `read_file` returns `Err(Io(...))` from a UTF-8 decode error, or `assert_eq!` fails because bytes were corrupted. Alternatively, test fails at compile time because the signature is `Result<String>` but we assert against `Vec<u8>` — equally valid proof the signature needs to change.
 
-- [x] **Step 2.5: Change `read_file` to return `Vec<u8>`**
+- **Step 2.5: Change `read_file` to return `Vec<u8>`**
 
 File: `crates/veda-fuse/src/client.rs` — replace lines 103-113.
 
 Before:
+
 ```rust
     pub fn read_file(&self, path: &str) -> Result<String> {
         let path = path.trim_start_matches('/');
@@ -426,6 +451,7 @@ Before:
 ```
 
 After:
+
 ```rust
     pub fn read_file(&self, path: &str) -> Result<Vec<u8>> {
         let path = path.trim_start_matches('/');
@@ -451,13 +477,14 @@ After:
     }
 ```
 
-- [x] **Step 2.6: Update `fs.rs` call sites to drop redundant `.into_bytes()`**
+- **Step 2.6: Update `fs.rs` call sites to drop redundant `.into_bytes()`**
 
 File: `crates/veda-fuse/src/fs.rs`.
 
 **(a) `setattr` truncate path (line ~333):**
 
 Before:
+
 ```rust
                 match self.client.read_file(&path) {
                     Ok(content) => {
@@ -465,6 +492,7 @@ Before:
 ```
 
 After:
+
 ```rust
                 match self.client.read_file(&path) {
                     Ok(mut bytes) => {
@@ -473,6 +501,7 @@ After:
 **(b) `open` for write (lines ~432-433):**
 
 Before:
+
 ```rust
                         let buf = match self.client.read_file(&path) {
                             Ok(content) => content.into_bytes(),
@@ -480,6 +509,7 @@ Before:
 ```
 
 After:
+
 ```rust
                         let buf = match self.client.read_file(&path) {
                             Ok(bytes) => bytes,
@@ -489,6 +519,7 @@ After:
 **(c) `read` hot path (lines ~479-488):**
 
 Before:
+
 ```rust
             match self.client.read_file(&path) {
                 Ok(content) => {
@@ -497,31 +528,37 @@ Before:
 ```
 
 After:
+
 ```rust
             match self.client.read_file(&path) {
                 Ok(bytes) => {
                     let off = offset as usize;
 ```
 
-- [x] **Step 2.7: Run the integration test — confirm it passes**
+- **Step 2.7: Run the integration test — confirm it passes**
 
 Run:
+
 ```bash
 cd /Users/konglingqiao/code/personal/veda/crates/veda-fuse && cargo test --test binary_roundtrip
 ```
+
 Expected: BOTH tests PASS.
 
-- [x] **Step 2.8: Run the full test suite to check for regressions**
+- **Step 2.8: Run the full test suite to check for regressions**
 
 Run:
+
 ```bash
 cd /Users/konglingqiao/code/personal/veda/crates/veda-fuse && cargo test
 ```
+
 Expected: ALL PASS (Task 1 tests + cache/main/sse tests + new binary_roundtrip integration).
 
-- [ ] **Step 2.9: Manual smoke test — real binary file through a live mount**
+- **Step 2.9: Manual smoke test — real binary file through a live mount**
 
 Document for user (do not run automatically):
+
 ```bash
 # With mount active from Task 1:
 # Upload /tmp/test.png via API (any real PNG file).
@@ -532,9 +569,10 @@ md5 /path/to/any/image.png  # read original
 # or produce a different hash due to UTF-8 replacement chars.
 ```
 
-- [x] **Step 2.10: Commit**
+- **Step 2.10: Commit**
 
 Run:
+
 ```bash
 cd /Users/konglingqiao/code/personal/veda
 git add crates/veda-fuse/src/client.rs crates/veda-fuse/src/fs.rs crates/veda-fuse/src/lib.rs crates/veda-fuse/src/main.rs crates/veda-fuse/Cargo.toml crates/veda-fuse/tests/binary_roundtrip.rs
@@ -566,21 +604,24 @@ EOF
 **Fix:** On signal, spawn `umount <mountpoint>` (using the same platform-dispatched `umount_argv`). The fuser kernel loop exits when the mount disappears, `mount2` returns, `destroy` runs, dirty handles flush. Keep a 5-second watchdog: if `mount2` hasn't returned by then (e.g., hung FS, stuck HTTP flush), `exit(1)` as a last resort so the process doesn't zombie forever.
 
 **Files:**
+
 - Modify: `crates/veda-fuse/src/main.rs:199-208` (signal handler) and call sites at line 174.
 
 ### Steps
 
-- [x] **Step 3.1: Refactor `umount_argv` → make it a reusable helper and add a test**
+- **Step 3.1: Refactor `umount_argv` → make it a reusable helper and add a test**
 
 The function already exists (`main.rs:219-229`) and has tests. We just need to be sure the signal handler can call it. It takes `&str` and returns `Vec<String>`, which is already suitable. No changes needed here — verify by reading the existing tests.
 
 Run:
+
 ```bash
 cd /Users/konglingqiao/code/personal/veda/crates/veda-fuse && cargo test --bin veda-fuse umount_argv
 ```
+
 Expected: PASS — baseline confirmation.
 
-- [x] **Step 3.2: Add a test for the new helper `trigger_graceful_unmount`**
+- **Step 3.2: Add a test for the new helper `trigger_graceful_unmount`**
 
 File: `crates/veda-fuse/src/main.rs` — add to the existing `#[cfg(test)] mod tests` block at the bottom.
 
@@ -597,18 +638,21 @@ File: `crates/veda-fuse/src/main.rs` — add to the existing `#[cfg(test)] mod t
 ```
 
 Run:
+
 ```bash
 cd /Users/konglingqiao/code/personal/veda/crates/veda-fuse && cargo test --bin veda-fuse graceful_unmount_builds_expected_argv_for_nonexistent_mount
 ```
+
 Expected: PASS (trivially — the helper already works, we're just proving a test harness exists).
 
-- [x] **Step 3.3: Rewrite `install_signal_handler` to trigger umount instead of exit**
+- **Step 3.3: Rewrite `install_signal_handler` to trigger umount instead of exit**
 
 File: `crates/veda-fuse/src/main.rs`.
 
 **(a) Change the signature** — it now takes the mountpoint:
 
 Before (line 199-208):
+
 ```rust
 fn install_signal_handler() {
     std::thread::spawn(|| {
@@ -623,6 +667,7 @@ fn install_signal_handler() {
 ```
 
 After:
+
 ```rust
 fn install_signal_handler(mountpoint: String) {
     std::thread::spawn(move || {
@@ -654,32 +699,38 @@ fn install_signal_handler(mountpoint: String) {
 **(b) Update the call site** in `mount_and_serve` (line 174):
 
 Before:
+
 ```rust
     install_signal_handler();
 ```
 
 After:
+
 ```rust
     install_signal_handler(mountpoint.to_string());
 ```
 
-- [x] **Step 3.4: Build to confirm it compiles**
+- **Step 3.4: Build to confirm it compiles**
 
 Run:
+
 ```bash
 cd /Users/konglingqiao/code/personal/veda/crates/veda-fuse && cargo build
 ```
+
 Expected: SUCCESS, no warnings.
 
-- [x] **Step 3.5: Run the full test suite**
+- **Step 3.5: Run the full test suite**
 
 Run:
+
 ```bash
 cd /Users/konglingqiao/code/personal/veda/crates/veda-fuse && cargo test
 ```
+
 Expected: ALL PASS.
 
-- [ ] **Step 3.6: Manual signal-handling smoke test**
+- **Step 3.6: Manual signal-handling smoke test**
 
 Document for user (cannot be automated — needs a live mount):
 
@@ -704,9 +755,10 @@ cat /tmp/veda/ctrltest.txt
 # Before the fix: file would be empty or 404 because destroy() never ran.
 ```
 
-- [x] **Step 3.7: Commit**
+- **Step 3.7: Commit**
 
 Run:
+
 ```bash
 cd /Users/konglingqiao/code/personal/veda
 git add crates/veda-fuse/src/main.rs
@@ -740,13 +792,14 @@ EOF
 **Fix:** Wrap `dir_cache` in `Arc<Mutex<HashMap<u64, DirCacheEntry>>>`. Expose `VedaFs::dir_cache()` getter alongside `inodes()` / `read_cache()`. Pass it into `SseWatcher::start`. In `invalidate_caches`, compute `parent_path(path)`, look up its ino via `InodeTable`, and remove it from `dir_cache`.
 
 **Files:**
+
 - Modify: `crates/veda-fuse/src/fs.rs` — struct field, constructor, all `dir_cache` access sites (lines 64, 180-207, 555, 580, 599, 624, 653-654), and add `pub fn dir_cache()`.
 - Modify: `crates/veda-fuse/src/sse.rs` — add `dir_cache` parameter to `start` and `invalidate_caches`; invalidate parent's entry.
 - Modify: `crates/veda-fuse/src/main.rs:171` — pass `vedafs.dir_cache()` into `SseWatcher::start`.
 
 ### Steps
 
-- [x] **Step 4.1: Add a failing test for `invalidate_caches` that exercises the new behavior**
+- **Step 4.1: Add a failing test for `invalidate_caches` that exercises the new behavior**
 
 File: `crates/veda-fuse/src/sse.rs` — append to the existing `mod tests` block at the bottom.
 
@@ -781,21 +834,24 @@ File: `crates/veda-fuse/src/sse.rs` — append to the existing `mod tests` block
 
 Note: `DirCacheMap` and `DirCacheEntry::empty_for_test()` don't exist yet — that's why this test fails. We add them in Step 4.3.
 
-- [x] **Step 4.2: Run the test — confirm compile error**
+- **Step 4.2: Run the test — confirm compile error**
 
 Run:
+
 ```bash
 cd /Users/konglingqiao/code/personal/veda/crates/veda-fuse && cargo test --lib sse::tests::invalidate_caches_removes_parent_dir_cache_entry 2>&1 | head -40
 ```
+
 Expected: FAIL at compile — "no type `DirCacheMap` in module `fs`" or similar.
 
-- [x] **Step 4.3: Introduce `DirCacheMap` type alias and `DirCacheEntry::empty_for_test`**
+- **Step 4.3: Introduce `DirCacheMap` type alias and `DirCacheEntry::empty_for_test`**
 
 File: `crates/veda-fuse/src/fs.rs`.
 
 **(a) Make `DirCacheEntry` `pub(crate)`** and add a test-only ctor. Around line 51:
 
 Before:
+
 ```rust
 struct DirCacheEntry {
     entries: Vec<DirEntry>,
@@ -805,6 +861,7 @@ struct DirCacheEntry {
 ```
 
 After:
+
 ```rust
 pub(crate) struct DirCacheEntry {
     pub(crate) entries: Vec<DirEntry>,
@@ -830,18 +887,20 @@ impl DirCacheEntry {
 pub type DirCacheMap = Arc<Mutex<HashMap<u64, DirCacheEntry>>>;
 ```
 
-- [x] **Step 4.4: Rewrap `dir_cache` in `Arc<Mutex<...>>`**
+- **Step 4.4: Rewrap `dir_cache` in `Arc<Mutex<...>>`**
 
 File: `crates/veda-fuse/src/fs.rs`.
 
 **(a) Field declaration** (line 64):
 
 Before:
+
 ```rust
     dir_cache: HashMap<u64, DirCacheEntry>,
 ```
 
 After:
+
 ```rust
     dir_cache: DirCacheMap,
 ```
@@ -849,11 +908,13 @@ After:
 **(b) Constructor** (line 73):
 
 Before:
+
 ```rust
         Self { client, inodes, config, read_cache, next_fh: 1, write_handles: HashMap::new(), dir_cache: HashMap::new(), notify_fd }
 ```
 
 After:
+
 ```rust
         let dir_cache: DirCacheMap = Arc::new(Mutex::new(HashMap::new()));
         Self { client, inodes, config, read_cache, next_fh: 1, write_handles: HashMap::new(), dir_cache, notify_fd }
@@ -913,7 +974,7 @@ After:
     }
 ```
 
-- [x] **Step 4.5: Thread `dir_cache` through `SseWatcher::start` and `invalidate_caches`**
+- **Step 4.5: Thread `dir_cache` through `SseWatcher::start` and `invalidate_caches`**
 
 File: `crates/veda-fuse/src/sse.rs`.
 
@@ -928,6 +989,7 @@ use crate::inode::InodeTable;
 **(b) `SseWatcher::start` signature** (line 29-34):
 
 Before:
+
 ```rust
     pub fn start(
         server: &str,
@@ -938,6 +1000,7 @@ Before:
 ```
 
 After:
+
 ```rust
     pub fn start(
         server: &str,
@@ -951,6 +1014,7 @@ After:
 **(c)** Inside the spawned thread, the closure captures `inodes`, `read_cache`; also capture `dir_cache`:
 
 Before (line 87-91):
+
 ```rust
                                     invalidate_caches(
                                         &event.path,
@@ -960,6 +1024,7 @@ Before (line 87-91):
 ```
 
 After:
+
 ```rust
                                     invalidate_caches(
                                         &event.path,
@@ -972,6 +1037,7 @@ After:
 **(d) `invalidate_caches` signature and body** (lines 139-159):
 
 Before:
+
 ```rust
 fn invalidate_caches(
     path: &str,
@@ -997,6 +1063,7 @@ fn invalidate_caches(
 ```
 
 After:
+
 ```rust
 fn invalidate_caches(
     path: &str,
@@ -1035,11 +1102,12 @@ fn invalidate_caches(
 }
 ```
 
-- [x] **Step 4.6: Update the call site in `main.rs`**
+- **Step 4.6: Update the call site in `main.rs`**
 
 File: `crates/veda-fuse/src/main.rs` — lines 169-172.
 
 Before:
+
 ```rust
     let mut watcher = sse::SseWatcher::start(
         server, key,
@@ -1048,6 +1116,7 @@ Before:
 ```
 
 After:
+
 ```rust
     let mut watcher = sse::SseWatcher::start(
         server, key,
@@ -1055,15 +1124,17 @@ After:
     );
 ```
 
-- [x] **Step 4.7: Run the target test — confirm it passes**
+- **Step 4.7: Run the target test — confirm it passes**
 
 Run:
+
 ```bash
 cd /Users/konglingqiao/code/personal/veda/crates/veda-fuse && cargo test --lib sse::tests::invalidate_caches_removes_parent_dir_cache_entry
 ```
+
 Expected: PASS.
 
-- [x] **Step 4.8: Add one more sse.rs test — sanity that read_cache + inode invalidation still work**
+- **Step 4.8: Add one more sse.rs test — sanity that read_cache + inode invalidation still work**
 
 File: `crates/veda-fuse/src/sse.rs` — append to the `mod tests` block.
 
@@ -1105,20 +1176,24 @@ File: `crates/veda-fuse/src/sse.rs` — append to the `mod tests` block.
 ```
 
 Run:
+
 ```bash
 cd /Users/konglingqiao/code/personal/veda/crates/veda-fuse && cargo test --lib sse::tests
 ```
+
 Expected: ALL sse tests pass (new + existing parent_path and sse_event tests).
 
-- [x] **Step 4.9: Full test suite sanity**
+- **Step 4.9: Full test suite sanity**
 
 Run:
+
 ```bash
 cd /Users/konglingqiao/code/personal/veda/crates/veda-fuse && cargo test
 ```
+
 Expected: ALL PASS, no regressions from tasks 1-3.
 
-- [ ] **Step 4.10: Manual cross-client SSE test**
+- **Step 4.10: Manual cross-client SSE test**
 
 Document for user (needs two mounts or a mount + direct API call):
 
@@ -1142,9 +1217,10 @@ ls /tmp/vedaA/somedir/newfile.txt
 # Before fix: ENOENT for up to 5s (attr_ttl).
 ```
 
-- [x] **Step 4.11: Commit**
+- **Step 4.11: Commit**
 
 Run:
+
 ```bash
 cd /Users/konglingqiao/code/personal/veda
 git add crates/veda-fuse/src/fs.rs crates/veda-fuse/src/sse.rs crates/veda-fuse/src/main.rs
@@ -1175,22 +1251,26 @@ EOF
 
 ## Wrap-up
 
-- [x] **Step W.1: Full test summary**
+- **Step W.1: Full test summary**
 
 Run:
+
 ```bash
 cd /Users/konglingqiao/code/personal/veda/crates/veda-fuse && cargo test 2>&1 | tail -20
 ```
+
 Expected: summary shows `test result: ok. N passed; 0 failed` for each of: `--lib`, `--bin veda-fuse`, `--test binary_roundtrip`.
 
-- [x] **Step W.2: Git log review**
+- **Step W.2: Git log review**
 
 Run:
+
 ```bash
 cd /Users/konglingqiao/code/personal/veda && git log --oneline -5
 ```
+
 Expected: 4 new commits on top of `8aae222`, each a single task's fix.
 
-- [x] **Step W.3: Report to Joe**
+- **Step W.3: Report to Joe**
 
 Summarize in Chinese: tasks completed, test counts (before: N, after: N+M), manual smoke-tests pending for Tasks 1/2/3/4, recommended next items from the remaining list.
