@@ -167,7 +167,7 @@ fn mount_and_serve(
         vedafs.inodes(), vedafs.read_cache(),
     );
     let options = build_fuse_options(opts);
-    install_signal_handler();
+    install_signal_handler(mountpoint.to_string());
     let result = fuser::mount2(vedafs, mountpoint, &options);
     watcher.stop();
     result.map_err(Into::into)
@@ -192,13 +192,28 @@ fn wait_for_child_ready(read_fd: RawFd, child: nix::unistd::Pid) -> anyhow::Resu
     }
 }
 
-fn install_signal_handler() {
-    std::thread::spawn(|| {
+fn install_signal_handler(mountpoint: String) {
+    std::thread::spawn(move || {
         let mut signals = signal_hook::iterator::Signals::new([libc::SIGINT, libc::SIGTERM])
             .expect("failed to register signal handler");
         for sig in signals.forever() {
-            eprintln!("\nveda: received signal {sig}, unmounting...");
-            std::process::exit(0);
+            eprintln!("\nveda: received signal {sig}, unmounting {mountpoint}...");
+            // Trigger graceful unmount: this causes the FUSE kernel loop to exit,
+            // fuser::mount2 returns, VedaFs::destroy runs, dirty write handles flush.
+            let argv = umount_argv(&mountpoint);
+            let _ = Command::new(&argv[0]).args(&argv[1..]).status();
+
+            // Watchdog: if mount2 hasn't returned in 5s, force-exit so we don't
+            // zombie forever on a wedged FS. Data may still be lost in that case.
+            std::thread::spawn(|| {
+                std::thread::sleep(std::time::Duration::from_secs(5));
+                eprintln!("veda: unmount watchdog timeout, forcing exit");
+                std::process::exit(1);
+            });
+
+            // Don't exit from the signal handler thread itself — let the main
+            // thread return from mount2 naturally so destroy() runs.
+            return;
         }
     });
 }
@@ -261,5 +276,15 @@ mod tests {
         let argv = umount_argv("/mnt/test");
         assert!(!argv.is_empty());
         assert!(argv.last().unwrap() == "/mnt/test");
+    }
+
+    #[test]
+    fn graceful_unmount_builds_expected_argv_for_nonexistent_mount() {
+        // Unit test: we don't actually run the command (the mount doesn't exist),
+        // we just verify the argv we'd pass to Command::new matches what umount_argv produces.
+        let mp = "/tmp/veda-test-nonexistent-xyz123";
+        let argv = umount_argv(mp);
+        assert!(!argv.is_empty());
+        assert_eq!(argv.last().unwrap(), mp);
     }
 }
