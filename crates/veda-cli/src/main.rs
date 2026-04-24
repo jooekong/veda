@@ -67,6 +67,14 @@ enum Commands {
         mode: String,
         #[arg(long, default_value = "10")]
         limit: usize,
+        /// Detail level: abstract, overview, full
+        #[arg(long, default_value = "full")]
+        detail_level: String,
+    },
+    /// Show L0/L1 summary for a file or directory
+    Summary {
+        /// Remote path
+        path: String,
     },
     /// Collection management
     Collection {
@@ -283,8 +291,15 @@ async fn main() -> anyhow::Result<()> {
             c.mkdir(cfg.ws_key()?, &path).await?;
             println!("Created directory {path}");
         }
-        Commands::Search { query, mode, limit } => {
-            let resp = c.search(cfg.ws_key()?, &query, &mode, limit).await?;
+        Commands::Search {
+            query,
+            mode,
+            limit,
+            detail_level,
+        } => {
+            let resp = c
+                .search(cfg.ws_key()?, &query, &mode, limit, &detail_level)
+                .await?;
             if let Some(arr) = resp["data"].as_array() {
                 for hit in arr {
                     let path = hit["path"].as_str().unwrap_or("?");
@@ -295,9 +310,26 @@ async fn main() -> anyhow::Result<()> {
                         .chars()
                         .take(80)
                         .collect::<String>();
-                    println!("{score:.3}\t{path}\t{content}");
+                    print!("{score:.3}\t{path}\t{content}");
+                    if let Some(l0) = hit["l0_abstract"].as_str() {
+                        print!("\n  L0: {l0}");
+                    }
+                    if let Some(l1) = hit["l1_overview"].as_str() {
+                        let preview: String = l1.chars().take(120).collect();
+                        print!("\n  L1: {preview}...");
+                    }
+                    println!();
                 }
             }
+        }
+        Commands::Summary { path } => {
+            let resp = c.get_summary(cfg.ws_key()?, &path).await?;
+            let data = &resp["data"];
+            println!("Path: {}", data["path"].as_str().unwrap_or("?"));
+            println!("\n--- L0 Abstract ---");
+            println!("{}", data["l0_abstract"].as_str().unwrap_or("(none)"));
+            println!("\n--- L1 Overview ---");
+            println!("{}", data["l1_overview"].as_str().unwrap_or("(none)"));
         }
         Commands::Collection { action } => match action {
             CollectionCmd::Create {

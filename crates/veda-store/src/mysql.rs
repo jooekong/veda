@@ -6,9 +6,9 @@ use sqlx::{MySqlPool, Row, Transaction};
 use veda_core::store::{AuthStore, CollectionMetaStore, MetadataStore, MetadataTx, TaskQueue};
 use veda_types::{
     Account, AccountStatus, ApiKeyRecord, CollectionSchema, CollectionStatus, CollectionType,
-    Dentry, FileChunk, FileRecord, FsEvent, FsEventType, KeyPermission, KeyStatus, OutboxEvent,
-    OutboxEventType, OutboxStatus, Result, SourceType, StorageStats, StorageType, VedaError,
-    Workspace, WorkspaceKey, WorkspaceStatus,
+    Dentry, FileChunk, FileRecord, FileSummary, FsEvent, FsEventType, KeyPermission, KeyStatus,
+    OutboxEvent, OutboxEventType, OutboxStatus, Result, SourceType, StorageStats, StorageType,
+    SummaryStatus, VedaError, Workspace, WorkspaceKey, WorkspaceStatus,
 };
 
 // Batched INSERT sizes chosen to stay well under a conservative
@@ -69,6 +69,8 @@ fn parse_outbox_event_type(s: &str) -> Result<OutboxEventType> {
         "chunk_sync" => Ok(OutboxEventType::ChunkSync),
         "chunk_delete" => Ok(OutboxEventType::ChunkDelete),
         "collection_sync" => Ok(OutboxEventType::CollectionSync),
+        "summary_sync" => Ok(OutboxEventType::SummarySync),
+        "dir_summary_sync" => Ok(OutboxEventType::DirSummarySync),
         _ => Err(storage_err(format!("unknown outbox event_type: {s}"))),
     }
 }
@@ -78,6 +80,8 @@ fn outbox_event_type_str(t: OutboxEventType) -> &'static str {
         OutboxEventType::ChunkSync => "chunk_sync",
         OutboxEventType::ChunkDelete => "chunk_delete",
         OutboxEventType::CollectionSync => "collection_sync",
+        OutboxEventType::SummarySync => "summary_sync",
+        OutboxEventType::DirSummarySync => "dir_summary_sync",
     }
 }
 
@@ -497,6 +501,20 @@ impl MysqlStore {
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
     UNIQUE INDEX idx_ws_name (workspace_id, name)
+)"#,
+            r#"CREATE TABLE IF NOT EXISTS veda_summaries (
+    id VARCHAR(36) PRIMARY KEY,
+    workspace_id VARCHAR(36) NOT NULL,
+    file_id VARCHAR(36),
+    dentry_id VARCHAR(36),
+    l0_abstract TEXT NOT NULL,
+    l1_overview TEXT NOT NULL,
+    status VARCHAR(16) DEFAULT 'pending',
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    UNIQUE INDEX idx_file (file_id),
+    UNIQUE INDEX idx_dentry (dentry_id),
+    INDEX idx_workspace (workspace_id)
 )"#,
         ];
         for s in stmts {
@@ -945,6 +963,106 @@ impl MetadataStore for MysqlStore {
             .map_err(|e| VedaError::Storage(e.to_string()))?;
         Ok(Box::new(MysqlMetadataTx { tx: Some(tx) }))
     }
+
+    async fn get_summary_by_file(&self, file_id: &str) -> Result<Option<FileSummary>> {
+        let row = sqlx::query(
+            r#"SELECT id, workspace_id, file_id, dentry_id, l0_abstract, l1_overview,
+                      status, created_at, updated_at
+               FROM veda_summaries WHERE file_id = ?"#,
+        )
+        .bind(file_id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(storage_err)?;
+        row.map(|r| row_to_summary(&r)).transpose()
+    }
+
+    async fn get_summary_by_dentry(&self, dentry_id: &str) -> Result<Option<FileSummary>> {
+        let row = sqlx::query(
+            r#"SELECT id, workspace_id, file_id, dentry_id, l0_abstract, l1_overview,
+                      status, created_at, updated_at
+               FROM veda_summaries WHERE dentry_id = ?"#,
+        )
+        .bind(dentry_id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(storage_err)?;
+        row.map(|r| row_to_summary(&r)).transpose()
+    }
+
+    async fn upsert_summary(&self, summary: &FileSummary) -> Result<()> {
+        sqlx::query(
+            r#"INSERT INTO veda_summaries (id, workspace_id, file_id, dentry_id, l0_abstract, l1_overview, status)
+               VALUES (?, ?, ?, ?, ?, ?, ?)
+               ON DUPLICATE KEY UPDATE
+                 l0_abstract = VALUES(l0_abstract),
+                 l1_overview = VALUES(l1_overview),
+                 status = VALUES(status)"#,
+        )
+        .bind(&summary.id)
+        .bind(&summary.workspace_id)
+        .bind(&summary.file_id)
+        .bind(&summary.dentry_id)
+        .bind(&summary.l0_abstract)
+        .bind(&summary.l1_overview)
+        .bind(serde_json::to_string(&summary.status).unwrap().trim_matches('"'))
+        .execute(&self.pool)
+        .await
+        .map_err(storage_err)?;
+        Ok(())
+    }
+
+    async fn delete_summary_by_file(&self, file_id: &str) -> Result<()> {
+        sqlx::query(r#"DELETE FROM veda_summaries WHERE file_id = ?"#)
+            .bind(file_id)
+            .execute(&self.pool)
+            .await
+            .map_err(storage_err)?;
+        Ok(())
+    }
+
+    async fn list_child_summaries(
+        &self,
+        workspace_id: &str,
+        parent_path: &str,
+    ) -> Result<Vec<FileSummary>> {
+        let rows = sqlx::query(
+            r#"SELECT s.id, s.workspace_id, s.file_id, s.dentry_id, s.l0_abstract, s.l1_overview,
+                      s.status, s.created_at, s.updated_at
+               FROM veda_summaries s
+               INNER JOIN veda_dentries d ON (
+                   (s.file_id IS NOT NULL AND d.file_id = s.file_id)
+                   OR (s.dentry_id IS NOT NULL AND d.id = s.dentry_id)
+               )
+               WHERE d.workspace_id = ? AND d.parent_path = ? AND s.status = 'ready'"#,
+        )
+        .bind(workspace_id)
+        .bind(parent_path)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(storage_err)?;
+        rows.iter().map(|r| row_to_summary(r)).collect()
+    }
+}
+
+fn row_to_summary(row: &sqlx::mysql::MySqlRow) -> Result<FileSummary> {
+    let status_str: String = row.try_get("status").map_err(storage_err)?;
+    let status = match status_str.as_str() {
+        "ready" => SummaryStatus::Ready,
+        "failed" => SummaryStatus::Failed,
+        _ => SummaryStatus::Pending,
+    };
+    Ok(FileSummary {
+        id: row.try_get("id").map_err(storage_err)?,
+        workspace_id: row.try_get("workspace_id").map_err(storage_err)?,
+        file_id: row.try_get("file_id").map_err(storage_err)?,
+        dentry_id: row.try_get("dentry_id").map_err(storage_err)?,
+        l0_abstract: row.try_get("l0_abstract").map_err(storage_err)?,
+        l1_overview: row.try_get("l1_overview").map_err(storage_err)?,
+        status,
+        created_at: row.try_get("created_at").map_err(storage_err)?,
+        updated_at: row.try_get("updated_at").map_err(storage_err)?,
+    })
 }
 
 pub struct MysqlMetadataTx {

@@ -8,6 +8,7 @@ pub struct ServerConfig {
     pub mysql: MysqlConfig,
     pub milvus: MilvusConfig,
     pub embedding: EmbeddingConfig,
+    pub llm: Option<LlmConfig>,
     #[serde(default)]
     pub worker: WorkerConfig,
 }
@@ -56,6 +57,19 @@ impl Default for WorkerConfig {
             poll_interval_secs: default_poll_secs(),
         }
     }
+}
+
+#[derive(Debug, Deserialize)]
+pub struct LlmConfig {
+    pub api_url: String,
+    pub api_key: String,
+    pub model: String,
+    #[serde(default = "default_max_summary_tokens")]
+    pub max_summary_tokens: usize,
+}
+
+fn default_max_summary_tokens() -> usize {
+    2048
 }
 
 fn default_listen() -> String {

@@ -808,5 +808,52 @@ dimension = 1024
 poll_interval_ms = 1000
 batch_size = 10
 reconcile_interval_secs = 300
+
+# Optional: LLM service for summary generation (L0/L1)
+[llm]
+api_url = "https://api.openai.com/v1/chat/completions"
+api_key = "sk-xxx"
+model = "gpt-4o-mini"
+max_summary_tokens = 2048
 ```
+
+## Tiered Context Loading (三层信息模型)
+
+参考 OpenViking 的 Tiered Context Loading 设计，为每个文件和目录生成多层摘要：
+
+### 信息层级
+
+| 层级 | 名称 | 大小 | 用途 |
+|------|------|------|------|
+| L0 | Abstract | ~100 tokens | 一句话摘要，用于文件级向量搜索和快速筛选 |
+| L1 | Overview | ~2k tokens | 结构化概览，包含关键章节、API、概念 |
+| L2 | Full | 原文 | 现有 chunk 搜索，完整内容 |
+
+### 写入流程
+
+1. 文件写入触发 `ChunkSync`（现有）
+2. `ChunkSync` 完成后自动入队 `SummarySync`
+3. `SummarySync`：读取文件内容 → LLM 生成 L0+L1 → Embed L0 → 存 MySQL + Milvus → 入队 `DirSummarySync`
+4. `DirSummarySync`：聚合子项 L0 → LLM 生成目录 L0+L1 → 存储 → 递归触发上层
+
+### 搜索 API
+
+`POST /v1/search` 新增 `detail_level` 参数：
+
+- `abstract`：搜索 L0 向量（veda_summaries 集合），返回文件级摘要，token 消耗最低
+- `overview`：搜索 L0 定位文件 + 从 MySQL 加载 L1，中等 token 消耗
+- `full`（默认）：搜索原文 chunk 向量（veda_chunks 集合），返回完整片段
+
+### 摘要查询
+
+`GET /v1/summary/{path}`：返回指定文件或目录的 L0 + L1 摘要。
+
+### 存储
+
+- MySQL `veda_summaries` 表：存储 L0/L1 文本和状态
+- Milvus `veda_summaries` 集合：存储 L0 的向量嵌入
+
+### 配置
+
+LLM 配置为可选。未配置 `[llm]` 段时，summary 功能自动禁用，系统回退到纯 L2 chunk 搜索。
 

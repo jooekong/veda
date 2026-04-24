@@ -91,6 +91,17 @@ pub trait MetadataStore: Send + Sync {
     ) -> Result<Vec<FsEvent>>;
     async fn storage_stats(&self, workspace_id: &str) -> Result<StorageStats>;
     async fn begin_tx(&self) -> Result<Box<dyn MetadataTx>>;
+
+    // summary ops (L0/L1)
+    async fn get_summary_by_file(&self, file_id: &str) -> Result<Option<FileSummary>>;
+    async fn get_summary_by_dentry(&self, dentry_id: &str) -> Result<Option<FileSummary>>;
+    async fn upsert_summary(&self, summary: &FileSummary) -> Result<()>;
+    async fn delete_summary_by_file(&self, file_id: &str) -> Result<()>;
+    async fn list_child_summaries(
+        &self,
+        workspace_id: &str,
+        parent_path: &str,
+    ) -> Result<Vec<FileSummary>>;
 }
 
 #[async_trait]
@@ -190,6 +201,10 @@ pub trait VectorStore: Send + Sync {
     async fn delete_chunks(&self, workspace_id: &str, file_id: &str) -> Result<()>;
     async fn search(&self, req: &SearchRequest) -> Result<Vec<SearchHit>>;
 
+    async fn upsert_summaries(&self, summaries: &[SummaryWithEmbedding]) -> Result<()>;
+    async fn delete_summary(&self, workspace_id: &str, id: &str) -> Result<()>;
+    async fn search_summaries(&self, req: &SearchRequest) -> Result<Vec<SearchHit>>;
+
     async fn init_collections(&self, embedding_dim: u32) -> Result<()>;
 }
 
@@ -284,4 +299,16 @@ pub trait AuthStore: Send + Sync {
 pub trait EmbeddingService: Send + Sync {
     async fn embed(&self, texts: &[String]) -> Result<Vec<Vec<f32>>>;
     fn dimension(&self) -> usize;
+}
+
+// ── LLM Service (for L0/L1 summary generation) ────────
+
+#[async_trait]
+pub trait LlmService: Send + Sync {
+    async fn summarize(&self, content: &str, max_tokens: usize) -> Result<String>;
+    async fn generate_overview(
+        &self,
+        content: &str,
+        child_abstracts: &[String],
+    ) -> Result<String>;
 }

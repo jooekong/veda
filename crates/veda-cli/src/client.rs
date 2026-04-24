@@ -198,12 +198,33 @@ impl Client {
         query: &str,
         mode: &str,
         limit: usize,
+        detail_level: &str,
     ) -> Result<serde_json::Value> {
         let resp = self
             .http
             .post(format!("{}/v1/search", self.base))
             .bearer_auth(ws_key)
-            .json(&serde_json::json!({"query": query, "mode": mode, "limit": limit}))
+            .json(&serde_json::json!({
+                "query": query,
+                "mode": mode,
+                "limit": limit,
+                "detail_level": detail_level,
+            }))
+            .send()
+            .await?;
+        Self::check(resp).await
+    }
+
+    pub async fn get_summary(
+        &self,
+        ws_key: &str,
+        path: &str,
+    ) -> Result<serde_json::Value> {
+        let path = path.trim_start_matches('/');
+        let resp = self
+            .http
+            .get(format!("{}/v1/summary/{path}", self.base))
+            .bearer_auth(ws_key)
             .send()
             .await?;
         Self::check(resp).await

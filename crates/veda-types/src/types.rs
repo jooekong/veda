@@ -52,6 +52,8 @@ pub enum OutboxEventType {
     ChunkSync,
     ChunkDelete,
     CollectionSync,
+    SummarySync,
+    DirSummarySync,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -259,6 +261,43 @@ pub struct FieldDefinition {
     pub index: bool,
 }
 
+// ── Summary (L0/L1/L2 tiered context) ─────────────────
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SummaryStatus {
+    Pending,
+    Ready,
+    Failed,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DetailLevel {
+    Abstract,
+    Overview,
+    Full,
+}
+
+impl Default for DetailLevel {
+    fn default() -> Self {
+        Self::Full
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FileSummary {
+    pub id: String,
+    pub workspace_id: String,
+    pub file_id: Option<String>,
+    pub dentry_id: Option<String>,
+    pub l0_abstract: String,
+    pub l1_overview: String,
+    pub status: SummaryStatus,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
 // ── Search ─────────────────────────────────────────────
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -286,6 +325,10 @@ pub struct SearchHit {
     pub content: String,
     pub score: f32,
     pub path: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub l0_abstract: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub l1_overview: Option<String>,
 }
 
 // ── Vector / Embedding ─────────────────────────────────
@@ -296,6 +339,15 @@ pub struct ChunkWithEmbedding {
     pub workspace_id: String,
     pub file_id: String,
     pub chunk_index: i32,
+    pub content: String,
+    pub vector: Vec<f32>,
+}
+
+#[derive(Debug, Clone)]
+pub struct SummaryWithEmbedding {
+    pub id: String,
+    pub workspace_id: String,
+    pub summary_type: String,
     pub content: String,
     pub vector: Vec<f32>,
 }

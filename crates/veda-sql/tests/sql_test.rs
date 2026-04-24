@@ -136,6 +136,21 @@ impl MetadataStore for MockMetaFull {
             fs_events: self.fs_events.clone(),
         }))
     }
+    async fn get_summary_by_file(&self, _file_id: &str) -> Result<Option<FileSummary>> {
+        Ok(None)
+    }
+    async fn get_summary_by_dentry(&self, _dentry_id: &str) -> Result<Option<FileSummary>> {
+        Ok(None)
+    }
+    async fn upsert_summary(&self, _summary: &FileSummary) -> Result<()> {
+        Ok(())
+    }
+    async fn delete_summary_by_file(&self, _file_id: &str) -> Result<()> {
+        Ok(())
+    }
+    async fn list_child_summaries(&self, _ws: &str, _parent: &str) -> Result<Vec<FileSummary>> {
+        Ok(vec![])
+    }
 }
 
 // Tx operates directly on shared state (no isolation, fine for tests)
@@ -446,6 +461,21 @@ impl MetadataStore for MockMeta {
     async fn begin_tx(&self) -> Result<Box<dyn MetadataTx>> {
         unreachable!()
     }
+    async fn get_summary_by_file(&self, _file_id: &str) -> Result<Option<FileSummary>> {
+        Ok(None)
+    }
+    async fn get_summary_by_dentry(&self, _dentry_id: &str) -> Result<Option<FileSummary>> {
+        Ok(None)
+    }
+    async fn upsert_summary(&self, _summary: &FileSummary) -> Result<()> {
+        Ok(())
+    }
+    async fn delete_summary_by_file(&self, _file_id: &str) -> Result<()> {
+        Ok(())
+    }
+    async fn list_child_summaries(&self, _ws: &str, _parent: &str) -> Result<Vec<FileSummary>> {
+        Ok(vec![])
+    }
 }
 
 // ── Mock VectorStore ──────────────────────────────────
@@ -472,6 +502,15 @@ impl VectorStore for MockVector {
     }
     async fn search(&self, _req: &SearchRequest) -> Result<Vec<SearchHit>> {
         Ok(self.hits.lock().unwrap().clone())
+    }
+    async fn upsert_summaries(&self, _summaries: &[SummaryWithEmbedding]) -> Result<()> {
+        Ok(())
+    }
+    async fn delete_summary(&self, _ws: &str, _id: &str) -> Result<()> {
+        Ok(())
+    }
+    async fn search_summaries(&self, _req: &SearchRequest) -> Result<Vec<SearchHit>> {
+        Ok(vec![])
     }
     async fn init_collections(&self, _dim: u32) -> Result<()> {
         Ok(())
@@ -1802,6 +1841,8 @@ async fn search_returns_results() {
             content: "chunk about deployment".into(),
             score: 0.95,
             path: Some("/docs/deploy.md".into()),
+            l0_abstract: None,
+            l1_overview: None,
         },
         SearchHit {
             file_id: "f2".into(),
@@ -1809,6 +1850,8 @@ async fn search_returns_results() {
             content: "another chunk".into(),
             score: 0.80,
             path: None,
+            l0_abstract: None,
+            l1_overview: None,
         },
     ];
     let vector = Arc::new(MockVector::new(hits));
@@ -1850,6 +1893,8 @@ async fn search_with_mode_and_limit() {
         content: "result".into(),
         score: 0.9,
         path: Some("/a.md".into()),
+        l0_abstract: None,
+        l1_overview: None,
     }];
     let vector = Arc::new(MockVector::new(hits));
     let meta = Arc::new(MockMetaFull::new());
@@ -1902,6 +1947,8 @@ async fn search_with_where_filter() {
             content: "high".into(),
             score: 0.95,
             path: Some("/a.md".into()),
+            l0_abstract: None,
+            l1_overview: None,
         },
         SearchHit {
             file_id: "f2".into(),
@@ -1909,6 +1956,8 @@ async fn search_with_where_filter() {
             content: "low".into(),
             score: 0.30,
             path: Some("/b.md".into()),
+            l0_abstract: None,
+            l1_overview: None,
         },
     ];
     let vector = Arc::new(MockVector::new(hits));

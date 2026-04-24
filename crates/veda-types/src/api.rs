@@ -1,7 +1,7 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-use crate::types::{CollectionType, FieldDefinition, SearchHit, SearchMode};
+use crate::types::{CollectionType, DetailLevel, FieldDefinition, SearchHit, SearchMode};
 
 // ── Account ────────────────────────────────────────────
 
@@ -82,6 +82,7 @@ pub struct SearchApiRequest {
     pub mode: Option<SearchMode>,
     pub limit: Option<usize>,
     pub path_prefix: Option<String>,
+    pub detail_level: Option<DetailLevel>,
 }
 
 #[derive(Debug, Serialize)]
@@ -90,6 +91,10 @@ pub struct SearchResultItem {
     pub chunk_index: i32,
     pub content: String,
     pub score: f32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub l0_abstract: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub l1_overview: Option<String>,
 }
 
 impl From<SearchHit> for SearchResultItem {
@@ -99,8 +104,17 @@ impl From<SearchHit> for SearchResultItem {
             chunk_index: h.chunk_index,
             content: h.content,
             score: h.score,
+            l0_abstract: h.l0_abstract,
+            l1_overview: h.l1_overview,
         }
     }
+}
+
+#[derive(Debug, Serialize)]
+pub struct SummaryResponse {
+    pub path: String,
+    pub l0_abstract: String,
+    pub l1_overview: String,
 }
 
 // ── Collection ─────────────────────────────────────────

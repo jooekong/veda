@@ -15,8 +15,9 @@ use tracing::info;
 use veda_core::service::collection::CollectionService;
 use veda_core::service::fs::FsService;
 use veda_core::service::search::SearchService;
-use veda_core::store::VectorStore;
+use veda_core::store::{LlmService, VectorStore};
 use veda_pipeline::embedding::EmbeddingProvider;
+use veda_pipeline::llm::LlmProvider;
 use veda_store::{MilvusStore, MysqlStore};
 
 use config::ServerConfig;
@@ -79,12 +80,25 @@ async fn main() -> anyhow::Result<()> {
 
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
 
+    let llm: Option<Arc<dyn LlmService>> = match &cfg.llm {
+        Some(llm_cfg) => {
+            let provider = LlmProvider::new(&llm_cfg.api_url, &llm_cfg.api_key, &llm_cfg.model)?;
+            info!(model = %llm_cfg.model, "LLM summary service enabled");
+            Some(Arc::new(provider))
+        }
+        None => {
+            info!("LLM config not set, summary generation disabled");
+            None
+        }
+    };
+
     let worker_handle = if cfg.worker.enabled {
         let w = Worker::new(
             mysql.clone(),
             mysql.clone(),
             milvus.clone(),
             embedding.clone(),
+            llm.clone(),
             cfg.worker.batch_size,
             cfg.worker.poll_interval_secs,
         );

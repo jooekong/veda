@@ -216,6 +216,22 @@ impl MetadataStore for MockMetadataStore {
             state: Arc::clone(&self.state),
         }))
     }
+
+    async fn get_summary_by_file(&self, _file_id: &str) -> Result<Option<FileSummary>> {
+        Ok(None)
+    }
+    async fn get_summary_by_dentry(&self, _dentry_id: &str) -> Result<Option<FileSummary>> {
+        Ok(None)
+    }
+    async fn upsert_summary(&self, _summary: &FileSummary) -> Result<()> {
+        Ok(())
+    }
+    async fn delete_summary_by_file(&self, _file_id: &str) -> Result<()> {
+        Ok(())
+    }
+    async fn list_child_summaries(&self, _ws: &str, _parent: &str) -> Result<Vec<FileSummary>> {
+        Ok(vec![])
+    }
 }
 
 // ── In-memory MetadataTx ───────────────────────────────

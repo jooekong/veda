@@ -6,10 +6,12 @@ use serde_json::{json, Value};
 use tracing::warn;
 use veda_core::store::{CollectionVectorStore, VectorStore};
 use veda_types::{
-    ChunkWithEmbedding, FieldDefinition, Result, SearchHit, SearchMode, SearchRequest, VedaError,
+    ChunkWithEmbedding, FieldDefinition, Result, SearchHit, SearchMode, SearchRequest,
+    SummaryWithEmbedding, VedaError,
 };
 
 const COLLECTION: &str = "veda_chunks";
+const SUMMARY_COLLECTION: &str = "veda_summaries";
 
 fn storage_err(e: impl ToString) -> VedaError {
     VedaError::Storage(e.to_string())
@@ -211,6 +213,109 @@ impl MilvusStore {
         }
     }
 
+    async fn init_summary_collection(&self, embedding_dim: u32) -> Result<()> {
+        let has = self
+            .post(
+                "/v2/vectordb/collections/has",
+                json!({ "collectionName": SUMMARY_COLLECTION }),
+            )
+            .await?;
+        if !has["data"]["has"].as_bool().unwrap_or(false) {
+            let dim = embedding_dim as i64;
+            let body = json!({
+                "collectionName": SUMMARY_COLLECTION,
+                "schema": {
+                    "enableDynamicField": false,
+                    "fields": [
+                        {
+                            "fieldName": "id",
+                            "dataType": "VarChar",
+                            "isPrimary": true,
+                            "elementTypeParams": { "max_length": 64 }
+                        },
+                        {
+                            "fieldName": "workspace_id",
+                            "dataType": "VarChar",
+                            "elementTypeParams": { "max_length": 64 }
+                        },
+                        {
+                            "fieldName": "summary_type",
+                            "dataType": "VarChar",
+                            "elementTypeParams": { "max_length": 16 }
+                        },
+                        {
+                            "fieldName": "content",
+                            "dataType": "VarChar",
+                            "elementTypeParams": { "max_length": 65535 }
+                        },
+                        {
+                            "fieldName": "vector",
+                            "dataType": "FloatVector",
+                            "elementTypeParams": { "dim": dim }
+                        }
+                    ]
+                }
+            });
+            self.post("/v2/vectordb/collections/create", body).await?;
+
+            let idx = json!({
+                "collectionName": SUMMARY_COLLECTION,
+                "indexParams": [{
+                    "index_type": "AUTOINDEX",
+                    "metricType": "COSINE",
+                    "fieldName": "vector",
+                    "indexName": "vector"
+                }]
+            });
+            match self.post("/v2/vectordb/indexes/create", idx).await {
+                Ok(_) => {}
+                Err(e) => {
+                    let m = e.to_string();
+                    if !m.contains("same index name")
+                        && !m.contains("IndexAlreadyExists")
+                        && !m.contains("index already exist")
+                    {
+                        return Err(e);
+                    }
+                }
+            }
+        }
+        self.post(
+            "/v2/vectordb/collections/load",
+            json!({ "collectionName": SUMMARY_COLLECTION }),
+        )
+        .await?;
+        Ok(())
+    }
+
+    fn summary_rows_to_hits(rows: &[Value], limit: usize) -> Vec<SearchHit> {
+        rows.iter()
+            .take(limit)
+            .map(|row| {
+                let id = row.get("id").and_then(|x| x.as_str()).unwrap_or("");
+                let content = row
+                    .get("content")
+                    .and_then(|x| x.as_str())
+                    .unwrap_or("");
+                let score = row
+                    .get("distance")
+                    .and_then(|x| x.as_f64())
+                    .map(|d| d as f32)
+                    .or_else(|| row.get("score").and_then(|x| x.as_f64()).map(|d| d as f32))
+                    .unwrap_or(0.0);
+                SearchHit {
+                    file_id: id.to_string(),
+                    chunk_index: -1,
+                    content: content.to_string(),
+                    score,
+                    path: None,
+                    l0_abstract: Some(content.to_string()),
+                    l1_overview: None,
+                }
+            })
+            .collect()
+    }
+
     fn rows_to_hits(rows: &[Value], limit: usize) -> Vec<SearchHit> {
         let mut out = Vec::new();
         for row in rows.iter().take(limit) {
@@ -237,6 +342,8 @@ impl MilvusStore {
                 content,
                 score,
                 path: None,
+                l0_abstract: None,
+                l1_overview: None,
             });
         }
         out
@@ -368,6 +475,8 @@ impl MilvusStore {
                     .to_string(),
                 score: 1.0,
                 path: None,
+                l0_abstract: None,
+                l1_overview: None,
             });
         }
         Ok(hits)
@@ -460,6 +569,67 @@ impl VectorStore for MilvusStore {
         }
     }
 
+    async fn upsert_summaries(&self, summaries: &[SummaryWithEmbedding]) -> Result<()> {
+        if summaries.is_empty() {
+            return Ok(());
+        }
+        let data: Vec<Value> = summaries
+            .iter()
+            .map(|s| {
+                json!({
+                    "id": s.id,
+                    "workspace_id": s.workspace_id,
+                    "summary_type": s.summary_type,
+                    "content": s.content,
+                    "vector": s.vector
+                })
+            })
+            .collect();
+        let body = json!({
+            "collectionName": SUMMARY_COLLECTION,
+            "data": data
+        });
+        self.post("/v2/vectordb/entities/upsert", body).await?;
+        Ok(())
+    }
+
+    async fn delete_summary(&self, workspace_id: &str, id: &str) -> Result<()> {
+        let ws = milvus_quote(workspace_id);
+        let sid = milvus_quote(id);
+        let filter = format!("workspace_id == {ws} && id == {sid}");
+        let body = json!({
+            "collectionName": SUMMARY_COLLECTION,
+            "filter": filter
+        });
+        self.post("/v2/vectordb/entities/delete", body).await?;
+        Ok(())
+    }
+
+    async fn search_summaries(&self, req: &SearchRequest) -> Result<Vec<SearchHit>> {
+        let ws = milvus_quote(&req.workspace_id);
+        let filter = format!("workspace_id == {ws}");
+        let lim = req.limit.min(16_383).max(1);
+
+        match &req.query_vector {
+            Some(v) if !v.is_empty() => {
+                let body = json!({
+                    "collectionName": SUMMARY_COLLECTION,
+                    "data": [v],
+                    "annsField": "vector",
+                    "filter": filter,
+                    "limit": lim,
+                    "outputFields": ["id", "workspace_id", "summary_type", "content"],
+                    "searchParams": { "metricType": "COSINE" },
+                    "consistencyLevel": "Strong"
+                });
+                let v = self.post("/v2/vectordb/entities/search", body).await?;
+                let rows = flatten_entity_rows(v.get("data"));
+                Ok(Self::summary_rows_to_hits(&rows, req.limit))
+            }
+            _ => Ok(vec![]),
+        }
+    }
+
     async fn init_collections(&self, embedding_dim: u32) -> Result<()> {
         if !self.collection_exists().await? {
             self.create_collection(embedding_dim).await?;
@@ -470,6 +640,8 @@ impl VectorStore for MilvusStore {
             json!({ "collectionName": COLLECTION }),
         )
         .await?;
+
+        self.init_summary_collection(embedding_dim).await?;
         Ok(())
     }
 }
