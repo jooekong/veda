@@ -33,7 +33,14 @@ veda-fuse       FUSE 挂载（不在默认 workspace）      (已实现)
 - `veda-server`：ServerConfig（TOML 加载，新增 LlmConfig）；JWT 签发/验证；API Key + Workspace Key 认证中间件；Account/Workspace/File/Search/Collection/SQL 全部 REST 路由；Worker（outbox 消费 + chunk sync + summary sync + dir summary sync）；`GET /v1/summary/{path}` 摘要查询端点；搜索 API 支持 `detail_level` 参数；graceful shutdown；4 个 HTTP 端到端集成测试（fs CRUD/stat/mkdir/copy/rename/append/CAS/range/auth）
 - `veda-server`：新增 `POST /v1/fs/{path}` append 路由
 - `veda-cli`：clap 命令行解析；account create/login；workspace create/list/use；cp/cat/ls/mv/rm/mkdir/append；search（支持 --detail-level abstract/overview/full）；summary（查看文件/目录摘要）；collection CRUD；sql；config 管理；$HOME/.config/veda/config.toml 持久化
-- `veda-fuse`：FUSE 文件系统挂载（fuser 0.14）；子命令 mount/umount；daemon 化（fork+setsid，pipe 通知 parent）；blocking HTTP 客户端（stat/read/write/list/delete/mkdir/rename/read_range）；InodeTable（inode ↔ path 双向映射 + 可配置 attr TTL）；WriteHandle（dirty 标记消除 flush+release 双写）；LRU ReadCache（小文件全量缓存，大文件 Range read）；SSE watcher（后台线程连接 /v1/events，远程变更时失效 attr+read cache）；mount 选项（--cache-size/--attr-ttl/--allow-other/--read-only/--debug）；需要 macFUSE（macOS）或 libfuse（Linux）
+- `veda-fuse`：FUSE 文件系统挂载（fuser 0.14），需要 macFUSE（macOS）或 libfuse（Linux）
+  - 基础：子命令 mount/umount；daemon 化（fork+setsid，pipe 通知 parent）；mount 选项（--cache-size/--attr-ttl/--allow-other/--read-only/--debug）
+  - HTTP：blocking client（stat/read/write/list/delete/mkdir/rename/read_range），30s connect+request timeout，ClientError 区分 Network/Server/Parse
+  - Inode：inode ↔ path 双向映射 + 可配置 attr TTL + nlookup 计数 + forget 回收
+  - 写入：WriteHandle dirty 标记消除 flush+release 双写；O_TRUNC 正确标记 dirty；setattr 截断走 If-Match CAS；fsync 实现；多 fh 同 ino 写入告警
+  - 缓存：LRU ReadCache（小文件全量缓存，大文件 Range read），generation 计数器防止 invalidate→put 竞态，TTL 与 attr_ttl 统一；dir_cache 使用 Arc 零拷贝共享
+  - SSE：后台线程连接 /v1/events，远程变更时失效 attr+read+dir cache；cursor 原子落盘持久化（debounce 1s）
+  - 其他：statfs 返回合理值
 - `veda-server`：新增 `GET /v1/events` SSE 端点（轮询 veda_fs_events 表，cursor-based）；`GET /v1/fs/{path}` 支持 `Range` header 返回 206 Partial Content
 
 ## 测试策略

@@ -11,6 +11,7 @@ pub struct InodeTable {
     path_to_ino: HashMap<String, u64>,
     attr_cache: HashMap<u64, (FileAttr, Instant)>,
     attr_ttl: Duration,
+    nlookup: HashMap<u64, u64>,
 }
 
 impl InodeTable {
@@ -25,6 +26,7 @@ impl InodeTable {
             path_to_ino: HashMap::new(),
             attr_cache: HashMap::new(),
             attr_ttl,
+            nlookup: HashMap::new(),
         };
         t.ino_to_path.insert(ROOT_INO, "/".to_string());
         t.path_to_ino.insert("/".to_string(), ROOT_INO);
@@ -71,6 +73,7 @@ impl InodeTable {
         if let Some(ino) = self.path_to_ino.remove(path) {
             self.ino_to_path.remove(&ino);
             self.attr_cache.remove(&ino);
+            self.nlookup.remove(&ino);
         }
     }
 
@@ -94,5 +97,73 @@ impl InodeTable {
             self.path_to_ino.insert(new_child, ino);
             self.attr_cache.remove(&ino);
         }
+    }
+
+    pub fn inc_nlookup(&mut self, ino: u64) {
+        *self.nlookup.entry(ino).or_insert(0) += 1;
+    }
+
+    /// Decrement kernel reference count. Reclaims inode mapping when count
+    /// reaches zero (root inode is never reclaimed).
+    pub fn forget(&mut self, ino: u64, nlookup: u64) {
+        if ino == ROOT_INO {
+            return;
+        }
+        if let Some(count) = self.nlookup.get_mut(&ino) {
+            *count = count.saturating_sub(nlookup);
+            if *count == 0 {
+                self.nlookup.remove(&ino);
+                if let Some(path) = self.ino_to_path.remove(&ino) {
+                    self.path_to_ino.remove(&path);
+                }
+                self.attr_cache.remove(&ino);
+            }
+        }
+    }
+
+    #[cfg(test)]
+    pub fn nlookup_count(&self, ino: u64) -> u64 {
+        self.nlookup.get(&ino).copied().unwrap_or(0)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn forget_reclaims_inode() {
+        let mut t = InodeTable::new();
+        let ino = t.get_or_create_ino("/a.txt");
+        t.inc_nlookup(ino);
+        t.inc_nlookup(ino);
+        assert_eq!(t.nlookup_count(ino), 2);
+
+        t.forget(ino, 1);
+        assert_eq!(t.nlookup_count(ino), 1);
+        assert!(t.get_path(ino).is_some());
+
+        t.forget(ino, 1);
+        assert_eq!(t.nlookup_count(ino), 0);
+        assert!(t.get_path(ino).is_none());
+        assert!(t.get_ino("/a.txt").is_none());
+    }
+
+    #[test]
+    fn forget_root_is_noop() {
+        let mut t = InodeTable::new();
+        t.forget(ROOT_INO, 100);
+        assert!(t.get_path(ROOT_INO).is_some());
+    }
+
+    #[test]
+    fn forget_after_remove_path() {
+        let mut t = InodeTable::new();
+        let ino = t.get_or_create_ino("/a.txt");
+        t.inc_nlookup(ino);
+        t.remove_path("/a.txt");
+        // Path mapping already gone, forget just cleans up nlookup
+        t.forget(ino, 1);
+        assert_eq!(t.nlookup_count(ino), 0);
     }
 }

@@ -49,7 +49,7 @@ struct WriteHandle {
 }
 
 pub struct DirCacheEntry {
-    pub entries: Vec<DirEntry>,
+    pub entries: Arc<Vec<DirEntry>>,
     pub child_names: HashSet<String>,
     pub fetched_at: Instant,
 }
@@ -58,7 +58,7 @@ impl DirCacheEntry {
     #[cfg(test)]
     pub fn empty_for_test() -> Self {
         Self {
-            entries: Vec::new(),
+            entries: Arc::new(Vec::new()),
             child_names: HashSet::new(),
             fetched_at: Instant::now(),
         }
@@ -81,7 +81,7 @@ pub struct VedaFs {
 
 impl VedaFs {
     pub fn new(client: VedaClient, config: FuseConfig, notify_fd: Option<RawFd>) -> Self {
-        let read_cache = Arc::new(Mutex::new(ReadCache::new(config.cache_size_mb)));
+        let read_cache = Arc::new(Mutex::new(ReadCache::new(config.cache_size_mb, config.attr_ttl)));
         let inodes = Arc::new(Mutex::new(InodeTable::new_with_ttl(config.attr_ttl)));
         let dir_cache: DirCacheMap = Arc::new(Mutex::new(HashMap::new()));
         Self { client, inodes, config, read_cache, next_fh: 1, write_handles: HashMap::new(), dir_cache, notify_fd }
@@ -128,10 +128,6 @@ impl VedaFs {
         Self::make_attr(&info, ino)
     }
 
-    /// True when a readdir entry has enough information to safely cache its attr.
-    /// Files without a known size must NOT be cached as size=0, since the server's
-    /// `list_dir` returns `size_bytes: None` and we would otherwise report 0 bytes
-    /// for every file under `attr_ttl`.
     fn should_cache_attr(de: &DirEntry) -> bool {
         de.is_dir || de.size_bytes.is_some()
     }
@@ -147,16 +143,12 @@ impl VedaFs {
             ClientError::AlreadyExists => libc::EEXIST,
             ClientError::PermissionDenied => libc::EACCES,
             ClientError::Conflict => libc::EBUSY,
-            ClientError::Io(_) => libc::EIO,
+            ClientError::Network(_) | ClientError::Server(_, _) | ClientError::Parse(_) => libc::EIO,
         }
     }
 
     fn inode_get_path(&self, ino: u64) -> Option<String> {
         self.inodes.lock().unwrap().get_path(ino).map(|s| s.to_string())
-    }
-
-    fn inode_get_ino(&self, path: &str) -> Option<u64> {
-        self.inodes.lock().unwrap().get_ino(path)
     }
 
     fn inode_get_or_create(&self, path: &str) -> u64 {
@@ -183,12 +175,30 @@ impl VedaFs {
         self.inodes.lock().unwrap().rename_path(old, new);
     }
 
-    fn cache_get(&self, path: &str) -> Option<Vec<u8>> {
-        self.read_cache.lock().unwrap().get(path).map(|s| s.to_vec())
+    fn inode_lookup_cached(&self, path: &str) -> Option<(u64, FileAttr)> {
+        let mut table = self.inodes.lock().unwrap();
+        let ino = table.get_ino(path)?;
+        let attr = table.get_cached_attr(ino)?;
+        table.inc_nlookup(ino);
+        Some((ino, attr))
     }
 
-    fn cache_put(&self, path: &str, data: Vec<u8>) {
-        self.read_cache.lock().unwrap().put(path, data);
+    fn inode_get_or_create_with_nlookup(&self, path: &str) -> u64 {
+        let mut table = self.inodes.lock().unwrap();
+        let ino = table.get_or_create_ino(path);
+        table.inc_nlookup(ino);
+        ino
+    }
+
+    fn cache_get_with_gen(&self, path: &str) -> (Option<Vec<u8>>, u64) {
+        let mut cache = self.read_cache.lock().unwrap();
+        let gen = cache.generation();
+        let data = cache.get(path).map(|s| s.to_vec());
+        (data, gen)
+    }
+
+    fn cache_put(&self, path: &str, data: Vec<u8>, gen: u64) {
+        self.read_cache.lock().unwrap().put(path, data, gen);
     }
 
     fn cache_invalidate(&self, path: &str) {
@@ -199,8 +209,7 @@ impl VedaFs {
         self.read_cache.lock().unwrap().is_cacheable_size(size)
     }
 
-    /// Fetch directory listing, using TTL-based cache to avoid repeated HTTP calls.
-    fn fetch_dir(&mut self, ino: u64, path: &str) -> Result<Vec<DirEntry>, i32> {
+    fn fetch_dir(&mut self, ino: u64, path: &str) -> Result<Arc<Vec<DirEntry>>, i32> {
         let stale = {
             let dc = self.dir_cache.lock().unwrap();
             match dc.get(&ino) {
@@ -209,18 +218,16 @@ impl VedaFs {
             }
         };
         if stale {
-            // NOTE: network I/O outside the lock.
             let entries = self.client.list_dir(path).map_err(|ref e| Self::err_to_errno(e))?;
             let child_names: HashSet<String> = entries.iter().map(|de| de.name.clone()).collect();
+            let entries = Arc::new(entries);
             let mut dc = self.dir_cache.lock().unwrap();
-            dc.insert(ino, DirCacheEntry { entries, child_names, fetched_at: Instant::now() });
+            dc.insert(ino, DirCacheEntry { entries: entries.clone(), child_names, fetched_at: Instant::now() });
         }
         let dc = self.dir_cache.lock().unwrap();
         Ok(dc.get(&ino).unwrap().entries.clone())
     }
 
-    /// Check if a child name exists in a recently-listed directory.
-    /// Returns Some(true/false) if cache is fresh, None if stale/missing.
     fn dir_cache_has_child(&self, parent_ino: u64, name: &str) -> Option<bool> {
         let dc = self.dir_cache.lock().unwrap();
         dc.get(&parent_ino).and_then(|c| {
@@ -296,15 +303,11 @@ impl Filesystem for VedaFs {
         };
         let child_path = Self::resolve_child_path(&parent_path, name_str);
 
-        // Positive cache: reuse attr from a prior lookup or readdir.
-        if let Some(ino) = self.inode_get_ino(&child_path) {
-            if let Some(attr) = self.inode_get_attr(ino) {
-                reply.entry(&self.config.attr_ttl, &attr, 0);
-                return;
-            }
+        if let Some((_, attr)) = self.inode_lookup_cached(&child_path) {
+            reply.entry(&self.config.attr_ttl, &attr, 0);
+            return;
         }
 
-        // Negative cache: parent was recently listed and this name wasn't in it.
         if let Some(false) = self.dir_cache_has_child(parent, name_str) {
             reply.error(libc::ENOENT);
             return;
@@ -312,7 +315,7 @@ impl Filesystem for VedaFs {
 
         match self.client.stat(&child_path) {
             Ok(info) => {
-                let ino = self.inode_get_or_create(&child_path);
+                let ino = self.inode_get_or_create_with_nlookup(&child_path);
                 let attr = Self::make_attr(&info, ino);
                 self.inode_set_attr(ino, attr);
                 reply.entry(&self.config.attr_ttl, &attr, 0);
@@ -322,6 +325,10 @@ impl Filesystem for VedaFs {
                 reply.error(Self::err_to_errno(e));
             }
         }
+    }
+
+    fn forget(&mut self, _req: &Request, ino: u64, nlookup: u64) {
+        self.inodes.lock().unwrap().forget(ino, nlookup);
     }
 
     fn getattr(&mut self, _req: &Request, ino: u64, reply: ReplyAttr) {
@@ -355,8 +362,12 @@ impl Filesystem for VedaFs {
                 Some(p) => p,
                 None => { reply.error(libc::ENOENT); return; }
             };
+            let rev = match self.client.stat(&path) {
+                Ok(info) => info.revision,
+                Err(ref e) => { reply.error(Self::err_to_errno(e)); return; }
+            };
             if new_size == 0 {
-                if let Err(ref e) = self.client.write_file(&path, b"", None) {
+                if let Err(ref e) = self.client.write_file(&path, b"", rev) {
                     reply.error(Self::err_to_errno(e)); return;
                 }
             } else {
@@ -365,7 +376,7 @@ impl Filesystem for VedaFs {
                         let target = new_size as usize;
                         if target < bytes.len() { bytes.truncate(target); }
                         else if target > bytes.len() { bytes.resize(target, 0); }
-                        if let Err(ref e) = self.client.write_file(&path, &bytes, None) {
+                        if let Err(ref e) = self.client.write_file(&path, &bytes, rev) {
                             reply.error(Self::err_to_errno(e)); return;
                         }
                     }
@@ -395,19 +406,19 @@ impl Filesystem for VedaFs {
             Err(errno) => { reply.error(errno); return; }
         };
         let parent_ino = self.inode_get_or_create(parent_path(&path));
-        let mut full_entries = vec![
+        let mut full_entries: Vec<(u64, FileType, String)> = vec![
             (ino, FileType::Directory, ".".to_string()),
             (parent_ino, FileType::Directory, "..".to_string()),
         ];
-        for de in &entries {
-            let child_ino = self.inode_get_or_create(&de.path);
-            if Self::should_cache_attr(de) {
-                let attr = Self::attr_from_dir_entry(de, child_ino);
-                self.inode_set_attr(child_ino, attr);
-            }
+        // ino=0 means "no hint": kernel will issue lookup if it wants to use
+        // the entry, which is the path that properly tracks nlookup.
+        let table = self.inodes.lock().unwrap();
+        for de in entries.iter() {
+            let hint_ino = table.get_ino(&de.path).unwrap_or(0);
             let kind = if de.is_dir { FileType::Directory } else { FileType::RegularFile };
-            full_entries.push((child_ino, kind, de.name.clone()));
+            full_entries.push((hint_ino, kind, de.name.clone()));
         }
+        drop(table);
         for (i, (child_ino, kind, name)) in full_entries.iter().enumerate().skip(offset as usize) {
             if reply.add(*child_ino, (i + 1) as i64, *kind, name) { break; }
         }
@@ -430,12 +441,10 @@ impl Filesystem for VedaFs {
         let self_attr = self.inode_get_attr(ino).unwrap_or_else(|| Self::dir_stub_attr(ino));
         let parent_attr = self.inode_get_attr(parent_ino).unwrap_or_else(|| Self::dir_stub_attr(parent_ino));
 
-        // (ino, name, attr, cache_ok). When cache_ok=false we pass Duration::ZERO
-        // as TTL so the kernel immediately re-fetches via getattr.
         let mut full: Vec<(u64, String, FileAttr, bool)> = Vec::with_capacity(entries.len() + 2);
         full.push((ino, ".".to_string(), self_attr, true));
         full.push((parent_ino, "..".to_string(), parent_attr, true));
-        for de in &entries {
+        for de in entries.iter() {
             let child_ino = self.inode_get_or_create(&de.path);
             let attr = Self::attr_from_dir_entry(de, child_ino);
             let cache_ok = Self::should_cache_attr(de);
@@ -445,9 +454,13 @@ impl Filesystem for VedaFs {
             full.push((child_ino, de.name.clone(), attr, cache_ok));
         }
         let zero_ttl = Duration::ZERO;
+        let mut table = self.inodes.lock().unwrap();
         for (i, (child_ino, name, attr, cache_ok)) in full.iter().enumerate().skip(offset as usize) {
             let ttl = if *cache_ok { &self.config.attr_ttl } else { &zero_ttl };
             if reply.add(*child_ino, (i + 1) as i64, name, ttl, attr, 0) { break; }
+            if name != "." && name != ".." {
+                table.inc_nlookup(*child_ino);
+            }
         }
         reply.ok();
     }
@@ -461,10 +474,11 @@ impl Filesystem for VedaFs {
                 Some(p) => p,
                 None => { reply.error(libc::ENOENT); return; }
             };
+            let truncated = (flags & libc::O_TRUNC) != 0;
             let (existing, base_rev) = match self.client.stat(&path) {
                 Ok(info) => {
                     let rev = info.revision;
-                    if (flags & libc::O_TRUNC) != 0 {
+                    if truncated {
                         (Vec::new(), rev)
                     } else {
                         let buf = match self.client.read_file(&path) {
@@ -478,7 +492,7 @@ impl Filesystem for VedaFs {
                 Err(ClientError::NotFound) => (Vec::new(), None),
                 Err(ref e) => { reply.error(Self::err_to_errno(e)); return; }
             };
-            self.write_handles.insert(fh, WriteHandle { ino, buf: existing, dirty: false, base_rev });
+            self.write_handles.insert(fh, WriteHandle { ino, buf: existing, dirty: truncated, base_rev });
         }
         reply.opened(fh, 0);
     }
@@ -502,7 +516,8 @@ impl Filesystem for VedaFs {
             None => { reply.error(libc::ENOENT); return; }
         };
 
-        if let Some(cached) = self.cache_get(&path) {
+        let (cached, gen) = self.cache_get_with_gen(&path);
+        if let Some(cached) = cached {
             let off = offset as usize;
             if off >= cached.len() { reply.data(&[]); }
             else {
@@ -522,7 +537,7 @@ impl Filesystem for VedaFs {
                         let end = std::cmp::min(off + size as usize, bytes.len());
                         reply.data(&bytes[off..end]);
                     }
-                    self.cache_put(&path, bytes);
+                    self.cache_put(&path, bytes, gen);
                 }
                 Err(ref e) => reply.error(Self::err_to_errno(e)),
             }
@@ -540,9 +555,15 @@ impl Filesystem for VedaFs {
         _write_flags: u32, _flags: i32, _lock_owner: Option<u64>,
         reply: ReplyWrite,
     ) {
-        let handle = self.write_handles.entry(fh).or_insert_with(|| WriteHandle {
-            ino, buf: Vec::new(), dirty: false, base_rev: None,
-        });
+        if !self.write_handles.contains_key(&fh) {
+            if self.write_handles.values().any(|h| h.ino == ino && h.dirty) {
+                warn!(ino, "concurrent dirty write handles for same inode");
+            }
+            self.write_handles.insert(fh, WriteHandle {
+                ino, buf: Vec::new(), dirty: false, base_rev: None,
+            });
+        }
+        let handle = self.write_handles.get_mut(&fh).unwrap();
         let offset = offset as usize;
         if offset > handle.buf.len() { handle.buf.resize(offset, 0); }
         let end = offset + data.len();
@@ -553,6 +574,13 @@ impl Filesystem for VedaFs {
     }
 
     fn flush(&mut self, _req: &Request, ino: u64, fh: u64, _lock_owner: u64, reply: ReplyEmpty) {
+        match self.flush_handle(fh, ino) {
+            Ok(()) => reply.ok(),
+            Err(errno) => reply.error(errno),
+        }
+    }
+
+    fn fsync(&mut self, _req: &Request, ino: u64, fh: u64, _datasync: bool, reply: ReplyEmpty) {
         match self.flush_handle(fh, ino) {
             Ok(()) => reply.ok(),
             Err(errno) => reply.error(errno),
@@ -591,7 +619,7 @@ impl Filesystem for VedaFs {
         };
         self.invalidate_dir_cache(parent);
         let fh = self.alloc_fh();
-        let ino = self.inode_get_or_create(&child_path);
+        let ino = self.inode_get_or_create_with_nlookup(&child_path);
         let info = FileInfo { path: child_path, is_dir: false, size_bytes: Some(0), revision: base_rev };
         let attr = Self::make_attr(&info, ino);
         self.inode_set_attr(ino, attr);
@@ -615,7 +643,7 @@ impl Filesystem for VedaFs {
             reply.error(Self::err_to_errno(e)); return;
         }
         self.invalidate_dir_cache(parent);
-        let ino = self.inode_get_or_create(&child_path);
+        let ino = self.inode_get_or_create_with_nlookup(&child_path);
         let info = FileInfo { path: child_path, is_dir: true, size_bytes: None, revision: None };
         let attr = Self::make_attr(&info, ino);
         self.inode_set_attr(ino, attr);
@@ -703,7 +731,7 @@ impl Filesystem for VedaFs {
     }
 
     fn statfs(&mut self, _req: &Request, _ino: u64, reply: fuser::ReplyStatfs) {
-        reply.statfs(0, 0, 0, 0, 0, BLOCK_SIZE, 255, 0);
+        reply.statfs(1 << 30, 1 << 30, 1 << 30, 1 << 20, 1 << 20, BLOCK_SIZE, 255, 0);
     }
 
     fn access(&mut self, _req: &Request, _ino: u64, _mask: i32, reply: ReplyEmpty) {
@@ -755,8 +783,6 @@ mod tests {
     fn attr_from_dir_entry_uses_zero_when_size_missing() {
         let de = make_dir_entry("a.txt", false, None);
         let attr = VedaFs::attr_from_dir_entry(&de, 42);
-        // This documents the bug: when size is None, make_attr falls back to 0.
-        // The fix is NOT to change this helper, but to avoid caching the result.
         assert_eq!(attr.size, 0);
     }
 

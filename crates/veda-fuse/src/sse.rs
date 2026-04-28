@@ -1,6 +1,7 @@
 use std::io::BufRead;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use tracing::{debug, info, warn};
 
@@ -10,6 +11,7 @@ use crate::inode::InodeTable;
 
 const RECONNECT_MIN: Duration = Duration::from_secs(1);
 const RECONNECT_MAX: Duration = Duration::from_secs(30);
+const CURSOR_FLUSH_INTERVAL: Duration = Duration::from_secs(1);
 
 #[derive(Debug, serde::Deserialize)]
 struct SseEvent {
@@ -32,6 +34,7 @@ impl SseWatcher {
         inodes: Arc<Mutex<InodeTable>>,
         read_cache: Arc<Mutex<ReadCache>>,
         dir_cache: DirCacheMap,
+        cursor_file: PathBuf,
     ) -> Self {
         let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let stop_clone = stop.clone();
@@ -44,7 +47,10 @@ impl SseWatcher {
                 .build()
                 .expect("failed to build SSE client");
 
-            let mut cursor: i64 = 0;
+            let mut cursor: i64 = load_cursor(&cursor_file);
+            let mut last_persisted = cursor;
+            let mut last_flush = Instant::now();
+            info!(cursor, "SSE starting with persisted cursor");
             let mut backoff = RECONNECT_MIN;
 
             while !stop_clone.load(std::sync::atomic::Ordering::Relaxed) {
@@ -62,6 +68,7 @@ impl SseWatcher {
                         let reader = std::io::BufReader::new(resp);
                         for line in reader.lines() {
                             if stop_clone.load(std::sync::atomic::Ordering::Relaxed) {
+                                flush_cursor_if_dirty(&cursor_file, cursor, &mut last_persisted);
                                 return;
                             }
                             let line = match line {
@@ -99,7 +106,14 @@ impl SseWatcher {
                                     cursor = id;
                                 }
                             }
+
+                            if cursor != last_persisted && last_flush.elapsed() >= CURSOR_FLUSH_INTERVAL {
+                                save_cursor(&cursor_file, cursor);
+                                last_persisted = cursor;
+                                last_flush = Instant::now();
+                            }
                         }
+                        flush_cursor_if_dirty(&cursor_file, cursor, &mut last_persisted);
                     }
                     Ok(resp) => {
                         warn!("SSE connect failed: HTTP {}", resp.status());
@@ -110,11 +124,13 @@ impl SseWatcher {
                 }
 
                 if stop_clone.load(std::sync::atomic::Ordering::Relaxed) {
+                    flush_cursor_if_dirty(&cursor_file, cursor, &mut last_persisted);
                     return;
                 }
                 std::thread::sleep(backoff);
                 backoff = std::cmp::min(backoff * 2, RECONNECT_MAX);
             }
+            flush_cursor_if_dirty(&cursor_file, cursor, &mut last_persisted);
         });
 
         Self {
@@ -138,22 +154,41 @@ impl Drop for SseWatcher {
     }
 }
 
+fn flush_cursor_if_dirty(path: &Path, cursor: i64, last_persisted: &mut i64) {
+    if cursor != *last_persisted {
+        save_cursor(path, cursor);
+        *last_persisted = cursor;
+    }
+}
+
+fn load_cursor(path: &Path) -> i64 {
+    std::fs::read_to_string(path)
+        .ok()
+        .and_then(|s| s.trim().parse().ok())
+        .unwrap_or(0)
+}
+
+/// Atomic write: write to .tmp then rename so a crash can't corrupt the file.
+fn save_cursor(path: &Path, cursor: i64) {
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let tmp = path.with_extension("tmp");
+    if std::fs::write(&tmp, cursor.to_string()).is_ok() {
+        let _ = std::fs::rename(&tmp, path);
+    }
+}
+
 fn invalidate_caches(
     path: &str,
     inodes: &Arc<Mutex<InodeTable>>,
     read_cache: &Arc<Mutex<ReadCache>>,
     dir_cache: &DirCacheMap,
 ) {
-    // Invalidate read cache for the file itself.
     if let Ok(mut cache) = read_cache.lock() {
         cache.invalidate(path);
     }
 
-    // Invalidate inode attr cache for the file and its parent directory,
-    // and drop the parent's directory listing cache so the next lookup/readdir
-    // re-fetches from the server. Without this, negative-lookup short-circuit
-    // in VedaFs::lookup returns ENOENT for files created remotely, for up to
-    // attr_ttl seconds.
     let parent = parent_path(path);
     let parent_ino = if let Ok(mut table) = inodes.lock() {
         if let Some(ino) = table.get_ino(path) {
@@ -172,6 +207,17 @@ fn invalidate_caches(
             dc.remove(&pi);
         }
     }
+}
+
+pub fn cursor_file_path(server: &str) -> PathBuf {
+    let safe = server
+        .replace("://", "_")
+        .replace(['/', ':', '?', '#', '@'], "_");
+    let cache_dir = std::env::var("HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| PathBuf::from("/tmp"))
+        .join(".cache/veda-fuse");
+    cache_dir.join(format!("cursor-{safe}"))
 }
 
 #[cfg(test)]
@@ -208,39 +254,33 @@ mod tests {
     #[test]
     fn invalidate_caches_removes_parent_dir_cache_entry() {
         let inodes = Arc::new(Mutex::new(InodeTable::new()));
-        let read_cache = Arc::new(Mutex::new(ReadCache::new(1)));
+        let read_cache = Arc::new(Mutex::new(ReadCache::new(1, Duration::from_secs(30))));
         let dir_cache: DirCacheMap = Arc::new(Mutex::new(HashMap::new()));
 
-        // Seed: /foo has ino 2, dir_cache[2] is populated as if a readdir just ran.
         let foo_ino = {
             let mut t = inodes.lock().unwrap();
             t.get_or_create_ino("/foo")
         };
-        // Populate dir_cache with a dummy entry for foo_ino.
         {
             let mut dc = dir_cache.lock().unwrap();
             dc.insert(foo_ino, crate::fs::DirCacheEntry::empty_for_test());
         }
 
-        // Simulate: SSE event "create /foo/new.txt"
         invalidate_caches("/foo/new.txt", &inodes, &read_cache, &dir_cache);
 
-        // Expect: dir_cache entry for /foo (the parent) is gone.
         assert!(dir_cache.lock().unwrap().get(&foo_ino).is_none());
     }
 
     #[test]
     fn invalidate_caches_still_invalidates_read_and_attr_caches() {
         let inodes = Arc::new(Mutex::new(InodeTable::new()));
-        let read_cache = Arc::new(Mutex::new(ReadCache::new(1)));
+        let read_cache = Arc::new(Mutex::new(ReadCache::new(1, Duration::from_secs(30))));
         let dir_cache: DirCacheMap = Arc::new(Mutex::new(HashMap::new()));
 
         let file_ino = {
             let mut t = inodes.lock().unwrap();
             let ino = t.get_or_create_ino("/foo/bar.txt");
-            // Also materialize parent so parent_ino lookup succeeds.
             t.get_or_create_ino("/foo");
-            // Seed a cached attr we can observe.
             let dummy_attr = fuser::FileAttr {
                 ino, size: 100,
                 blocks: 1,
@@ -254,13 +294,48 @@ mod tests {
             t.set_cached_attr(ino, dummy_attr);
             ino
         };
-        read_cache.lock().unwrap().put("/foo/bar.txt", b"hello".to_vec());
+        {
+            let gen = read_cache.lock().unwrap().generation();
+            read_cache.lock().unwrap().put("/foo/bar.txt", b"hello".to_vec(), gen);
+        }
 
         invalidate_caches("/foo/bar.txt", &inodes, &read_cache, &dir_cache);
 
-        // Attr cache cleared
         assert!(inodes.lock().unwrap().get_cached_attr(file_ino).is_none());
-        // Read cache cleared
         assert!(read_cache.lock().unwrap().get("/foo/bar.txt").is_none());
+    }
+
+    #[test]
+    fn cursor_persistence_roundtrip() {
+        let dir = std::env::temp_dir().join("veda-fuse-test-cursor");
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("test-cursor");
+        let _ = std::fs::remove_file(&path);
+
+        assert_eq!(load_cursor(&path), 0);
+        save_cursor(&path, 42);
+        assert_eq!(load_cursor(&path), 42);
+        save_cursor(&path, 99);
+        assert_eq!(load_cursor(&path), 99);
+
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_dir(&dir);
+    }
+
+    #[test]
+    fn cursor_file_path_stable() {
+        let p1 = cursor_file_path("https://example.com");
+        let p2 = cursor_file_path("https://example.com");
+        assert_eq!(p1, p2);
+        let p3 = cursor_file_path("https://other.com");
+        assert_ne!(p1, p3);
+    }
+
+    #[test]
+    fn cursor_file_path_no_special_chars() {
+        let p = cursor_file_path("https://api.example.com:8443/prefix");
+        let name = p.file_name().unwrap().to_str().unwrap();
+        assert!(!name.contains('/'));
+        assert!(!name.contains(':'));
     }
 }

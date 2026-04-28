@@ -162,9 +162,11 @@ fn mount_and_serve(
     notify_fd: Option<RawFd>,
 ) -> anyhow::Result<()> {
     let vedafs = fs::VedaFs::new(client, config, notify_fd);
+    let cursor_file = sse::cursor_file_path(server);
     let mut watcher = sse::SseWatcher::start(
         server, key,
         vedafs.inodes(), vedafs.read_cache(), vedafs.dir_cache(),
+        cursor_file,
     );
     let options = build_fuse_options(opts);
     install_signal_handler(mountpoint.to_string());
