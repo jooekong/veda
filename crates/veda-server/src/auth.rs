@@ -157,7 +157,7 @@ impl FromRequestParts<Arc<AppState>> for AuthWorkspace {
                 .and_then(|s| s.strip_prefix("Bearer "))
                 .ok_or_else(auth_err)?;
 
-            let (workspace_id, account_id, read_only) =
+            let (workspace_id, mut account_id, read_only) =
                 if let Some(claims) = verify_jwt(&state.jwt_secret, token) {
                     (claims.workspace_id, claims.account_id, false)
                 } else {
@@ -186,6 +186,10 @@ impl FromRequestParts<Arc<AppState>> for AuthWorkspace {
                 .ok_or_else(auth_err)?;
             if ws.status != veda_types::WorkspaceStatus::Active {
                 return Err(auth_err());
+            }
+
+            if account_id.is_empty() {
+                account_id = ws.account_id.clone();
             }
 
             Ok(AuthWorkspace {

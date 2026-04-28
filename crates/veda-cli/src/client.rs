@@ -215,11 +215,7 @@ impl Client {
         Self::check(resp).await
     }
 
-    pub async fn get_summary(
-        &self,
-        ws_key: &str,
-        path: &str,
-    ) -> Result<serde_json::Value> {
+    pub async fn get_summary(&self, ws_key: &str, path: &str) -> Result<serde_json::Value> {
         let path = path.trim_start_matches('/');
         let resp = self
             .http

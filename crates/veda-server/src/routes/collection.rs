@@ -99,7 +99,7 @@ async fn search_collection(
     Path(name): Path<String>,
     Json(req): Json<CollectionSearchRequest>,
 ) -> Result<Json<ApiResponse<Vec<serde_json::Value>>>, AppError> {
-    let limit = req.limit.unwrap_or(10);
+    let limit = req.limit.unwrap_or(10).min(100);
     let results = state
         .collection_service
         .search(&auth.workspace_id, &name, &req.query, limit)

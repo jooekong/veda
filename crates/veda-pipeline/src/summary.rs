@@ -56,11 +56,7 @@ pub async fn generate_l0(llm: &dyn LlmService, content: &str) -> Result<String> 
     llm.summarize(&prompt, 150).await
 }
 
-pub async fn generate_l1(
-    llm: &dyn LlmService,
-    content: &str,
-    max_tokens: usize,
-) -> Result<String> {
+pub async fn generate_l1(llm: &dyn LlmService, content: &str, max_tokens: usize) -> Result<String> {
     let truncated = truncate_content(content, 12_000);
     let prompt = L1_PROMPT.replace("{content}", &truncated);
     llm.summarize(&prompt, max_tokens).await
@@ -144,8 +140,12 @@ mod tests {
     #[tokio::test]
     async fn generate_l1_returns_summary() {
         let llm = MockLlm;
-        let result =
-            generate_l1(&llm, "# Chapter 1\nSome content\n# Chapter 2\nMore content", 2048).await;
+        let result = generate_l1(
+            &llm,
+            "# Chapter 1\nSome content\n# Chapter 2\nMore content",
+            2048,
+        )
+        .await;
         assert!(result.is_ok());
     }
 

@@ -4626,6 +4626,7 @@ dependencies = [
  "serde_json",
  "tokio",
  "toml",
+ "tracing",
  "veda-core",
  "veda-types",
 ]

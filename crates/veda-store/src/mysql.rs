@@ -641,10 +641,7 @@ async fn get_file_chunks_conn(
         }
         (None, None) => {
             q.push_str(" ORDER BY chunk_index");
-            sqlx::query(&q)
-                .bind(file_id)
-                .fetch_all(&mut *conn)
-                .await
+            sqlx::query(&q).bind(file_id).fetch_all(&mut *conn).await
         }
     }
     .map_err(storage_err)?;
@@ -731,6 +728,14 @@ async fn insert_outbox_conn(conn: &mut sqlx::MySqlConnection, event: &OutboxEven
 
 #[async_trait]
 impl MetadataStore for MysqlStore {
+    async fn ping(&self) -> Result<()> {
+        sqlx::query("SELECT 1")
+            .execute(&self.pool)
+            .await
+            .map_err(storage_err)?;
+        Ok(())
+    }
+
     async fn get_dentry(&self, workspace_id: &str, path: &str) -> Result<Option<Dentry>> {
         let mut conn = self.pool.acquire().await.map_err(storage_err)?;
         get_dentry_conn(&mut *conn, workspace_id, path).await
@@ -1447,8 +1452,7 @@ impl MetadataTx for MysqlMetadataTx {
         }
         let t = self.tx_mut()?;
         for batch in chunks.chunks(CHUNK_INSERT_BATCH) {
-            let placeholders: Vec<&str> =
-                batch.iter().map(|_| "(?, ?, ?, ?, ?, ?, ?)").collect();
+            let placeholders: Vec<&str> = batch.iter().map(|_| "(?, ?, ?, ?, ?, ?, ?)").collect();
             let sql = format!(
                 "INSERT INTO veda_file_chunks \
                  (file_id, chunk_index, start_line, line_count, byte_len, chunk_sha256, content) \

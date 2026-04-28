@@ -137,11 +137,7 @@ impl Worker {
         Ok(())
     }
 
-    async fn handle_chunk_sync(
-        &self,
-        workspace_id: &str,
-        file_id: &str,
-    ) -> veda_types::Result<()> {
+    async fn handle_chunk_sync(&self, workspace_id: &str, file_id: &str) -> veda_types::Result<()> {
         let Some(file) = self.meta.get_file(file_id).await? else {
             warn!(
                 workspace_id,
@@ -324,7 +320,10 @@ impl Worker {
             )
             .await?
         {
-            info!(dentry_id, "dir_summary_sync already pending, skipping enqueue");
+            info!(
+                dentry_id,
+                "dir_summary_sync already pending, skipping enqueue"
+            );
             return Ok(());
         }
         let now = Utc::now();
@@ -357,15 +356,20 @@ impl Worker {
             return Ok(());
         };
 
-        let child_summaries = self.meta.list_child_summaries(workspace_id, dir_path).await?;
+        let child_summaries = self
+            .meta
+            .list_child_summaries(workspace_id, dir_path)
+            .await?;
         if child_summaries.is_empty() {
             return Ok(());
         }
 
-        let child_l0s: Vec<String> = child_summaries.iter().map(|s| s.l0_abstract.clone()).collect();
+        let child_l0s: Vec<String> = child_summaries
+            .iter()
+            .map(|s| s.l0_abstract.clone())
+            .collect();
         let max_tokens = self.max_overview_tokens;
-        let (l0, l1) =
-            summary::aggregate_dir_summary(llm.as_ref(), &child_l0s, max_tokens).await?;
+        let (l0, l1) = summary::aggregate_dir_summary(llm.as_ref(), &child_l0s, max_tokens).await?;
 
         let summary_id = uuid::Uuid::new_v4().to_string();
         let now = Utc::now();

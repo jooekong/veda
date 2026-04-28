@@ -77,7 +77,7 @@ impl TableFunctionImpl for VedaSearchFactory {
                         v
                     )));
                 }
-                *v as usize
+                (*v as usize).min(100)
             }
             Some(Expr::Literal(ScalarValue::Null, _)) | None => 10,
             _ => {

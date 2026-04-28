@@ -34,9 +34,18 @@ impl SearchService {
         detail_level: DetailLevel,
     ) -> Result<Vec<SearchHit>> {
         match detail_level {
-            DetailLevel::Abstract => self.search_abstract(workspace_id, query, mode, limit, path_prefix).await,
-            DetailLevel::Overview => self.search_overview(workspace_id, query, mode, limit, path_prefix).await,
-            DetailLevel::Full => self.search_full(workspace_id, query, mode, limit, path_prefix).await,
+            DetailLevel::Abstract => {
+                self.search_abstract(workspace_id, query, mode, limit, path_prefix)
+                    .await
+            }
+            DetailLevel::Overview => {
+                self.search_overview(workspace_id, query, mode, limit, path_prefix)
+                    .await
+            }
+            DetailLevel::Full => {
+                self.search_full(workspace_id, query, mode, limit, path_prefix)
+                    .await
+            }
         }
     }
 
@@ -52,14 +61,21 @@ impl SearchService {
             warn!(requested_mode = ?mode, "abstract/overview search always uses semantic mode, ignoring requested mode");
         }
         let limit = if limit == 0 { 10 } else { limit };
-        let fetch_limit = if path_prefix.is_some() { limit * 3 } else { limit };
+        let fetch_limit = if path_prefix.is_some() {
+            limit * 3
+        } else {
+            limit
+        };
 
         // Summary search is always vector-based (L0 abstracts are short
         // semantic texts), so we always embed regardless of the requested mode.
         let vectors = self.embedding.embed(&[query.to_string()]).await?;
-        let query_vector = Some(vectors.into_iter().next().ok_or_else(|| {
-            VedaError::EmbeddingFailed("empty embedding result".to_string())
-        })?);
+        let query_vector = Some(
+            vectors
+                .into_iter()
+                .next()
+                .ok_or_else(|| VedaError::EmbeddingFailed("empty embedding result".to_string()))?,
+        );
 
         let req = SearchRequest {
             workspace_id: workspace_id.to_string(),
@@ -175,11 +191,7 @@ impl SearchService {
         }
     }
 
-    pub async fn get_summary(
-        &self,
-        workspace_id: &str,
-        path: &str,
-    ) -> Result<Option<FileSummary>> {
+    pub async fn get_summary(&self, workspace_id: &str, path: &str) -> Result<Option<FileSummary>> {
         let dentry = self.meta.get_dentry(workspace_id, path).await?;
         let Some(dentry) = dentry else {
             return Err(VedaError::NotFound(format!("path not found: {path}")));

@@ -651,8 +651,16 @@ async fn mysql_rename_dentries_under_unicode_prefix() {
     assert_eq!(b.parent_path, "/renamed/子目录");
 
     // Ensure old paths are gone
-    assert!(store.get_dentry(&ws, "/中文dir/a.txt").await.unwrap().is_none());
-    assert!(store.get_dentry(&ws, "/中文dir/子目录/b.txt").await.unwrap().is_none());
+    assert!(store
+        .get_dentry(&ws, "/中文dir/a.txt")
+        .await
+        .unwrap()
+        .is_none());
+    assert!(store
+        .get_dentry(&ws, "/中文dir/子目录/b.txt")
+        .await
+        .unwrap()
+        .is_none());
 
     cleanup_workspace(&store, &ws).await;
 }

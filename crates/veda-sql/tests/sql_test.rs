@@ -28,6 +28,9 @@ impl MockMetaFull {
 
 #[async_trait]
 impl MetadataStore for MockMetaFull {
+    async fn ping(&self) -> Result<()> {
+        Ok(())
+    }
     async fn get_dentry(&self, ws: &str, path: &str) -> Result<Option<Dentry>> {
         Ok(self
             .dentries
@@ -231,7 +234,12 @@ impl MetadataTx for MockMetaFullTx {
         }
         Ok(())
     }
-    async fn rename_dentries_under(&mut self, ws: &str, old_prefix: &str, new_prefix: &str) -> Result<u64> {
+    async fn rename_dentries_under(
+        &mut self,
+        ws: &str,
+        old_prefix: &str,
+        new_prefix: &str,
+    ) -> Result<u64> {
         let mut st = self.dentries.lock().unwrap();
         let prefix = format!("{old_prefix}/");
         let mut count = 0u64;
@@ -389,6 +397,9 @@ impl MockMeta {
 
 #[async_trait]
 impl MetadataStore for MockMeta {
+    async fn ping(&self) -> Result<()> {
+        Ok(())
+    }
     async fn get_dentry(&self, _ws: &str, path: &str) -> Result<Option<Dentry>> {
         Ok(self
             .dentries
@@ -494,6 +505,9 @@ impl MockVector {
 
 #[async_trait]
 impl VectorStore for MockVector {
+    async fn ping(&self) -> Result<()> {
+        Ok(())
+    }
     async fn upsert_chunks(&self, _chunks: &[ChunkWithEmbedding]) -> Result<()> {
         Ok(())
     }

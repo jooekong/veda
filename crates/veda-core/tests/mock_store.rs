@@ -54,6 +54,10 @@ fn filter_overlap(
 
 #[async_trait]
 impl MetadataStore for MockMetadataStore {
+    async fn ping(&self) -> Result<()> {
+        Ok(())
+    }
+
     async fn get_dentry(&self, workspace_id: &str, path: &str) -> Result<Option<Dentry>> {
         let st = self.state.lock().unwrap();
         Ok(st

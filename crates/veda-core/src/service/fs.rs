@@ -48,7 +48,7 @@ async fn compute_write_meta(content: String) -> Result<WriteMeta> {
         compute_write_meta_blocking(content, CHUNK_SIZE, INLINE_THRESHOLD)
     })
     .await
-    .map_err(|e| VedaError::Internal(format!("hash task join failed: {e}")))
+    .map_err(|e| VedaError::Internal(format!("hash task join failed: {e}")))?
 }
 
 /// Single-pass metadata computation.
@@ -62,32 +62,31 @@ fn compute_write_meta_blocking(
     content: String,
     chunk_size: usize,
     inline_threshold: i64,
-) -> WriteMeta {
+) -> Result<WriteMeta> {
     let size = content.len() as i64;
     let bytes = content.as_bytes();
 
-    // Inline: one hash pass + one line-count pass (both cache-hot on ≤256 KB).
     if size <= inline_threshold {
         let mut hasher = Sha256::new();
         hasher.update(bytes);
         let sha256 = format!("{:x}", hasher.finalize());
         let line_count = content.lines().count().min(i32::MAX as usize) as i32;
-        return WriteMeta {
+        return Ok(WriteMeta {
             sha256,
             size,
             line_count,
             payload: WritePayload::Inline { content },
-        };
+        });
     }
 
-    let (chunks, full_sha, line_count) = split_and_hash(bytes, chunk_size, 0, 1);
+    let (chunks, full_sha, line_count) = split_and_hash(bytes, chunk_size, 0, 1)?;
 
-    WriteMeta {
+    Ok(WriteMeta {
         sha256: full_sha,
         size,
         line_count,
         payload: WritePayload::Chunked { chunks },
-    }
+    })
 }
 
 /// Split `bytes` into '\n'-aligned chunks, computing each chunk's sha256,
@@ -99,7 +98,7 @@ fn split_and_hash(
     chunk_size: usize,
     start_chunk_index: i32,
     start_line: i32,
-) -> (Vec<FileChunk>, String, i32) {
+) -> Result<(Vec<FileChunk>, String, i32)> {
     let mut full_hasher = Sha256::new();
     let mut chunks: Vec<FileChunk> = Vec::new();
     let mut offset = 0usize;
@@ -129,10 +128,8 @@ fn split_and_hash(
         chunk_hasher.update(slice);
         let chunk_sha256 = format!("{:x}", chunk_hasher.finalize());
         let nl_count = slice.iter().filter(|&&b| b == b'\n').count() as i32;
-        // SAFETY: chunk boundaries land on '\n' bytes or EOF — always on a
-        // UTF-8 char boundary for valid UTF-8 input.
         let chunk_content = std::str::from_utf8(slice)
-            .expect("chunk boundary must align with UTF-8")
+            .map_err(|e| VedaError::InvalidInput(format!("file content is not valid UTF-8: {e}")))?
             .to_string();
 
         chunks.push(FileChunk {
@@ -155,7 +152,7 @@ fn split_and_hash(
     let newline_total: i32 = chunks.iter().map(|c| c.line_count).sum();
     let line_count = newline_total + if trailing_partial { 1 } else { 0 };
 
-    (chunks, full_sha, line_count)
+    Ok((chunks, full_sha, line_count))
 }
 
 /// Result of an incremental chunked append: new full-content sha256, total
@@ -178,7 +175,7 @@ fn compute_append_meta_blocking(
     tail_start_line: i32,
     tail: String,
     chunk_size: usize,
-) -> AppendMeta {
+) -> Result<AppendMeta> {
     let mut hasher = Sha256::new();
     for c in pre_tail_contents {
         hasher.update(c.as_bytes());
@@ -187,17 +184,17 @@ fn compute_append_meta_blocking(
     let sha256 = format!("{:x}", hasher.finalize());
 
     let (tail_chunks, _tail_only_sha, _tail_lines_with_trailing) =
-        split_and_hash(tail.as_bytes(), chunk_size, last_chunk_idx, tail_start_line);
+        split_and_hash(tail.as_bytes(), chunk_size, last_chunk_idx, tail_start_line)?;
 
     let tail_newlines: i32 = tail_chunks.iter().map(|c| c.line_count).sum();
     let trailing_partial = tail.as_bytes().last().map(|&b| b != b'\n').unwrap_or(false);
     let line_count = before_line_count + tail_newlines + if trailing_partial { 1 } else { 0 };
 
-    AppendMeta {
+    Ok(AppendMeta {
         sha256,
         line_count,
         tail_chunks,
-    }
+    })
 }
 
 pub struct FsService {
@@ -310,8 +307,7 @@ impl FsService {
                         });
                     }
 
-                    return finalize_full_rewrite(tx, workspace_id, &norm, &f, fid, &meta)
-                        .await;
+                    return finalize_full_rewrite(tx, workspace_id, &norm, &f, fid, &meta).await;
                 }
             }
         }
@@ -965,7 +961,7 @@ impl FsService {
             )
         })
         .await
-        .map_err(|e| VedaError::Internal(format!("append hash task join failed: {e}")))?;
+        .map_err(|e| VedaError::Internal(format!("append hash task join failed: {e}")))??;
 
         tx.delete_file_chunks_from(&fid_string, last_chunk_idx)
             .await?;
@@ -1242,9 +1238,7 @@ async fn ensure_parents(
     let existing = store.get_dentry(workspace_id, parent).await?;
     if let Some(d) = existing {
         if !d.is_dir {
-            return Err(VedaError::InvalidPath(format!(
-                "{parent} exists as a file"
-            )));
+            return Err(VedaError::InvalidPath(format!("{parent} exists as a file")));
         }
         return Ok(());
     }
@@ -1400,7 +1394,8 @@ mod append_hash_tests {
             1, // tail_start_line
             tail.clone(),
             256 * 1024,
-        );
+        )
+        .unwrap();
 
         let reconstructed = format!("{chunk0}{chunk1}{appended}");
         assert_eq!(
@@ -1412,10 +1407,44 @@ mod append_hash_tests {
 
     #[test]
     fn append_meta_with_no_pre_tail_chunks() {
-        // Single-chunk file being appended: pre_tail is empty.
         let tail = "hello world\n".to_string();
-        let meta = compute_append_meta_blocking(&[], 0, 0, 1, tail.clone(), 256 * 1024);
+        let meta = compute_append_meta_blocking(&[], 0, 0, 1, tail.clone(), 256 * 1024).unwrap();
         assert_eq!(meta.sha256, full_sha256(&tail));
+    }
+
+    #[test]
+    fn split_and_hash_rejects_non_utf8() {
+        let invalid = b"hello \xff world\n";
+        let result = split_and_hash(invalid, 256 * 1024, 0, 1);
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        match err {
+            VedaError::InvalidInput(msg) => {
+                assert!(msg.contains("UTF-8"), "expected UTF-8 error, got: {msg}");
+            }
+            other => panic!("expected InvalidInput, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn split_and_hash_accepts_valid_utf8() {
+        let valid = "hello world\n日本語テスト\n".as_bytes();
+        let result = split_and_hash(valid, 256 * 1024, 0, 1);
+        assert!(result.is_ok());
+        let (chunks, sha, _lines) = result.unwrap();
+        assert_eq!(chunks.len(), 1);
+        assert!(!sha.is_empty());
+    }
+
+    #[test]
+    fn compute_write_meta_rejects_non_utf8_in_chunked_path() {
+        let mut content = String::new();
+        for _ in 0..300_000 {
+            content.push('a');
+        }
+        content.push('\n');
+        let result = compute_write_meta_blocking(content, 256 * 1024, 256 * 1024);
+        assert!(result.is_ok());
     }
 }
 

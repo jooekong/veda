@@ -5,6 +5,7 @@ use veda_types::*;
 
 #[async_trait]
 pub trait MetadataStore: Send + Sync {
+    async fn ping(&self) -> Result<()>;
     async fn get_dentry(&self, workspace_id: &str, path: &str) -> Result<Option<Dentry>>;
     async fn list_dentries(&self, workspace_id: &str, parent_path: &str) -> Result<Vec<Dentry>>;
     async fn list_dentries_under(
@@ -209,6 +210,7 @@ pub trait MetadataTx: Send {
 
 #[async_trait]
 pub trait VectorStore: Send + Sync {
+    async fn ping(&self) -> Result<()>;
     async fn upsert_chunks(&self, chunks: &[ChunkWithEmbedding]) -> Result<()>;
     async fn delete_chunks(&self, workspace_id: &str, file_id: &str) -> Result<()>;
     async fn search(&self, req: &SearchRequest) -> Result<Vec<SearchHit>>;

@@ -26,6 +26,9 @@ struct MockVector {
 
 #[async_trait]
 impl VectorStore for MockVector {
+    async fn ping(&self) -> Result<()> {
+        Ok(())
+    }
     async fn upsert_chunks(&self, _chunks: &[ChunkWithEmbedding]) -> Result<()> {
         Ok(())
     }
@@ -73,7 +76,14 @@ async fn search_full_returns_chunks() {
     let svc = make_service(chunk_hits, vec![]);
 
     let hits = svc
-        .search("ws1", "test query", SearchMode::Hybrid, 10, None, DetailLevel::Full)
+        .search(
+            "ws1",
+            "test query",
+            SearchMode::Hybrid,
+            10,
+            None,
+            DetailLevel::Full,
+        )
         .await
         .unwrap();
     assert_eq!(hits.len(), 1);
@@ -95,7 +105,14 @@ async fn search_abstract_returns_summaries() {
     let svc = make_service(vec![], summary_hits);
 
     let hits = svc
-        .search("ws1", "test query", SearchMode::Semantic, 10, None, DetailLevel::Abstract)
+        .search(
+            "ws1",
+            "test query",
+            SearchMode::Semantic,
+            10,
+            None,
+            DetailLevel::Abstract,
+        )
         .await
         .unwrap();
     assert_eq!(hits.len(), 1);

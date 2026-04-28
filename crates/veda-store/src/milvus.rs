@@ -179,8 +179,7 @@ impl MilvusStore {
                 ]
             }
         });
-        self.post("/v2/vectordb/collections/create", body)
-            .await?;
+        self.post("/v2/vectordb/collections/create", body).await?;
         Ok(())
     }
 
@@ -194,10 +193,7 @@ impl MilvusStore {
                 "indexName": "vector"
             }]
         });
-        match self
-            .post("/v2/vectordb/indexes/create", index_body)
-            .await
-        {
+        match self.post("/v2/vectordb/indexes/create", index_body).await {
             Ok(_) => Ok(()),
             Err(e) => {
                 let m = e.to_string();
@@ -293,10 +289,7 @@ impl MilvusStore {
             .take(limit)
             .map(|row| {
                 let id = row.get("id").and_then(|x| x.as_str()).unwrap_or("");
-                let content = row
-                    .get("content")
-                    .and_then(|x| x.as_str())
-                    .unwrap_or("");
+                let content = row.get("content").and_then(|x| x.as_str()).unwrap_or("");
                 let score = row
                     .get("distance")
                     .and_then(|x| x.as_f64())
@@ -386,10 +379,7 @@ impl MilvusStore {
         Ok(Self::rows_to_hits(&rows, limit))
     }
 
-    async fn hybrid_search_remote(
-        &self,
-        req: &SearchRequest,
-    ) -> Result<Option<Vec<SearchHit>>> {
+    async fn hybrid_search_remote(&self, req: &SearchRequest) -> Result<Option<Vec<SearchHit>>> {
         let qv = req.query_vector.as_ref().unwrap();
         let ws = milvus_quote(&req.workspace_id);
         let base_filter = format!("workspace_id == {ws}");
@@ -415,10 +405,7 @@ impl MilvusStore {
             "outputFields": ["id", "workspace_id", "file_id", "chunk_index", "content"],
             "consistencyLevel": "Strong"
         });
-        match self
-            .post("/v2/vectordb/entities/hybrid_search", body)
-            .await
-        {
+        match self.post("/v2/vectordb/entities/hybrid_search", body).await {
             Ok(v) => {
                 let rows = flatten_entity_rows(v.get("data"));
                 Ok(Some(Self::rows_to_hits(&rows, req.limit)))
@@ -485,6 +472,12 @@ impl MilvusStore {
 
 #[async_trait]
 impl VectorStore for MilvusStore {
+    async fn ping(&self) -> Result<()> {
+        self.post("/v2/vectordb/collections/list", json!({}))
+            .await?;
+        Ok(())
+    }
+
     async fn upsert_chunks(&self, chunks: &[ChunkWithEmbedding]) -> Result<()> {
         if chunks.is_empty() {
             return Ok(());
@@ -706,8 +699,7 @@ impl CollectionVectorStore for MilvusStore {
                 "fields": schema_fields,
             }
         });
-        self.post("/v2/vectordb/collections/create", body)
-            .await?;
+        self.post("/v2/vectordb/collections/create", body).await?;
 
         let idx = json!({
             "collectionName": name,

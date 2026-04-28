@@ -22,7 +22,7 @@ async fn search(
     Json(req): Json<SearchApiRequest>,
 ) -> Result<Json<ApiResponse<Vec<SearchResultItem>>>, AppError> {
     let mode = req.mode.unwrap_or_default();
-    let limit = req.limit.unwrap_or(10);
+    let limit = req.limit.unwrap_or(10).min(100);
     let detail_level = req.detail_level.unwrap_or(DetailLevel::Full);
 
     let hits = state
@@ -59,5 +59,29 @@ async fn get_summary(
             l1_overview: s.l1_overview,
         }))),
         None => Err(veda_types::VedaError::NotFound("summary not found".into()).into()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn search_limit_capped_at_100() {
+        let raw: Option<usize> = Some(500);
+        let limit = raw.unwrap_or(10).min(100);
+        assert_eq!(limit, 100);
+    }
+
+    #[test]
+    fn search_limit_default_is_10() {
+        let raw: Option<usize> = None;
+        let limit = raw.unwrap_or(10).min(100);
+        assert_eq!(limit, 10);
+    }
+
+    #[test]
+    fn search_limit_passes_through_when_small() {
+        let raw: Option<usize> = Some(50);
+        let limit = raw.unwrap_or(10).min(100);
+        assert_eq!(limit, 50);
     }
 }

@@ -7,6 +7,7 @@ mod worker;
 
 use std::sync::Arc;
 
+use axum::http::{header, HeaderValue, Method};
 use tokio::net::TcpListener;
 use tokio::sync::watch;
 use tower_http::cors::CorsLayer;
@@ -36,7 +37,8 @@ async fn main() -> anyhow::Result<()> {
     info!(listen = %cfg.listen, "starting veda-server");
 
     let mysql = Arc::new(
-        MysqlStore::with_max_connections(&cfg.mysql.database_url, cfg.mysql.max_connections).await?,
+        MysqlStore::with_max_connections(&cfg.mysql.database_url, cfg.mysql.max_connections)
+            .await?,
     );
     mysql.migrate().await?;
 
@@ -74,6 +76,8 @@ async fn main() -> anyhow::Result<()> {
         search_service,
         collection_service,
         auth_store: mysql.clone(),
+        meta_store: mysql.clone(),
+        vector_store: milvus.clone(),
         sql_engine,
         jwt_secret: cfg.jwt_secret.clone(),
     });
@@ -93,7 +97,11 @@ async fn main() -> anyhow::Result<()> {
     };
 
     let worker_handle = if cfg.worker.enabled {
-        let max_overview_tokens = cfg.llm.as_ref().map(|c| c.max_summary_tokens).unwrap_or(2048);
+        let max_overview_tokens = cfg
+            .llm
+            .as_ref()
+            .map(|c| c.max_summary_tokens)
+            .unwrap_or(2048);
         let w = Worker::new(
             mysql.clone(),
             mysql.clone(),
@@ -111,9 +119,35 @@ async fn main() -> anyhow::Result<()> {
         None
     };
 
+    let cors = if cfg.allowed_origins.is_empty() {
+        CorsLayer::permissive()
+    } else {
+        let origins: Vec<HeaderValue> = cfg
+            .allowed_origins
+            .iter()
+            .filter_map(|s| s.parse().ok())
+            .collect();
+        CorsLayer::new()
+            .allow_origin(origins)
+            .allow_methods([
+                Method::GET,
+                Method::POST,
+                Method::PUT,
+                Method::DELETE,
+                Method::HEAD,
+            ])
+            .allow_headers([
+                header::AUTHORIZATION,
+                header::CONTENT_TYPE,
+                header::IF_MATCH,
+                header::IF_NONE_MATCH,
+                header::RANGE,
+            ])
+    };
+
     let app = routes::build_router(app_state)
         .layer(TraceLayer::new_for_http())
-        .layer(CorsLayer::permissive());
+        .layer(cors);
 
     let listener = TcpListener::bind(&cfg.listen).await?;
     info!(addr = %cfg.listen, "server listening");
