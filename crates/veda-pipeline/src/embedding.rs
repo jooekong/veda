@@ -106,6 +106,7 @@ impl EmbeddingProvider {
         let response = req.send().await.map_err(|e| EmbedError {
             inner: VedaError::EmbeddingFailed(e.to_string()),
             retry_after: None,
+            retryable: true,
         })?;
 
         let status = response.status();
@@ -118,12 +119,14 @@ impl EmbeddingProvider {
         let bytes = response.bytes().await.map_err(|e| EmbedError {
             inner: VedaError::EmbeddingFailed(e.to_string()),
             retry_after: None,
+            retryable: true,
         })?;
 
         if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
             return Err(EmbedError {
                 inner: VedaError::EmbeddingFailed("rate limited (429)".into()),
                 retry_after,
+                retryable: true,
             });
         }
 
@@ -132,6 +135,7 @@ impl EmbeddingProvider {
             return Err(EmbedError {
                 inner: VedaError::EmbeddingFailed(format!("HTTP {status}: {msg}")),
                 retry_after: None,
+                retryable: true,
             });
         }
 
@@ -140,12 +144,14 @@ impl EmbeddingProvider {
             return Err(EmbedError {
                 inner: VedaError::EmbeddingFailed(format!("HTTP {status}: {msg}")),
                 retry_after: None,
+                retryable: false,
             });
         }
 
         let parsed: EmbeddingResponse = serde_json::from_slice(&bytes).map_err(|e| EmbedError {
             inner: VedaError::EmbeddingFailed(format!("invalid embedding JSON: {e}")),
             retry_after: None,
+            retryable: false,
         })?;
 
         if parsed.data.len() != texts.len() {
@@ -156,6 +162,7 @@ impl EmbeddingProvider {
                     parsed.data.len()
                 )),
                 retry_after: None,
+                retryable: false,
             });
         }
 
@@ -165,6 +172,7 @@ impl EmbeddingProvider {
                 .map_err(|e| EmbedError {
                     inner: e,
                     retry_after: None,
+                    retryable: false,
                 })?;
             out.push(item.embedding);
         }
@@ -177,7 +185,7 @@ impl EmbeddingProvider {
             match self.embed_single_batch(texts).await {
                 Ok(v) => return Ok(v),
                 Err(e) => {
-                    if !is_retryable(&e.inner) || attempt == MAX_RETRIES {
+                    if !e.retryable || attempt == MAX_RETRIES {
                         return Err(e.inner);
                     }
                     let backoff_ms = if let Some(secs) = e.retry_after {
@@ -198,22 +206,7 @@ impl EmbeddingProvider {
 struct EmbedError {
     inner: VedaError,
     retry_after: Option<u64>,
-}
-
-fn is_retryable(e: &VedaError) -> bool {
-    match e {
-        VedaError::EmbeddingFailed(msg) => {
-            msg.contains("429")
-                || msg.contains("500")
-                || msg.contains("502")
-                || msg.contains("503")
-                || msg.contains("504")
-                || msg.contains("connect")
-                || msg.contains("timeout")
-                || msg.contains("timed out")
-        }
-        _ => false,
-    }
+    retryable: bool,
 }
 
 #[async_trait]
@@ -252,54 +245,23 @@ mod tests {
     use super::*;
 
     #[test]
-    fn is_retryable_catches_rate_limit() {
-        let err = VedaError::EmbeddingFailed("rate limited (429), retry-after=1s".into());
-        assert!(is_retryable(&err));
+    fn embed_error_retryable_for_transport() {
+        let e = EmbedError {
+            inner: VedaError::EmbeddingFailed("connection reset".into()),
+            retry_after: None,
+            retryable: true,
+        };
+        assert!(e.retryable);
     }
 
     #[test]
-    fn is_retryable_catches_server_errors() {
-        assert!(is_retryable(&VedaError::EmbeddingFailed(
-            "HTTP 500: internal".into()
-        )));
-        assert!(is_retryable(&VedaError::EmbeddingFailed(
-            "HTTP 502: bad gateway".into()
-        )));
-        assert!(is_retryable(&VedaError::EmbeddingFailed(
-            "HTTP 503: unavailable".into()
-        )));
-    }
-
-    #[test]
-    fn is_retryable_catches_connection_errors() {
-        assert!(is_retryable(&VedaError::EmbeddingFailed(
-            "connect error".into()
-        )));
-        assert!(is_retryable(&VedaError::EmbeddingFailed(
-            "request timed out".into()
-        )));
-        assert!(is_retryable(&VedaError::EmbeddingFailed(
-            "timeout reached".into()
-        )));
-    }
-
-    #[test]
-    fn is_retryable_rejects_client_errors() {
-        assert!(!is_retryable(&VedaError::EmbeddingFailed(
-            "HTTP 400: bad request".into()
-        )));
-        assert!(!is_retryable(&VedaError::EmbeddingFailed(
-            "HTTP 401: unauthorized".into()
-        )));
-        assert!(!is_retryable(&VedaError::EmbeddingFailed(
-            "invalid embedding JSON: ...".into()
-        )));
-    }
-
-    #[test]
-    fn is_retryable_rejects_non_embedding_errors() {
-        assert!(!is_retryable(&VedaError::NotFound("file".into())));
-        assert!(!is_retryable(&VedaError::InvalidInput("bad".into())));
+    fn embed_error_not_retryable_for_client_errors() {
+        let e = EmbedError {
+            inner: VedaError::EmbeddingFailed("HTTP 400: bad request".into()),
+            retry_after: None,
+            retryable: false,
+        };
+        assert!(!e.retryable);
     }
 
     #[test]

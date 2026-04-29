@@ -24,26 +24,19 @@ async fn execute_sql(
         .execute(&auth.workspace_id, auth.read_only, &req.sql)
         .await?;
 
-    let mut rows: Vec<serde_json::Value> = Vec::new();
+    let buf = Vec::new();
+    let mut writer = arrow::json::ArrayWriter::new(buf);
     for batch in &batches {
-        let buf = Vec::new();
-        let mut writer = arrow::json::LineDelimitedWriter::new(buf);
         writer
             .write(batch)
             .map_err(|e| AppError(veda_types::VedaError::Storage(e.to_string())))?;
-        writer
-            .finish()
-            .map_err(|e| AppError(veda_types::VedaError::Storage(e.to_string())))?;
-        let bytes = writer.into_inner();
-        let text = String::from_utf8_lossy(&bytes);
-        for line in text.lines() {
-            if !line.trim().is_empty() {
-                if let Ok(val) = serde_json::from_str(line) {
-                    rows.push(val);
-                }
-            }
-        }
     }
+    writer
+        .finish()
+        .map_err(|e| AppError(veda_types::VedaError::Storage(e.to_string())))?;
+    let bytes = writer.into_inner();
+    let rows: Vec<serde_json::Value> = serde_json::from_slice(&bytes)
+        .map_err(|e| AppError(veda_types::VedaError::Storage(format!("arrow json parse failed: {e}"))))?;
 
     Ok(Json(ApiResponse::ok(rows)))
 }

@@ -88,7 +88,8 @@ pub struct SearchApiRequest {
 #[derive(Debug, Serialize)]
 pub struct SearchResultItem {
     pub path: String,
-    pub chunk_index: i32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub chunk_index: Option<i32>,
     pub content: String,
     pub score: f32,
     #[serde(skip_serializing_if = "Option::is_none")]

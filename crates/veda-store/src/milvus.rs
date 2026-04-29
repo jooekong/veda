@@ -10,8 +10,12 @@ use veda_types::{
     SummaryWithEmbedding, VedaError,
 };
 
+use std::time::Duration;
+
 const COLLECTION: &str = "veda_chunks";
 const SUMMARY_COLLECTION: &str = "veda_summaries";
+const MAX_RETRIES: u32 = 3;
+const BASE_BACKOFF_MS: u64 = 300;
 
 fn storage_err(e: impl ToString) -> VedaError {
     VedaError::Storage(e.to_string())
@@ -92,25 +96,62 @@ impl MilvusStore {
         }
     }
 
-    async fn post(&self, path: &str, mut body: Value) -> Result<Value> {
+    /// Retry-enabled POST. Use ONLY for idempotent endpoints
+    /// (search/query/upsert/delete/load/list/has/drop). Non-idempotent
+    /// mutations (collections/create, entities/insert) MUST go through
+    /// `post_no_retry` — replaying after a commit-then-timeout produces
+    /// duplicate rows or AlreadyExists errors masking the real state.
+    async fn post(&self, path: &str, body: Value) -> Result<Value> {
+        let mut last_err = None;
+        for attempt in 0..=MAX_RETRIES {
+            match self.post_once(path, body.clone()).await {
+                Ok(v) => return Ok(v),
+                Err((e, retryable)) => {
+                    if !retryable || attempt == MAX_RETRIES {
+                        return Err(e);
+                    }
+                    let backoff_ms = BASE_BACKOFF_MS * 2u64.pow(attempt);
+                    warn!(attempt, backoff_ms, path, err = %e, "milvus request failed, retrying");
+                    tokio::time::sleep(Duration::from_millis(backoff_ms)).await;
+                    last_err = Some(e);
+                }
+            }
+        }
+        Err(last_err.unwrap())
+    }
+
+    /// Single-shot POST without retry. Required for non-idempotent mutations
+    /// where a transport-level retry could replay an already-committed write.
+    async fn post_no_retry(&self, path: &str, body: Value) -> Result<Value> {
+        self.post_once(path, body).await.map_err(|(e, _)| e)
+    }
+
+    async fn post_once(&self, path: &str, mut body: Value) -> std::result::Result<Value, (VedaError, bool)> {
         self.inject_db(&mut body);
         let resp = self
             .http
             .post(self.url(path))
-            .headers(self.headers()?)
+            .headers(self.headers().map_err(|e| (e, false))?)
             .json(&body)
             .send()
             .await
-            .map_err(|e| VedaError::Storage(e.to_string()))?;
+            .map_err(|e| (VedaError::Storage(e.to_string()), true))?;
         let status = resp.status();
+        let retryable = status == reqwest::StatusCode::TOO_MANY_REQUESTS || status.is_server_error();
         let text = resp
             .text()
             .await
-            .map_err(|e| VedaError::Storage(e.to_string()))?;
+            .map_err(|e| (VedaError::Storage(e.to_string()), true))?;
+        if retryable {
+            return Err((
+                VedaError::Storage(format!("milvus HTTP {status}: {text}")),
+                true,
+            ));
+        }
         let v: Value = serde_json::from_str(&text).map_err(|e| {
-            VedaError::Storage(format!(
+            (VedaError::Storage(format!(
                 "milvus invalid json (HTTP {status}): {e}; body: {text}"
-            ))
+            )), false)
         })?;
         let code = v
             .get("code")
@@ -122,9 +163,9 @@ impl MilvusStore {
                 .get("message")
                 .and_then(|m| m.as_str())
                 .unwrap_or("unknown error");
-            return Err(VedaError::Storage(format!(
+            return Err((VedaError::Storage(format!(
                 "milvus error code {code}: {msg}"
-            )));
+            )), false));
         }
         Ok(v)
     }
@@ -179,7 +220,8 @@ impl MilvusStore {
                 ]
             }
         });
-        self.post("/v2/vectordb/collections/create", body).await?;
+        self.post_no_retry("/v2/vectordb/collections/create", body)
+            .await?;
         Ok(())
     }
 
@@ -252,7 +294,8 @@ impl MilvusStore {
                     ]
                 }
             });
-            self.post("/v2/vectordb/collections/create", body).await?;
+            self.post_no_retry("/v2/vectordb/collections/create", body)
+                .await?;
 
             let idx = json!({
                 "collectionName": SUMMARY_COLLECTION,
@@ -298,7 +341,7 @@ impl MilvusStore {
                     .unwrap_or(0.0);
                 SearchHit {
                     file_id: id.to_string(),
-                    chunk_index: -1,
+                    chunk_index: None,
                     content: content.to_string(),
                     score,
                     path: None,
@@ -317,7 +360,7 @@ impl MilvusStore {
                 .and_then(|x| x.as_str())
                 .unwrap_or("")
                 .to_string();
-            let chunk_index = row.get("chunk_index").and_then(|x| x.as_i64()).unwrap_or(0) as i32;
+            let chunk_index = row.get("chunk_index").and_then(|x| x.as_i64()).map(|x| x as i32);
             let content = row
                 .get("content")
                 .and_then(|x| x.as_str())
@@ -454,7 +497,7 @@ impl MilvusStore {
                     .and_then(|x| x.as_str())
                     .unwrap_or("")
                     .to_string(),
-                chunk_index: row.get("chunk_index").and_then(|x| x.as_i64()).unwrap_or(0) as i32,
+                chunk_index: row.get("chunk_index").and_then(|x| x.as_i64()).map(|x| x as i32),
                 content: row
                     .get("content")
                     .and_then(|x| x.as_str())
@@ -699,7 +742,8 @@ impl CollectionVectorStore for MilvusStore {
                 "fields": schema_fields,
             }
         });
-        self.post("/v2/vectordb/collections/create", body).await?;
+        self.post_no_retry("/v2/vectordb/collections/create", body)
+            .await?;
 
         let idx = json!({
             "collectionName": name,
@@ -766,7 +810,8 @@ impl CollectionVectorStore for MilvusStore {
             "collectionName": collection_name,
             "data": data
         });
-        self.post("/v2/vectordb/entities/insert", body).await?;
+        self.post_no_retry("/v2/vectordb/entities/insert", body)
+            .await?;
         Ok(())
     }
 

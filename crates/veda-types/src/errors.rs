@@ -73,8 +73,3 @@ impl ApiResponse<()> {
     }
 }
 
-impl From<String> for VedaError {
-    fn from(s: String) -> Self {
-        VedaError::Internal(s)
-    }
-}

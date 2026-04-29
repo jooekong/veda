@@ -25,14 +25,14 @@ veda-fuse       FUSE 挂载（不在默认 workspace）      (已实现)
 
 ## 已实现能力
 
-- `veda-types`：VedaError enum、ApiResponse、所有领域类型（Account/Workspace/Dentry/FileRecord/FileChunk/OutboxEvent/CollectionSchema/SearchHit/FileSummary/SummaryStatus/DetailLevel 等）、API DTOs、13 个单元测试
+- `veda-types`：VedaError enum（已移除 `From<String>` 隐式转换，强制显式构造）、ApiResponse、所有领域类型（Account/Workspace/Dentry/FileRecord/FileChunk/OutboxEvent/CollectionSchema/SearchHit/FileSummary/SummaryStatus/DetailLevel 等）、API DTOs；`SearchHit.chunk_index` 为 `Option<i32>`（summary 命中为 None）；12 个单元测试
 - `veda-core`：MetadataStore/MetadataTx/VectorStore/TaskQueue/EmbeddingService/LlmService/AuthStore/CollectionMetaStore/CollectionVectorStore trait 定义（含 ping() 健康检查）；FsService（write/read/list/stat/delete/copy/rename/mkdir/append/glob_files/list_dir_recursive，含 dedup/COW/分层存储/outbox，非 UTF-8 内容返回错误而非 panic）；SearchService（hybrid/semantic/fulltext 三模式 + Abstract/Overview/Full 三层分级搜索）；CollectionService（create/list/get/delete/insert_rows/search）；path normalization；SHA256 checksum；glob matching；24 个 mock 单元测试 + 17 个工具单元测试
-- `veda-store`：MysqlStore（MetadataStore + MetadataTx + TaskQueue + AuthStore + CollectionMetaStore 实现，含 schema migration，新增 veda_summaries 表）；MilvusStore（VectorStore + CollectionVectorStore 实现，REST v2 client，新增 veda_summaries 集合）；10 个 MySQL 集成测试 + 2 个 Milvus 集成测试
-- `veda-pipeline`：EmbeddingProvider（OpenAI 兼容 HTTP，100/batch 自动分批 + exponential backoff 重试，429/5xx/连接错误最多重试 3 次）；LlmProvider（OpenAI-compatible chat completions，用于 L0/L1 摘要生成）；semantic_chunk（heading-based + sliding window）；storage_chunk（256KB 边界 + start_line）；extract_text（text/plain 占位）；summary 模块（generate_l0/generate_l1/aggregate_dir_summary + prompt 模板）；6 个 chunking 单元测试 + 3 个 summary 单元测试 + 6 个 embedding 单元测试 + 4 个 embedding 集成测试
+- `veda-store`：MysqlStore（MetadataStore + MetadataTx + TaskQueue + AuthStore + CollectionMetaStore 实现，含 schema migration，新增 veda_summaries 表；`insert_dentry` 使用 MySQL errno 1062 精确匹配 duplicate entry；`claim()` 重入不重复递增 retry_count）；MilvusStore（VectorStore + CollectionVectorStore 实现，REST v2 client，新增 veda_summaries 集合，`post()` 含 3 次指数退避重试）；10 个 MySQL 集成测试 + 2 个 Milvus 集成测试
+- `veda-pipeline`：EmbeddingProvider（OpenAI 兼容 HTTP，100/batch 自动分批 + exponential backoff 重试，基于 HTTP status code 判断 retryable）；LlmProvider（OpenAI-compatible chat completions，含 3 次指数退避重试，429/5xx/连接错误自动重试）；semantic_chunk（heading-based + sliding window）；storage_chunk（256KB 边界 + start_line）；extract_text（text/plain 占位）；summary 模块（generate_l0/generate_l1/aggregate_dir_summary + prompt 模板）；6 个 chunking 单元测试 + 3 个 summary 单元测试 + 4 个 embedding 单元测试 + 4 个 embedding 集成测试
 - `veda-sql`：VedaSqlEngine（DataFusion session 管理）；FilesTable（递归 dentry 枚举）；CollectionTable（Milvus 查询 → Arrow）；8 个 FS SQL 标量函数（veda_read/write/append/exists/size/mtime/remove/mkdir，友好错误消息）；`embedding()` UDF（文本 → JSON 向量）；`veda_fs()` Table Function（目录列举 / 文件读取 / glob 匹配，CSV/TSV/JSONL/plain text 自动解析）；`search()` UDTF（向量搜索，支持 hybrid/semantic/fulltext 模式 + limit 参数）；`veda_fs_events()` Table Function（事件查询，支持 since_id/path_prefix/limit）；`veda_storage_stats()` Table Function（文件/目录/字节统计）；支持 SELECT/WHERE/COUNT/JOIN 等标准 SQL；37 个 mock 单元测试
-- `veda-server`：ServerConfig（TOML 加载 + `VEDA_` 环境变量覆盖，新增 LlmConfig/allowed_origins）；JWT 签发/验证；API Key + Workspace Key 认证中间件（workspace-key 路径自动填充 account_id）；Account/Workspace/File/Search/Collection/SQL 全部 REST 路由；Worker（outbox 消费 + chunk sync + summary sync + dir summary sync）；`GET /v1/summary/{path}` 摘要查询端点；搜索 API 支持 `detail_level` 参数（limit 上限 100）；`/v1/health` 检查 MySQL+Milvus 可用性（返回 200/503）；CORS 可配置白名单（`allowed_origins`，默认 permissive）；graceful shutdown；4 个 HTTP 端到端集成测试
+- `veda-server`：ServerConfig（TOML 加载 + `VEDA_` 环境变量覆盖，新增 LlmConfig/allowed_origins）；JWT 签发/验证；API Key + Workspace Key 认证中间件（workspace-key 路径自动填充 account_id）；Account/Workspace/File/Search/Collection/SQL 全部 REST 路由；Worker（outbox 消费 + chunk sync + summary sync + dir summary sync）；`GET /v1/summary/{path}` 摘要查询端点；搜索 API 支持 `detail_level` 参数（limit 上限 100）；`/v1/ready` 检查 MySQL+Milvus 可用性（返回 200/503）；SQL 路由使用 Arrow ArrayWriter 直接序列化 JSON；CORS 可配置白名单（`allowed_origins`，默认 permissive）；graceful shutdown；4 个 HTTP 端到端集成测试
 - `veda-server`：新增 `POST /v1/fs/{path}` append 路由
-- `veda-cli`：clap 命令行解析；account create/login；workspace create/list/use；cp/cat/ls/mv/rm/mkdir/append；search（支持 --detail-level abstract/overview/full）；summary（查看文件/目录摘要）；collection CRUD；sql；config 管理；$HOME/.config/veda/config.toml 持久化
+- `veda-cli`：clap 命令行解析；account create/login；workspace create/list/use；cp/cat/ls/mv/rm/mkdir/append；search（支持 --detail-level abstract/overview/full）；summary（查看文件/目录摘要）；collection CRUD；sql；config 管理；$HOME/.config/veda/config.toml 持久化；HTTP client 带 connect 10s / request 60s 超时
 - `veda-fuse`：FUSE 文件系统挂载（fuser 0.14），需要 macFUSE（macOS）或 libfuse（Linux）
   - 基础：子命令 mount/umount；daemon 化（fork+setsid，pipe 通知 parent）；mount 选项（--cache-size/--attr-ttl/--allow-other/--read-only/--debug）
   - HTTP：blocking client（stat/read/write/list/delete/mkdir/rename/read_range），30s connect+request timeout，ClientError 区分 Network/Server/Parse
@@ -45,8 +45,8 @@ veda-fuse       FUSE 挂载（不在默认 workspace）      (已实现)
 
 ## 测试策略
 
-- 单元测试：`cargo test`（146 个测试，全部自动运行）
-- 集成测试：`cargo test -- --ignored`（17 个测试，需要 `config/test.toml` 配置真实 MySQL/Milvus/Embedding 服务）
+- 单元测试：`cargo test`（148 个测试，全部自动运行）
+- 集成测试：`cargo test -- --ignored`（22 个测试，需要 `config/test.toml` 配置真实 MySQL/Milvus/Embedding 服务）
 - 敏感配置：`config/test.toml`（已 gitignore），模板见 `config/test.toml.example`
 
 ## 待实现

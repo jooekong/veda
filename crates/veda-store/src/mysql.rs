@@ -1159,7 +1159,11 @@ impl MetadataTx for MysqlMetadataTx {
         .await
         {
             Ok(_) => Ok(()),
-            Err(sqlx::Error::Database(ref db_err)) if db_err.code().as_deref() == Some("23000") => {
+            Err(sqlx::Error::Database(ref db_err))
+                if db_err
+                    .try_downcast_ref::<sqlx::mysql::MySqlDatabaseError>()
+                    .is_some_and(|e| e.number() == 1062) =>
+            {
                 Err(VedaError::AlreadyExists(format!("dentry {}", dentry.path)))
             }
             Err(e) => Err(storage_err(e)),
@@ -1598,6 +1602,9 @@ impl TaskQueue for MysqlStore {
             let evt = row_to_outbox(r)?;
             let was_processing = evt.status == OutboxStatus::Processing;
             if was_processing {
+                // Lease expired: previous attempt crashed without calling fail(),
+                // so count it here. fail() resets status to 'pending', so next
+                // claim() won't enter this branch — no double-increment.
                 let next_retry = evt.retry_count + 1;
                 if next_retry >= evt.max_retries {
                     dead_ids.push(evt.id);

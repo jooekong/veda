@@ -18,7 +18,7 @@ use crate::fs_udf;
 fn search_schema() -> SchemaRef {
     Arc::new(Schema::new(vec![
         Field::new("file_id", DataType::Utf8, false),
-        Field::new("chunk_index", DataType::Int64, false),
+        Field::new("chunk_index", DataType::Int64, true),
         Field::new("content", DataType::Utf8, false),
         Field::new("score", DataType::Float64, false),
         Field::new("path", DataType::Utf8, true),
@@ -102,7 +102,10 @@ impl TableFunctionImpl for VedaSearchFactory {
 
         for h in &hits {
             fid_b.append_value(&h.file_id);
-            idx_b.append_value(h.chunk_index as i64);
+            match h.chunk_index {
+                Some(idx) => idx_b.append_value(idx as i64),
+                None => idx_b.append_null(),
+            }
             content_b.append_value(&h.content);
             score_b.append_value(h.score as f64);
             match &h.path {

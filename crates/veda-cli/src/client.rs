@@ -1,3 +1,5 @@
+use std::time::Duration;
+
 use anyhow::{bail, Context, Result};
 use sha2::{Digest, Sha256};
 
@@ -14,9 +16,14 @@ fn sha256_hex(data: &[u8]) -> String {
 
 impl Client {
     pub fn new(base_url: &str) -> Self {
+        let http = reqwest::Client::builder()
+            .connect_timeout(Duration::from_secs(10))
+            .timeout(Duration::from_secs(60))
+            .build()
+            .unwrap_or_else(|_| reqwest::Client::new());
         Self {
             base: base_url.trim_end_matches('/').to_string(),
-            http: reqwest::Client::new(),
+            http,
         }
     }
 

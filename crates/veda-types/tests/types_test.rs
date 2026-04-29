@@ -67,12 +67,6 @@ fn veda_error_display() {
 }
 
 #[test]
-fn veda_error_from_string() {
-    let err: VedaError = "something broke".to_string().into();
-    assert!(matches!(err, VedaError::Internal(msg) if msg == "something broke"));
-}
-
-#[test]
 fn api_response_ok() {
     let resp = ApiResponse::ok(42u32);
     assert!(resp.success);

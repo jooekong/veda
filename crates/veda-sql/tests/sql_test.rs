@@ -1851,7 +1851,7 @@ async fn search_returns_results() {
     let hits = vec![
         SearchHit {
             file_id: "f1".into(),
-            chunk_index: 0,
+            chunk_index: Some(0),
             content: "chunk about deployment".into(),
             score: 0.95,
             path: Some("/docs/deploy.md".into()),
@@ -1860,7 +1860,7 @@ async fn search_returns_results() {
         },
         SearchHit {
             file_id: "f2".into(),
-            chunk_index: 1,
+            chunk_index: Some(1),
             content: "another chunk".into(),
             score: 0.80,
             path: None,
@@ -1903,7 +1903,7 @@ async fn search_returns_results() {
 async fn search_with_mode_and_limit() {
     let hits = vec![SearchHit {
         file_id: "f1".into(),
-        chunk_index: 0,
+        chunk_index: Some(0),
         content: "result".into(),
         score: 0.9,
         path: Some("/a.md".into()),
@@ -1957,7 +1957,7 @@ async fn search_with_where_filter() {
     let hits = vec![
         SearchHit {
             file_id: "f1".into(),
-            chunk_index: 0,
+            chunk_index: Some(0),
             content: "high".into(),
             score: 0.95,
             path: Some("/a.md".into()),
@@ -1966,7 +1966,7 @@ async fn search_with_where_filter() {
         },
         SearchHit {
             file_id: "f2".into(),
-            chunk_index: 0,
+            chunk_index: Some(0),
             content: "low".into(),
             score: 0.30,
             path: Some("/b.md".into()),

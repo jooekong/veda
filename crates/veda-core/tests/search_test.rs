@@ -66,7 +66,7 @@ fn make_service(chunk_hits: Vec<SearchHit>, summary_hits: Vec<SearchHit>) -> Sea
 async fn search_full_returns_chunks() {
     let chunk_hits = vec![SearchHit {
         file_id: "f1".into(),
-        chunk_index: 0,
+        chunk_index: Some(0),
         content: "chunk content".into(),
         score: 0.9,
         path: Some("/a.md".into()),
@@ -95,7 +95,7 @@ async fn search_full_returns_chunks() {
 async fn search_abstract_returns_summaries() {
     let summary_hits = vec![SearchHit {
         file_id: "f1".into(),
-        chunk_index: -1,
+        chunk_index: None,
         content: "L0 abstract text".into(),
         score: 0.95,
         path: Some("/docs/readme.md".into()),
@@ -125,7 +125,7 @@ async fn search_with_path_prefix_filters() {
     let summary_hits = vec![
         SearchHit {
             file_id: "f1".into(),
-            chunk_index: -1,
+            chunk_index: None,
             content: "in docs".into(),
             score: 0.9,
             path: Some("/docs/a.md".into()),
@@ -134,7 +134,7 @@ async fn search_with_path_prefix_filters() {
         },
         SearchHit {
             file_id: "f2".into(),
-            chunk_index: -1,
+            chunk_index: None,
             content: "in src".into(),
             score: 0.8,
             path: Some("/src/b.rs".into()),

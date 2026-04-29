@@ -321,7 +321,7 @@ fn default_search_limit() -> usize {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SearchHit {
     pub file_id: String,
-    pub chunk_index: i32,
+    pub chunk_index: Option<i32>,
     pub content: String,
     pub score: f32,
     pub path: Option<String>,

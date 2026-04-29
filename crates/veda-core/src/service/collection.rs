@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use chrono::Utc;
+use tracing::error;
 use uuid::Uuid;
 use veda_types::*;
 
@@ -73,7 +74,13 @@ impl CollectionService {
             .await?;
 
         if let Err(e) = self.meta.create_collection_schema(&cs).await {
-            let _ = self.vector.drop_dynamic_collection(&milvus_name).await;
+            if let Err(drop_err) = self.vector.drop_dynamic_collection(&milvus_name).await {
+                error!(
+                    collection = %milvus_name,
+                    err = %drop_err,
+                    "failed to rollback Milvus collection after MySQL insert failed"
+                );
+            }
             return Err(e);
         }
 

@@ -14,13 +14,11 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use axum::{Json, Router};
 use serde::Serialize;
-use veda_types::ApiResponse;
 
 const READY_TIMEOUT: Duration = Duration::from_secs(3);
 
 pub fn build_router(state: Arc<AppState>) -> Router {
     Router::new()
-        .route("/v1/health", get(health))
         .route("/v1/ready", get(ready))
         .merge(account::routes())
         .merge(fs::routes())
@@ -32,10 +30,6 @@ pub fn build_router(state: Arc<AppState>) -> Router {
 }
 
 use crate::state::AppState;
-
-async fn health() -> Json<ApiResponse<&'static str>> {
-    Json(ApiResponse::ok("ok"))
-}
 
 #[derive(Serialize)]
 struct ReadyResponse {
