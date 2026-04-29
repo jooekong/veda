@@ -233,6 +233,16 @@ pub trait VectorStore: Send + Sync {
     async fn delete_summary(&self, workspace_id: &str, id: &str) -> Result<()>;
     async fn search_summaries(&self, req: &SearchRequest) -> Result<Vec<SearchHit>>;
 
+    /// Return the distinct `file_id` set present in the chunks collection
+    /// for `workspace_id`. Used by the reconciler to diff against MySQL.
+    /// Implementations may paginate internally; the returned list is a
+    /// point-in-time snapshot (no consistency guarantees during enumeration).
+    async fn list_chunk_file_ids(&self, workspace_id: &str) -> Result<Vec<String>>;
+    /// Return the distinct entity IDs present in the summary collection for
+    /// `workspace_id`. Summary entity IDs are file_id (for file summaries)
+    /// or dentry_id (for directory summaries) — reconciler resolves both.
+    async fn list_summary_ids(&self, workspace_id: &str) -> Result<Vec<String>>;
+
     async fn init_collections(&self, embedding_dim: u32) -> Result<()>;
 }
 
@@ -319,6 +329,9 @@ pub trait AuthStore: Send + Sync {
     async fn create_workspace(&self, workspace: &Workspace) -> Result<()>;
     async fn get_workspace(&self, id: &str) -> Result<Option<Workspace>>;
     async fn list_workspaces(&self, account_id: &str) -> Result<Vec<Workspace>>;
+    /// Return the IDs of all active workspaces across all accounts.
+    /// Used by the reconciler to iterate workspaces during drift detection.
+    async fn list_active_workspace_ids(&self) -> Result<Vec<String>>;
     async fn delete_workspace(&self, id: &str) -> Result<()>;
 
     // workspace key

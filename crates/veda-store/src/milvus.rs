@@ -666,6 +666,70 @@ impl VectorStore for MilvusStore {
         }
     }
 
+    async fn list_chunk_file_ids(&self, workspace_id: &str) -> Result<Vec<String>> {
+        let ws = milvus_quote(workspace_id);
+        let filter = format!("workspace_id == {ws}");
+        let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+        // Milvus has no DISTINCT — paginate the chunks and dedupe client-side.
+        // 16383 is the documented hard upper bound for `limit` on entities/query.
+        let page_size = 16_383i64;
+        let mut offset: i64 = 0;
+        loop {
+            let body = json!({
+                "collectionName": COLLECTION,
+                "filter": filter,
+                "limit": page_size,
+                "offset": offset,
+                "outputFields": ["file_id"],
+                "consistencyLevel": "Strong"
+            });
+            let v = self.post("/v2/vectordb/entities/query", body).await?;
+            let rows = flatten_entity_rows(v.get("data"));
+            let n = rows.len();
+            for row in &rows {
+                if let Some(fid) = row.get("file_id").and_then(|x| x.as_str()) {
+                    seen.insert(fid.to_string());
+                }
+            }
+            if (n as i64) < page_size {
+                break;
+            }
+            offset += page_size;
+        }
+        Ok(seen.into_iter().collect())
+    }
+
+    async fn list_summary_ids(&self, workspace_id: &str) -> Result<Vec<String>> {
+        let ws = milvus_quote(workspace_id);
+        let filter = format!("workspace_id == {ws}");
+        let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let page_size = 16_383i64;
+        let mut offset: i64 = 0;
+        loop {
+            let body = json!({
+                "collectionName": SUMMARY_COLLECTION,
+                "filter": filter,
+                "limit": page_size,
+                "offset": offset,
+                "outputFields": ["id"],
+                "consistencyLevel": "Strong"
+            });
+            let v = self.post("/v2/vectordb/entities/query", body).await?;
+            let rows = flatten_entity_rows(v.get("data"));
+            let n = rows.len();
+            for row in &rows {
+                if let Some(id) = row.get("id").and_then(|x| x.as_str()) {
+                    seen.insert(id.to_string());
+                }
+            }
+            if (n as i64) < page_size {
+                break;
+            }
+            offset += page_size;
+        }
+        Ok(seen.into_iter().collect())
+    }
+
     async fn init_collections(&self, embedding_dim: u32) -> Result<()> {
         if !self.collection_exists().await? {
             self.create_collection(embedding_dim).await?;

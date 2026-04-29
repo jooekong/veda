@@ -12,6 +12,8 @@ pub struct ServerConfig {
     #[serde(default)]
     pub worker: WorkerConfig,
     #[serde(default)]
+    pub reconciler: ReconcilerConfig,
+    #[serde(default)]
     pub allowed_origins: Vec<String>,
 }
 
@@ -59,6 +61,32 @@ impl Default for WorkerConfig {
             poll_interval_secs: default_poll_secs(),
         }
     }
+}
+
+#[derive(Debug, Deserialize, Clone)]
+pub struct ReconcilerConfig {
+    #[serde(default = "default_reconciler_enabled")]
+    pub enabled: bool,
+    /// Pass interval in seconds. Default: 6 hours. Minimum enforced at 60s.
+    #[serde(default = "default_reconciler_interval_secs")]
+    pub interval_secs: u64,
+}
+
+impl Default for ReconcilerConfig {
+    fn default() -> Self {
+        Self {
+            enabled: default_reconciler_enabled(),
+            interval_secs: default_reconciler_interval_secs(),
+        }
+    }
+}
+
+fn default_reconciler_enabled() -> bool {
+    true
+}
+
+fn default_reconciler_interval_secs() -> u64 {
+    6 * 3600
 }
 
 #[derive(Debug, Deserialize)]
@@ -164,6 +192,16 @@ impl ServerConfig {
                 .collect();
             if !origins.is_empty() {
                 self.allowed_origins = origins;
+            }
+        }
+        if let Ok(v) = std::env::var("VEDA_RECONCILER_ENABLED") {
+            if let Ok(b) = v.parse() {
+                self.reconciler.enabled = b;
+            }
+        }
+        if let Ok(v) = std::env::var("VEDA_RECONCILER_INTERVAL_SECS") {
+            if let Ok(n) = v.parse() {
+                self.reconciler.interval_secs = n;
             }
         }
     }

@@ -47,6 +47,12 @@ impl VectorStore for MockVector {
     async fn search_summaries(&self, _req: &SearchRequest) -> Result<Vec<SearchHit>> {
         Ok(self.summary_hits.clone())
     }
+    async fn list_chunk_file_ids(&self, _ws: &str) -> Result<Vec<String>> {
+        Ok(vec![])
+    }
+    async fn list_summary_ids(&self, _ws: &str) -> Result<Vec<String>> {
+        Ok(vec![])
+    }
     async fn init_collections(&self, _dim: u32) -> Result<()> {
         Ok(())
     }

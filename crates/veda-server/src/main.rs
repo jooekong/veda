@@ -1,4 +1,4 @@
-use veda_server::{auth, config, routes, state, worker};
+use veda_server::{auth, config, reconciler, routes, state, worker};
 
 use std::sync::Arc;
 
@@ -107,10 +107,32 @@ async fn main() -> anyhow::Result<()> {
             cfg.worker.poll_interval_secs,
             max_overview_tokens,
         );
+        let rx = shutdown_rx.clone();
         Some(tokio::spawn(async move {
-            w.run(shutdown_rx).await;
+            w.run(rx).await;
         }))
     } else {
+        None
+    };
+
+    let reconciler_handle = if cfg.reconciler.enabled {
+        let r = reconciler::Reconciler::new(
+            mysql.clone(),
+            mysql.clone(),
+            milvus.clone(),
+            mysql.clone(),
+            cfg.reconciler.interval_secs,
+        );
+        let rx = shutdown_rx.clone();
+        info!(
+            interval_secs = cfg.reconciler.interval_secs,
+            "reconciler enabled"
+        );
+        Some(tokio::spawn(async move {
+            r.run(rx).await;
+        }))
+    } else {
+        info!("reconciler disabled");
         None
     };
 
@@ -156,6 +178,9 @@ async fn main() -> anyhow::Result<()> {
         .await?;
 
     if let Some(handle) = worker_handle {
+        let _ = handle.await;
+    }
+    if let Some(handle) = reconciler_handle {
         let _ = handle.await;
     }
 

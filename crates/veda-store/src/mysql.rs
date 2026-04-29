@@ -1938,6 +1938,16 @@ impl AuthStore for MysqlStore {
         rows.iter().map(|r| row_to_workspace(r)).collect()
     }
 
+    async fn list_active_workspace_ids(&self) -> Result<Vec<String>> {
+        let rows: Vec<(String,)> = sqlx::query_as(
+            r#"SELECT id FROM veda_workspaces WHERE status = 'active'"#,
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map_err(storage_err)?;
+        Ok(rows.into_iter().map(|(id,)| id).collect())
+    }
+
     async fn delete_workspace(&self, id: &str) -> Result<()> {
         sqlx::query(r#"UPDATE veda_workspaces SET status = 'archived' WHERE id = ?"#)
             .bind(id)

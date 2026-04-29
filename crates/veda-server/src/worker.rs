@@ -88,10 +88,21 @@ impl Worker {
             .get("file_id")
             .and_then(|v| v.as_str())
             .unwrap_or("");
+        // force_reembed=true bypasses the W1.3 last_embedded_content_hash
+        // short-circuit. The reconciler sets it when MySQL has a file but
+        // Milvus is missing chunks for it — the watermark would otherwise
+        // (correctly, from MySQL's PoV) say "already embedded" and the
+        // worker would silently no-op despite the actual data loss.
+        let force_reembed = task
+            .payload
+            .get("force_reembed")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
 
         match task.event_type {
             OutboxEventType::ChunkSync => {
-                self.handle_chunk_sync(&task.workspace_id, file_id).await?;
+                self.handle_chunk_sync(&task.workspace_id, file_id, force_reembed)
+                    .await?;
                 // Enqueue summary BEFORE completing the ChunkSync, so a
                 // failure in summary enqueue retries the whole ChunkSync.
                 // The retry's handle_chunk_sync short-circuits via
@@ -142,7 +153,12 @@ impl Worker {
         Ok(())
     }
 
-    async fn handle_chunk_sync(&self, workspace_id: &str, file_id: &str) -> veda_types::Result<()> {
+    async fn handle_chunk_sync(
+        &self,
+        workspace_id: &str,
+        file_id: &str,
+        force_reembed: bool,
+    ) -> veda_types::Result<()> {
         let Some(file) = self.meta.get_file(file_id).await? else {
             warn!(
                 workspace_id,
@@ -158,7 +174,14 @@ impl Worker {
         // watermark write will redo the work (idempotent), but a successful
         // run followed by an outbox replay (lease expired, claim retry, etc.)
         // will short-circuit here.
-        if file.last_embedded_content_hash.as_deref() == Some(file.checksum_sha256.as_str()) {
+        //
+        // The reconciler-driven path sets `force_reembed=true` when it sees
+        // Milvus missing chunks for a file MySQL says is already embedded —
+        // in that case the watermark is correct relative to past embed
+        // history but Milvus has actually lost the data, so we must bypass.
+        if !force_reembed
+            && file.last_embedded_content_hash.as_deref() == Some(file.checksum_sha256.as_str())
+        {
             debug!(file_id, "chunk_sync skipped: content unchanged since last embed");
             return Ok(());
         }
