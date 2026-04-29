@@ -1,9 +1,4 @@
-mod auth;
-mod config;
-mod error;
-mod routes;
-mod state;
-mod worker;
+use veda_server::{auth, config, routes, state, worker};
 
 use std::sync::Arc;
 

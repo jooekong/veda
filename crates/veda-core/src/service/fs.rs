@@ -335,6 +335,7 @@ impl FsService {
             checksum_sha256: meta.sha256.clone(),
             revision: 1,
             ref_count: 1,
+            last_embedded_content_hash: None,
             created_at: now,
             updated_at: now,
         };
@@ -360,7 +361,7 @@ impl FsService {
         }
 
         let outbox = make_outbox(workspace_id, OutboxEventType::ChunkSync, &file_id);
-        tx.insert_outbox(&outbox).await?;
+        tx.try_insert_outbox_for_file(&outbox, &file_id).await?;
 
         let evt = make_fs_event(workspace_id, FsEventType::Create, &norm, Some(&file_id));
         tx.insert_fs_event(&evt).await?;
@@ -988,7 +989,7 @@ impl FsService {
         .await?;
 
         let outbox = make_outbox(workspace_id, OutboxEventType::ChunkSync, &fid_string);
-        tx.insert_outbox(&outbox).await?;
+        tx.try_insert_outbox_for_file(&outbox, &fid_string).await?;
         let evt = make_fs_event(workspace_id, FsEventType::Update, &norm, Some(&fid_string));
         tx.insert_fs_event(&evt).await?;
         tx.commit().await?;
@@ -1167,6 +1168,7 @@ async fn finalize_full_rewrite(
             checksum_sha256: meta.sha256.clone(),
             revision: old_file.revision + 1,
             ref_count: 1,
+            last_embedded_content_hash: None,
             created_at: now,
             updated_at: now,
         };
@@ -1177,7 +1179,7 @@ async fn finalize_full_rewrite(
             .await?;
 
         let outbox = make_outbox(workspace_id, OutboxEventType::ChunkSync, &new_file_id);
-        tx.insert_outbox(&outbox).await?;
+        tx.try_insert_outbox_for_file(&outbox, &new_file_id).await?;
         let evt = make_fs_event(
             workspace_id,
             FsEventType::Update,
@@ -1209,7 +1211,7 @@ async fn finalize_full_rewrite(
     .await?;
 
     let outbox = make_outbox(workspace_id, OutboxEventType::ChunkSync, old_file_id);
-    tx.insert_outbox(&outbox).await?;
+    tx.try_insert_outbox_for_file(&outbox, old_file_id).await?;
     let evt = make_fs_event(
         workspace_id,
         FsEventType::Update,

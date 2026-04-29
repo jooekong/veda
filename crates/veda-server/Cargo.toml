@@ -38,3 +38,6 @@ metrics-exporter-prometheus = "0.16"
 [dev-dependencies]
 reqwest = { version = "0.12", features = ["json"] }
 toml = "0.8"
+sqlx = { version = "0.8", features = ["mysql", "chrono", "json", "runtime-tokio-rustls"] }
+chrono = { workspace = true }
+tracing-subscriber = { workspace = true }

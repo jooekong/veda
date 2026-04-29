@@ -326,6 +326,9 @@ fn row_to_file(row: &sqlx::mysql::MySqlRow) -> Result<FileRecord> {
         checksum_sha256: row.try_get("checksum_sha256").map_err(storage_err)?,
         revision: row.try_get("revision").map_err(storage_err)?,
         ref_count: row.try_get("ref_count").map_err(storage_err)?,
+        last_embedded_content_hash: row
+            .try_get("last_embedded_content_hash")
+            .map_err(storage_err)?,
         created_at: row.try_get("created_at").map_err(storage_err)?,
         updated_at: row.try_get("updated_at").map_err(storage_err)?,
     })
@@ -407,6 +410,7 @@ impl MysqlStore {
     checksum_sha256 VARCHAR(64) NOT NULL,
     revision INT NOT NULL DEFAULT 1,
     ref_count INT NOT NULL DEFAULT 1,
+    last_embedded_content_hash VARCHAR(64) NULL,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
     INDEX idx_workspace (workspace_id),
@@ -524,6 +528,20 @@ impl MysqlStore {
                 .map_err(|e| VedaError::Storage(e.to_string()))?;
         }
 
+        // Idempotent column adds for upgrading existing schemas. errno 1060
+        // (duplicate column) is treated as success so re-running migrate
+        // against an already-migrated database is a no-op.
+        let alters = ["ALTER TABLE veda_files ADD COLUMN last_embedded_content_hash VARCHAR(64) NULL"];
+        for s in alters {
+            match sqlx::query(s).execute(&self.pool).await {
+                Ok(_) => {}
+                Err(sqlx::Error::Database(ref e))
+                    if e.try_downcast_ref::<sqlx::mysql::MySqlDatabaseError>()
+                        .is_some_and(|x| x.number() == 1060) => {}
+                Err(e) => return Err(VedaError::Storage(e.to_string())),
+            }
+        }
+
         Ok(())
     }
 
@@ -555,7 +573,8 @@ async fn get_file_conn(
 ) -> Result<Option<FileRecord>> {
     let row = sqlx::query(
         r#"SELECT id, workspace_id, size_bytes, mime_type, storage_type, source_type, line_count,
-                  checksum_sha256, revision, ref_count, created_at, updated_at
+                  checksum_sha256, revision, ref_count, last_embedded_content_hash,
+                  created_at, updated_at
            FROM veda_files WHERE id = ?"#,
     )
     .bind(file_id)
@@ -802,7 +821,8 @@ impl MetadataStore for MysqlStore {
         let placeholders = vec!["?"; file_ids.len()].join(",");
         let sql = format!(
             "SELECT id, workspace_id, size_bytes, mime_type, storage_type, source_type, \
-             line_count, checksum_sha256, revision, ref_count, created_at, updated_at \
+             line_count, checksum_sha256, revision, ref_count, last_embedded_content_hash, \
+             created_at, updated_at \
              FROM veda_files WHERE id IN ({})",
             placeholders
         );
@@ -843,7 +863,8 @@ impl MetadataStore for MysqlStore {
     ) -> Result<Option<FileRecord>> {
         let row = sqlx::query(
             r#"SELECT id, workspace_id, size_bytes, mime_type, storage_type, source_type, line_count,
-                      checksum_sha256, revision, ref_count, created_at, updated_at
+                      checksum_sha256, revision, ref_count, last_embedded_content_hash,
+                      created_at, updated_at
                FROM veda_files WHERE workspace_id = ? AND checksum_sha256 = ? LIMIT 1"#,
         )
         .bind(workspace_id)
@@ -958,6 +979,18 @@ impl MetadataStore for MysqlStore {
             total_directories: row.try_get::<i64, _>("total_directories").unwrap_or(0),
             total_bytes: row.try_get::<i64, _>("total_bytes").unwrap_or(0),
         })
+    }
+
+    async fn update_file_content_hash(&self, file_id: &str, hash: &str) -> Result<()> {
+        sqlx::query(
+            r#"UPDATE veda_files SET last_embedded_content_hash = ? WHERE id = ?"#,
+        )
+        .bind(hash)
+        .bind(file_id)
+        .execute(&self.pool)
+        .await
+        .map_err(storage_err)?;
+        Ok(())
     }
 
     async fn begin_tx(&self) -> Result<Box<dyn MetadataTx>> {
@@ -1288,7 +1321,8 @@ impl MetadataTx for MysqlMetadataTx {
         let t = self.tx_mut()?;
         let row = sqlx::query(
             r#"SELECT id, workspace_id, size_bytes, mime_type, storage_type, source_type,
-                      line_count, checksum_sha256, revision, ref_count, created_at, updated_at
+                      line_count, checksum_sha256, revision, ref_count,
+                      last_embedded_content_hash, created_at, updated_at
                FROM veda_files WHERE id = ? FOR UPDATE"#,
         )
         .bind(file_id)
@@ -1521,6 +1555,39 @@ impl MetadataTx for MysqlMetadataTx {
     async fn insert_outbox(&mut self, event: &OutboxEvent) -> Result<()> {
         let t = self.tx_mut()?;
         insert_outbox_conn(t.as_mut(), event).await
+    }
+
+    async fn try_insert_outbox_for_file(
+        &mut self,
+        event: &OutboxEvent,
+        file_id: &str,
+    ) -> Result<bool> {
+        let t = self.tx_mut()?;
+        let et = outbox_event_type_str(event.event_type);
+        // Only deduplicate against `pending` events. A `processing` event is
+        // already in flight against an older snapshot of the file; if we
+        // dedupe against it, the new content's ChunkSync gets dropped and the
+        // worker silently embeds stale data. Letting it through means after
+        // the in-flight task completes, the worker picks up the new pending
+        // event; if the second event's content_hash equals the watermark by
+        // then (e.g. user reverted), `handle_chunk_sync` short-circuits.
+        let row: Option<(i64,)> = sqlx::query_as(
+            r#"SELECT 1 FROM veda_outbox
+               WHERE event_type = ? AND workspace_id = ? AND status = 'pending'
+                 AND JSON_UNQUOTE(JSON_EXTRACT(payload, '$.file_id')) = ?
+               LIMIT 1"#,
+        )
+        .bind(et)
+        .bind(&event.workspace_id)
+        .bind(file_id)
+        .fetch_optional(t.as_mut())
+        .await
+        .map_err(storage_err)?;
+        if row.is_some() {
+            return Ok(false);
+        }
+        insert_outbox_conn(t.as_mut(), event).await?;
+        Ok(true)
     }
 
     async fn insert_fs_event(&mut self, event: &FsEvent) -> Result<()> {

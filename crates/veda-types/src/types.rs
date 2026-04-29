@@ -188,6 +188,10 @@ pub struct FileRecord {
     pub checksum_sha256: String,
     pub revision: i32,
     pub ref_count: i32,
+    /// Hash of the content at the time of the last successful Milvus embed.
+    /// NULL for files never embedded. Worker compares this against
+    /// `checksum_sha256` to skip redundant embedding when content is unchanged.
+    pub last_embedded_content_hash: Option<String>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }

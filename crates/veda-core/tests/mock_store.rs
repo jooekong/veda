@@ -215,6 +215,14 @@ impl MetadataStore for MockMetadataStore {
         })
     }
 
+    async fn update_file_content_hash(&self, file_id: &str, hash: &str) -> Result<()> {
+        let mut st = self.state.lock().unwrap();
+        if let Some(f) = st.files.iter_mut().find(|f| f.id == file_id) {
+            f.last_embedded_content_hash = Some(hash.to_string());
+        }
+        Ok(())
+    }
+
     async fn begin_tx(&self) -> Result<Box<dyn MetadataTx>> {
         Ok(Box::new(MockTx {
             state: Arc::clone(&self.state),
@@ -489,6 +497,30 @@ impl MetadataTx for MockTx {
         let mut st = self.state.lock().unwrap();
         st.outbox.push(event.clone());
         Ok(())
+    }
+
+    async fn try_insert_outbox_for_file(
+        &mut self,
+        event: &OutboxEvent,
+        file_id: &str,
+    ) -> Result<bool> {
+        // Only dedup against `Pending`. Processing tasks are already in
+        // flight against an older snapshot — letting a new event through
+        // ensures the latest content gets embedded after the in-flight
+        // task completes. See try_insert_outbox_for_file in mysql.rs for
+        // the full rationale.
+        let mut st = self.state.lock().unwrap();
+        let exists = st.outbox.iter().any(|e| {
+            e.event_type == event.event_type
+                && e.workspace_id == event.workspace_id
+                && matches!(e.status, OutboxStatus::Pending)
+                && e.payload.get("file_id").and_then(|v| v.as_str()) == Some(file_id)
+        });
+        if exists {
+            return Ok(false);
+        }
+        st.outbox.push(event.clone());
+        Ok(true)
     }
 
     async fn insert_fs_event(&mut self, event: &FsEvent) -> Result<()> {

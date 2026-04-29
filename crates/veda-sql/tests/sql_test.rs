@@ -131,6 +131,13 @@ impl MetadataStore for MockMetaFull {
             total_bytes,
         })
     }
+    async fn update_file_content_hash(&self, file_id: &str, hash: &str) -> Result<()> {
+        let mut files = self.files.lock().unwrap();
+        if let Some(f) = files.iter_mut().find(|f| f.id == file_id) {
+            f.last_embedded_content_hash = Some(hash.to_string());
+        }
+        Ok(())
+    }
     async fn begin_tx(&self) -> Result<Box<dyn MetadataTx>> {
         Ok(Box::new(MockMetaFullTx {
             dentries: self.dentries.clone(),
@@ -338,6 +345,13 @@ impl MetadataTx for MockMetaFullTx {
     async fn insert_outbox(&mut self, _event: &OutboxEvent) -> Result<()> {
         Ok(())
     }
+    async fn try_insert_outbox_for_file(
+        &mut self,
+        _event: &OutboxEvent,
+        _file_id: &str,
+    ) -> Result<bool> {
+        Ok(true)
+    }
     async fn insert_fs_event(&mut self, event: &FsEvent) -> Result<()> {
         let mut st = self.fs_events.lock().unwrap();
         // Emulate MySQL AUTO_INCREMENT — production uses DB-assigned IDs
@@ -468,6 +482,9 @@ impl MetadataStore for MockMeta {
             total_directories: 0,
             total_bytes: 0,
         })
+    }
+    async fn update_file_content_hash(&self, _file_id: &str, _hash: &str) -> Result<()> {
+        Ok(())
     }
     async fn begin_tx(&self) -> Result<Box<dyn MetadataTx>> {
         unreachable!()
@@ -1006,6 +1023,7 @@ async fn files_exposes_full_file_record() {
         checksum_sha256: "abc".into(),
         revision: 2,
         ref_count: 5,
+        last_embedded_content_hash: None,
         created_at: now,
         updated_at: now,
     });

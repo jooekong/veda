@@ -139,6 +139,7 @@ fn file_record_serde() {
         checksum_sha256: "abc123".into(),
         revision: 1,
         ref_count: 1,
+        last_embedded_content_hash: None,
         created_at: chrono::Utc::now(),
         updated_at: chrono::Utc::now(),
     };

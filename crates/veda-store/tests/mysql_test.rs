@@ -123,6 +123,7 @@ fn sample_file(ws: &str, id: &str, checksum: &str) -> FileRecord {
         checksum_sha256: checksum.to_string(),
         revision: 1,
         ref_count: 1,
+        last_embedded_content_hash: None,
         created_at: now,
         updated_at: now,
     }
@@ -663,4 +664,196 @@ async fn mysql_rename_dentries_under_unicode_prefix() {
         .is_none());
 
     cleanup_workspace(&store, &ws).await;
+}
+
+#[tokio::test]
+#[ignore]
+async fn mysql_update_file_content_hash_roundtrip() {
+    let url = load_mysql_url();
+    let store = MysqlStore::new(&url).await.expect("connect");
+    store.migrate().await.expect("migrate");
+
+    let ws = Uuid::new_v4().to_string();
+    let mut tx = store.begin_tx().await.expect("begin");
+    let file = sample_file(&ws, &Uuid::new_v4().to_string(), "checksum_v1");
+    tx.insert_file(&file).await.expect("insert_file");
+    tx.commit().await.expect("commit");
+
+    // Initially NULL.
+    let f1 = store.get_file(&file.id).await.unwrap().unwrap();
+    assert_eq!(f1.last_embedded_content_hash, None);
+
+    // Write watermark = the current checksum.
+    store
+        .update_file_content_hash(&file.id, &file.checksum_sha256)
+        .await
+        .expect("update_file_content_hash");
+    let f2 = store.get_file(&file.id).await.unwrap().unwrap();
+    assert_eq!(
+        f2.last_embedded_content_hash.as_deref(),
+        Some(file.checksum_sha256.as_str())
+    );
+
+    // Overwrite to a different value.
+    store
+        .update_file_content_hash(&file.id, "new_hash")
+        .await
+        .expect("update again");
+    let f3 = store.get_file(&file.id).await.unwrap().unwrap();
+    assert_eq!(f3.last_embedded_content_hash.as_deref(), Some("new_hash"));
+
+    cleanup_workspace(&store, &ws).await;
+}
+
+#[tokio::test]
+#[ignore]
+async fn mysql_try_insert_outbox_dedups_pending_for_file() {
+    let url = load_mysql_url();
+    let store = MysqlStore::new(&url).await.expect("connect");
+    store.migrate().await.expect("migrate");
+
+    let ws = Uuid::new_v4().to_string();
+    let file_id = Uuid::new_v4().to_string();
+    let now = Utc::now();
+    let event = OutboxEvent {
+        id: 0,
+        workspace_id: ws.clone(),
+        event_type: OutboxEventType::ChunkSync,
+        payload: serde_json::json!({"file_id": file_id}),
+        status: OutboxStatus::Pending,
+        retry_count: 0,
+        max_retries: 5,
+        available_at: now,
+        lease_until: None,
+        created_at: now,
+    };
+
+    // First insert: should succeed.
+    let mut tx = store.begin_tx().await.expect("begin tx 1");
+    let inserted_1 = tx
+        .try_insert_outbox_for_file(&event, &file_id)
+        .await
+        .expect("first insert");
+    assert!(inserted_1, "first call must insert");
+    tx.commit().await.expect("commit 1");
+
+    // Second insert with same workspace+file_id+event_type while the first is
+    // still pending: should be deduplicated.
+    let mut tx = store.begin_tx().await.expect("begin tx 2");
+    let inserted_2 = tx
+        .try_insert_outbox_for_file(&event, &file_id)
+        .await
+        .expect("second insert");
+    assert!(!inserted_2, "duplicate pending event must be skipped");
+    tx.commit().await.expect("commit 2");
+
+    // Different file_id under the same workspace must NOT be deduplicated.
+    let other_file_id = Uuid::new_v4().to_string();
+    let other_event = OutboxEvent {
+        payload: serde_json::json!({"file_id": other_file_id}),
+        ..event.clone()
+    };
+    let mut tx = store.begin_tx().await.expect("begin tx 3");
+    let inserted_3 = tx
+        .try_insert_outbox_for_file(&other_event, &other_file_id)
+        .await
+        .expect("third insert");
+    assert!(inserted_3, "different file_id must insert independently");
+    tx.commit().await.expect("commit 3");
+
+    // Cleanup.
+    let pool = store.pool();
+    let _ = sqlx::query("DELETE FROM veda_outbox WHERE workspace_id = ?")
+        .bind(&ws)
+        .execute(pool)
+        .await;
+}
+
+#[tokio::test]
+#[ignore]
+async fn mysql_try_insert_outbox_does_not_dedup_processing_for_new_writes() {
+    // Regression for the Codex adversarial finding: when a worker is mid-flight
+    // (status=processing) on file F's old content, a fresh write for F must
+    // enqueue a new pending ChunkSync — otherwise the worker silently embeds
+    // stale content and the new write is never indexed.
+    let url = load_mysql_url();
+    let store = MysqlStore::new(&url).await.expect("connect");
+    store.migrate().await.expect("migrate");
+
+    let ws = Uuid::new_v4().to_string();
+    let file_id = Uuid::new_v4().to_string();
+    let now = Utc::now();
+
+    // Simulate "worker has already claimed and started processing".
+    let processing_event = OutboxEvent {
+        id: 0,
+        workspace_id: ws.clone(),
+        event_type: OutboxEventType::ChunkSync,
+        payload: serde_json::json!({"file_id": file_id}),
+        status: OutboxStatus::Processing,
+        retry_count: 0,
+        max_retries: 5,
+        available_at: now,
+        lease_until: Some(now + chrono::Duration::minutes(10)),
+        created_at: now,
+    };
+    sqlx::query(
+        r#"INSERT INTO veda_outbox
+           (workspace_id, event_type, payload, status, retry_count, max_retries,
+            available_at, lease_until, created_at)
+           VALUES (?, 'chunk_sync', CAST(? AS JSON), 'processing', 0, 5, ?, ?, ?)"#,
+    )
+    .bind(&ws)
+    .bind(processing_event.payload.to_string())
+    .bind(now.naive_utc())
+    .bind(processing_event.lease_until.unwrap().naive_utc())
+    .bind(now.naive_utc())
+    .execute(store.pool())
+    .await
+    .expect("seed processing event");
+
+    // A user's fresh write for the same file_id must NOT be deduped by the
+    // in-flight processing event.
+    let new_event = OutboxEvent {
+        status: OutboxStatus::Pending,
+        ..processing_event
+    };
+    let mut tx = store.begin_tx().await.expect("begin tx");
+    let inserted = tx
+        .try_insert_outbox_for_file(&new_event, &file_id)
+        .await
+        .expect("try insert");
+    assert!(
+        inserted,
+        "must insert a new pending event even when an older processing one exists"
+    );
+    tx.commit().await.expect("commit");
+
+    // Verify the table now has 2 ChunkSync rows for this file_id. The seeded
+    // one is processing; the freshly inserted one starts as pending. We do
+    // NOT assert the exact (pending, processing) split because a real worker
+    // sharing this MySQL instance may claim the new pending event and flip
+    // it to processing before we look — that doesn't change the invariant
+    // we're testing (the new event was NOT silently dropped).
+    let total: i64 = sqlx::query_scalar(
+        r#"SELECT COUNT(*) FROM veda_outbox
+           WHERE workspace_id = ? AND event_type = 'chunk_sync'
+             AND JSON_UNQUOTE(JSON_EXTRACT(payload, '$.file_id')) = ?
+             AND status IN ('pending','processing','completed')"#,
+    )
+    .bind(&ws)
+    .bind(&file_id)
+    .fetch_one(store.pool())
+    .await
+    .expect("count total");
+    assert_eq!(
+        total, 2,
+        "must have exactly 2 chunk_sync rows after 1 seeded processing + 1 user insert (got {total})"
+    );
+
+    // Cleanup.
+    let _ = sqlx::query("DELETE FROM veda_outbox WHERE workspace_id = ?")
+        .bind(&ws)
+        .execute(store.pool())
+        .await;
 }

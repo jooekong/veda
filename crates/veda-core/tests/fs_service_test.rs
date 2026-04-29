@@ -82,14 +82,17 @@ async fn overwrite_bumps_revision() {
 }
 
 #[tokio::test]
-async fn overwrite_enqueues_outbox() {
+async fn rapid_overwrite_dedupes_pending_chunksync() {
+    // While a ChunkSync is still pending (worker hasn't completed it yet),
+    // additional writes to the same file_id MUST NOT enqueue duplicate
+    // ChunkSync events — the eventual single embed run will already see the
+    // latest content.
     let (svc, state) = make_service();
-    svc.write_file("ws1", "/f.txt", "v1", None, None)
-        .await
-        .unwrap();
-    svc.write_file("ws1", "/f.txt", "v2", None, None)
-        .await
-        .unwrap();
+    for v in ["v1", "v2", "v3", "v4", "v5"] {
+        svc.write_file("ws1", "/f.txt", v, None, None)
+            .await
+            .unwrap();
+    }
 
     let st = state.lock().unwrap();
     let sync_events: Vec<_> = st
@@ -97,7 +100,12 @@ async fn overwrite_enqueues_outbox() {
         .iter()
         .filter(|e| e.event_type == OutboxEventType::ChunkSync)
         .collect();
-    assert_eq!(sync_events.len(), 2);
+    assert_eq!(
+        sync_events.len(),
+        1,
+        "5 rapid writes should produce exactly 1 pending ChunkSync (got {})",
+        sync_events.len()
+    );
 }
 
 #[tokio::test]

@@ -91,6 +91,10 @@ pub trait MetadataStore: Send + Sync {
         limit: usize,
     ) -> Result<Vec<FsEvent>>;
     async fn storage_stats(&self, workspace_id: &str) -> Result<StorageStats>;
+    /// Update the `last_embedded_content_hash` watermark after a successful
+    /// Milvus upsert. Worker uses this on the next claim to skip redundant
+    /// embed calls when content hash is unchanged.
+    async fn update_file_content_hash(&self, file_id: &str, hash: &str) -> Result<()>;
     async fn begin_tx(&self) -> Result<Box<dyn MetadataTx>>;
 
     // summary ops (L0/L1)
@@ -192,6 +196,16 @@ pub trait MetadataTx: Send {
 
     // outbox
     async fn insert_outbox(&mut self, event: &OutboxEvent) -> Result<()>;
+    /// Insert an outbox event only if no pending/processing event of the same
+    /// `event_type` already exists for this `(workspace_id, file_id)`. Returns
+    /// `true` if inserted, `false` if a duplicate was detected and the call
+    /// was a no-op. Use for ChunkSync/ChunkDelete to deduplicate rapid writes
+    /// to the same file.
+    async fn try_insert_outbox_for_file(
+        &mut self,
+        event: &OutboxEvent,
+        file_id: &str,
+    ) -> Result<bool>;
 
     // fs event
     async fn insert_fs_event(&mut self, event: &FsEvent) -> Result<()>;

@@ -5,7 +5,7 @@ use chrono::Utc;
 use futures::stream::{self, StreamExt};
 use tokio::sync::watch;
 use tokio::time::sleep;
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 
 use veda_core::store::{EmbeddingService, LlmService, MetadataStore, TaskQueue, VectorStore};
 use veda_pipeline::chunking::semantic_chunk;
@@ -92,11 +92,16 @@ impl Worker {
         match task.event_type {
             OutboxEventType::ChunkSync => {
                 self.handle_chunk_sync(&task.workspace_id, file_id).await?;
-                self.task_queue.complete(task.id).await?;
+                // Enqueue summary BEFORE completing the ChunkSync, so a
+                // failure in summary enqueue retries the whole ChunkSync.
+                // The retry's handle_chunk_sync short-circuits via
+                // last_embedded_content_hash (no wasted embed), and
+                // enqueue_summary_sync has its own has_pending_event guard.
                 if self.llm.is_some() {
                     self.enqueue_summary_sync(&task.workspace_id, file_id)
                         .await?;
                 }
+                self.task_queue.complete(task.id).await?;
             }
             OutboxEventType::ChunkDelete => {
                 self.vector
@@ -147,6 +152,17 @@ impl Worker {
             return Ok(());
         };
 
+        // Skip the entire embed pipeline if the content has not changed since
+        // the last successful Milvus upsert. The watermark below is written at
+        // the end of this function, so a worker crash between upsert and
+        // watermark write will redo the work (idempotent), but a successful
+        // run followed by an outbox replay (lease expired, claim retry, etc.)
+        // will short-circuit here.
+        if file.last_embedded_content_hash.as_deref() == Some(file.checksum_sha256.as_str()) {
+            debug!(file_id, "chunk_sync skipped: content unchanged since last embed");
+            return Ok(());
+        }
+
         let content = match file.storage_type {
             StorageType::Inline => self
                 .meta
@@ -167,6 +183,11 @@ impl Worker {
         let sem_chunks = semantic_chunk(&content, 2048);
         if sem_chunks.is_empty() {
             self.vector.delete_chunks(workspace_id, file_id).await?;
+            // Empty content is "embedded as nothing"; record the watermark so
+            // re-embedding the same empty file short-circuits.
+            self.meta
+                .update_file_content_hash(file_id, &file.checksum_sha256)
+                .await?;
             return Ok(());
         }
 
@@ -187,6 +208,11 @@ impl Worker {
             .collect();
 
         self.vector.upsert_chunks(&chunks_with_emb).await?;
+        // Watermark only after Milvus upsert succeeds. If this update fails,
+        // the next claim retries embed+upsert (wasted) but data stays correct.
+        self.meta
+            .update_file_content_hash(file_id, &file.checksum_sha256)
+            .await?;
         Ok(())
     }
 

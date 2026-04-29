@@ -11,3 +11,13 @@ api_url = "https://api.openai.com/v1/embeddings"
 api_key = "sk-xxx"
 model = "text-embedding-3-small"
 dimension = 1024
+
+# LLM provider for summary / L0 / L1 generation.
+# Optional for unit tests; required for `cargo test -- --ignored` integration
+# tests that exercise the LLM path (Week 1 worker_atomic_test, Week 2
+# reconciler summary tests, etc.).
+[llm]
+api_url = "https://api.openai.com/v1/chat/completions"
+api_key = "sk-xxx"
+model = "gpt-4o-mini"
+max_summary_tokens = 2048
