@@ -172,6 +172,42 @@ async fn main() -> anyhow::Result<()> {
         }
     });
 
+    let retention_handle = if cfg.retention.enabled {
+        let interval = std::time::Duration::from_secs(cfg.retention.interval_secs.max(60));
+        let days = cfg.retention.events_retention_days.max(1);
+        let svc = app_state.fs_service.clone();
+        let mut rx = shutdown_rx.clone();
+        info!(
+            interval_secs = cfg.retention.interval_secs,
+            events_retention_days = days,
+            "fs_events retention sweep enabled"
+        );
+        Some(tokio::spawn(async move {
+            // Drift the first sweep by `interval` so a fresh boot doesn't
+            // immediately delete; gives ops time to ctrl-c if config is wrong.
+            let mut tick = tokio::time::interval(interval);
+            tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            tick.tick().await; // first tick fires immediately — discard
+            loop {
+                tokio::select! {
+                    _ = tick.tick() => {}
+                    _ = rx.changed() => {
+                        if *rx.borrow() { return; }
+                    }
+                }
+                let cutoff = chrono::Utc::now() - chrono::Duration::days(days);
+                match svc.prune_events_older_than(cutoff).await {
+                    Ok(n) if n > 0 => info!(deleted = n, cutoff = %cutoff, "fs_events retention swept"),
+                    Ok(_) => {}
+                    Err(e) => tracing::warn!(err = %e, "fs_events retention sweep failed"),
+                }
+            }
+        }))
+    } else {
+        info!("fs_events retention sweep disabled");
+        None
+    };
+
     let reconciler_handle = if cfg.reconciler.enabled {
         let r = reconciler::Reconciler::new(
             mysql.clone(),
@@ -239,6 +275,9 @@ async fn main() -> anyhow::Result<()> {
         let _ = handle.await;
     }
     if let Some(handle) = reconciler_handle {
+        let _ = handle.await;
+    }
+    if let Some(handle) = retention_handle {
         let _ = handle.await;
     }
 

@@ -173,20 +173,59 @@ impl MetadataStore for MockMetadataStore {
         path_prefix: Option<&str>,
         limit: usize,
     ) -> Result<Vec<FsEvent>> {
+        // Mirror the MySQL impl's subtree semantics: `prefix` matches the dir
+        // entry itself (`path == prefix`) or anything strictly under it
+        // (`path` starts with `prefix + "/"`). Plain `starts_with(prefix)`
+        // would leak across siblings — see mysql.rs comment.
         let st = self.state.lock().unwrap();
+        let normalized_prefix = path_prefix.map(|p| p.trim_end_matches('/'));
         let mut events: Vec<FsEvent> = st
             .fs_events
             .iter()
             .filter(|e| {
                 e.workspace_id == workspace_id
                     && e.id > since_id
-                    && path_prefix.map(|p| e.path.starts_with(p)).unwrap_or(true)
+                    && match normalized_prefix {
+                        None => true,
+                        Some("") => true, // "/" trimmed to ""
+                        Some(p) => e.path == p || e.path.starts_with(&format!("{p}/")),
+                    }
             })
             .cloned()
             .collect();
         events.sort_by_key(|e| e.id);
         events.truncate(limit);
         Ok(events)
+    }
+
+    async fn min_fs_event_id(&self, workspace_id: &str) -> Result<Option<i64>> {
+        let st = self.state.lock().unwrap();
+        Ok(st
+            .fs_events
+            .iter()
+            .filter(|e| e.workspace_id == workspace_id)
+            .map(|e| e.id)
+            .min())
+    }
+
+    async fn max_fs_event_id(&self, workspace_id: &str) -> Result<Option<i64>> {
+        let st = self.state.lock().unwrap();
+        Ok(st
+            .fs_events
+            .iter()
+            .filter(|e| e.workspace_id == workspace_id)
+            .map(|e| e.id)
+            .max())
+    }
+
+    async fn prune_fs_events_older_than(
+        &self,
+        cutoff: chrono::DateTime<chrono::Utc>,
+    ) -> Result<u64> {
+        let mut st = self.state.lock().unwrap();
+        let before = st.fs_events.len();
+        st.fs_events.retain(|e| e.created_at >= cutoff);
+        Ok((before - st.fs_events.len()) as u64)
     }
 
     async fn storage_stats(&self, workspace_id: &str) -> Result<StorageStats> {
@@ -526,7 +565,14 @@ impl MetadataTx for MockTx {
 
     async fn insert_fs_event(&mut self, event: &FsEvent) -> Result<()> {
         let mut st = self.state.lock().unwrap();
-        st.fs_events.push(event.clone());
+        let mut e = event.clone();
+        // Mirror MySQL's auto_increment: callers pass id=0 for "assign one".
+        // Without this, query_fs_events(since_id=0) sees nothing because every
+        // mocked event has id=0 and the strict `id > since_id` filter trips.
+        if e.id == 0 {
+            e.id = st.fs_events.iter().map(|x| x.id).max().unwrap_or(0) + 1;
+        }
+        st.fs_events.push(e);
         Ok(())
     }
 

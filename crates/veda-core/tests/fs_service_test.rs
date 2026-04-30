@@ -989,3 +989,81 @@ async fn get_file_chunks_returns_empty_when_range_exceeds_eof() {
         chunks.len()
     );
 }
+
+#[tokio::test]
+async fn events_min_id_returns_none_for_empty_workspace() {
+    let (svc, _state) = make_service();
+    let v = svc.events_min_id("nope").await.unwrap();
+    assert_eq!(v, None);
+}
+
+#[tokio::test]
+async fn events_min_id_after_writes() {
+    let (svc, _state) = make_service();
+    svc.write_file("ws1", "/a.txt", "1", None, None).await.unwrap();
+    svc.write_file("ws1", "/b.txt", "2", None, None).await.unwrap();
+    let min = svc.events_min_id("ws1").await.unwrap();
+    assert!(min.is_some(), "writes must produce events");
+    let events = svc.query_events("ws1", 0, 100).await.unwrap();
+    assert_eq!(min, events.iter().map(|e| e.id).min());
+}
+
+#[tokio::test]
+async fn prune_events_older_than_clears_old_rows() {
+    let (svc, state) = make_service();
+    svc.write_file("ws1", "/a.txt", "1", None, None).await.unwrap();
+    // Backdate the inserted event so it falls outside the retention window.
+    {
+        let mut st = state.lock().unwrap();
+        for e in st.fs_events.iter_mut() {
+            e.created_at = chrono::Utc::now() - chrono::Duration::days(30);
+        }
+    }
+    let cutoff = chrono::Utc::now() - chrono::Duration::days(7);
+    let n = svc.prune_events_older_than(cutoff).await.unwrap();
+    assert!(n > 0, "expected at least one deletion, got {n}");
+    assert!(svc.query_events("ws1", 0, 100).await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn query_events_filtered_by_path_prefix() {
+    let (svc, _state) = make_service();
+    svc.write_file("ws1", "/docs/a.md", "1", None, None).await.unwrap();
+    svc.write_file("ws1", "/src/b.rs", "2", None, None).await.unwrap();
+    svc.write_file("ws1", "/docs/c.md", "3", None, None).await.unwrap();
+    let events = svc
+        .query_events_filtered("ws1", 0, Some("/docs"), 100)
+        .await
+        .unwrap();
+    assert_eq!(events.len(), 2, "only /docs/* events should match");
+    assert!(events.iter().all(|e| e.path.starts_with("/docs")));
+}
+
+#[tokio::test]
+async fn query_events_filtered_does_not_leak_into_sibling_dirs() {
+    // Subtree boundary: a `/docs` prefix must not match `/docs_alt/*`.
+    // The naive `LIKE 'prefix%'` shape fails this; the fix uses
+    // `path = prefix OR path LIKE 'prefix/%'`.
+    let (svc, _state) = make_service();
+    svc.write_file("ws1", "/docs/a.md", "1", None, None).await.unwrap();
+    svc.write_file("ws1", "/docs_alt/b.md", "2", None, None).await.unwrap();
+    svc.write_file("ws1", "/docs/c.md", "3", None, None).await.unwrap();
+    let events = svc
+        .query_events_filtered("ws1", 0, Some("/docs"), 100)
+        .await
+        .unwrap();
+    assert_eq!(
+        events.len(),
+        2,
+        "/docs prefix must not match /docs_alt/*; got: {:?}",
+        events.iter().map(|e| &e.path).collect::<Vec<_>>()
+    );
+    assert!(events.iter().all(|e| e.path.starts_with("/docs/")));
+
+    // Trailing slash variant should be canonicalized to the same result.
+    let events_with_slash = svc
+        .query_events_filtered("ws1", 0, Some("/docs/"), 100)
+        .await
+        .unwrap();
+    assert_eq!(events_with_slash.len(), 2);
+}

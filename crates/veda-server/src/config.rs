@@ -14,6 +14,8 @@ pub struct ServerConfig {
     #[serde(default)]
     pub reconciler: ReconcilerConfig,
     #[serde(default)]
+    pub retention: RetentionConfig,
+    #[serde(default)]
     pub allowed_origins: Vec<String>,
     /// Bearer token gating `/v1/metrics`. When `None`, the endpoint returns
     /// 404 — making metrics opt-in via explicit configuration. Prometheus
@@ -113,6 +115,43 @@ fn default_reconciler_enabled() -> bool {
 
 fn default_reconciler_interval_secs() -> u64 {
     6 * 3600
+}
+
+#[derive(Debug, Deserialize, Clone)]
+pub struct RetentionConfig {
+    /// `veda_fs_events` retention background sweep on/off.
+    #[serde(default = "default_retention_enabled")]
+    pub enabled: bool,
+    /// Sweep cadence. Default: once a day. Clamped to ≥ 60s.
+    #[serde(default = "default_retention_interval_secs")]
+    pub interval_secs: u64,
+    /// Events older than this are deleted on each sweep. Default: 14 days.
+    /// SSE clients with cursors older than this window get HTTP 410 and
+    /// must resync via `list_dir` then resubscribe.
+    #[serde(default = "default_retention_days")]
+    pub events_retention_days: i64,
+}
+
+impl Default for RetentionConfig {
+    fn default() -> Self {
+        Self {
+            enabled: default_retention_enabled(),
+            interval_secs: default_retention_interval_secs(),
+            events_retention_days: default_retention_days(),
+        }
+    }
+}
+
+fn default_retention_enabled() -> bool {
+    true
+}
+
+fn default_retention_interval_secs() -> u64 {
+    24 * 3600
+}
+
+fn default_retention_days() -> i64 {
+    14
 }
 
 #[derive(Debug, Deserialize)]
@@ -248,6 +287,21 @@ impl ServerConfig {
         if let Ok(v) = std::env::var("VEDA_RECONCILER_INTERVAL_SECS") {
             if let Ok(n) = v.parse() {
                 self.reconciler.interval_secs = n;
+            }
+        }
+        if let Ok(v) = std::env::var("VEDA_RETENTION_ENABLED") {
+            if let Ok(b) = v.parse() {
+                self.retention.enabled = b;
+            }
+        }
+        if let Ok(v) = std::env::var("VEDA_RETENTION_INTERVAL_SECS") {
+            if let Ok(n) = v.parse() {
+                self.retention.interval_secs = n;
+            }
+        }
+        if let Ok(v) = std::env::var("VEDA_RETENTION_EVENTS_DAYS") {
+            if let Ok(n) = v.parse() {
+                self.retention.events_retention_days = n;
             }
         }
         if let Ok(v) = std::env::var("VEDA_METRICS_TOKEN") {

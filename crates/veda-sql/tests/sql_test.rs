@@ -109,6 +109,23 @@ impl MetadataStore for MockMetaFull {
         v.truncate(limit);
         Ok(v)
     }
+    async fn min_fs_event_id(&self, ws: &str) -> Result<Option<i64>> {
+        let st = self.fs_events.lock().unwrap();
+        Ok(st.iter().filter(|e| e.workspace_id == ws).map(|e| e.id).min())
+    }
+    async fn max_fs_event_id(&self, ws: &str) -> Result<Option<i64>> {
+        let st = self.fs_events.lock().unwrap();
+        Ok(st.iter().filter(|e| e.workspace_id == ws).map(|e| e.id).max())
+    }
+    async fn prune_fs_events_older_than(
+        &self,
+        cutoff: chrono::DateTime<chrono::Utc>,
+    ) -> Result<u64> {
+        let mut st = self.fs_events.lock().unwrap();
+        let before = st.len();
+        st.retain(|e| e.created_at >= cutoff);
+        Ok((before - st.len()) as u64)
+    }
     async fn storage_stats(&self, ws: &str) -> Result<StorageStats> {
         let dentries = self.dentries.lock().unwrap();
         let files = self.files.lock().unwrap();
@@ -475,6 +492,18 @@ impl MetadataStore for MockMeta {
         _limit: usize,
     ) -> Result<Vec<FsEvent>> {
         Ok(vec![])
+    }
+    async fn min_fs_event_id(&self, _ws: &str) -> Result<Option<i64>> {
+        Ok(None)
+    }
+    async fn max_fs_event_id(&self, _ws: &str) -> Result<Option<i64>> {
+        Ok(None)
+    }
+    async fn prune_fs_events_older_than(
+        &self,
+        _cutoff: chrono::DateTime<chrono::Utc>,
+    ) -> Result<u64> {
+        Ok(0)
     }
     async fn storage_stats(&self, _ws: &str) -> Result<StorageStats> {
         Ok(StorageStats {

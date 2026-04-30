@@ -518,7 +518,8 @@ impl MysqlStore {
     path VARCHAR(4096) NOT NULL,
     file_id VARCHAR(36),
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    INDEX idx_ws_poll (workspace_id, id)
+    INDEX idx_ws_poll (workspace_id, id),
+    INDEX idx_created_at (created_at)
 )"#,
             r#"CREATE TABLE IF NOT EXISTS veda_accounts (
     id VARCHAR(36) PRIMARY KEY,
@@ -605,6 +606,20 @@ impl MysqlStore {
                 Err(sqlx::Error::Database(ref e))
                     if e.try_downcast_ref::<sqlx::mysql::MySqlDatabaseError>()
                         .is_some_and(|x| x.number() == 1060) => {}
+                Err(e) => return Err(VedaError::Storage(e.to_string())),
+            }
+        }
+
+        // Idempotent index adds. errno 1061 is "Duplicate key name", treated as
+        // already-applied. Required for retention sweeps over `created_at` to
+        // avoid full-table scans + long row-lock holds on large event tables.
+        let index_alters = ["ALTER TABLE veda_fs_events ADD INDEX idx_created_at (created_at)"];
+        for s in index_alters {
+            match sqlx::query(s).execute(&self.pool).await {
+                Ok(_) => {}
+                Err(sqlx::Error::Database(ref e))
+                    if e.try_downcast_ref::<sqlx::mysql::MySqlDatabaseError>()
+                        .is_some_and(|x| x.number() == 1061) => {}
                 Err(e) => return Err(VedaError::Storage(e.to_string())),
             }
         }
@@ -1044,18 +1059,42 @@ impl MetadataStore for MysqlStore {
         limit: usize,
     ) -> Result<Vec<FsEvent>> {
         let limit_i64 = i64::try_from(limit).unwrap_or(10_000);
+        // path_prefix is treated as a directory subtree. We match `path = prefix`
+        // (the dir entry itself, if any) OR `path LIKE 'prefix/%'`. The naive
+        // `LIKE 'prefix%'` form would leak into siblings (e.g. `/docs_alt/*`
+        // when the user asked for `/docs`), which is a hard correctness bug for
+        // any caller wiring this up to an authorization or notification fence.
+        // `/` is special-cased upstream (treated as unfiltered) and never reaches
+        // this branch with a meaningful trailing slash.
         let rows = match path_prefix {
-            Some(prefix) => {
-                let like = format!("{}%", escape_like(prefix));
+            Some("/") => {
                 sqlx::query(
                     r#"SELECT id, workspace_id, event_type, path, file_id, created_at
                        FROM veda_fs_events
-                       WHERE workspace_id = ? AND id > ? AND path LIKE ? ESCAPE '\\'
+                       WHERE workspace_id = ? AND id > ?
                        ORDER BY id ASC LIMIT ?"#,
                 )
                 .bind(workspace_id)
                 .bind(since_id)
-                .bind(&like)
+                .bind(limit_i64)
+                .fetch_all(&self.pool)
+                .await
+                .map_err(storage_err)?
+            }
+            Some(prefix) => {
+                let prefix = prefix.trim_end_matches('/');
+                let subtree_like = format!("{}/%", escape_like(prefix));
+                sqlx::query(
+                    r#"SELECT id, workspace_id, event_type, path, file_id, created_at
+                       FROM veda_fs_events
+                       WHERE workspace_id = ? AND id > ?
+                         AND (path = ? OR path LIKE ? ESCAPE '\\')
+                       ORDER BY id ASC LIMIT ?"#,
+                )
+                .bind(workspace_id)
+                .bind(since_id)
+                .bind(prefix)
+                .bind(&subtree_like)
                 .bind(limit_i64)
                 .fetch_all(&self.pool)
                 .await
@@ -1075,6 +1114,59 @@ impl MetadataStore for MysqlStore {
             .map_err(storage_err)?,
         };
         rows.iter().map(|r| row_to_fs_event(r)).collect()
+    }
+
+    async fn min_fs_event_id(&self, workspace_id: &str) -> Result<Option<i64>> {
+        let row = sqlx::query(
+            r#"SELECT MIN(id) AS min_id FROM veda_fs_events WHERE workspace_id = ?"#,
+        )
+        .bind(workspace_id)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(storage_err)?;
+        // MIN over an empty set is NULL — try_get returns Err for NULL, so
+        // map that to None instead of bubbling up the type-coercion error.
+        Ok(row.try_get::<i64, _>("min_id").ok())
+    }
+
+    async fn max_fs_event_id(&self, workspace_id: &str) -> Result<Option<i64>> {
+        let row = sqlx::query(
+            r#"SELECT MAX(id) AS max_id FROM veda_fs_events WHERE workspace_id = ?"#,
+        )
+        .bind(workspace_id)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(storage_err)?;
+        Ok(row.try_get::<i64, _>("max_id").ok())
+    }
+
+    async fn prune_fs_events_older_than(
+        &self,
+        cutoff: chrono::DateTime<chrono::Utc>,
+    ) -> Result<u64> {
+        // Batched delete: a single unbounded DELETE on a large event table
+        // would grab a lock-list proportional to the matching row count and
+        // can stall live writers for tens of seconds. We chunk by 5000 rows
+        // and yield between iterations so live `INSERT INTO veda_fs_events`
+        // can interleave. The loop terminates when a chunk affects 0 rows.
+        const CHUNK: u64 = 5000;
+        let mut total = 0u64;
+        loop {
+            let r = sqlx::query(r#"DELETE FROM veda_fs_events WHERE created_at < ? LIMIT 5000"#)
+                .bind(cutoff.naive_utc())
+                .execute(&self.pool)
+                .await
+                .map_err(storage_err)?;
+            let n = r.rows_affected();
+            total += n;
+            if n < CHUNK {
+                break;
+            }
+            // Yield to the runtime so other queries on the pool can interleave
+            // between chunks. No backoff — we're disk- and lock-bound, not CPU.
+            tokio::task::yield_now().await;
+        }
+        Ok(total)
     }
 
     async fn storage_stats(&self, workspace_id: &str) -> Result<StorageStats> {

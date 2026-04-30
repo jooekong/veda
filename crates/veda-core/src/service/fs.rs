@@ -427,6 +427,44 @@ impl FsService {
             .await
     }
 
+    /// Same as `query_events` but with a server-side path-prefix filter.
+    /// The prefix is applied as a SQL `LIKE 'prefix%'`, so callers should
+    /// pass the canonical (post-`path::normalize`) form.
+    pub async fn query_events_filtered(
+        &self,
+        workspace_id: &str,
+        since_id: i64,
+        path_prefix: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<FsEvent>> {
+        self.meta
+            .query_fs_events(workspace_id, since_id, path_prefix, limit)
+            .await
+    }
+
+    /// Smallest event id still in the table for a workspace, or `None` if
+    /// none exist. The events route uses this to detect "your cursor is
+    /// older than retention" and respond 410 with the new floor.
+    pub async fn events_min_id(&self, workspace_id: &str) -> Result<Option<i64>> {
+        self.meta.min_fs_event_id(workspace_id).await
+    }
+
+    /// Largest event id for a workspace, or `None` if none exist. Returned
+    /// alongside `min_id` in the 410 body so the recovering client can
+    /// resubscribe with `since_id = max_id` after a list_dir resync.
+    pub async fn events_max_id(&self, workspace_id: &str) -> Result<Option<i64>> {
+        self.meta.max_fs_event_id(workspace_id).await
+    }
+
+    /// Delete events older than `cutoff` across all workspaces. Returns the
+    /// number of rows removed. Wired into the retention background task.
+    pub async fn prune_events_older_than(
+        &self,
+        cutoff: chrono::DateTime<chrono::Utc>,
+    ) -> Result<u64> {
+        self.meta.prune_fs_events_older_than(cutoff).await
+    }
+
     /// Read a byte range from a file. Returns (data, total_size).
     ///
     /// For chunked files this only fetches the chunks whose byte range

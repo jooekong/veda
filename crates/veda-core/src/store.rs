@@ -120,6 +120,23 @@ pub trait MetadataStore: Send + Sync {
         path_prefix: Option<&str>,
         limit: usize,
     ) -> Result<Vec<FsEvent>>;
+    /// Smallest still-retained `veda_fs_events.id` for a workspace, or
+    /// `None` if the workspace has no events yet. Returning `Some(min)`
+    /// where `since_id < min` is the cue to emit HTTP 410 to a stale SSE
+    /// client — they slept past the retention window and need to resync.
+    async fn min_fs_event_id(&self, workspace_id: &str) -> Result<Option<i64>>;
+    /// Largest `veda_fs_events.id` for a workspace, or `None` if empty.
+    /// Returned alongside `current_min_id` in the 410 body so the client
+    /// has a race-free resync cursor: list_dir + resubscribe with
+    /// `since_id = current_max_id` won't miss events landed mid-recovery.
+    async fn max_fs_event_id(&self, workspace_id: &str) -> Result<Option<i64>>;
+    /// Delete `veda_fs_events` rows with `created_at < cutoff` across all
+    /// workspaces. Returns the number of rows removed. Called periodically
+    /// by the retention task.
+    async fn prune_fs_events_older_than(
+        &self,
+        cutoff: chrono::DateTime<chrono::Utc>,
+    ) -> Result<u64>;
     async fn storage_stats(&self, workspace_id: &str) -> Result<StorageStats>;
     /// Update the `last_embedded_content_hash` watermark after a successful
     /// Milvus upsert. Worker uses this on the next claim to skip redundant
