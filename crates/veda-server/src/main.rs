@@ -22,7 +22,11 @@ use worker::Worker;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    tracing_subscriber::fmt::init();
+    // Default to INFO so first-run logs are useful out of the box;
+    // RUST_LOG (e.g. "info,veda=debug") still wins for ops tuning.
+    use tracing_subscriber::EnvFilter;
+    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
+    tracing_subscriber::fmt().with_env_filter(filter).init();
 
     // Install the global metrics recorder before any module fires a
     // `metrics::*!` macro. Subsequent install attempts panic, so this

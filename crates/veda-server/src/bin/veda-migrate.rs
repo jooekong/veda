@@ -17,7 +17,11 @@ use veda_store::{MysqlStore, PoolConfig};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    tracing_subscriber::fmt::init();
+    // Default to INFO so the migrate output is useful out of the box;
+    // RUST_LOG still wins if the operator wants debug or trace.
+    use tracing_subscriber::EnvFilter;
+    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
+    tracing_subscriber::fmt().with_env_filter(filter).init();
 
     let config_path = std::env::args()
         .nth(1)
