@@ -1,0 +1,33 @@
+# One-shot migration unit. Runs `veda-migrate` to bring the schema up to
+# the binary's expected version, then exits. Fires automatically before
+# veda-server.service via the After=/Wants= relationship.
+#
+# Re-running on every boot is intentional and safe: migrate is idempotent
+# (CREATE TABLE IF NOT EXISTS, ALTER TABLE checks for errno 1060/1061 and
+# treats "already applied" as success).
+
+[Unit]
+Description=Veda schema migrate (one-shot)
+Documentation=https://github.com/jooekong/veda
+After=network-online.target
+Requires=network-online.target
+
+[Service]
+Type=oneshot
+User=veda
+Group=veda
+EnvironmentFile=-/etc/veda/veda.env
+ExecStart=/usr/local/bin/veda-migrate /etc/veda/config.toml
+RemainAfterExit=true
+# Migration on a populated DB rarely takes more than a few seconds, but
+# alpha may add ALTER TABLE on a 10M-row events table eventually. 5 min
+# is generous; raise if you start seeing this trip.
+TimeoutStartSec=300s
+
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

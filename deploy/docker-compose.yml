@@ -1,0 +1,220 @@
+# Single-host alpha stack: mysql + milvus + veda-server (+ migrate one-shot)
+# + prometheus + grafana. Designed to come up green from a fresh `docker
+# compose up -d` on a clean host within ~30s of all images being pulled.
+#
+# Setup (one-time):
+#   1. cp deploy/.env.example deploy/.env  (and edit secrets)
+#   2. mkdir -p deploy/secrets
+#      printf '%s' "$VEDA_METRICS_TOKEN" > deploy/secrets/veda_metrics_token
+#   3. cp deploy/config.docker.toml.example deploy/config.docker.toml
+#      and fill in [embedding] / [llm] sections with real provider creds
+#
+# Usage:
+#   cd deploy
+#   docker compose up -d
+#   docker compose logs -f veda-server
+#   open http://localhost:3000   # veda-server
+#   open http://localhost:9090   # prometheus
+#   open http://localhost:3001   # grafana (admin/admin)
+#
+# Migration: the `veda-migrate` service is a one-shot that runs `migrate`
+# then exits 0. veda-server depends_on it with `condition: service_completed_successfully`,
+# so it won't start until schema is up to date. Re-running `docker compose up`
+# is idempotent — migrate is a no-op when nothing has changed.
+
+services:
+  # ── Storage ────────────────────────────────────────────────────────
+  mysql:
+    image: mysql:8.0.40
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-veda-dev-root}
+      MYSQL_DATABASE: ${MYSQL_DATABASE:-veda}
+      MYSQL_USER: ${MYSQL_USER:-veda}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:-veda-dev}
+    command:
+      - --default-authentication-plugin=caching_sha2_password
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_unicode_ci
+      # wait_timeout default 28800s (8h) is fine for the 1800s pool max_lifetime,
+      # but make it explicit so a future `RESET PERSIST` can't pull it under us.
+      - --wait-timeout=28800
+    volumes:
+      - mysql-data:/var/lib/mysql
+    ports:
+      # Bound to localhost-only by default — alpha is meant to run on a
+      # private VM and storage services don't need to be exposed to the
+      # LAN. Drop the 127.0.0.1: prefix in .env or override here if you
+      # want remote access (then strongly consider locking down
+      # MYSQL_PASSWORD too).
+      - "${MYSQL_BIND:-127.0.0.1}:${MYSQL_PORT:-3306}:3306"
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "root", "-p${MYSQL_ROOT_PASSWORD:-veda-dev-root}"]
+      interval: 5s
+      timeout: 3s
+      retries: 30  # mysql 8 first-init takes ~20s; allow plenty of headroom
+    restart: unless-stopped
+
+  # Milvus standalone needs etcd (metadata) and minio (object storage). The
+  # official upstream compose splits them into 3 services; we follow the
+  # same shape so swapping in a managed Milvus later is mechanical.
+  etcd:
+    image: quay.io/coreos/etcd:v3.5.16
+    environment:
+      - ETCD_AUTO_COMPACTION_MODE=revision
+      - ETCD_AUTO_COMPACTION_RETENTION=1000
+      - ETCD_QUOTA_BACKEND_BYTES=4294967296
+      - ETCD_SNAPSHOT_COUNT=50000
+    command: >
+      etcd -advertise-client-urls=http://etcd:2379
+           -listen-client-urls http://0.0.0.0:2379
+           --data-dir /etcd
+    volumes:
+      - etcd-data:/etcd
+    healthcheck:
+      test: ["CMD", "etcdctl", "endpoint", "health"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+
+  minio:
+    image: minio/minio:RELEASE.2024-12-18T13-15-44Z
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+    command: minio server /data --console-address ":9001"
+    volumes:
+      - minio-data:/data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+
+  milvus:
+    image: milvusdb/milvus:v2.4.15
+    command: ["milvus", "run", "standalone"]
+    environment:
+      ETCD_ENDPOINTS: etcd:2379
+      MINIO_ADDRESS: minio:9000
+    volumes:
+      - milvus-data:/var/lib/milvus
+    ports:
+      # Same localhost-default rationale as mysql. Veda-server reaches
+      # milvus over the in-network DNS name, so this host port is just
+      # for ad-hoc CLI debugging.
+      - "${MILVUS_BIND:-127.0.0.1}:${MILVUS_PORT:-19530}:19530"
+    depends_on:
+      etcd:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9091/healthz"]
+      interval: 10s
+      timeout: 5s
+      retries: 30   # cold-start can take 30-60s
+      # 60s start_period — milvus standalone (etcd + minio + milvus
+      # boot serially in the same image) can take 35-50s on a fresh
+      # host. start_period suppresses unhealthy reports during this
+      # window so depends_on doesn't bail.
+      start_period: 60s
+    restart: unless-stopped
+
+  # ── Veda ───────────────────────────────────────────────────────────
+  # One-shot migration. exits 0 after schema is applied. veda-server
+  # depends_on this with service_completed_successfully so we're sure
+  # `migrate()` ran before the server starts answering /v1/* requests.
+  veda-migrate:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    image: veda:local
+    entrypoint: ["/usr/local/bin/veda-migrate"]
+    # Both binaries take a positional config path, NOT --config.
+    command: ["/etc/veda/config.toml"]
+    environment:
+      VEDA_MYSQL_URL: mysql://${MYSQL_USER:-veda}:${MYSQL_PASSWORD:-veda-dev}@mysql:3306/${MYSQL_DATABASE:-veda}
+    volumes:
+      - ./config.docker.toml:/etc/veda/config.toml:ro
+    depends_on:
+      mysql:
+        condition: service_healthy
+    restart: "no"  # one-shot
+
+  veda-server:
+    image: veda:local
+    # Build is on veda-migrate so we don't double-build; both services
+    # use the same image tag.
+    environment:
+      VEDA_MYSQL_URL: mysql://${MYSQL_USER:-veda}:${MYSQL_PASSWORD:-veda-dev}@mysql:3306/${MYSQL_DATABASE:-veda}
+      VEDA_MILVUS_URL: http://milvus:19530
+      VEDA_JWT_SECRET: ${VEDA_JWT_SECRET:?set VEDA_JWT_SECRET in .env}
+      VEDA_METRICS_TOKEN: ${VEDA_METRICS_TOKEN:?set VEDA_METRICS_TOKEN in .env}
+      VEDA_EMBEDDING_API_KEY: ${VEDA_EMBEDDING_API_KEY:?set VEDA_EMBEDDING_API_KEY in .env}
+      VEDA_LLM_API_KEY: ${VEDA_LLM_API_KEY:-}
+      RUST_LOG: ${RUST_LOG:-info,veda=debug}
+    # Positional config path (not --config). --skip-migrate avoids a
+    # redundant migrate pass on startup since veda-migrate already ran.
+    command: ["/etc/veda/config.toml", "--skip-migrate"]
+    volumes:
+      - ./config.docker.toml:/etc/veda/config.toml:ro
+    ports:
+      - "${VEDA_PORT:-3000}:3000"
+    depends_on:
+      milvus:
+        condition: service_healthy
+      veda-migrate:
+        condition: service_completed_successfully
+    restart: unless-stopped
+
+  # ── Observability ──────────────────────────────────────────────────
+  # Prometheus reads veda-server:3000/v1/metrics with a bearer token from
+  # ./secrets/veda_metrics_token. We point at the in-network service name,
+  # not host.docker.internal — that's only needed when the server runs on
+  # the host (the "observability-only" compose file).
+  prometheus:
+    image: prom/prometheus:v2.55.1
+    volumes:
+      - ./prometheus.compose.yml:/etc/prometheus/prometheus.yml:ro
+      # `bind.create_host_path: false` so a missing
+      # ./secrets/veda_metrics_token fails the container start with a
+      # clear "no such file or directory" instead of silently bind-
+      # mounting an empty *directory* (the docker default), which would
+      # make Prometheus 404 on every scrape and quietly never detect
+      # veda-server as up.
+      - type: bind
+        source: ./secrets/veda_metrics_token
+        target: /etc/prometheus/secrets/veda_metrics_token
+        read_only: true
+        bind:
+          create_host_path: false
+      - prometheus-data:/prometheus
+    ports:
+      - "${PROMETHEUS_PORT:-9090}:9090"
+    depends_on:
+      - veda-server
+    restart: unless-stopped
+
+  grafana:
+    image: grafana/grafana:11.3.0
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: admin
+      GF_USERS_ALLOW_SIGN_UP: "false"
+    volumes:
+      - grafana-data:/var/lib/grafana
+    ports:
+      - "${GRAFANA_PORT:-3001}:3000"
+    depends_on:
+      - prometheus
+    restart: unless-stopped
+
+volumes:
+  mysql-data:
+  etcd-data:
+  minio-data:
+  milvus-data:
+  prometheus-data:
+  grafana-data:

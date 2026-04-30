@@ -7,3 +7,5 @@ target/
 veda-server.toml
 config/test.toml
 config/server.toml
+deploy/config.docker.toml
+deploy/.env

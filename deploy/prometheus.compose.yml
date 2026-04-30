@@ -1,0 +1,19 @@
+# Prometheus scrape config for the in-compose veda-server. Differs from
+# prometheus.yml (the observability-only variant) only by target — here we
+# point at the Docker network service name `veda-server:3000` instead of
+# `host.docker.internal:3000`.
+
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+scrape_configs:
+  - job_name: veda-server
+    metrics_path: /v1/metrics
+    bearer_token_file: /etc/prometheus/secrets/veda_metrics_token
+    static_configs:
+      - targets:
+          - veda-server:3000
+        labels:
+          environment: alpha
+          deployment: docker-compose

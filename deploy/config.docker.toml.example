@@ -1,0 +1,62 @@
+# Veda config tuned for the docker-compose stack. Most connection strings
+# are overridden by environment variables (VEDA_MYSQL_DATABASE_URL etc.)
+# defined in docker-compose.yml; this file supplies the structural shape
+# and the sections that don't have env overrides yet.
+#
+# Copy to deploy/config.docker.toml and fill in [embedding] / [llm].
+
+listen = "0.0.0.0:3000"
+# Overridden by VEDA_JWT_SECRET in compose; placeholder here just lets
+# `cargo run` work without env if someone reuses this for dev.
+jwt_secret = "set-via-env"
+metrics_token = "set-via-env"
+
+[mysql]
+# Overridden by VEDA_MYSQL_DATABASE_URL.
+database_url = "mysql://veda:veda-dev@mysql:3306/veda"
+# Pool sized for a single-replica alpha. See PoolConfig docs in
+# crates/veda-store/src/mysql.rs for the full knob set.
+max_connections = 50
+min_connections = 5
+acquire_timeout_secs = 30
+idle_timeout_secs = 600
+max_lifetime_secs = 1800
+
+[milvus]
+url = "http://milvus:19530"
+# Standalone Milvus inside compose has no auth; keep token blank.
+db = "default"
+
+[embedding]
+# Replace with your provider. Anything OpenAI-compatible works:
+#   openai     → https://api.openai.com/v1/embeddings + text-embedding-3-small (1536d)
+#   ali bailian → https://airouter.ddmc-inc.com/api/v1/embeddings + text-embedding-v4 (1024d)
+api_url = "https://api.openai.com/v1/embeddings"
+api_key = "set-via-env"
+model = "text-embedding-3-small"
+dimension = 1536
+
+# Optional summary generation. Off by default — uncomment + fill in
+# api_key (or set VEDA_LLM_API_KEY) to enable.
+# [llm]
+# api_url = "https://api.openai.com/v1/chat/completions"
+# api_key = "set-via-env"
+# model = "gpt-4o-mini"
+# max_summary_tokens = 2048
+
+[worker]
+enabled = true
+batch_size = 16
+poll_interval_secs = 1
+
+[reconciler]
+enabled = true
+# 6h pass on a single-node alpha is plenty.
+interval_secs = 21600
+
+[retention]
+enabled = true
+# Daily sweep, 14-day retention. Long enough for a typical CI/coding
+# session; short enough to keep the events table O(GB) on a busy host.
+interval_secs = 86400
+events_retention_days = 14
