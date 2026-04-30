@@ -216,16 +216,35 @@ impl EmbeddingService for EmbeddingProvider {
             return Ok(Vec::new());
         }
 
-        if texts.len() <= BATCH_SIZE {
-            return self.embed_with_retry(texts).await;
+        let started = std::time::Instant::now();
+        // Use an async block so the inner `?` short-circuits to the block
+        // boundary, NOT out of `embed`. Without this wrapper, a failed batch
+        // returns straight from `embed`, skipping the metrics emission below
+        // and silently under-counting `veda_embed_total{outcome="err"}` for
+        // multi-batch failures.
+        let result: Result<Vec<Vec<f32>>> = async {
+            if texts.len() <= BATCH_SIZE {
+                return self.embed_with_retry(texts).await;
+            }
+            let mut all = Vec::with_capacity(texts.len());
+            for batch in texts.chunks(BATCH_SIZE) {
+                all.extend(self.embed_with_retry(batch).await?);
+            }
+            Ok(all)
         }
-
-        let mut all = Vec::with_capacity(texts.len());
-        for batch in texts.chunks(BATCH_SIZE) {
-            let batch_result = self.embed_with_retry(batch).await?;
-            all.extend(batch_result);
-        }
-        Ok(all)
+        .await;
+        let outcome = if result.is_ok() { "ok" } else { "err" };
+        ::metrics::histogram!(
+            "veda_embed_latency_seconds",
+            "outcome" => outcome,
+        )
+        .record(started.elapsed().as_secs_f64());
+        ::metrics::counter!(
+            "veda_embed_total",
+            "outcome" => outcome,
+        )
+        .increment(1);
+        result
     }
 
     fn dimension(&self) -> usize {

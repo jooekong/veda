@@ -15,6 +15,12 @@ pub struct ServerConfig {
     pub reconciler: ReconcilerConfig,
     #[serde(default)]
     pub allowed_origins: Vec<String>,
+    /// Bearer token gating `/v1/metrics`. When `None`, the endpoint returns
+    /// 404 — making metrics opt-in via explicit configuration. Prometheus
+    /// scrape jobs supply this in their `bearer_token` (or
+    /// `bearer_token_file`) directive.
+    #[serde(default)]
+    pub metrics_token: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -22,10 +28,30 @@ pub struct MysqlConfig {
     pub database_url: String,
     #[serde(default = "default_max_connections")]
     pub max_connections: u32,
+    #[serde(default)]
+    pub min_connections: u32,
+    #[serde(default = "default_acquire_timeout")]
+    pub acquire_timeout_secs: u64,
+    #[serde(default = "default_idle_timeout")]
+    pub idle_timeout_secs: u64,
+    #[serde(default = "default_max_lifetime")]
+    pub max_lifetime_secs: u64,
 }
 
 fn default_max_connections() -> u32 {
     50
+}
+
+fn default_acquire_timeout() -> u64 {
+    30
+}
+
+fn default_idle_timeout() -> u64 {
+    600 // drop idle conns after 10 minutes
+}
+
+fn default_max_lifetime() -> u64 {
+    1800 // recycle every 30 minutes to stay under typical MySQL wait_timeout
 }
 
 #[derive(Debug, Deserialize)]
@@ -145,6 +171,26 @@ impl ServerConfig {
                 self.mysql.max_connections = n;
             }
         }
+        if let Ok(v) = std::env::var("VEDA_MYSQL_MIN_CONNECTIONS") {
+            if let Ok(n) = v.parse() {
+                self.mysql.min_connections = n;
+            }
+        }
+        if let Ok(v) = std::env::var("VEDA_MYSQL_ACQUIRE_TIMEOUT_SECS") {
+            if let Ok(n) = v.parse() {
+                self.mysql.acquire_timeout_secs = n;
+            }
+        }
+        if let Ok(v) = std::env::var("VEDA_MYSQL_IDLE_TIMEOUT_SECS") {
+            if let Ok(n) = v.parse() {
+                self.mysql.idle_timeout_secs = n;
+            }
+        }
+        if let Ok(v) = std::env::var("VEDA_MYSQL_MAX_LIFETIME_SECS") {
+            if let Ok(n) = v.parse() {
+                self.mysql.max_lifetime_secs = n;
+            }
+        }
         if let Ok(v) = std::env::var("VEDA_MILVUS_URL") {
             self.milvus.url = v;
         }
@@ -204,6 +250,13 @@ impl ServerConfig {
                 self.reconciler.interval_secs = n;
             }
         }
+        if let Ok(v) = std::env::var("VEDA_METRICS_TOKEN") {
+            // An explicitly empty env var means "disable metrics auth", which
+            // we don't allow — empty or unset both leave the endpoint 404.
+            if !v.is_empty() {
+                self.metrics_token = Some(v);
+            }
+        }
     }
 }
 
@@ -232,7 +285,7 @@ dimension = 768
 
     #[test]
     fn load_minimal_toml() {
-        let _lock = ENV_MUTEX.lock().unwrap();
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
         let cfg = ServerConfig::from_toml(MINIMAL_TOML).unwrap();
         assert_eq!(cfg.listen, "0.0.0.0:3000");
         assert_eq!(cfg.jwt_secret, "test-secret-that-is-long-enough-32chars!");
@@ -244,7 +297,7 @@ dimension = 768
 
     #[test]
     fn env_overrides_toml_values() {
-        let _lock = ENV_MUTEX.lock().unwrap();
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
 
         std::env::set_var("VEDA_JWT_SECRET", "env-secret-override-32chars-long!");
         std::env::set_var("VEDA_MYSQL_URL", "mysql://prod/veda");
@@ -272,7 +325,7 @@ dimension = 768
 
     #[test]
     fn env_creates_llm_config_when_absent() {
-        let _lock = ENV_MUTEX.lock().unwrap();
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
 
         std::env::set_var("VEDA_LLM_API_URL", "http://llm:8080/v1/chat");
 
@@ -285,8 +338,95 @@ dimension = 768
     }
 
     #[test]
+    fn mysql_pool_defaults_match_documented_values() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
+        let cfg = ServerConfig::from_toml(MINIMAL_TOML).unwrap();
+        assert_eq!(cfg.mysql.max_connections, 50);
+        assert_eq!(cfg.mysql.min_connections, 0);
+        assert_eq!(cfg.mysql.acquire_timeout_secs, 30);
+        assert_eq!(cfg.mysql.idle_timeout_secs, 600);
+        assert_eq!(cfg.mysql.max_lifetime_secs, 1800);
+    }
+
+    #[test]
+    fn mysql_pool_env_overrides() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
+
+        std::env::set_var("VEDA_MYSQL_MIN_CONNECTIONS", "5");
+        std::env::set_var("VEDA_MYSQL_ACQUIRE_TIMEOUT_SECS", "10");
+        std::env::set_var("VEDA_MYSQL_IDLE_TIMEOUT_SECS", "120");
+        std::env::set_var("VEDA_MYSQL_MAX_LIFETIME_SECS", "60");
+
+        let cfg = ServerConfig::from_toml(MINIMAL_TOML).unwrap();
+
+        std::env::remove_var("VEDA_MYSQL_MIN_CONNECTIONS");
+        std::env::remove_var("VEDA_MYSQL_ACQUIRE_TIMEOUT_SECS");
+        std::env::remove_var("VEDA_MYSQL_IDLE_TIMEOUT_SECS");
+        std::env::remove_var("VEDA_MYSQL_MAX_LIFETIME_SECS");
+
+        assert_eq!(cfg.mysql.min_connections, 5);
+        assert_eq!(cfg.mysql.acquire_timeout_secs, 10);
+        assert_eq!(cfg.mysql.idle_timeout_secs, 120);
+        assert_eq!(cfg.mysql.max_lifetime_secs, 60);
+    }
+
+    #[test]
+    fn metrics_token_unset_by_default() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
+        let cfg = ServerConfig::from_toml(MINIMAL_TOML).unwrap();
+        assert!(cfg.metrics_token.is_none(), "default must disable metrics");
+    }
+
+    #[test]
+    fn metrics_token_from_env() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
+        std::env::set_var("VEDA_METRICS_TOKEN", "scrape-token-xyz");
+        let cfg = ServerConfig::from_toml(MINIMAL_TOML).unwrap();
+        std::env::remove_var("VEDA_METRICS_TOKEN");
+        assert_eq!(cfg.metrics_token.as_deref(), Some("scrape-token-xyz"));
+    }
+
+    #[test]
+    fn metrics_token_empty_env_stays_disabled() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
+        std::env::set_var("VEDA_METRICS_TOKEN", "");
+        let cfg = ServerConfig::from_toml(MINIMAL_TOML).unwrap();
+        std::env::remove_var("VEDA_METRICS_TOKEN");
+        assert!(
+            cfg.metrics_token.is_none(),
+            "empty env must not silently enable an empty-token bypass"
+        );
+    }
+
+    #[test]
+    fn metrics_token_from_toml() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
+        // Prepend (not append) — appending would land the field inside the
+        // trailing `[embedding]` table of MINIMAL_TOML.
+        let toml_with_token = format!("metrics_token = \"toml-token\"\n{MINIMAL_TOML}");
+        let cfg = ServerConfig::from_toml(&toml_with_token).unwrap();
+        assert_eq!(cfg.metrics_token.as_deref(), Some("toml-token"));
+    }
+
+    #[test]
+    fn reconciler_defaults_and_env_overrides() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
+        let cfg = ServerConfig::from_toml(MINIMAL_TOML).unwrap();
+        assert!(cfg.reconciler.enabled);
+        assert_eq!(cfg.reconciler.interval_secs, 6 * 3600);
+
+        std::env::set_var("VEDA_RECONCILER_ENABLED", "false");
+        std::env::set_var("VEDA_RECONCILER_INTERVAL_SECS", "300");
+        let cfg = ServerConfig::from_toml(MINIMAL_TOML).unwrap();
+        std::env::remove_var("VEDA_RECONCILER_ENABLED");
+        std::env::remove_var("VEDA_RECONCILER_INTERVAL_SECS");
+        assert!(!cfg.reconciler.enabled);
+        assert_eq!(cfg.reconciler.interval_secs, 300);
+    }
+
+    #[test]
     fn invalid_numeric_env_is_ignored() {
-        let _lock = ENV_MUTEX.lock().unwrap();
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
 
         std::env::set_var("VEDA_MYSQL_MAX_CONNECTIONS", "not-a-number");
         std::env::set_var("VEDA_EMBEDDING_DIMENSION", "abc");
@@ -302,7 +442,7 @@ dimension = 768
 
     #[test]
     fn empty_allowed_origins_env_stays_permissive() {
-        let _lock = ENV_MUTEX.lock().unwrap();
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
 
         std::env::set_var("VEDA_ALLOWED_ORIGINS", "");
         let cfg = ServerConfig::from_toml(MINIMAL_TOML).unwrap();
@@ -316,7 +456,7 @@ dimension = 768
 
     #[test]
     fn allowed_origins_with_trailing_comma() {
-        let _lock = ENV_MUTEX.lock().unwrap();
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
 
         std::env::set_var("VEDA_ALLOWED_ORIGINS", "https://a.com,,https://b.com,");
         let cfg = ServerConfig::from_toml(MINIMAL_TOML).unwrap();

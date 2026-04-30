@@ -368,14 +368,81 @@ pub struct MysqlStore {
     pool: MySqlPool,
 }
 
+/// Snapshot of pool counters for `veda_mysql_pool_*` gauges. Caller does the
+/// `metrics::gauge!` set; we only return the numbers because `metrics` should
+/// not be a hard dependency of this crate's public API (only at the crate root
+/// for typed instrumentation).
+pub struct PoolStats {
+    pub size: u32,
+    pub idle: usize,
+}
+
+impl MysqlStore {
+    pub fn pool_stats(&self) -> PoolStats {
+        PoolStats {
+            size: self.pool.size(),
+            idle: self.pool.num_idle(),
+        }
+    }
+}
+
+/// Pool tuning parameters. Values of `0` for the optional knobs mean
+/// "leave at sqlx default"; positive values are passed through. Sane
+/// production defaults live in `veda-server::config::MysqlConfig`.
+#[derive(Debug, Clone, Copy)]
+pub struct PoolConfig {
+    pub max_connections: u32,
+    pub min_connections: u32,
+    /// Time to wait for a free connection before failing. 0 = sqlx default (30s).
+    pub acquire_timeout_secs: u64,
+    /// Drop idle connections after this many seconds. 0 = no idle timeout.
+    pub idle_timeout_secs: u64,
+    /// Recycle every connection after this many seconds. 0 = no max lifetime.
+    pub max_lifetime_secs: u64,
+}
+
+impl Default for PoolConfig {
+    fn default() -> Self {
+        Self {
+            max_connections: 50,
+            min_connections: 0,
+            acquire_timeout_secs: 0,
+            idle_timeout_secs: 0,
+            max_lifetime_secs: 0,
+        }
+    }
+}
+
 impl MysqlStore {
     pub async fn new(database_url: &str) -> Result<Self> {
-        Self::with_max_connections(database_url, 50).await
+        Self::with_pool_config(database_url, PoolConfig::default()).await
     }
 
     pub async fn with_max_connections(database_url: &str, max_connections: u32) -> Result<Self> {
-        let pool = sqlx::pool::PoolOptions::<sqlx::MySql>::new()
-            .max_connections(max_connections)
+        Self::with_pool_config(
+            database_url,
+            PoolConfig {
+                max_connections,
+                ..Default::default()
+            },
+        )
+        .await
+    }
+
+    pub async fn with_pool_config(database_url: &str, cfg: PoolConfig) -> Result<Self> {
+        let mut opts = sqlx::pool::PoolOptions::<sqlx::MySql>::new()
+            .max_connections(cfg.max_connections)
+            .min_connections(cfg.min_connections);
+        if cfg.acquire_timeout_secs > 0 {
+            opts = opts.acquire_timeout(std::time::Duration::from_secs(cfg.acquire_timeout_secs));
+        }
+        if cfg.idle_timeout_secs > 0 {
+            opts = opts.idle_timeout(std::time::Duration::from_secs(cfg.idle_timeout_secs));
+        }
+        if cfg.max_lifetime_secs > 0 {
+            opts = opts.max_lifetime(std::time::Duration::from_secs(cfg.max_lifetime_secs));
+        }
+        let pool = opts
             .connect(database_url)
             .await
             .map_err(|e| VedaError::Storage(e.to_string()))?;

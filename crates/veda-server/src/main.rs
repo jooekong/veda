@@ -1,4 +1,4 @@
-use veda_server::{auth, config, reconciler, routes, state, worker};
+use veda_server::{auth, config, obs, reconciler, routes, state, worker};
 
 use std::sync::Arc;
 
@@ -14,7 +14,7 @@ use veda_core::service::search::SearchService;
 use veda_core::store::{LlmService, VectorStore};
 use veda_pipeline::embedding::EmbeddingProvider;
 use veda_pipeline::llm::LlmProvider;
-use veda_store::{MilvusStore, MysqlStore};
+use veda_store::{MilvusStore, MysqlStore, PoolConfig};
 
 use config::ServerConfig;
 use state::AppState;
@@ -24,18 +24,58 @@ use worker::Worker;
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt::init();
 
-    let config_path = std::env::args()
-        .nth(1)
-        .unwrap_or_else(|| "config/server.toml".into());
+    // Install the global metrics recorder before any module fires a
+    // `metrics::*!` macro. Subsequent install attempts panic, so this
+    // must happen exactly once and early.
+    let metrics = obs::install();
+
+    // Minimal CLI parsing without bringing in clap for the binary.
+    // Positional config path + `--skip-migrate`. Order-insensitive.
+    let mut config_path = "config/server.toml".to_string();
+    let mut skip_migrate = false;
+    for arg in std::env::args().skip(1) {
+        match arg.as_str() {
+            "--skip-migrate" => skip_migrate = true,
+            "--help" | "-h" => {
+                eprintln!(
+                    "Usage: veda-server [config.toml] [--skip-migrate]\n\
+                     \n\
+                     --skip-migrate  Don't run schema migrations on startup.\n\
+                                     Run `veda-migrate` separately before this.\n\
+                     \n\
+                     Multi-replica deploys should always pass --skip-migrate\n\
+                     to avoid CREATE TABLE races between replicas, and rely\n\
+                     on a one-off migration job."
+                );
+                return Ok(());
+            }
+            other if !other.starts_with("--") => config_path = other.to_string(),
+            other => anyhow::bail!("unknown flag: {other}"),
+        }
+    }
     let cfg = ServerConfig::load(&config_path)?;
     auth::validate_jwt_secret(&cfg.jwt_secret)?;
-    info!(listen = %cfg.listen, "starting veda-server");
+    info!(listen = %cfg.listen, skip_migrate, "starting veda-server");
 
     let mysql = Arc::new(
-        MysqlStore::with_max_connections(&cfg.mysql.database_url, cfg.mysql.max_connections)
-            .await?,
+        MysqlStore::with_pool_config(
+            &cfg.mysql.database_url,
+            PoolConfig {
+                max_connections: cfg.mysql.max_connections,
+                min_connections: cfg.mysql.min_connections,
+                acquire_timeout_secs: cfg.mysql.acquire_timeout_secs,
+                idle_timeout_secs: cfg.mysql.idle_timeout_secs,
+                max_lifetime_secs: cfg.mysql.max_lifetime_secs,
+            },
+        )
+        .await?,
     );
-    mysql.migrate().await?;
+    if !skip_migrate {
+        info!("running schema migrations");
+        mysql.migrate().await?;
+    } else {
+        info!("--skip-migrate set, skipping schema migrations");
+    }
 
     let milvus = Arc::new(MilvusStore::new(
         &cfg.milvus.url,
@@ -75,6 +115,8 @@ async fn main() -> anyhow::Result<()> {
         vector_store: milvus.clone(),
         sql_engine,
         jwt_secret: cfg.jwt_secret.clone(),
+        metrics: metrics.clone(),
+        metrics_token: cfg.metrics_token.clone(),
     });
 
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
@@ -114,6 +156,21 @@ async fn main() -> anyhow::Result<()> {
     } else {
         None
     };
+
+    // Pool stats sampler: emits veda_mysql_pool_{connections,idle} every 10s.
+    // Lives for the duration of the server (no shutdown handle — gets dropped
+    // when the runtime exits).
+    let pool_metrics = mysql.clone();
+    tokio::spawn(async move {
+        let mut tick = tokio::time::interval(std::time::Duration::from_secs(10));
+        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        loop {
+            tick.tick().await;
+            let s = pool_metrics.pool_stats();
+            ::metrics::gauge!("veda_mysql_pool_connections").set(s.size as f64);
+            ::metrics::gauge!("veda_mysql_pool_idle").set(s.idle as f64);
+        }
+    });
 
     let reconciler_handle = if cfg.reconciler.enabled {
         let r = reconciler::Reconciler::new(
@@ -163,6 +220,7 @@ async fn main() -> anyhow::Result<()> {
     };
 
     let app = routes::build_router(app_state)
+        .layer(axum::middleware::from_fn(obs::track_http))
         .layer(TraceLayer::new_for_http())
         .layer(cors);
 

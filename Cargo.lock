@@ -4621,6 +4621,7 @@ name = "veda-pipeline"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "metrics",
  "reqwest",
  "serde",
  "serde_json",
@@ -4691,6 +4692,7 @@ dependencies = [
  "anyhow",
  "async-trait",
  "chrono",
+ "metrics",
  "reqwest",
  "serde",
  "serde_json",

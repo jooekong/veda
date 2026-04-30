@@ -152,6 +152,11 @@ impl Reconciler {
         for ws in workspace_ids {
             match self.reconcile_workspace(&ws).await {
                 Ok(r) => {
+                    // Per-workspace drift goes to logs, not metrics labels:
+                    // workspace_id is high-cardinality and effectively a
+                    // tenant identifier, neither of which belongs in a
+                    // Prometheus label (Codex finding #2). Aggregated drift
+                    // by kind is emitted at the end of the pass below.
                     if r.chunk_missing
                         + r.chunk_orphan
                         + r.summary_missing
@@ -176,6 +181,30 @@ impl Reconciler {
                 }
             }
         }
+
+        // Cluster-wide drift gauges: sum across workspaces, only `kind` as
+        // a label. Operators investigating "which workspace?" follow the
+        // structured logs above (workspace_id is in tracing fields). This
+        // intentionally trades workspace-level metric attribution for
+        // bounded label cardinality and tenant privacy.
+        let mut chunk_missing = 0u64;
+        let mut chunk_orphan = 0u64;
+        let mut summary_missing = 0u64;
+        let mut summary_orphan = 0u64;
+        for w in &report.workspaces {
+            chunk_missing += w.chunk_missing as u64;
+            chunk_orphan += w.chunk_orphan as u64;
+            summary_missing += w.summary_missing as u64;
+            summary_orphan += w.summary_orphan as u64;
+        }
+        ::metrics::gauge!("veda_drift_total", "kind" => "chunk_missing")
+            .set(chunk_missing as f64);
+        ::metrics::gauge!("veda_drift_total", "kind" => "chunk_orphan")
+            .set(chunk_orphan as f64);
+        ::metrics::gauge!("veda_drift_total", "kind" => "summary_missing")
+            .set(summary_missing as f64);
+        ::metrics::gauge!("veda_drift_total", "kind" => "summary_orphan")
+            .set(summary_orphan as f64);
         info!(
             workspaces = report.workspaces.len(),
             total_drift = report.total_drift(),

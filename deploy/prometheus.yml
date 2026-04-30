@@ -1,0 +1,32 @@
+# Prometheus scrape config for Veda alpha.
+#
+# Default target points at the host machine on port 3000 — handy when
+# you're developing locally with `cargo run --bin veda-server` and want
+# Prometheus + Grafana running in containers next to it. For multi-host
+# / Kubernetes deploys, replace `host.docker.internal:3000` with the
+# actual veda-server endpoint(s).
+
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+scrape_configs:
+  - job_name: veda-server
+    metrics_path: /v1/metrics
+    # /v1/metrics requires a bearer token; veda-server returns 404 to any
+    # unauthenticated request (so the endpoint's existence isn't disclosed).
+    #
+    # Prometheus does NOT expand environment variables inside its config,
+    # so we read the token from a file. The companion docker-compose file
+    # mounts ./secrets/veda_metrics_token at this path. Outside of compose,
+    # write the same string into the file at this path on the prometheus
+    # host. The token must match the server's `metrics_token` config /
+    # VEDA_METRICS_TOKEN env.
+    bearer_token_file: /etc/prometheus/secrets/veda_metrics_token
+    static_configs:
+      - targets:
+          # Linux docker: replace with `172.17.0.1:3000` or run with
+          # --add-host=host.docker.internal:host-gateway.
+          - host.docker.internal:3000
+        labels:
+          environment: alpha

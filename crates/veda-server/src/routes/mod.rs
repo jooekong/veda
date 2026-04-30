@@ -20,6 +20,7 @@ const READY_TIMEOUT: Duration = Duration::from_secs(3);
 pub fn build_router(state: Arc<AppState>) -> Router {
     Router::new()
         .route("/v1/ready", get(ready))
+        .route("/v1/metrics", get(metrics_endpoint))
         .merge(account::routes())
         .merge(fs::routes())
         .merge(events::routes())
@@ -27,6 +28,69 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .merge(collection::routes())
         .merge(sql::routes())
         .with_state(state)
+}
+
+async fn metrics_endpoint(
+    State(state): State<Arc<AppState>>,
+    headers: axum::http::HeaderMap,
+) -> Response {
+    if !metrics_auth_ok(state.metrics_token.as_deref(), &headers) {
+        // Match how the endpoint behaves when disabled: don't disclose
+        // existence on bad/missing tokens. Prometheus operators see the same
+        // 404 whether the endpoint isn't configured or their token is wrong;
+        // they fix it by reading their own scrape config.
+        return StatusCode::NOT_FOUND.into_response();
+    }
+    let body = state.metrics.render();
+    (
+        StatusCode::OK,
+        [(axum::http::header::CONTENT_TYPE, "text/plain; version=0.0.4")],
+        body,
+    )
+        .into_response()
+}
+
+/// Check whether the request can read /v1/metrics.
+///
+/// `expected` is the configured token, `None` if metrics auth is disabled
+/// entirely. Disabled means "endpoint not exposed" — we deliberately return
+/// false here so the handler 404s. There is no "open metrics" mode by design;
+/// see Codex finding #1 for why.
+///
+/// Comparison is constant-time-ish via `subtle`-style byte-by-byte equality
+/// to make timing-attack pre-image search uninteresting; for a 32+ byte
+/// random token this is theoretical at best, but it costs nothing.
+pub(crate) fn metrics_auth_ok(
+    expected: Option<&str>,
+    headers: &axum::http::HeaderMap,
+) -> bool {
+    let Some(expected) = expected else {
+        return false;
+    };
+    if expected.is_empty() {
+        return false;
+    }
+    let Some(value) = headers
+        .get(axum::http::header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+    else {
+        return false;
+    };
+    let Some(presented) = value.strip_prefix("Bearer ") else {
+        return false;
+    };
+    constant_time_eq(presented.as_bytes(), expected.as_bytes())
+}
+
+fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut diff: u8 = 0;
+    for (x, y) in a.iter().zip(b.iter()) {
+        diff |= x ^ y;
+    }
+    diff == 0
 }
 
 use crate::state::AppState;
@@ -116,5 +180,59 @@ mod tests {
         let json = serde_json::to_value(&resp).unwrap();
         assert_eq!(json["status"], "not_ready");
         assert_eq!(json["components"][1]["ok"], false);
+    }
+
+    fn hdr_with_auth(value: &str) -> axum::http::HeaderMap {
+        let mut h = axum::http::HeaderMap::new();
+        h.insert(
+            axum::http::header::AUTHORIZATION,
+            axum::http::HeaderValue::from_str(value).unwrap(),
+        );
+        h
+    }
+
+    #[test]
+    fn metrics_auth_disabled_when_token_unset() {
+        let h = hdr_with_auth("Bearer anything");
+        assert!(!metrics_auth_ok(None, &h));
+    }
+
+    #[test]
+    fn metrics_auth_disabled_when_token_empty_string() {
+        // Explicitly-empty token shouldn't accidentally allow empty bearer.
+        let h = hdr_with_auth("Bearer ");
+        assert!(!metrics_auth_ok(Some(""), &h));
+    }
+
+    #[test]
+    fn metrics_auth_rejects_missing_authorization_header() {
+        let h = axum::http::HeaderMap::new();
+        assert!(!metrics_auth_ok(Some("real-token"), &h));
+    }
+
+    #[test]
+    fn metrics_auth_rejects_wrong_scheme() {
+        let h = hdr_with_auth("Basic real-token");
+        assert!(!metrics_auth_ok(Some("real-token"), &h));
+    }
+
+    #[test]
+    fn metrics_auth_rejects_wrong_token() {
+        let h = hdr_with_auth("Bearer wrong-token");
+        assert!(!metrics_auth_ok(Some("real-token"), &h));
+    }
+
+    #[test]
+    fn metrics_auth_accepts_correct_token() {
+        let h = hdr_with_auth("Bearer real-token");
+        assert!(metrics_auth_ok(Some("real-token"), &h));
+    }
+
+    #[test]
+    fn constant_time_eq_handles_length_difference() {
+        assert!(!constant_time_eq(b"abc", b"abcd"));
+        assert!(!constant_time_eq(b"abcd", b"abc"));
+        assert!(constant_time_eq(b"abcd", b"abcd"));
+        assert!(constant_time_eq(b"", b""));
     }
 }

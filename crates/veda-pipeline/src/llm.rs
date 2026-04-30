@@ -145,6 +145,19 @@ struct LlmError {
 #[async_trait]
 impl LlmService for LlmProvider {
     async fn summarize(&self, content: &str, max_tokens: usize) -> Result<String> {
-        self.chat(content, max_tokens).await
+        let started = std::time::Instant::now();
+        let result = self.chat(content, max_tokens).await;
+        let outcome = if result.is_ok() { "ok" } else { "err" };
+        ::metrics::histogram!(
+            "veda_llm_latency_seconds",
+            "outcome" => outcome,
+        )
+        .record(started.elapsed().as_secs_f64());
+        ::metrics::counter!(
+            "veda_llm_total",
+            "outcome" => outcome,
+        )
+        .increment(1);
+        result
     }
 }

@@ -13,6 +13,7 @@ serde.workspace = true
 serde_json.workspace = true
 reqwest.workspace = true
 tracing.workspace = true
+metrics = "0.24"
 
 [dev-dependencies]
 toml.workspace = true

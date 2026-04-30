@@ -68,8 +68,22 @@ impl Worker {
                 let concurrency = self.batch_size.max(1);
                 stream::iter(tasks)
                     .for_each_concurrent(concurrency, |task| async move {
-                        if let Err(e) = self.process_task(&task).await {
+                        let event_type = outbox_event_label(task.event_type);
+                        let started = std::time::Instant::now();
+                        let result = self.process_task(&task).await;
+                        let elapsed = started.elapsed().as_secs_f64();
+                        ::metrics::histogram!(
+                            "veda_outbox_process_seconds",
+                            "event_type" => event_type,
+                        )
+                        .record(elapsed);
+                        if let Err(e) = result {
                             error!(task_id = task.id, err = %e, "task failed");
+                            ::metrics::counter!(
+                                "veda_outbox_failed_total",
+                                "event_type" => event_type,
+                            )
+                            .increment(1);
                             let _ = self.task_queue.fail(task.id, &e.to_string()).await;
                         }
                     })
@@ -468,5 +482,17 @@ fn parent_path_of(path: &str) -> String {
         Some(0) => "/".to_string(),
         Some(i) => path[..i].to_string(),
         None => "/".to_string(),
+    }
+}
+
+/// Static label string for `OutboxEventType`, used as a Prometheus label.
+/// Must be `&'static str` because `metrics` labels need it.
+fn outbox_event_label(event: OutboxEventType) -> &'static str {
+    match event {
+        OutboxEventType::ChunkSync => "chunk_sync",
+        OutboxEventType::ChunkDelete => "chunk_delete",
+        OutboxEventType::CollectionSync => "collection_sync",
+        OutboxEventType::SummarySync => "summary_sync",
+        OutboxEventType::DirSummarySync => "dir_summary_sync",
     }
 }
