@@ -64,6 +64,42 @@ impl SseWatcher {
                 );
 
                 match http.get(&url).bearer_auth(&key).send() {
+                    Ok(resp) if resp.status().as_u16() == 410 => {
+                        // Cursor fell off the server's retention window. The
+                        // body carries `current_max_id` (or `current_min_id`
+                        // when the table is empty) — both are post-cutoff
+                        // floors we can safely jump our cursor to. We then
+                        // wipe attr/read/dir caches because file structure
+                        // may have changed entirely while we slept; the
+                        // kernel still owns inode refs so we don't touch
+                        // path↔ino mappings (kernel re-fetches on next access
+                        // via readdir / getattr after the cache wipe — there's
+                        // no eager list_dir resync here on purpose).
+                        let new_cursor = parse_410_cursor(resp);
+                        warn!(
+                            old = cursor,
+                            new = new_cursor,
+                            "SSE 410: cursor expired, resyncing"
+                        );
+                        handle_cursor_expired(&inodes, &read_cache, &dir_cache);
+                        cursor = new_cursor;
+                        // Only mark in-memory persisted state when the on-disk
+                        // write actually succeeded — otherwise a process crash
+                        // here could roll us back to the old (pre-410) cursor
+                        // even though we've already advanced in memory and
+                        // wiped caches.
+                        if save_cursor(&cursor_file, cursor) {
+                            last_persisted = cursor;
+                            last_flush = Instant::now();
+                        }
+                        // Exponential backoff inside the 410 branch only.
+                        // A misconfigured server (retention=0) or a broken
+                        // resync would otherwise pin us to a 1Hz hot loop.
+                        // The success branch resets back to MIN once a real
+                        // connection lands, so a transient 410 burst recovers
+                        // quickly; only chronic 410s pay the backoff cost.
+                        backoff = std::cmp::min(backoff.saturating_mul(2), RECONNECT_MAX);
+                    }
                     Ok(resp) if resp.status().is_success() => {
                         info!("SSE connected to {url}");
                         backoff = RECONNECT_MIN;
@@ -112,9 +148,10 @@ impl SseWatcher {
                             }
 
                             if cursor != last_persisted && last_flush.elapsed() >= CURSOR_FLUSH_INTERVAL {
-                                save_cursor(&cursor_file, cursor);
-                                last_persisted = cursor;
-                                last_flush = Instant::now();
+                                if save_cursor(&cursor_file, cursor) {
+                                    last_persisted = cursor;
+                                    last_flush = Instant::now();
+                                }
                             }
                         }
                         flush_cursor_if_dirty(&cursor_file, cursor, &mut last_persisted);
@@ -160,8 +197,12 @@ impl Drop for SseWatcher {
 
 fn flush_cursor_if_dirty(path: &Path, cursor: i64, last_persisted: &mut i64) {
     if cursor != *last_persisted {
-        save_cursor(path, cursor);
-        *last_persisted = cursor;
+        // Only mark persisted on a successful disk write — otherwise we'd
+        // suppress retry on the next dirty check and silently keep diverging
+        // from the on-disk truth.
+        if save_cursor(path, cursor) {
+            *last_persisted = cursor;
+        }
     }
 }
 
@@ -173,13 +214,75 @@ fn load_cursor(path: &Path) -> i64 {
 }
 
 /// Atomic write: write to .tmp then rename so a crash can't corrupt the file.
-fn save_cursor(path: &Path, cursor: i64) {
+/// Returns true on a successful rename, false otherwise so the caller can
+/// avoid lying about persisted state.
+fn save_cursor(path: &Path, cursor: i64) -> bool {
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
     let tmp = path.with_extension("tmp");
-    if std::fs::write(&tmp, cursor.to_string()).is_ok() {
-        let _ = std::fs::rename(&tmp, path);
+    if std::fs::write(&tmp, cursor.to_string()).is_err() {
+        return false;
+    }
+    std::fs::rename(&tmp, path).is_ok()
+}
+
+/// Parse the 410 body to extract the cursor we should resume from.
+/// The contract (server `routes/events.rs::build_410_response`) is:
+///   { current_min_id: i64, current_max_id: i64 | null }
+/// Prefer `current_max_id`: jumping straight to the head means the next
+/// stream resumes with id > max, so we won't replay events we'll re-discover
+/// via the post-410 list_dir resync. Fall back to `current_min_id` when the
+/// table is empty (max is null) — that just means "subscribe fresh from
+/// the new floor". Final fallback to 0 if the body is missing/malformed —
+/// worst case we replay events but never silently lose them.
+fn parse_410_cursor(resp: reqwest::blocking::Response) -> i64 {
+    // Read text first so a non-JSON 410 body (e.g. an HTML error page from a
+    // reverse proxy) shows up in the warn log instead of being lost as
+    // "expected value at line 1 column 1".
+    let body = resp.text().unwrap_or_default();
+    match serde_json::from_str::<serde_json::Value>(&body) {
+        Ok(v) => parse_410_cursor_from_json(&v),
+        Err(e) => {
+            let snippet: String = body.chars().take(200).collect();
+            warn!(
+                err = %e,
+                body = %snippet,
+                "SSE 410: failed to parse body, falling back to cursor=0"
+            );
+            0
+        }
+    }
+}
+
+fn parse_410_cursor_from_json(v: &serde_json::Value) -> i64 {
+    if let Some(n) = v.get("current_max_id").and_then(|x| x.as_i64()) {
+        return n;
+    }
+    if let Some(n) = v.get("current_min_id").and_then(|x| x.as_i64()) {
+        return n;
+    }
+    0
+}
+
+/// Caches to drop on cursor-expired (410). Symmetrical to the per-event
+/// path in `invalidate_caches` but workspace-wide: we don't know which
+/// paths changed during the gap, so the safe default is "trust nothing".
+/// path↔ino mappings stay intact — the kernel owns those refs and forget
+/// is the only safe way to drop them.
+fn handle_cursor_expired(
+    inodes: &Arc<Mutex<InodeTable>>,
+    read_cache: &Arc<Mutex<ReadCache>>,
+    dir_cache: &DirCacheMap,
+) {
+    if let Ok(mut t) = inodes.lock() {
+        t.invalidate_all_attrs();
+    }
+    if let Ok(mut c) = read_cache.lock() {
+        c.invalidate_all();
+    }
+    if let Ok(mut d) = dir_cache.lock() {
+        d.clear();
     }
 }
 
@@ -345,6 +448,71 @@ mod tests {
     }
 
     #[test]
+    fn parse_410_cursor_prefers_max_over_min() {
+        let v = serde_json::json!({"current_min_id": 100, "current_max_id": 999});
+        assert_eq!(parse_410_cursor_from_json(&v), 999);
+    }
+
+    #[test]
+    fn parse_410_cursor_falls_back_to_min_when_max_null() {
+        let v = serde_json::json!({"current_min_id": 42, "current_max_id": null});
+        assert_eq!(parse_410_cursor_from_json(&v), 42);
+    }
+
+    #[test]
+    fn parse_410_cursor_falls_back_to_zero_when_body_malformed() {
+        let v = serde_json::json!({"unrelated": "junk"});
+        assert_eq!(parse_410_cursor_from_json(&v), 0);
+    }
+
+    #[test]
+    fn handle_cursor_expired_clears_all_three_caches() {
+        let inodes = Arc::new(Mutex::new(InodeTable::new()));
+        let read_cache = Arc::new(Mutex::new(ReadCache::new(2, Duration::from_secs(30))));
+        let dir_cache: DirCacheMap = Arc::new(Mutex::new(HashMap::new()));
+
+        // Seed all three caches with stuff that should be wiped.
+        let (foo_ino, bar_ino) = {
+            let mut t = inodes.lock().unwrap();
+            let foo = t.get_or_create_ino("/foo");
+            let bar = t.get_or_create_ino("/foo/bar.txt");
+            let dummy_attr = fuser::FileAttr {
+                ino: bar, size: 100,
+                blocks: 1,
+                atime: std::time::SystemTime::UNIX_EPOCH,
+                mtime: std::time::SystemTime::UNIX_EPOCH,
+                ctime: std::time::SystemTime::UNIX_EPOCH,
+                crtime: std::time::SystemTime::UNIX_EPOCH,
+                kind: fuser::FileType::RegularFile, perm: 0o644, nlink: 1,
+                uid: 0, gid: 0, rdev: 0, blksize: 512, flags: 0,
+            };
+            t.set_cached_attr(bar, dummy_attr);
+            (foo, bar)
+        };
+        {
+            let gen = read_cache.lock().unwrap().generation();
+            read_cache.lock().unwrap().put("/foo/bar.txt", b"v1".to_vec(), gen);
+        }
+        {
+            let mut dc = dir_cache.lock().unwrap();
+            dc.insert(foo_ino, crate::fs::DirCacheEntry::empty_for_test());
+        }
+
+        handle_cursor_expired(&inodes, &read_cache, &dir_cache);
+
+        // Attr cache wiped, but path↔ino mappings preserved (kernel still
+        // holds inode refs and would explode if we yanked them).
+        let t = inodes.lock().unwrap();
+        assert!(t.get_cached_attr(bar_ino).is_none());
+        assert_eq!(t.get_ino("/foo"), Some(foo_ino));
+        assert_eq!(t.get_ino("/foo/bar.txt"), Some(bar_ino));
+        drop(t);
+
+        assert!(read_cache.lock().unwrap().get("/foo/bar.txt").is_none());
+        assert!(dir_cache.lock().unwrap().is_empty());
+    }
+
+    #[test]
     fn invalidate_caches_update_keeps_path_to_ino_mapping() {
         let inodes = Arc::new(Mutex::new(InodeTable::new()));
         let read_cache = Arc::new(Mutex::new(ReadCache::new(1, Duration::from_secs(30))));
@@ -370,9 +538,9 @@ mod tests {
         let _ = std::fs::remove_file(&path);
 
         assert_eq!(load_cursor(&path), 0);
-        save_cursor(&path, 42);
+        assert!(save_cursor(&path, 42));
         assert_eq!(load_cursor(&path), 42);
-        save_cursor(&path, 99);
+        assert!(save_cursor(&path, 99));
         assert_eq!(load_cursor(&path), 99);
 
         let _ = std::fs::remove_file(&path);

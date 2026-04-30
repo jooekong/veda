@@ -69,6 +69,14 @@ impl InodeTable {
         self.attr_cache.remove(&ino);
     }
 
+    /// Drop every cached attr without touching path↔ino mappings or the
+    /// nlookup ref-counts. Used on SSE 410 (cursor expired): we can't tell
+    /// the kernel to forget inodes it still holds, so we leave the mappings
+    /// intact and let the next stat() refetch from the server.
+    pub fn invalidate_all_attrs(&mut self) {
+        self.attr_cache.clear();
+    }
+
     pub fn remove_path(&mut self, path: &str) {
         if let Some(ino) = self.path_to_ino.remove(path) {
             self.ino_to_path.remove(&ino);
