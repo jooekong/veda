@@ -31,6 +31,8 @@ impl MockMetadataStore {
 
 /// Mirrors the MySQL impl: returns chunks overlapping the line range [start, end].
 /// The "containing" chunk (whose own start_line may be before `start`) is included.
+/// Mirrors the post-W4.2 fix: chunks whose line range ends before `start_line`
+/// are excluded, so a query past EOF returns empty rather than the last chunk.
 fn filter_overlap(
     mut chunks: Vec<FileChunk>,
     start_line: Option<i32>,
@@ -40,14 +42,13 @@ fn filter_overlap(
         chunks.retain(|c| c.start_line <= b);
     }
     if let Some(a) = start_line {
-        // keep the largest chunk_index among those with start_line <= a, and all after it
         let base_idx = chunks
             .iter()
             .filter(|c| c.start_line <= a)
             .map(|c| c.chunk_index)
             .max()
             .unwrap_or(0);
-        chunks.retain(|c| c.chunk_index >= base_idx);
+        chunks.retain(|c| c.chunk_index >= base_idx && c.start_line + c.line_count >= a);
     }
     chunks
 }

@@ -12,12 +12,15 @@ use crate::inode::InodeTable;
 const RECONNECT_MIN: Duration = Duration::from_secs(1);
 const RECONNECT_MAX: Duration = Duration::from_secs(30);
 const CURSOR_FLUSH_INTERVAL: Duration = Duration::from_secs(1);
+// Cap per-connection lifetime so a TCP-half-open or silently-stalled SSE
+// connection can't keep us blocked forever. After this we error out, the
+// outer loop reconnects with `since_id=cursor`, and we resume mid-stream.
+const SSE_REQUEST_TIMEOUT: Duration = Duration::from_secs(120);
 
 #[derive(Debug, serde::Deserialize)]
 struct SseEvent {
     #[allow(dead_code)]
     id: i64,
-    #[allow(dead_code)]
     event_type: String,
     path: String,
 }
@@ -43,7 +46,7 @@ impl SseWatcher {
 
         let handle = std::thread::spawn(move || {
             let http = reqwest::blocking::Client::builder()
-                .timeout(None)
+                .timeout(SSE_REQUEST_TIMEOUT)
                 .build()
                 .expect("failed to build SSE client");
 
@@ -93,6 +96,7 @@ impl SseWatcher {
 
                                     cursor = event.id;
                                     invalidate_caches(
+                                        &event.event_type,
                                         &event.path,
                                         &inodes,
                                         &read_cache,
@@ -180,6 +184,7 @@ fn save_cursor(path: &Path, cursor: i64) {
 }
 
 fn invalidate_caches(
+    event_type: &str,
     path: &str,
     inodes: &Arc<Mutex<InodeTable>>,
     read_cache: &Arc<Mutex<ReadCache>>,
@@ -189,9 +194,18 @@ fn invalidate_caches(
         cache.invalidate(path);
     }
 
+    // Delete events must drop the path → ino mapping entirely. Otherwise a
+    // subsequent `lookup` for a re-created path with the same name would hit
+    // the stale ino, the kernel would think the file is the same one it had
+    // open, and the user would see unexpected reads against the deleted file's
+    // (now reused) state. Update events only need attr-cache invalidation —
+    // the file at this path still exists, just with new content.
+    let is_delete = event_type == "delete";
     let parent = parent_path(path);
     let parent_ino = if let Ok(mut table) = inodes.lock() {
-        if let Some(ino) = table.get_ino(path) {
+        if is_delete {
+            table.remove_path(path);
+        } else if let Some(ino) = table.get_ino(path) {
             table.invalidate(ino);
         }
         let pi = table.get_ino(parent);
@@ -266,7 +280,7 @@ mod tests {
             dc.insert(foo_ino, crate::fs::DirCacheEntry::empty_for_test());
         }
 
-        invalidate_caches("/foo/new.txt", &inodes, &read_cache, &dir_cache);
+        invalidate_caches("update", "/foo/new.txt", &inodes, &read_cache, &dir_cache);
 
         assert!(dir_cache.lock().unwrap().get(&foo_ino).is_none());
     }
@@ -299,10 +313,53 @@ mod tests {
             read_cache.lock().unwrap().put("/foo/bar.txt", b"hello".to_vec(), gen);
         }
 
-        invalidate_caches("/foo/bar.txt", &inodes, &read_cache, &dir_cache);
+        invalidate_caches("update", "/foo/bar.txt", &inodes, &read_cache, &dir_cache);
 
         assert!(inodes.lock().unwrap().get_cached_attr(file_ino).is_none());
         assert!(read_cache.lock().unwrap().get("/foo/bar.txt").is_none());
+    }
+
+    #[test]
+    fn invalidate_caches_delete_drops_path_to_ino_mapping() {
+        let inodes = Arc::new(Mutex::new(InodeTable::new()));
+        let read_cache = Arc::new(Mutex::new(ReadCache::new(1, Duration::from_secs(30))));
+        let dir_cache: DirCacheMap = Arc::new(Mutex::new(HashMap::new()));
+
+        let file_path = "/foo/bar.txt";
+        let file_ino = {
+            let mut t = inodes.lock().unwrap();
+            t.get_or_create_ino(file_path)
+        };
+
+        invalidate_caches("delete", file_path, &inodes, &read_cache, &dir_cache);
+
+        let table = inodes.lock().unwrap();
+        assert!(
+            table.get_ino(file_path).is_none(),
+            "delete must drop path→ino mapping"
+        );
+        assert!(
+            table.get_path(file_ino).is_none(),
+            "delete must drop ino→path mapping"
+        );
+    }
+
+    #[test]
+    fn invalidate_caches_update_keeps_path_to_ino_mapping() {
+        let inodes = Arc::new(Mutex::new(InodeTable::new()));
+        let read_cache = Arc::new(Mutex::new(ReadCache::new(1, Duration::from_secs(30))));
+        let dir_cache: DirCacheMap = Arc::new(Mutex::new(HashMap::new()));
+
+        let file_path = "/foo/bar.txt";
+        let file_ino = {
+            let mut t = inodes.lock().unwrap();
+            t.get_or_create_ino(file_path)
+        };
+
+        invalidate_caches("update", file_path, &inodes, &read_cache, &dir_cache);
+
+        let table = inodes.lock().unwrap();
+        assert_eq!(table.get_ino(file_path), Some(file_ino));
     }
 
     #[test]

@@ -1,5 +1,6 @@
 use std::time::Duration;
 
+use chrono::{DateTime, Utc};
 use serde::Deserialize;
 
 #[derive(Debug, Deserialize)]
@@ -15,6 +16,14 @@ pub struct FileInfo {
     pub is_dir: bool,
     pub size_bytes: Option<i64>,
     pub revision: Option<i32>,
+    // Server returns RFC3339 strings via chrono::DateTime<Utc>'s default serde
+    // impl. Optional so unauthenticated/legacy responses still parse, but
+    // when present they let the FUSE layer report real mtime/ctime instead
+    // of `now`, which makes `make`-style timestamp tests work correctly.
+    #[serde(default)]
+    pub created_at: Option<DateTime<Utc>>,
+    #[serde(default)]
+    pub updated_at: Option<DateTime<Utc>>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -23,6 +32,10 @@ pub struct DirEntry {
     pub path: String,
     pub is_dir: bool,
     pub size_bytes: Option<i64>,
+    #[serde(default)]
+    pub created_at: Option<DateTime<Utc>>,
+    #[serde(default)]
+    pub updated_at: Option<DateTime<Utc>>,
 }
 
 #[derive(Debug)]

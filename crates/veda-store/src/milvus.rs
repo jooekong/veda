@@ -525,8 +525,19 @@ impl VectorStore for MilvusStore {
         if chunks.is_empty() {
             return Ok(());
         }
+        // Whole-file path: upsert + sweep trailing stale. Safe when all
+        // chunks of the file are passed in a single call.
+        self.upsert_chunks_only(chunks).await?;
+        let max_index = chunks.iter().map(|c| c.chunk_index).max().unwrap_or(0);
+        let file_id = &chunks[0].file_id;
+        let ws_id = &chunks[0].workspace_id;
+        self.delete_chunks_above(ws_id, file_id, max_index).await
+    }
 
-        // 1. Upsert new chunks first (safe: at worst we have brief duplicates)
+    async fn upsert_chunks_only(&self, chunks: &[ChunkWithEmbedding]) -> Result<()> {
+        if chunks.is_empty() {
+            return Ok(());
+        }
         let data: Vec<Value> = chunks
             .iter()
             .map(|c| {
@@ -545,21 +556,25 @@ impl VectorStore for MilvusStore {
             "data": data
         });
         self.post("/v2/vectordb/entities/upsert", body).await?;
+        Ok(())
+    }
 
-        // 2. Delete stale chunks (indices beyond the new set) — safe because new data is persisted
-        let max_index = chunks.iter().map(|c| c.chunk_index).max().unwrap_or(0);
-        let file_id = &chunks[0].file_id;
-        let ws_id = &chunks[0].workspace_id;
-        let ws = milvus_quote(ws_id);
+    async fn delete_chunks_above(
+        &self,
+        workspace_id: &str,
+        file_id: &str,
+        max_chunk_index: i32,
+    ) -> Result<()> {
+        let ws = milvus_quote(workspace_id);
         let fid = milvus_quote(file_id);
-        let filter =
-            format!("workspace_id == {ws} && file_id == {fid} && chunk_index > {max_index}");
-        let del = json!({
+        let filter = format!(
+            "workspace_id == {ws} && file_id == {fid} && chunk_index > {max_chunk_index}"
+        );
+        let body = json!({
             "collectionName": COLLECTION,
             "filter": filter
         });
-        self.post("/v2/vectordb/entities/delete", del).await?;
-
+        self.post("/v2/vectordb/entities/delete", body).await?;
         Ok(())
     }
 

@@ -428,6 +428,11 @@ impl FsService {
     }
 
     /// Read a byte range from a file. Returns (data, total_size).
+    ///
+    /// For chunked files this only fetches the chunks whose byte range
+    /// overlaps `[offset, offset+length)` — a 49MB file read with a 1MB
+    /// range never pulls more than the chunks containing that 1MB.
+    /// Inline files always load fully (they're capped small by design).
     pub async fn read_file_range(
         &self,
         workspace_id: &str,
@@ -435,16 +440,78 @@ impl FsService {
         offset: u64,
         length: u64,
     ) -> Result<(Vec<u8>, u64)> {
-        let content = self.read_file(workspace_id, raw_path).await?;
-        let bytes = content.as_bytes();
-        let total = bytes.len() as u64;
+        let (file_id, file) = self.resolve_file(workspace_id, raw_path).await?;
 
-        if offset >= total {
-            return Ok((Vec::new(), total));
+        match file.storage_type {
+            StorageType::Inline => {
+                let content = self
+                    .meta
+                    .get_file_content(&file_id)
+                    .await?
+                    .ok_or_else(|| VedaError::NotFound(format!("content for {file_id}")))?;
+                let bytes = content.as_bytes();
+                let total = bytes.len() as u64;
+                if offset >= total {
+                    return Ok((Vec::new(), total));
+                }
+                let end = std::cmp::min(offset.saturating_add(length), total) as usize;
+                Ok((bytes[offset as usize..end].to_vec(), total))
+            }
+            StorageType::Chunked => {
+                let total = file.size_bytes.max(0) as u64;
+                if offset >= total || length == 0 {
+                    return Ok((Vec::new(), total));
+                }
+                let end = std::cmp::min(offset.saturating_add(length), total);
+
+                // Pull (chunk_index, byte_len) only — cheap metadata read.
+                // Walk the cumulative byte offsets to find the index range
+                // overlapping [offset, end). byte_lens come back ordered by
+                // chunk_index from the store.
+                let byte_lens = self.meta.list_chunk_byte_lens(&file_id).await?;
+                let mut idx_min: Option<i32> = None;
+                let mut idx_max: Option<i32> = None;
+                let mut first_chunk_byte_start: u64 = 0;
+                let mut cursor: u64 = 0;
+                for (idx, len) in &byte_lens {
+                    let len_u = (*len).max(0) as u64;
+                    let chunk_end = cursor + len_u;
+                    let overlaps = chunk_end > offset && cursor < end;
+                    if overlaps {
+                        if idx_min.is_none() {
+                            idx_min = Some(*idx);
+                            first_chunk_byte_start = cursor;
+                        }
+                        idx_max = Some(*idx);
+                    }
+                    cursor = chunk_end;
+                    if cursor >= end {
+                        break;
+                    }
+                }
+
+                let (Some(lo), Some(hi)) = (idx_min, idx_max) else {
+                    return Ok((Vec::new(), total));
+                };
+
+                let chunks = self
+                    .meta
+                    .get_chunks_in_index_range(&file_id, lo, hi)
+                    .await?;
+                let merged_len: usize = chunks.iter().map(|c| c.content.len()).sum();
+                let mut merged = Vec::with_capacity(merged_len);
+                for c in &chunks {
+                    merged.extend_from_slice(c.content.as_bytes());
+                }
+
+                // Slice indices are relative to the first kept chunk's start.
+                let slice_start = (offset - first_chunk_byte_start) as usize;
+                let slice_end = (end - first_chunk_byte_start) as usize;
+                let slice_end = std::cmp::min(slice_end, merged.len());
+                let slice_start = std::cmp::min(slice_start, slice_end);
+                Ok((merged[slice_start..slice_end].to_vec(), total))
+            }
         }
-
-        let end = std::cmp::min(offset.saturating_add(length), total) as usize;
-        Ok((bytes[offset as usize..end].to_vec(), total))
     }
 
     pub async fn read_file_lines(
@@ -529,6 +596,8 @@ impl FsService {
                 is_dir: d.is_dir,
                 size_bytes: None,
                 mime_type: None,
+                created_at: d.created_at,
+                updated_at: d.updated_at,
             })
             .collect())
     }
@@ -613,6 +682,19 @@ impl FsService {
             None => None,
         };
 
+        // mtime: prefer the file row's updated_at — it advances on every
+        // overwrite via the schema's ON UPDATE CURRENT_TIMESTAMP, while the
+        // dentry row only changes on rename/relink. Using dentry.updated_at
+        // here would freeze FUSE-visible mtime across content writes, which
+        // breaks `make` / `rsync -a` / `git status`'s freshness checks.
+        let updated_at = file
+            .as_ref()
+            .map(|f| f.updated_at)
+            .unwrap_or(dentry.updated_at);
+        let created_at = file
+            .as_ref()
+            .map(|f| f.created_at)
+            .unwrap_or(dentry.created_at);
         Ok(api::FileInfo {
             path: dentry.path,
             file_id: dentry.file_id,
@@ -621,8 +703,8 @@ impl FsService {
             mime_type: file.as_ref().map(|f| f.mime_type.clone()),
             revision: file.as_ref().map(|f| f.revision),
             checksum: file.as_ref().map(|f| f.checksum_sha256.clone()),
-            created_at: dentry.created_at,
-            updated_at: dentry.updated_at,
+            created_at,
+            updated_at,
         })
     }
 

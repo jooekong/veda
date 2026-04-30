@@ -820,3 +820,172 @@ async fn incremental_append_preserves_prefix_chunks() {
     expected.push_str("TAIL\n");
     assert_eq!(roundtrip, expected);
 }
+
+#[tokio::test]
+async fn read_file_range_chunked_returns_correct_slice_from_middle() {
+    // 3000 lines × 100 bytes = 300 KB → forced into chunked storage. Read a
+    // 1KB byte range from the middle and validate it matches the original
+    // content slice. This exercises the cumulative-byte-offset overlap walk.
+    let (svc, state) = make_service();
+    let line_body = "x".repeat(99);
+    let content: String = (0..3000)
+        .map(|i| format!("{:04}{}\n", i, &line_body[4..]))
+        .collect();
+    svc.write_file("ws1", "/big.txt", &content, None, None)
+        .await
+        .unwrap();
+    {
+        let st = state.lock().unwrap();
+        let file = st.files.iter().find(|f| f.workspace_id == "ws1").unwrap();
+        assert!(matches!(file.storage_type, StorageType::Chunked));
+    }
+    let total = content.len() as u64;
+    let offset = total / 2;
+    let length: u64 = 1024;
+    let (data, reported_total) = svc
+        .read_file_range("ws1", "/big.txt", offset, length)
+        .await
+        .unwrap();
+    assert_eq!(reported_total, total);
+    let expected = &content.as_bytes()[offset as usize..(offset + length) as usize];
+    assert_eq!(data.as_slice(), expected);
+}
+
+#[tokio::test]
+async fn read_file_range_chunked_handles_offset_past_eof() {
+    let (svc, _state) = make_service();
+    let line_body = "x".repeat(99);
+    let content: String = (0..3000)
+        .map(|i| format!("{:04}{}\n", i, &line_body[4..]))
+        .collect();
+    svc.write_file("ws1", "/big.txt", &content, None, None)
+        .await
+        .unwrap();
+    let total = content.len() as u64;
+    let (data, reported_total) = svc
+        .read_file_range("ws1", "/big.txt", total + 100, 64)
+        .await
+        .unwrap();
+    assert!(data.is_empty(), "past EOF must yield empty");
+    assert_eq!(reported_total, total);
+}
+
+#[tokio::test]
+async fn read_file_range_chunked_clamps_length_to_eof() {
+    let (svc, _state) = make_service();
+    let line_body = "x".repeat(99);
+    let content: String = (0..3000)
+        .map(|i| format!("{:04}{}\n", i, &line_body[4..]))
+        .collect();
+    svc.write_file("ws1", "/big.txt", &content, None, None)
+        .await
+        .unwrap();
+    let total = content.len() as u64;
+    // Request more bytes than the tail can provide — must clamp, not panic.
+    let (data, reported_total) = svc
+        .read_file_range("ws1", "/big.txt", total - 50, 1024)
+        .await
+        .unwrap();
+    assert_eq!(reported_total, total);
+    assert_eq!(data.as_slice(), &content.as_bytes()[(total - 50) as usize..]);
+}
+
+#[tokio::test]
+async fn stat_uses_file_updated_at_not_dentry_updated_at_after_overwrite() {
+    // Regression: dentry.updated_at only advances on rename/relink, but FUSE
+    // mtime needs to bump on every overwrite. stat() now sources updated_at
+    // from the file row (schema's ON UPDATE CURRENT_TIMESTAMP keeps it fresh).
+    let (svc, state) = make_service();
+    svc.write_file("ws1", "/m.txt", "v1", None, None)
+        .await
+        .unwrap();
+    let info_before = svc.stat("ws1", "/m.txt").await.unwrap();
+    // Stash dentry.updated_at and pin it forward of where the file's update
+    // will land — this proves stat() doesn't trust dentry.updated_at.
+    let pinned_dentry_time = info_before.updated_at + chrono::Duration::seconds(3600);
+    {
+        let mut st = state.lock().unwrap();
+        let de = st
+            .dentries
+            .iter_mut()
+            .find(|d| d.workspace_id == "ws1" && d.path == "/m.txt")
+            .unwrap();
+        de.updated_at = pinned_dentry_time;
+    }
+    // Now overwrite. The mock bumps file.updated_at to "now"; the dentry row
+    // is intentionally pinned 1h in the future. If stat() returned dentry's
+    // time we'd see pinned_dentry_time; we want the file's fresh time.
+    tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    svc.write_file("ws1", "/m.txt", "v2", Some(1), None)
+        .await
+        .unwrap();
+    let info_after = svc.stat("ws1", "/m.txt").await.unwrap();
+    assert!(
+        info_after.updated_at < pinned_dentry_time,
+        "stat must source updated_at from file (got dentry's pinned future time)"
+    );
+    assert!(
+        info_after.updated_at >= info_before.updated_at,
+        "stat updated_at must advance after content overwrite"
+    );
+}
+
+#[tokio::test]
+async fn read_lines_chunked_no_trailing_newline_returns_last_line() {
+    // Regression for the W4.2 line-count off-by-one: when the file has no
+    // trailing newline, the final logical line satisfies
+    // `start_line + line_count == last_line`. Using `>` would drop it; we
+    // use `>=` so this read returns the actual last line.
+    let (svc, state) = make_service();
+    let body = "x".repeat(95);
+    let mut content: String = (0..3000)
+        .map(|i| format!("{:04}{}\n", i, &body))
+        .collect();
+    // Force "no trailing newline" — strip the final '\n'.
+    assert_eq!(content.pop(), Some('\n'));
+    svc.write_file("ws1", "/big.txt", &content, None, None)
+        .await
+        .unwrap();
+    {
+        let st = state.lock().unwrap();
+        let file = st.files.iter().find(|f| f.workspace_id == "ws1").unwrap();
+        assert!(matches!(file.storage_type, StorageType::Chunked));
+    }
+    // 3000 lines total. Read line 3000 (the final, un-newline-terminated line).
+    let last_line = svc
+        .read_file_lines("ws1", "/big.txt", 3000, 3000)
+        .await
+        .unwrap();
+    let expected = format!("2999{}", &body);
+    assert_eq!(last_line, expected, "last line must round-trip");
+}
+
+#[tokio::test]
+async fn get_file_chunks_returns_empty_when_range_exceeds_eof() {
+    // Regression for W4.2 SQL boundary: the old implementation returned the
+    // last chunk for any start_line past EOF. Mock now mirrors that fix.
+    use veda_core::store::MetadataStore;
+    let (svc, state) = make_service();
+    let line_body = "x".repeat(99);
+    let content: String = (0..3000)
+        .map(|i| format!("{:04}{}\n", i, &line_body[4..]))
+        .collect();
+    svc.write_file("ws1", "/big.txt", &content, None, None)
+        .await
+        .unwrap();
+    let (store, file_id) = {
+        let st = state.lock().unwrap();
+        let file = st.files.iter().find(|f| f.workspace_id == "ws1").unwrap();
+        (Arc::clone(&state), file.id.clone())
+    };
+    let mock = mock_store::MockMetadataStore { state: store };
+    let chunks = mock
+        .get_file_chunks(&file_id, Some(10_000), Some(10_100))
+        .await
+        .unwrap();
+    assert!(
+        chunks.is_empty(),
+        "querying past EOF must return empty, got {} chunks",
+        chunks.len()
+    );
+}

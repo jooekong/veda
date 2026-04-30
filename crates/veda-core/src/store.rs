@@ -43,6 +43,36 @@ pub trait MetadataStore: Send + Sync {
         start_line: Option<i32>,
         end_line: Option<i32>,
     ) -> Result<Vec<FileChunk>>;
+    /// Lightweight metadata read of `(chunk_index, byte_len)` for every chunk
+    /// of a file, ordered by `chunk_index`. Excludes the `content` column so
+    /// callers can compute byte offsets cheaply (used by byte-range reads to
+    /// figure out which chunks actually overlap the requested range).
+    /// Default impl falls back to `get_file_chunks` — fine for in-memory
+    /// mocks, real stores should override.
+    async fn list_chunk_byte_lens(&self, file_id: &str) -> Result<Vec<(i32, i32)>> {
+        let chunks = self.get_file_chunks(file_id, None, None).await?;
+        Ok(chunks
+            .into_iter()
+            .map(|c| (c.chunk_index, c.byte_len))
+            .collect())
+    }
+    /// Fetch chunks by a closed `chunk_index` range `[idx_min, idx_max]`,
+    /// ordered by `chunk_index`. Used by byte-range reads after computing
+    /// the overlapping chunk indices via `list_chunk_byte_lens`.
+    /// Default impl falls back to `get_file_chunks` + filter — correct but
+    /// pulls full content for mocks. Real stores should override.
+    async fn get_chunks_in_index_range(
+        &self,
+        file_id: &str,
+        idx_min: i32,
+        idx_max: i32,
+    ) -> Result<Vec<FileChunk>> {
+        let chunks = self.get_file_chunks(file_id, None, None).await?;
+        Ok(chunks
+            .into_iter()
+            .filter(|c| c.chunk_index >= idx_min && c.chunk_index <= idx_max)
+            .collect())
+    }
     async fn find_file_by_checksum(
         &self,
         workspace_id: &str,
@@ -226,6 +256,28 @@ pub trait MetadataTx: Send {
 pub trait VectorStore: Send + Sync {
     async fn ping(&self) -> Result<()>;
     async fn upsert_chunks(&self, chunks: &[ChunkWithEmbedding]) -> Result<()>;
+    /// Same as `upsert_chunks` but skips the trailing "delete chunk_index >
+    /// max_in_batch" sweep. Use when streaming a single file's chunks in
+    /// multiple batches — call this for every batch, then `delete_chunks_above`
+    /// once at the end with the overall max chunk_index. Default impl falls
+    /// back to `upsert_chunks` (which does the sweep itself); only override
+    /// for stores where the sweep is not safe between partial batches.
+    async fn upsert_chunks_only(&self, chunks: &[ChunkWithEmbedding]) -> Result<()> {
+        self.upsert_chunks(chunks).await
+    }
+    /// Delete chunks with `chunk_index > max_chunk_index` for `(workspace_id,
+    /// file_id)`. Pair with `upsert_chunks_only` to avoid the
+    /// "first batch upserts, second batch fails, search index missing the
+    /// tail" hole that batched embed otherwise opens up. Default impl noops
+    /// (fine for in-memory test stores).
+    async fn delete_chunks_above(
+        &self,
+        _workspace_id: &str,
+        _file_id: &str,
+        _max_chunk_index: i32,
+    ) -> Result<()> {
+        Ok(())
+    }
     async fn delete_chunks(&self, workspace_id: &str, file_id: &str) -> Result<()>;
     async fn search(&self, req: &SearchRequest) -> Result<Vec<SearchHit>>;
 

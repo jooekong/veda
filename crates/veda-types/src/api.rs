@@ -65,6 +65,8 @@ pub struct DirEntry {
     pub is_dir: bool,
     pub size_bytes: Option<i64>,
     pub mime_type: Option<String>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
 }
 
 #[derive(Debug, Clone, Serialize)]

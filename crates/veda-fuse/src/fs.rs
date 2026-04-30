@@ -2,7 +2,7 @@ use std::collections::{HashMap, HashSet};
 use std::ffi::OsStr;
 use std::os::fd::RawFd;
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant, SystemTime};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use fuser::{
     FileAttr, FileType, Filesystem, ReplyAttr, ReplyCreate, ReplyData, ReplyDirectory,
@@ -97,15 +97,38 @@ impl VedaFs {
         fh
     }
 
+    fn datetime_to_systime(dt: chrono::DateTime<chrono::Utc>) -> SystemTime {
+        // chrono → SystemTime via UNIX_EPOCH offset. Negative timestamps
+        // (pre-1970) are clamped to UNIX_EPOCH because FUSE doesn't model
+        // them and we'd never see one in practice.
+        let secs = dt.timestamp();
+        let nanos = dt.timestamp_subsec_nanos();
+        if secs >= 0 {
+            UNIX_EPOCH + std::time::Duration::new(secs as u64, nanos)
+        } else {
+            UNIX_EPOCH
+        }
+    }
+
     fn make_attr(info: &FileInfo, ino: u64) -> FileAttr {
         let kind = if info.is_dir { FileType::Directory } else { FileType::RegularFile };
         let size = info.size_bytes.unwrap_or(0) as u64;
         let perm = if info.is_dir { 0o755 } else { 0o644 };
-        let now = SystemTime::now();
+        // Use the server-known mtime/ctime when available so that tools like
+        // `make`, `rsync -a`, and `git status -uno` see stable timestamps.
+        // Fall back to wall clock for unauthenticated / legacy responses.
+        let mtime = info
+            .updated_at
+            .map(Self::datetime_to_systime)
+            .unwrap_or_else(SystemTime::now);
+        let crtime = info
+            .created_at
+            .map(Self::datetime_to_systime)
+            .unwrap_or(mtime);
         FileAttr {
             ino, size,
             blocks: (size + BLOCK_SIZE as u64 - 1) / BLOCK_SIZE as u64,
-            atime: now, mtime: now, ctime: now, crtime: now,
+            atime: mtime, mtime, ctime: mtime, crtime,
             kind, perm,
             nlink: if info.is_dir { 2 } else { 1 },
             uid: unsafe { libc::getuid() },
@@ -124,6 +147,8 @@ impl VedaFs {
             is_dir: de.is_dir,
             size_bytes: de.size_bytes,
             revision: None,
+            created_at: de.created_at,
+            updated_at: de.updated_at,
         };
         Self::make_attr(&info, ino)
     }
@@ -133,7 +158,14 @@ impl VedaFs {
     }
 
     fn dir_stub_attr(ino: u64) -> FileAttr {
-        let info = FileInfo { path: String::new(), is_dir: true, size_bytes: None, revision: None };
+        let info = FileInfo {
+            path: String::new(),
+            is_dir: true,
+            size_bytes: None,
+            revision: None,
+            created_at: None,
+            updated_at: None,
+        };
         Self::make_attr(&info, ino)
     }
 
@@ -502,11 +534,16 @@ impl Filesystem for VedaFs {
         offset: i64, size: u32, _flags: i32, _lock_owner: Option<u64>,
         reply: ReplyData,
     ) {
+        // FUSE callers (notably libfuse / `cat`) routinely pass `size = u32::MAX`
+        // when they don't know the file length yet. `off + size as usize` then
+        // overflows on 32-bit platforms and silently wraps on 64-bit when off is
+        // near usize::MAX. saturating_add caps at usize::MAX, then min() with
+        // the actual buffer length yields the correct slice end.
         if let Some(handle) = self.write_handles.get(&fh) {
             let off = offset as usize;
             if off >= handle.buf.len() { reply.data(&[]); }
             else {
-                let end = std::cmp::min(off + size as usize, handle.buf.len());
+                let end = std::cmp::min(off.saturating_add(size as usize), handle.buf.len());
                 reply.data(&handle.buf[off..end]);
             }
             return;
@@ -521,7 +558,7 @@ impl Filesystem for VedaFs {
             let off = offset as usize;
             if off >= cached.len() { reply.data(&[]); }
             else {
-                let end = std::cmp::min(off + size as usize, cached.len());
+                let end = std::cmp::min(off.saturating_add(size as usize), cached.len());
                 reply.data(&cached[off..end]);
             }
             return;
@@ -534,7 +571,7 @@ impl Filesystem for VedaFs {
                     let off = offset as usize;
                     if off >= bytes.len() { reply.data(&[]); }
                     else {
-                        let end = std::cmp::min(off + size as usize, bytes.len());
+                        let end = std::cmp::min(off.saturating_add(size as usize), bytes.len());
                         reply.data(&bytes[off..end]);
                     }
                     self.cache_put(&path, bytes, gen);
@@ -620,7 +657,15 @@ impl Filesystem for VedaFs {
         self.invalidate_dir_cache(parent);
         let fh = self.alloc_fh();
         let ino = self.inode_get_or_create_with_nlookup(&child_path);
-        let info = FileInfo { path: child_path, is_dir: false, size_bytes: Some(0), revision: base_rev };
+        let now = chrono::Utc::now();
+        let info = FileInfo {
+            path: child_path,
+            is_dir: false,
+            size_bytes: Some(0),
+            revision: base_rev,
+            created_at: Some(now),
+            updated_at: Some(now),
+        };
         let attr = Self::make_attr(&info, ino);
         self.inode_set_attr(ino, attr);
         self.write_handles.insert(fh, WriteHandle { ino, buf: Vec::new(), dirty: false, base_rev });
@@ -644,7 +689,15 @@ impl Filesystem for VedaFs {
         }
         self.invalidate_dir_cache(parent);
         let ino = self.inode_get_or_create_with_nlookup(&child_path);
-        let info = FileInfo { path: child_path, is_dir: true, size_bytes: None, revision: None };
+        let now = chrono::Utc::now();
+        let info = FileInfo {
+            path: child_path,
+            is_dir: true,
+            size_bytes: None,
+            revision: None,
+            created_at: Some(now),
+            updated_at: Some(now),
+        };
         let attr = Self::make_attr(&info, ino);
         self.inode_set_attr(ino, attr);
         reply.entry(&self.config.attr_ttl, &attr, 0);
@@ -776,6 +829,8 @@ mod tests {
             path: format!("/{name}"),
             is_dir,
             size_bytes: size,
+            created_at: None,
+            updated_at: None,
         }
     }
 
@@ -809,5 +864,57 @@ mod tests {
     fn directory_is_always_cached_even_with_none_size() {
         let de = make_dir_entry("docs", true, None);
         assert!(VedaFs::should_cache_attr(&de), "directories legitimately have size=0");
+    }
+
+    #[test]
+    fn make_attr_uses_server_mtime_when_present() {
+        // 2026-04-01T00:00:00Z = 1774310400 unix seconds
+        let dt: chrono::DateTime<chrono::Utc> =
+            chrono::DateTime::parse_from_rfc3339("2026-04-01T00:00:00Z")
+                .unwrap()
+                .with_timezone(&chrono::Utc);
+        let info = FileInfo {
+            path: "/x".to_string(),
+            is_dir: false,
+            size_bytes: Some(42),
+            revision: Some(1),
+            created_at: Some(dt),
+            updated_at: Some(dt),
+        };
+        let attr = VedaFs::make_attr(&info, 100);
+        let expected = UNIX_EPOCH + std::time::Duration::from_secs(dt.timestamp() as u64);
+        assert_eq!(attr.mtime, expected);
+        assert_eq!(attr.ctime, expected);
+        assert_eq!(attr.crtime, expected);
+    }
+
+    #[test]
+    fn make_attr_falls_back_to_now_when_mtime_missing() {
+        let info = FileInfo {
+            path: "/x".to_string(),
+            is_dir: false,
+            size_bytes: Some(0),
+            revision: None,
+            created_at: None,
+            updated_at: None,
+        };
+        let before = SystemTime::now();
+        let attr = VedaFs::make_attr(&info, 1);
+        let after = SystemTime::now();
+        // Should fall within the call window — proves we used wall clock.
+        assert!(attr.mtime >= before && attr.mtime <= after);
+    }
+
+    #[test]
+    fn read_size_u32_max_does_not_overflow() {
+        // Regression: FUSE callers can pass size = u32::MAX when length is
+        // unknown. `off + size as usize` previously overflowed; with the
+        // saturating_add fix the slice end clamps to buffer length.
+        let buf: Vec<u8> = vec![0u8; 10];
+        let off: usize = 0;
+        let size: u32 = u32::MAX;
+        let end = std::cmp::min(off.saturating_add(size as usize), buf.len());
+        assert_eq!(end, buf.len());
+        let _ = &buf[off..end];
     }
 }

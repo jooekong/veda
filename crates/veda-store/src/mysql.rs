@@ -691,14 +691,24 @@ async fn get_file_chunks_conn(
     );
     let rows = match (start_line, end_line) {
         (Some(a), Some(b)) => {
+            // The inner subquery picks the chunk that *starts at or before* line a
+            // (highest chunk_index with start_line <= a). When `a` is past EOF, this
+            // still returns the LAST chunk — which doesn't actually contain line a.
+            // The outer `start_line + line_count >= ?` filter excludes chunks whose
+            // line range ends before a. We use `>=` (not `>`) because line_count is
+            // the count of '\n' bytes inside the chunk: when the file has no
+            // trailing newline, the final logical line satisfies
+            // `start_line + line_count == last_line`, and `>` would drop it.
             q.push_str(
                 " AND chunk_index >= COALESCE((SELECT MAX(chunk_index) \
                    FROM veda_file_chunks WHERE file_id = ? AND start_line <= ?), 0) \
+                   AND start_line + line_count >= ? \
                    AND start_line <= ? ORDER BY chunk_index",
             );
             sqlx::query(&q)
                 .bind(file_id)
                 .bind(file_id)
+                .bind(a)
                 .bind(a)
                 .bind(b)
                 .fetch_all(&mut *conn)
@@ -708,11 +718,13 @@ async fn get_file_chunks_conn(
             q.push_str(
                 " AND chunk_index >= COALESCE((SELECT MAX(chunk_index) \
                    FROM veda_file_chunks WHERE file_id = ? AND start_line <= ?), 0) \
+                   AND start_line + line_count >= ? \
                    ORDER BY chunk_index",
             );
             sqlx::query(&q)
                 .bind(file_id)
                 .bind(file_id)
+                .bind(a)
                 .bind(a)
                 .fetch_all(&mut *conn)
                 .await
@@ -921,6 +933,45 @@ impl MetadataStore for MysqlStore {
     ) -> Result<Vec<FileChunk>> {
         let mut conn = self.pool.acquire().await.map_err(storage_err)?;
         get_file_chunks_conn(&mut *conn, file_id, start_line, end_line).await
+    }
+
+    async fn list_chunk_byte_lens(&self, file_id: &str) -> Result<Vec<(i32, i32)>> {
+        let rows = sqlx::query(
+            r#"SELECT chunk_index, byte_len FROM veda_file_chunks
+               WHERE file_id = ? ORDER BY chunk_index"#,
+        )
+        .bind(file_id)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(storage_err)?;
+        rows.iter()
+            .map(|r| {
+                let idx: i32 = r.try_get("chunk_index").map_err(storage_err)?;
+                let len: i32 = r.try_get("byte_len").map_err(storage_err)?;
+                Ok((idx, len))
+            })
+            .collect()
+    }
+
+    async fn get_chunks_in_index_range(
+        &self,
+        file_id: &str,
+        idx_min: i32,
+        idx_max: i32,
+    ) -> Result<Vec<FileChunk>> {
+        let rows = sqlx::query(
+            r#"SELECT file_id, chunk_index, start_line, line_count, byte_len, chunk_sha256, content
+               FROM veda_file_chunks
+               WHERE file_id = ? AND chunk_index >= ? AND chunk_index <= ?
+               ORDER BY chunk_index"#,
+        )
+        .bind(file_id)
+        .bind(idx_min)
+        .bind(idx_max)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(storage_err)?;
+        rows.iter().map(|r| row_to_file_chunk(r)).collect()
     }
 
     async fn find_file_by_checksum(

@@ -207,17 +207,39 @@ impl Worker {
                 .await?
                 .unwrap_or_default(),
             StorageType::Chunked => {
-                let chunks = self.meta.get_file_chunks(file_id, None, None).await?;
-                let total: usize = chunks.iter().map(|c| c.content.len()).sum();
+                // Paginated read: pull chunks in fixed-size index batches and
+                // drop each batch's `Vec<FileChunk>` after appending. This caps
+                // peak memory at ~file_size + 1 batch (was ~2x file_size when
+                // we held the full Vec<FileChunk> AND the assembled buf).
+                let total = file.size_bytes.max(0) as usize;
                 let mut buf = String::with_capacity(total);
-                for c in chunks {
-                    buf.push_str(&c.content);
+                let byte_lens = self.meta.list_chunk_byte_lens(file_id).await?;
+                if let (Some(first), Some(last)) =
+                    (byte_lens.first(), byte_lens.last())
+                {
+                    const CHUNK_BATCH: i32 = 32;
+                    let mut lo = first.0;
+                    let last_idx = last.0;
+                    while lo <= last_idx {
+                        let hi = lo.saturating_add(CHUNK_BATCH - 1).min(last_idx);
+                        let batch = self
+                            .meta
+                            .get_chunks_in_index_range(file_id, lo, hi)
+                            .await?;
+                        for c in batch {
+                            buf.push_str(&c.content);
+                        }
+                        lo = hi.saturating_add(1);
+                    }
                 }
                 buf
             }
         };
 
         let sem_chunks = semantic_chunk(&content, 2048);
+        // Drop the assembled file buffer before the embed loop allocates per-batch
+        // text clones. semantic_chunk has already copied the bytes it needs.
+        drop(content);
         if sem_chunks.is_empty() {
             self.vector.delete_chunks(workspace_id, file_id).await?;
             // Empty content is "embedded as nothing"; record the watermark so
@@ -228,23 +250,46 @@ impl Worker {
             return Ok(());
         }
 
-        let texts: Vec<String> = sem_chunks.iter().map(|c| c.content.clone()).collect();
-        let embeddings = self.embedding.embed(&texts).await?;
-
-        let chunks_with_emb: Vec<ChunkWithEmbedding> = sem_chunks
-            .into_iter()
-            .zip(embeddings)
-            .map(|(chunk, vector)| ChunkWithEmbedding {
-                id: format!("{file_id}_{}", chunk.index),
-                workspace_id: workspace_id.to_string(),
-                file_id: file_id.to_string(),
-                chunk_index: chunk.index,
-                content: chunk.content,
-                vector,
-            })
-            .collect();
-
-        self.vector.upsert_chunks(&chunks_with_emb).await?;
+        // Embed + upsert in batches so memory peaks at one batch's worth of
+        // texts/embeddings/ChunkWithEmbedding rather than the entire file.
+        // Upserts are idempotent (vector id keyed on file_id+chunk_index), so
+        // a mid-loop failure is safe — the next outbox claim retries from the
+        // first batch. The watermark below only fires after every batch lands.
+        //
+        // Critical: use `upsert_chunks_only` per batch, then ONE
+        // `delete_chunks_above` after every batch succeeds. The all-in-one
+        // `upsert_chunks` would delete chunk_index > batch_max after batch 1,
+        // wiping any stale tail chunks before batch 2 had a chance to write
+        // them — if batch 2+ failed the search index would be missing the
+        // tail until a successful retry. Splitting the sweep keeps stale
+        // chunks alive (briefly co-existing with new ones, both keyed on
+        // file_id+chunk_index so duplicates are impossible) until we know
+        // the full new set landed.
+        const EMBED_BATCH: usize = 64;
+        let max_chunk_index = sem_chunks
+            .last()
+            .map(|c| c.index)
+            .expect("sem_chunks empty handled above");
+        for batch in sem_chunks.chunks(EMBED_BATCH) {
+            let texts: Vec<String> = batch.iter().map(|c| c.content.clone()).collect();
+            let embeddings = self.embedding.embed(&texts).await?;
+            let with_emb: Vec<ChunkWithEmbedding> = batch
+                .iter()
+                .zip(embeddings)
+                .map(|(chunk, vector)| ChunkWithEmbedding {
+                    id: format!("{file_id}_{}", chunk.index),
+                    workspace_id: workspace_id.to_string(),
+                    file_id: file_id.to_string(),
+                    chunk_index: chunk.index,
+                    content: chunk.content.clone(),
+                    vector,
+                })
+                .collect();
+            self.vector.upsert_chunks_only(&with_emb).await?;
+        }
+        self.vector
+            .delete_chunks_above(workspace_id, file_id, max_chunk_index)
+            .await?;
         // Watermark only after Milvus upsert succeeds. If this update fails,
         // the next claim retries embed+upsert (wasted) but data stays correct.
         self.meta
