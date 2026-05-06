@@ -159,6 +159,21 @@ impl FromRequestParts<Arc<AppState>> for AuthWorkspace {
 
             let (workspace_id, mut account_id, read_only) =
                 if let Some(claims) = verify_jwt(&state.jwt_secret, token) {
+                    // JWT carries no DB-validated state. Verify the bearer's
+                    // account is still active — the workspace_key path
+                    // enforces this via SQL JOIN, but JWT must check explicitly.
+                    let account = state
+                        .auth_store
+                        .get_account(&claims.account_id)
+                        .await
+                        .map_err(|e| {
+                            error!(err = %e, "auth store error");
+                            internal_err()
+                        })?
+                        .ok_or_else(auth_err)?;
+                    if account.status != veda_types::AccountStatus::Active {
+                        return Err(auth_err());
+                    }
                     (claims.workspace_id, claims.account_id, false)
                 } else {
                     let key_hash = veda_core::checksum::sha256_hex(token.as_bytes());

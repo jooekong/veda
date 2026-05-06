@@ -432,7 +432,20 @@ impl MysqlStore {
     pub async fn with_pool_config(database_url: &str, cfg: PoolConfig) -> Result<Self> {
         let mut opts = sqlx::pool::PoolOptions::<sqlx::MySql>::new()
             .max_connections(cfg.max_connections)
-            .min_connections(cfg.min_connections);
+            .min_connections(cfg.min_connections)
+            // Pin every connection to UTC. The whole codebase binds
+            // `chrono::DateTime<Utc>::naive_utc()` into NaiveDateTime columns;
+            // sqlx writes those as the server's session timezone literal. If
+            // the MySQL server runs in CST/PST, those values would silently
+            // shift. Force +00:00 so the on-the-wire interpretation matches
+            // the in-memory UTC contract.
+            .after_connect(|conn, _meta| {
+                Box::pin(async move {
+                    use sqlx::Executor;
+                    conn.execute("SET time_zone = '+00:00'").await?;
+                    Ok(())
+                })
+            });
         if cfg.acquire_timeout_secs > 0 {
             opts = opts.acquire_timeout(std::time::Duration::from_secs(cfg.acquire_timeout_secs));
         }
@@ -2075,9 +2088,13 @@ impl AuthStore for MysqlStore {
     }
 
     async fn get_api_key_by_hash(&self, key_hash: &str) -> Result<Option<ApiKeyRecord>> {
+        // JOIN veda_accounts so a suspended account's keys stop authorizing
+        // immediately. Without this, AccountStatus::Suspended is dead weight.
         let row = sqlx::query(
-            r#"SELECT id, account_id, name, key_hash, status, created_at
-               FROM veda_api_keys WHERE key_hash = ? AND status = 'active'"#,
+            r#"SELECT k.id, k.account_id, k.name, k.key_hash, k.status, k.created_at
+               FROM veda_api_keys k
+               INNER JOIN veda_accounts a ON a.id = k.account_id
+               WHERE k.key_hash = ? AND k.status = 'active' AND a.status = 'active'"#,
         )
         .bind(key_hash)
         .fetch_optional(&self.pool)
@@ -2186,9 +2203,14 @@ impl AuthStore for MysqlStore {
     }
 
     async fn get_workspace_key_by_hash(&self, key_hash: &str) -> Result<Option<WorkspaceKey>> {
+        // JOIN workspace + account so suspending either revokes the key.
         let row = sqlx::query(
-            r#"SELECT id, workspace_id, name, key_hash, permission, status, created_at
-               FROM veda_workspace_keys WHERE key_hash = ? AND status = 'active'"#,
+            r#"SELECT k.id, k.workspace_id, k.name, k.key_hash, k.permission, k.status, k.created_at
+               FROM veda_workspace_keys k
+               INNER JOIN veda_workspaces w ON w.id = k.workspace_id
+               INNER JOIN veda_accounts a ON a.id = w.account_id
+               WHERE k.key_hash = ? AND k.status = 'active'
+                     AND w.status = 'active' AND a.status = 'active'"#,
         )
         .bind(key_hash)
         .fetch_optional(&self.pool)

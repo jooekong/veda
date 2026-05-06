@@ -91,6 +91,12 @@ async fn login(
         .await?
         .ok_or_else(|| VedaError::Unauthorized("invalid email or password".into()))?;
 
+    // Suspended accounts cannot mint new keys. Use the same generic error so
+    // the response does not disclose whether the account exists or is locked.
+    if account.status != AccountStatus::Active {
+        return Err(VedaError::Unauthorized("invalid email or password".into()).into());
+    }
+
     let hash_str = account
         .password_hash
         .as_deref()

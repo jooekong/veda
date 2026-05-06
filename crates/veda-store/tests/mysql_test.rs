@@ -515,6 +515,168 @@ async fn mysql_workspace_key_crud() {
     cleanup_account(&store, &acct_id).await;
 }
 
+// ── Account-status auth gating (C1) ────────────────────
+//
+// `get_api_key_by_hash` and `get_workspace_key_by_hash` JOIN
+// `veda_accounts.status` so suspending an account immediately stops both
+// API keys and workspace keys from authorizing — without these tests, the
+// JOIN clause could be silently dropped in a future refactor.
+
+#[tokio::test]
+#[ignore]
+async fn mysql_api_key_rejected_when_account_suspended() {
+    let url = load_mysql_url();
+    let store = MysqlStore::new(&url).await.expect("connect");
+    store.migrate().await.expect("migrate");
+
+    let acct_id = Uuid::new_v4().to_string();
+    let now = Utc::now();
+    store
+        .create_account(&Account {
+            id: acct_id.clone(),
+            name: "suspend-api".into(),
+            email: Some(format!("{}@test.com", &acct_id[..8])),
+            password_hash: None,
+            status: AccountStatus::Active,
+            created_at: now,
+            updated_at: now,
+        })
+        .await
+        .unwrap();
+
+    let key_hash = format!("hash_{}", &Uuid::new_v4().to_string()[..16]);
+    store
+        .create_api_key(&ApiKeyRecord {
+            id: Uuid::new_v4().to_string(),
+            account_id: acct_id.clone(),
+            name: "default".into(),
+            key_hash: key_hash.clone(),
+            status: KeyStatus::Active,
+            created_at: now,
+        })
+        .await
+        .unwrap();
+
+    // Active account: lookup must succeed (control case).
+    let got = store.get_api_key_by_hash(&key_hash).await.unwrap();
+    assert!(got.is_some(), "active account: api key must authorize");
+
+    // Suspend the account — the key row stays Active, only the account flips.
+    let pool = store.pool();
+    sqlx::query("UPDATE veda_accounts SET status = 'suspended' WHERE id = ?")
+        .bind(&acct_id)
+        .execute(pool)
+        .await
+        .unwrap();
+
+    let got = store.get_api_key_by_hash(&key_hash).await.unwrap();
+    assert!(
+        got.is_none(),
+        "suspended account: api key must NOT authorize"
+    );
+
+    cleanup_account(&store, &acct_id).await;
+}
+
+#[tokio::test]
+#[ignore]
+async fn mysql_workspace_key_rejected_when_account_suspended() {
+    let url = load_mysql_url();
+    let store = MysqlStore::new(&url).await.expect("connect");
+    store.migrate().await.expect("migrate");
+
+    let acct_id = Uuid::new_v4().to_string();
+    let ws_id = Uuid::new_v4().to_string();
+    let now = Utc::now();
+    store
+        .create_account(&Account {
+            id: acct_id.clone(),
+            name: "suspend-wk".into(),
+            email: Some(format!("{}@test.com", &acct_id[..8])),
+            password_hash: None,
+            status: AccountStatus::Active,
+            created_at: now,
+            updated_at: now,
+        })
+        .await
+        .unwrap();
+    store
+        .create_workspace(&Workspace {
+            id: ws_id.clone(),
+            account_id: acct_id.clone(),
+            name: "ws".into(),
+            status: WorkspaceStatus::Active,
+            created_at: now,
+            updated_at: now,
+        })
+        .await
+        .unwrap();
+
+    let wk_hash = format!("wk_hash_{}", &Uuid::new_v4().to_string()[..16]);
+    store
+        .create_workspace_key(&WorkspaceKey {
+            id: Uuid::new_v4().to_string(),
+            workspace_id: ws_id.clone(),
+            name: "ci".into(),
+            key_hash: wk_hash.clone(),
+            permission: KeyPermission::ReadWrite,
+            status: KeyStatus::Active,
+            created_at: now,
+        })
+        .await
+        .unwrap();
+
+    // Control: active account + active workspace → key works.
+    assert!(store
+        .get_workspace_key_by_hash(&wk_hash)
+        .await
+        .unwrap()
+        .is_some());
+
+    // Suspending the workspace alone must revoke the key.
+    let pool = store.pool();
+    sqlx::query("UPDATE veda_workspaces SET status = 'archived' WHERE id = ?")
+        .bind(&ws_id)
+        .execute(pool)
+        .await
+        .unwrap();
+    assert!(
+        store
+            .get_workspace_key_by_hash(&wk_hash)
+            .await
+            .unwrap()
+            .is_none(),
+        "archived workspace: key must NOT authorize"
+    );
+
+    // Re-activate workspace, suspend the owning account → still rejected.
+    sqlx::query("UPDATE veda_workspaces SET status = 'active' WHERE id = ?")
+        .bind(&ws_id)
+        .execute(pool)
+        .await
+        .unwrap();
+    assert!(store
+        .get_workspace_key_by_hash(&wk_hash)
+        .await
+        .unwrap()
+        .is_some());
+    sqlx::query("UPDATE veda_accounts SET status = 'suspended' WHERE id = ?")
+        .bind(&acct_id)
+        .execute(pool)
+        .await
+        .unwrap();
+    assert!(
+        store
+            .get_workspace_key_by_hash(&wk_hash)
+            .await
+            .unwrap()
+            .is_none(),
+        "suspended owner account: workspace key must NOT authorize"
+    );
+
+    cleanup_account(&store, &acct_id).await;
+}
+
 // ── Collection Schema tests ────────────────────────────
 
 #[tokio::test]
