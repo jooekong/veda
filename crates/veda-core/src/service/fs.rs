@@ -13,6 +13,11 @@ const INLINE_THRESHOLD: i64 = 256 * 1024;
 const CHUNK_SIZE: usize = 256 * 1024;
 const MAX_FILE_BYTES: i64 = 50 * 1024 * 1024;
 const MAX_LINE_RANGE: i32 = 100_000;
+/// Hard cap on entries loaded into memory for a single recursive
+/// delete/rename. Operations on larger subtrees should be batched by
+/// the caller — a single transaction holding millions of locks would
+/// block other writers for too long anyway.
+const MAX_RECURSIVE_DESCENT: usize = 100_000;
 
 /// Per-write precomputed metadata: full-content hash, size, line count,
 /// and either an inline string or chunk list ready to persist.
@@ -649,14 +654,12 @@ impl FsService {
         max_entries: usize,
     ) -> Result<Vec<Dentry>> {
         let norm = path::normalize(raw_path)?;
-        let all = self.meta.list_dentries_under(workspace_id, &norm).await?;
-        if all.len() > max_entries {
-            return Err(VedaError::QuotaExceeded(format!(
-                "directory listing exceeded {} entries",
-                max_entries
-            )));
-        }
-        Ok(all)
+        // _capped enforces the limit during pagination, so we never load
+        // more than `max_entries` rows at once. Old code did
+        // load-all-then-check, which OOMed on huge workspaces (review C2).
+        self.meta
+            .list_dentries_under_capped(workspace_id, &norm, max_entries)
+            .await
     }
 
     /// Match files using a glob pattern. Returns matching dentries.
@@ -764,7 +767,13 @@ impl FsService {
         let mut child_events: Vec<FsEvent> = Vec::new();
 
         if dentry.is_dir {
-            let children = tx.list_dentries_under(workspace_id, &norm).await?;
+            // Bound recursive delete at MAX_RECURSIVE_DESCENT entries.
+            // Beyond that the user should batch the operation; loading
+            // millions of children into a single tx would hold locks
+            // for too long anyway.
+            let children = tx
+                .list_dentries_under_capped(workspace_id, &norm, MAX_RECURSIVE_DESCENT)
+                .await?;
             deleted_count += children.len() as u64;
             for child in &children {
                 if let Some(ref fid) = child.file_id {
@@ -1162,7 +1171,9 @@ impl FsService {
 
         let mut child_events: Vec<FsEvent> = Vec::new();
         if src_dentry.is_dir {
-            let children = tx.list_dentries_under(workspace_id, &src).await?;
+            let children = tx
+                .list_dentries_under_capped(workspace_id, &src, MAX_RECURSIVE_DESCENT)
+                .await?;
             for child in &children {
                 let new_child_path = format!("{dst}{}", &child.path[src.len()..]);
                 child_events.push(make_fs_event(

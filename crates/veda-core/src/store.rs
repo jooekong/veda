@@ -8,23 +8,61 @@ pub trait MetadataStore: Send + Sync {
     async fn ping(&self) -> Result<()>;
     async fn get_dentry(&self, workspace_id: &str, path: &str) -> Result<Option<Dentry>>;
     async fn list_dentries(&self, workspace_id: &str, parent_path: &str) -> Result<Vec<Dentry>>;
-    async fn list_dentries_under(
+    /// Return up to `limit` dentries under `path_prefix` ordered by `path`
+    /// ASC, strictly after `after_path` (exclusive cursor; `None` starts
+    /// from the beginning). Caller pages by passing the last returned
+    /// `path` as the next `after_path`, stopping when fewer than `limit`
+    /// rows come back.
+    ///
+    /// Stable sort by `path` is REQUIRED so paging is deterministic
+    /// across invocations even with concurrent writes.
+    async fn list_dentries_under_page(
         &self,
         workspace_id: &str,
         path_prefix: &str,
+        after_path: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<Dentry>>;
+
+    /// Convenience wrapper that drains `list_dentries_under_page` until
+    /// exhausted, capped at `max` total entries. Errors with
+    /// `QuotaExceeded` if the listing would exceed `max` — protects
+    /// callers from unbounded memory growth on large workspaces.
+    /// For genuinely unbounded scans (reconciler), call `_page` directly
+    /// in a streaming loop and process incrementally.
+    async fn list_dentries_under_capped(
+        &self,
+        workspace_id: &str,
+        path_prefix: &str,
+        max: usize,
     ) -> Result<Vec<Dentry>> {
-        let mut all = Vec::new();
-        let mut queue = vec![path_prefix.to_string()];
-        while let Some(dir) = queue.pop() {
-            let children = self.list_dentries(workspace_id, &dir).await?;
-            for c in &children {
-                if c.is_dir {
-                    queue.push(c.path.clone());
-                }
+        const PAGE_SIZE: usize = 1000;
+        let mut out: Vec<Dentry> = Vec::new();
+        let mut cursor: Option<String> = None;
+        loop {
+            let page = self
+                .list_dentries_under_page(
+                    workspace_id,
+                    path_prefix,
+                    cursor.as_deref(),
+                    PAGE_SIZE,
+                )
+                .await?;
+            let n = page.len();
+            if out.len() + n > max {
+                return Err(VedaError::QuotaExceeded(format!(
+                    "dentry scan under {path_prefix} exceeded {max} entries"
+                )));
             }
-            all.extend(children);
+            if let Some(last) = page.last() {
+                cursor = Some(last.path.clone());
+            }
+            out.extend(page);
+            if n < PAGE_SIZE {
+                break;
+            }
         }
-        Ok(all)
+        Ok(out)
     }
     async fn get_file(&self, file_id: &str) -> Result<Option<FileRecord>>;
     async fn get_files_batch(&self, file_ids: &[String]) -> Result<Vec<FileRecord>> {
@@ -191,11 +229,50 @@ pub trait MetadataTx: Send {
         file_id: &str,
     ) -> Result<()>;
     async fn delete_dentry(&mut self, workspace_id: &str, path: &str) -> Result<u64>;
-    async fn list_dentries_under(
+    /// See `MetadataStore::list_dentries_under_page`. Same contract
+    /// applied within an open transaction.
+    async fn list_dentries_under_page(
         &mut self,
         workspace_id: &str,
         path_prefix: &str,
+        after_path: Option<&str>,
+        limit: usize,
     ) -> Result<Vec<Dentry>>;
+    /// See `MetadataStore::list_dentries_under_capped`.
+    async fn list_dentries_under_capped(
+        &mut self,
+        workspace_id: &str,
+        path_prefix: &str,
+        max: usize,
+    ) -> Result<Vec<Dentry>> {
+        const PAGE_SIZE: usize = 1000;
+        let mut out: Vec<Dentry> = Vec::new();
+        let mut cursor: Option<String> = None;
+        loop {
+            let page = self
+                .list_dentries_under_page(
+                    workspace_id,
+                    path_prefix,
+                    cursor.as_deref(),
+                    PAGE_SIZE,
+                )
+                .await?;
+            let n = page.len();
+            if out.len() + n > max {
+                return Err(VedaError::QuotaExceeded(format!(
+                    "dentry scan under {path_prefix} exceeded {max} entries"
+                )));
+            }
+            if let Some(last) = page.last() {
+                cursor = Some(last.path.clone());
+            }
+            out.extend(page);
+            if n < PAGE_SIZE {
+                break;
+            }
+        }
+        Ok(out)
+    }
     async fn delete_dentries_under(&mut self, workspace_id: &str, parent_path: &str)
         -> Result<u64>;
     async fn rename_dentry(

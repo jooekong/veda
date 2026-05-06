@@ -177,7 +177,7 @@ async fn mysql_list_dentries_under_root_lists_workspace_entries() {
     Box::new(tx).commit().await.expect("commit");
 
     let rows = store
-        .list_dentries_under(&ws, "/")
+        .list_dentries_under_capped(&ws, "/", 1000)
         .await
         .expect("list under root");
     let paths: Vec<String> = rows.into_iter().map(|d| d.path).collect();
@@ -185,6 +185,124 @@ async fn mysql_list_dentries_under_root_lists_workspace_entries() {
 
     cleanup_workspace(&store, &ws).await;
     cleanup_workspace(&store, &other_ws).await;
+}
+
+// ── Paginated dentry listing (C2) ──────────────────────
+//
+// `list_dentries_under_page` enables streaming over large workspaces
+// without loading every Dentry row into memory. These tests pin the
+// keyset-cursor contract.
+
+#[tokio::test]
+#[ignore]
+async fn mysql_list_dentries_under_page_paginates_in_path_order() {
+    let url = load_mysql_url();
+    let store = MysqlStore::new(&url).await.expect("connect");
+    store.migrate().await.expect("migrate");
+    let ws = Uuid::new_v4().to_string();
+
+    // Insert 5 dentries with paths intentionally out of insert order;
+    // pagination must order by path ASC regardless of insert sequence.
+    let inputs = ["/c.txt", "/a.txt", "/e.txt", "/b.txt", "/d.txt"];
+    let mut tx = store.begin_tx().await.unwrap();
+    for p in inputs {
+        let name = p.trim_start_matches('/');
+        tx.insert_dentry(&sample_dentry(&ws, p, name, None))
+            .await
+            .unwrap();
+    }
+    Box::new(tx).commit().await.unwrap();
+
+    // First page: limit=2, no cursor.
+    let p1 = store
+        .list_dentries_under_page(&ws, "/", None, 2)
+        .await
+        .unwrap();
+    let paths_1: Vec<String> = p1.iter().map(|d| d.path.clone()).collect();
+    assert_eq!(paths_1, vec!["/a.txt".to_string(), "/b.txt".to_string()]);
+
+    // Second page: cursor = last of p1, limit=2.
+    let p2 = store
+        .list_dentries_under_page(&ws, "/", Some("/b.txt"), 2)
+        .await
+        .unwrap();
+    let paths_2: Vec<String> = p2.iter().map(|d| d.path.clone()).collect();
+    assert_eq!(paths_2, vec!["/c.txt".to_string(), "/d.txt".to_string()]);
+
+    // Third page: only one row left, less than limit signals EOF.
+    let p3 = store
+        .list_dentries_under_page(&ws, "/", Some("/d.txt"), 2)
+        .await
+        .unwrap();
+    let paths_3: Vec<String> = p3.iter().map(|d| d.path.clone()).collect();
+    assert_eq!(paths_3, vec!["/e.txt".to_string()]);
+    assert!(p3.len() < 2, "short page indicates exhaustion");
+
+    cleanup_workspace(&store, &ws).await;
+}
+
+#[tokio::test]
+#[ignore]
+async fn mysql_list_dentries_under_page_filters_subtree() {
+    let url = load_mysql_url();
+    let store = MysqlStore::new(&url).await.expect("connect");
+    store.migrate().await.expect("migrate");
+    let ws = Uuid::new_v4().to_string();
+
+    // /docs/* and /src/* — page on /docs only.
+    let mut tx = store.begin_tx().await.unwrap();
+    for p in ["/docs/a.md", "/docs/b.md", "/src/lib.rs"] {
+        let name = p.rsplit('/').next().unwrap();
+        tx.insert_dentry(&sample_dentry(&ws, p, name, None))
+            .await
+            .unwrap();
+    }
+    Box::new(tx).commit().await.unwrap();
+
+    let page = store
+        .list_dentries_under_page(&ws, "/docs", None, 100)
+        .await
+        .unwrap();
+    let paths: Vec<String> = page.iter().map(|d| d.path.clone()).collect();
+    assert_eq!(
+        paths,
+        vec!["/docs/a.md".to_string(), "/docs/b.md".to_string()],
+        "subtree page must exclude /src/lib.rs"
+    );
+
+    cleanup_workspace(&store, &ws).await;
+}
+
+#[tokio::test]
+#[ignore]
+async fn mysql_list_dentries_under_capped_errors_on_overflow() {
+    let url = load_mysql_url();
+    let store = MysqlStore::new(&url).await.expect("connect");
+    store.migrate().await.expect("migrate");
+    let ws = Uuid::new_v4().to_string();
+
+    // Insert 3 dentries; cap at 2 → expect QuotaExceeded.
+    let mut tx = store.begin_tx().await.unwrap();
+    for p in ["/a.txt", "/b.txt", "/c.txt"] {
+        let name = p.trim_start_matches('/');
+        tx.insert_dentry(&sample_dentry(&ws, p, name, None))
+            .await
+            .unwrap();
+    }
+    Box::new(tx).commit().await.unwrap();
+
+    let result = store.list_dentries_under_capped(&ws, "/", 2).await;
+    assert!(
+        matches!(result, Err(veda_types::VedaError::QuotaExceeded(_))),
+        "expected QuotaExceeded, got {:?}",
+        result
+    );
+
+    // Cap >= count succeeds.
+    let ok = store.list_dentries_under_capped(&ws, "/", 10).await.unwrap();
+    assert_eq!(ok.len(), 3);
+
+    cleanup_workspace(&store, &ws).await;
 }
 
 #[tokio::test]

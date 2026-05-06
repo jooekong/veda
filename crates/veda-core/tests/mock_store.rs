@@ -78,27 +78,34 @@ impl MetadataStore for MockMetadataStore {
             .collect())
     }
 
-    async fn list_dentries_under(
+    async fn list_dentries_under_page(
         &self,
         workspace_id: &str,
         path_prefix: &str,
+        after_path: Option<&str>,
+        limit: usize,
     ) -> Result<Vec<Dentry>> {
         let st = self.state.lock().unwrap();
-        if path_prefix == "/" {
-            return Ok(st
-                .dentries
+        let mut all: Vec<Dentry> = if path_prefix == "/" {
+            st.dentries
                 .iter()
                 .filter(|d| d.workspace_id == workspace_id)
                 .cloned()
-                .collect());
+                .collect()
+        } else {
+            let prefix = format!("{path_prefix}/");
+            st.dentries
+                .iter()
+                .filter(|d| d.workspace_id == workspace_id && d.path.starts_with(&prefix))
+                .cloned()
+                .collect()
+        };
+        all.sort_by(|a, b| a.path.cmp(&b.path));
+        if let Some(after) = after_path {
+            all.retain(|d| d.path.as_str() > after);
         }
-        let prefix = format!("{path_prefix}/");
-        Ok(st
-            .dentries
-            .iter()
-            .filter(|d| d.workspace_id == workspace_id && d.path.starts_with(&prefix))
-            .cloned()
-            .collect())
+        all.truncate(limit);
+        Ok(all)
     }
 
     async fn get_file(&self, file_id: &str) -> Result<Option<FileRecord>> {
@@ -346,20 +353,28 @@ impl MetadataTx for MockTx {
         Ok((before - st.dentries.len()) as u64)
     }
 
-    async fn list_dentries_under(
+    async fn list_dentries_under_page(
         &mut self,
         workspace_id: &str,
         path_prefix: &str,
+        after_path: Option<&str>,
+        limit: usize,
     ) -> Result<Vec<Dentry>> {
         let st = self.state.lock().unwrap();
-        Ok(st
+        let mut all: Vec<Dentry> = st
             .dentries
             .iter()
             .filter(|d| {
                 d.workspace_id == workspace_id && d.path.starts_with(&format!("{path_prefix}/"))
             })
             .cloned()
-            .collect())
+            .collect();
+        all.sort_by(|a, b| a.path.cmp(&b.path));
+        if let Some(after) = after_path {
+            all.retain(|d| d.path.as_str() > after);
+        }
+        all.truncate(limit);
+        Ok(all)
     }
 
     async fn delete_dentries_under(

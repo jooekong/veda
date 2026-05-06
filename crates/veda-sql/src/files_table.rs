@@ -219,18 +219,21 @@ impl TableProvider for FilesTable {
             |e: veda_types::VedaError| datafusion::error::DataFusionError::External(Box::new(e));
 
         let scan_root = path_prefix.as_deref().unwrap_or("/");
+        // _capped paginates internally and short-circuits on
+        // QuotaExceeded, so we never materialize >MAX_SCAN_ENTRIES rows
+        // even on huge workspaces (was load-all-then-check, OOM risk).
         let mut all: Vec<Dentry> = self
             .meta
-            .list_dentries_under(&self.workspace_id, scan_root)
+            .list_dentries_under_capped(&self.workspace_id, scan_root, MAX_SCAN_ENTRIES)
             .await
-            .map_err(to_df_err)?;
-
-        if all.len() > MAX_SCAN_ENTRIES {
-            return Err(datafusion::error::DataFusionError::Execution(format!(
-                "files table scan exceeded {MAX_SCAN_ENTRIES} entries, \
-                     consider narrowing your query"
-            )));
-        }
+            .map_err(|e| match e {
+                veda_types::VedaError::QuotaExceeded(msg) => {
+                    datafusion::error::DataFusionError::Execution(format!(
+                        "{msg}; consider narrowing your query"
+                    ))
+                }
+                other => to_df_err(other),
+            })?;
 
         let effective_limit = if filters.is_empty() { limit } else { None };
 

@@ -679,17 +679,29 @@ async fn get_file_conn(
     row.map(|r| row_to_file(&r)).transpose()
 }
 
-async fn list_dentries_under_conn(
+async fn list_dentries_under_page_conn(
     conn: &mut sqlx::MySqlConnection,
     workspace_id: &str,
     path_prefix: &str,
+    after_path: Option<&str>,
+    limit: usize,
 ) -> Result<Vec<Dentry>> {
+    // Empty string sorts before every real path (paths begin with '/'),
+    // so `path > ''` is equivalent to "no cursor". This collapses the
+    // None / Some(..) split to a single SQL statement.
+    let after = after_path.unwrap_or("");
+    let limit_i64 = limit as i64;
     let rows = if path_prefix == "/" {
         sqlx::query(
             r#"SELECT id, workspace_id, parent_path, name, path, file_id, is_dir, created_at, updated_at
-               FROM veda_dentries WHERE workspace_id = ? ORDER BY path"#,
+               FROM veda_dentries
+               WHERE workspace_id = ? AND path > ?
+               ORDER BY path
+               LIMIT ?"#,
         )
         .bind(workspace_id)
+        .bind(after)
+        .bind(limit_i64)
         .fetch_all(&mut *conn)
         .await
         .map_err(storage_err)?
@@ -697,10 +709,15 @@ async fn list_dentries_under_conn(
         let like = format!("{}/%", escape_like(path_prefix));
         sqlx::query(
             r#"SELECT id, workspace_id, parent_path, name, path, file_id, is_dir, created_at, updated_at
-               FROM veda_dentries WHERE workspace_id = ? AND path LIKE ? ESCAPE '\\' ORDER BY path"#,
+               FROM veda_dentries
+               WHERE workspace_id = ? AND path LIKE ? ESCAPE '\\' AND path > ?
+               ORDER BY path
+               LIMIT ?"#,
         )
         .bind(workspace_id)
         .bind(&like)
+        .bind(after)
+        .bind(limit_i64)
         .fetch_all(&mut *conn)
         .await
         .map_err(storage_err)?
@@ -907,13 +924,22 @@ impl MetadataStore for MysqlStore {
         Ok(out)
     }
 
-    async fn list_dentries_under(
+    async fn list_dentries_under_page(
         &self,
         workspace_id: &str,
         path_prefix: &str,
+        after_path: Option<&str>,
+        limit: usize,
     ) -> Result<Vec<Dentry>> {
         let mut conn = self.pool.acquire().await.map_err(storage_err)?;
-        list_dentries_under_conn(&mut *conn, workspace_id, path_prefix).await
+        list_dentries_under_page_conn(
+            &mut *conn,
+            workspace_id,
+            path_prefix,
+            after_path,
+            limit,
+        )
+        .await
     }
 
     async fn get_file(&self, file_id: &str) -> Result<Option<FileRecord>> {
@@ -1484,13 +1510,16 @@ impl MetadataTx for MysqlMetadataTx {
         Ok(r.rows_affected())
     }
 
-    async fn list_dentries_under(
+    async fn list_dentries_under_page(
         &mut self,
         workspace_id: &str,
         path_prefix: &str,
+        after_path: Option<&str>,
+        limit: usize,
     ) -> Result<Vec<Dentry>> {
         let t = self.tx_mut()?;
-        list_dentries_under_conn(t.as_mut(), workspace_id, path_prefix).await
+        list_dentries_under_page_conn(t.as_mut(), workspace_id, path_prefix, after_path, limit)
+            .await
     }
 
     async fn delete_dentries_under(

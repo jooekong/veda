@@ -69,20 +69,23 @@ impl SummaryEntity {
     }
 }
 
-/// Pure in-memory join of dentries against the ready-summary key sets.
-/// Extracted so it can be unit-tested without a MetadataStore mock —
-/// the SQL fan-in lives in `list_mysql_summary_entities` and is
-/// exercised by integration tests.
-///
-/// Files are deduplicated: a file referenced from N dentries (ref_count
-/// > 1) emits a single SummaryEntity::File. Dirs are 1:1 with dentries.
-fn materialize_summary_entities(
+/// Page size used by the reconciler when paging dentries. 1000 is a
+/// good balance for MySQL: small enough to keep peak memory low (~200KB
+/// of Dentry rows per page), large enough to amortize round-trip
+/// latency across an entire workspace scan.
+const DENTRY_PAGE_SIZE: usize = 1000;
+
+/// Streaming variant of [`materialize_summary_entities`]. The
+/// `seen_files` set persists across pages so a file_id referenced by
+/// dentries in different pages still emits exactly one SummaryEntity.
+/// Returns only the entities discovered in this page.
+fn materialize_summary_entities_into(
     dentries: &[Dentry],
     ready_file_ids: &HashSet<String>,
     ready_dentry_ids: &HashSet<String>,
+    seen_files: &mut HashSet<String>,
 ) -> Vec<SummaryEntity> {
     let mut out: Vec<SummaryEntity> = Vec::new();
-    let mut seen_files: HashSet<String> = HashSet::new();
     for d in dentries {
         if let Some(fid) = &d.file_id {
             if ready_file_ids.contains(fid) && !seen_files.contains(fid) {
@@ -100,6 +103,20 @@ fn materialize_summary_entities(
         }
     }
     out
+}
+
+/// Test-only single-page convenience wrapper. Production callers use
+/// `materialize_summary_entities_into` to thread `seen_files` across
+/// pages; tests that exercise the pure join semantics in one shot want
+/// the simpler signature.
+#[cfg(test)]
+fn materialize_summary_entities(
+    dentries: &[Dentry],
+    ready_file_ids: &HashSet<String>,
+    ready_dentry_ids: &HashSet<String>,
+) -> Vec<SummaryEntity> {
+    let mut seen_files: HashSet<String> = HashSet::new();
+    materialize_summary_entities_into(dentries, ready_file_ids, ready_dentry_ids, &mut seen_files)
 }
 
 pub struct Reconciler {
@@ -462,13 +479,34 @@ impl Reconciler {
     /// rather than veda_files directly because a file with ref_count > 1 may
     /// be referenced from multiple dentries — we still only need it embedded
     /// once.
+    ///
+    /// Streamed via paginated dentry queries so memory stays O(unique
+    /// file_ids) regardless of workspace size — full-table SELECT used to
+    /// materialize every Dentry row before extracting file_id (review C2).
     async fn list_mysql_file_ids(&self, workspace_id: &str) -> veda_types::Result<Vec<String>> {
-        // Walk all dentries under "/" and collect non-null file_ids.
-        let dentries = self.meta.list_dentries_under(workspace_id, "/").await?;
         let mut out: HashSet<String> = HashSet::new();
-        for d in dentries {
-            if let Some(fid) = d.file_id {
-                out.insert(fid);
+        let mut cursor: Option<String> = None;
+        loop {
+            let page = self
+                .meta
+                .list_dentries_under_page(
+                    workspace_id,
+                    "/",
+                    cursor.as_deref(),
+                    DENTRY_PAGE_SIZE,
+                )
+                .await?;
+            let n = page.len();
+            for d in &page {
+                if let Some(fid) = &d.file_id {
+                    out.insert(fid.clone());
+                }
+            }
+            if let Some(last) = page.last() {
+                cursor = Some(last.path.clone());
+            }
+            if n < DENTRY_PAGE_SIZE {
+                break;
             }
         }
         Ok(out.into_iter().collect())
@@ -478,20 +516,48 @@ impl Reconciler {
     /// directory). The reconciler needs the kind to enqueue the right event
     /// (SummarySync for files, DirSummarySync for directories).
     ///
-    /// Was N+1: 1 dentry query + N per-row get_summary_by_* lookups.
-    /// Now: 1 dentry query + 1 batch summary-keys query + in-memory join.
+    /// Was N+1: 1 dentry full-table SELECT + N per-row get_summary_by_*
+    /// lookups. Now: paginated dentry pages + 1 batch summary-keys query
+    /// + in-memory join, with peak memory bounded by `DENTRY_PAGE_SIZE`
+    /// instead of total workspace size (review C2 + C8).
     async fn list_mysql_summary_entities(
         &self,
         workspace_id: &str,
     ) -> veda_types::Result<Vec<SummaryEntity>> {
-        let dentries = self.meta.list_dentries_under(workspace_id, "/").await?;
         let (ready_file_ids, ready_dentry_ids) =
             self.meta.list_ready_summary_keys(workspace_id).await?;
-        Ok(materialize_summary_entities(
-            &dentries,
-            &ready_file_ids,
-            &ready_dentry_ids,
-        ))
+        let mut out: Vec<SummaryEntity> = Vec::new();
+        let mut seen_files: HashSet<String> = HashSet::new();
+        let mut cursor: Option<String> = None;
+        loop {
+            let page = self
+                .meta
+                .list_dentries_under_page(
+                    workspace_id,
+                    "/",
+                    cursor.as_deref(),
+                    DENTRY_PAGE_SIZE,
+                )
+                .await?;
+            let n = page.len();
+            // Stream-merge: accumulate entities without ever holding all
+            // dentries in memory.
+            for entity in materialize_summary_entities_into(
+                &page,
+                &ready_file_ids,
+                &ready_dentry_ids,
+                &mut seen_files,
+            ) {
+                out.push(entity);
+            }
+            if let Some(last) = page.last() {
+                cursor = Some(last.path.clone());
+            }
+            if n < DENTRY_PAGE_SIZE {
+                break;
+            }
+        }
+        Ok(out)
     }
 
     /// Enqueue a ChunkSync with `force_reembed=true` payload, used by
@@ -764,5 +830,26 @@ mod tests {
         let out =
             materialize_summary_entities(&[], &HashSet::new(), &HashSet::new());
         assert!(out.is_empty());
+    }
+
+    /// When dentries are split across paginated calls, a file_id
+    /// referenced from dentries in different pages must STILL emit only
+    /// one SummaryEntity. The shared `seen_files` set is what keeps the
+    /// invariant across pages.
+    #[test]
+    fn materialize_into_dedupes_files_across_pages() {
+        let ready_files: HashSet<String> = ["shared".into()].into_iter().collect();
+        let ready_dirs: HashSet<String> = HashSet::new();
+        let mut seen: HashSet<String> = HashSet::new();
+
+        let page1 = vec![dentry("d1", "/a/copy.md", false, Some("shared"))];
+        let page2 = vec![dentry("d2", "/b/copy.md", false, Some("shared"))];
+
+        let out1 = materialize_summary_entities_into(&page1, &ready_files, &ready_dirs, &mut seen);
+        let out2 = materialize_summary_entities_into(&page2, &ready_files, &ready_dirs, &mut seen);
+
+        assert_eq!(out1.len(), 1, "file emitted on first page");
+        assert!(out2.is_empty(), "same file suppressed on second page");
+        assert_eq!(seen.len(), 1);
     }
 }

@@ -50,21 +50,29 @@ impl MetadataStore for MockMetaFull {
             .cloned()
             .collect())
     }
-    async fn list_dentries_under(&self, ws: &str, prefix: &str) -> Result<Vec<Dentry>> {
+    async fn list_dentries_under_page(
+        &self,
+        ws: &str,
+        prefix: &str,
+        after_path: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<Dentry>> {
         let st = self.dentries.lock().unwrap();
-        if prefix == "/" {
-            return Ok(st
-                .iter()
-                .filter(|d| d.workspace_id == ws)
+        let mut all: Vec<Dentry> = if prefix == "/" {
+            st.iter().filter(|d| d.workspace_id == ws).cloned().collect()
+        } else {
+            let pfx = format!("{prefix}/");
+            st.iter()
+                .filter(|d| d.workspace_id == ws && d.path.starts_with(&pfx))
                 .cloned()
-                .collect());
+                .collect()
+        };
+        all.sort_by(|a, b| a.path.cmp(&b.path));
+        if let Some(after) = after_path {
+            all.retain(|d| d.path.as_str() > after);
         }
-        let pfx = format!("{prefix}/");
-        Ok(st
-            .iter()
-            .filter(|d| d.workspace_id == ws && d.path.starts_with(&pfx))
-            .cloned()
-            .collect())
+        all.truncate(limit);
+        Ok(all)
     }
     async fn get_file(&self, id: &str) -> Result<Option<FileRecord>> {
         Ok(self
@@ -233,15 +241,27 @@ impl MetadataTx for MockMetaFullTx {
         st.retain(|d| !(d.workspace_id == ws && d.path == path));
         Ok((before - st.len()) as u64)
     }
-    async fn list_dentries_under(&mut self, ws: &str, prefix: &str) -> Result<Vec<Dentry>> {
-        Ok(self
+    async fn list_dentries_under_page(
+        &mut self,
+        ws: &str,
+        prefix: &str,
+        after_path: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<Dentry>> {
+        let mut all: Vec<Dentry> = self
             .dentries
             .lock()
             .unwrap()
             .iter()
             .filter(|d| d.workspace_id == ws && d.path.starts_with(&format!("{prefix}/")))
             .cloned()
-            .collect())
+            .collect();
+        all.sort_by(|a, b| a.path.cmp(&b.path));
+        if let Some(after) = after_path {
+            all.retain(|d| d.path.as_str() > after);
+        }
+        all.truncate(limit);
+        Ok(all)
     }
     async fn delete_dentries_under(&mut self, ws: &str, parent: &str) -> Result<u64> {
         let mut st = self.dentries.lock().unwrap();
@@ -463,17 +483,29 @@ impl MetadataStore for MockMeta {
             .cloned()
             .collect())
     }
-    async fn list_dentries_under(&self, _ws: &str, prefix: &str) -> Result<Vec<Dentry>> {
+    async fn list_dentries_under_page(
+        &self,
+        _ws: &str,
+        prefix: &str,
+        after_path: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<Dentry>> {
         let st = self.dentries.lock().unwrap();
-        if prefix == "/" {
-            return Ok(st.iter().cloned().collect());
+        let mut all: Vec<Dentry> = if prefix == "/" {
+            st.iter().cloned().collect()
+        } else {
+            let pfx = format!("{prefix}/");
+            st.iter()
+                .filter(|d| d.path.starts_with(&pfx))
+                .cloned()
+                .collect()
+        };
+        all.sort_by(|a, b| a.path.cmp(&b.path));
+        if let Some(after) = after_path {
+            all.retain(|d| d.path.as_str() > after);
         }
-        let pfx = format!("{prefix}/");
-        Ok(st
-            .iter()
-            .filter(|d| d.path.starts_with(&pfx))
-            .cloned()
-            .collect())
+        all.truncate(limit);
+        Ok(all)
     }
 
     async fn get_file(&self, _id: &str) -> Result<Option<FileRecord>> {
