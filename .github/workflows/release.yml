@@ -31,7 +31,7 @@ jobs:
           - target: aarch64-unknown-linux-gnu
             runs-on: ubuntu-latest
             cross: true
-            with-fuse: true
+            with-fuse: false   # cross-compile of fuser/libfuse3 unsupported
           - target: x86_64-apple-darwin
             runs-on: macos-13
             cross: false

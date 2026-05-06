@@ -33,11 +33,18 @@ build:linux:
     - rustup target add "${TARGET}"
   script:
     - cargo zigbuild --release --target "${TARGET}" --bin veda
-    - cargo zigbuild --release --target "${TARGET}" -p veda-fuse --bin veda-fuse
-    - mv "target/${TARGET}/release/veda"      "veda-${TARGET}"
-    - mv "target/${TARGET}/release/veda-fuse" "veda-fuse-${TARGET}"
-    - sha256sum "veda-${TARGET}"      > "veda-${TARGET}.sha256"
-    - sha256sum "veda-fuse-${TARGET}" > "veda-fuse-${TARGET}.sha256"
+    - mv "target/${TARGET}/release/veda" "veda-${TARGET}"
+    - sha256sum "veda-${TARGET}" > "veda-${TARGET}.sha256"
+    # veda-fuse cross-compile fails on aarch64 (pkg-config can't find aarch64 libfuse3).
+    # Build it only for the native x86_64-linux target. Other archs ship without fuse.
+    - |
+      if [ "${TARGET}" = "x86_64-unknown-linux-gnu" ]; then
+        cargo zigbuild --release --target "${TARGET}" -p veda-fuse --bin veda-fuse
+        mv "target/${TARGET}/release/veda-fuse" "veda-fuse-${TARGET}"
+        sha256sum "veda-fuse-${TARGET}" > "veda-fuse-${TARGET}.sha256"
+      else
+        echo "skipping veda-fuse for ${TARGET} (cross-arch FUSE compile unsupported)"
+      fi
   artifacts:
     paths:
       - veda-*
@@ -55,7 +62,10 @@ publish:linux:
   needs: ["build:linux"]
   script:
     - |
+      # use shell glob with nullglob to skip missing files (veda-fuse-aarch64* won't exist)
+      shopt -s nullglob 2>/dev/null || true
       for f in veda-* veda-fuse-* skill.md; do
+        [ -f "$f" ] || continue
         echo "uploading $f..."
         curl --fail --show-error --silent \
              --header "JOB-TOKEN: $CI_JOB_TOKEN" \
@@ -78,5 +88,4 @@ release:create:
         --assets-link "{\"name\":\"veda-x86_64-linux\",\"url\":\"${REGISTRY}/veda-x86_64-unknown-linux-gnu\",\"link_type\":\"package\"}" \
         --assets-link "{\"name\":\"veda-aarch64-linux\",\"url\":\"${REGISTRY}/veda-aarch64-unknown-linux-gnu\",\"link_type\":\"package\"}" \
         --assets-link "{\"name\":\"veda-fuse-x86_64-linux\",\"url\":\"${REGISTRY}/veda-fuse-x86_64-unknown-linux-gnu\",\"link_type\":\"package\"}" \
-        --assets-link "{\"name\":\"veda-fuse-aarch64-linux\",\"url\":\"${REGISTRY}/veda-fuse-aarch64-unknown-linux-gnu\",\"link_type\":\"package\"}" \
         --assets-link "{\"name\":\"skill.md\",\"url\":\"${REGISTRY}/skill.md\",\"link_type\":\"other\"}"
