@@ -23,6 +23,12 @@ pub struct ServerConfig {
     /// `bearer_token_file`) directive.
     #[serde(default)]
     pub metrics_token: Option<String>,
+    /// When true, an unset `allowed_origins` falls back to permissive CORS.
+    /// Defaults to false: production must list explicit origins, otherwise
+    /// the server denies cross-origin browser requests. Toggle on only for
+    /// local development. Env override: `VEDA_DEV_MODE`.
+    #[serde(default)]
+    pub dev_mode: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -304,6 +310,11 @@ impl ServerConfig {
                 self.retention.events_retention_days = n;
             }
         }
+        if let Ok(v) = std::env::var("VEDA_DEV_MODE") {
+            if let Ok(b) = v.parse() {
+                self.dev_mode = b;
+            }
+        }
         if let Ok(v) = std::env::var("VEDA_METRICS_TOKEN") {
             // An explicitly empty env var means "disable metrics auth", which
             // we don't allow — empty or unset both leave the endpoint 404.
@@ -495,7 +506,7 @@ dimension = 768
     }
 
     #[test]
-    fn empty_allowed_origins_env_stays_permissive() {
+    fn empty_allowed_origins_env_parses_clean() {
         let _lock = ENV_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
 
         std::env::set_var("VEDA_ALLOWED_ORIGINS", "");
@@ -506,6 +517,22 @@ dimension = 768
             cfg.allowed_origins.is_empty(),
             "empty env should not produce vec![\"\"]"
         );
+    }
+
+    #[test]
+    fn dev_mode_defaults_off() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
+        let cfg = ServerConfig::from_toml(MINIMAL_TOML).unwrap();
+        assert!(!cfg.dev_mode, "production must default to dev_mode=false");
+    }
+
+    #[test]
+    fn dev_mode_env_override() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
+        std::env::set_var("VEDA_DEV_MODE", "true");
+        let cfg = ServerConfig::from_toml(MINIMAL_TOML).unwrap();
+        std::env::remove_var("VEDA_DEV_MODE");
+        assert!(cfg.dev_mode);
     }
 
     #[test]

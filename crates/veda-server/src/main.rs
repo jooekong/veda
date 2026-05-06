@@ -233,9 +233,7 @@ async fn main() -> anyhow::Result<()> {
         None
     };
 
-    let cors = if cfg.allowed_origins.is_empty() {
-        CorsLayer::permissive()
-    } else {
+    let cors = if !cfg.allowed_origins.is_empty() {
         let origins: Vec<HeaderValue> = cfg
             .allowed_origins
             .iter()
@@ -257,6 +255,15 @@ async fn main() -> anyhow::Result<()> {
                 header::IF_NONE_MATCH,
                 header::RANGE,
             ])
+    } else if cfg.dev_mode {
+        tracing::warn!("dev_mode=true: CORS is permissive — do NOT use in production");
+        CorsLayer::permissive()
+    } else {
+        // Default-deny: empty allowed_origins + dev_mode=false means
+        // cross-origin browser requests are blocked. Same-origin still works.
+        // Configure `allowed_origins` to whitelist trusted frontends.
+        info!("allowed_origins empty: cross-origin requests will be denied");
+        CorsLayer::new()
     };
 
     let app = routes::build_router(app_state)
