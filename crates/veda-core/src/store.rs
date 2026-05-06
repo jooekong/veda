@@ -159,6 +159,17 @@ pub trait MetadataStore: Send + Sync {
         Ok(map)
     }
     async fn get_summary_by_dentry(&self, dentry_id: &str) -> Result<Option<FileSummary>>;
+    /// Return (file_id_set, dentry_id_set) of every `Ready` summary in
+    /// `workspace_id`. Reconciler bulk-checks the dentry list against
+    /// these sets, replacing per-dentry get_summary_by_* lookups (O(N)
+    /// round-trips → 1). Implementations MUST execute a single query.
+    async fn list_ready_summary_keys(
+        &self,
+        workspace_id: &str,
+    ) -> Result<(
+        std::collections::HashSet<String>,
+        std::collections::HashSet<String>,
+    )>;
     async fn upsert_summary(&self, summary: &FileSummary) -> Result<()>;
     async fn delete_summary_by_file(&self, file_id: &str) -> Result<()>;
     async fn list_child_summaries(

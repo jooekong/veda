@@ -275,6 +275,18 @@ impl MetadataStore for MockMetadataStore {
     async fn get_summary_by_dentry(&self, _dentry_id: &str) -> Result<Option<FileSummary>> {
         Ok(None)
     }
+    async fn list_ready_summary_keys(
+        &self,
+        _workspace_id: &str,
+    ) -> Result<(
+        std::collections::HashSet<String>,
+        std::collections::HashSet<String>,
+    )> {
+        Ok((
+            std::collections::HashSet::new(),
+            std::collections::HashSet::new(),
+        ))
+    }
     async fn upsert_summary(&self, _summary: &FileSummary) -> Result<()> {
         Ok(())
     }

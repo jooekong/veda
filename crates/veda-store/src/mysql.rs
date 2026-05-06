@@ -1279,6 +1279,36 @@ impl MetadataStore for MysqlStore {
         row.map(|r| row_to_summary(&r)).transpose()
     }
 
+    async fn list_ready_summary_keys(
+        &self,
+        workspace_id: &str,
+    ) -> Result<(
+        std::collections::HashSet<String>,
+        std::collections::HashSet<String>,
+    )> {
+        use sqlx::Row;
+        let rows = sqlx::query(
+            r#"SELECT file_id, dentry_id
+               FROM veda_summaries
+               WHERE workspace_id = ? AND status = 'ready'"#,
+        )
+        .bind(workspace_id)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(storage_err)?;
+        let mut file_ids = std::collections::HashSet::new();
+        let mut dentry_ids = std::collections::HashSet::new();
+        for r in &rows {
+            if let Ok(Some(fid)) = r.try_get::<Option<String>, _>("file_id") {
+                file_ids.insert(fid);
+            }
+            if let Ok(Some(did)) = r.try_get::<Option<String>, _>("dentry_id") {
+                dentry_ids.insert(did);
+            }
+        }
+        Ok((file_ids, dentry_ids))
+    }
+
     async fn upsert_summary(&self, summary: &FileSummary) -> Result<()> {
         sqlx::query(
             r#"INSERT INTO veda_summaries (id, workspace_id, file_id, dentry_id, l0_abstract, l1_overview, status)

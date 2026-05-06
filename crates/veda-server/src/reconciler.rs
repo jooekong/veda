@@ -23,7 +23,7 @@ use tokio::time::sleep;
 use tracing::{debug, info, warn};
 
 use veda_core::store::{AuthStore, MetadataStore, TaskQueue, VectorStore};
-use veda_types::{OutboxEvent, OutboxEventType, OutboxStatus};
+use veda_types::{Dentry, OutboxEvent, OutboxEventType, OutboxStatus};
 
 /// Per-workspace reconciliation outcome.
 #[derive(Debug, Default, Clone)]
@@ -67,6 +67,39 @@ impl SummaryEntity {
             Self::Dir { dentry_id, .. } => dentry_id,
         }
     }
+}
+
+/// Pure in-memory join of dentries against the ready-summary key sets.
+/// Extracted so it can be unit-tested without a MetadataStore mock —
+/// the SQL fan-in lives in `list_mysql_summary_entities` and is
+/// exercised by integration tests.
+///
+/// Files are deduplicated: a file referenced from N dentries (ref_count
+/// > 1) emits a single SummaryEntity::File. Dirs are 1:1 with dentries.
+fn materialize_summary_entities(
+    dentries: &[Dentry],
+    ready_file_ids: &HashSet<String>,
+    ready_dentry_ids: &HashSet<String>,
+) -> Vec<SummaryEntity> {
+    let mut out: Vec<SummaryEntity> = Vec::new();
+    let mut seen_files: HashSet<String> = HashSet::new();
+    for d in dentries {
+        if let Some(fid) = &d.file_id {
+            if ready_file_ids.contains(fid) && !seen_files.contains(fid) {
+                out.push(SummaryEntity::File {
+                    file_id: fid.clone(),
+                });
+                seen_files.insert(fid.clone());
+            }
+        }
+        if d.is_dir && ready_dentry_ids.contains(&d.id) {
+            out.push(SummaryEntity::Dir {
+                dentry_id: d.id.clone(),
+                dentry_path: d.path.clone(),
+            });
+        }
+    }
+    out
 }
 
 pub struct Reconciler {
@@ -444,38 +477,21 @@ impl Reconciler {
     /// Walk ready summaries and return them tagged with their kind (file vs
     /// directory). The reconciler needs the kind to enqueue the right event
     /// (SummarySync for files, DirSummarySync for directories).
+    ///
+    /// Was N+1: 1 dentry query + N per-row get_summary_by_* lookups.
+    /// Now: 1 dentry query + 1 batch summary-keys query + in-memory join.
     async fn list_mysql_summary_entities(
         &self,
         workspace_id: &str,
     ) -> veda_types::Result<Vec<SummaryEntity>> {
         let dentries = self.meta.list_dentries_under(workspace_id, "/").await?;
-        let mut out: Vec<SummaryEntity> = Vec::new();
-        let mut seen: HashSet<String> = HashSet::new();
-        for d in dentries {
-            if let Some(fid) = &d.file_id {
-                if !seen.contains(fid) {
-                    if let Some(s) = self.meta.get_summary_by_file(fid).await? {
-                        if matches!(s.status, veda_types::SummaryStatus::Ready) {
-                            out.push(SummaryEntity::File {
-                                file_id: fid.clone(),
-                            });
-                            seen.insert(fid.clone());
-                        }
-                    }
-                }
-            }
-            if d.is_dir {
-                if let Some(s) = self.meta.get_summary_by_dentry(&d.id).await? {
-                    if matches!(s.status, veda_types::SummaryStatus::Ready) {
-                        out.push(SummaryEntity::Dir {
-                            dentry_id: d.id.clone(),
-                            dentry_path: d.path.clone(),
-                        });
-                    }
-                }
-            }
-        }
-        Ok(out)
+        let (ready_file_ids, ready_dentry_ids) =
+            self.meta.list_ready_summary_keys(workspace_id).await?;
+        Ok(materialize_summary_entities(
+            &dentries,
+            &ready_file_ids,
+            &ready_dentry_ids,
+        ))
     }
 
     /// Enqueue a ChunkSync with `force_reembed=true` payload, used by
@@ -648,5 +664,105 @@ mod tests {
 
         assert_eq!(orphan.len(), 1);
         assert!(orphan.contains(&&"d"));
+    }
+
+    fn dentry(id: &str, path: &str, is_dir: bool, file_id: Option<&str>) -> Dentry {
+        Dentry {
+            id: id.to_string(),
+            workspace_id: "ws".to_string(),
+            parent_path: "/".to_string(),
+            name: path.trim_start_matches('/').to_string(),
+            path: path.to_string(),
+            is_dir,
+            file_id: file_id.map(|s| s.to_string()),
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        }
+    }
+
+    #[test]
+    fn materialize_emits_file_only_when_summary_ready() {
+        let dentries = vec![
+            dentry("d1", "/a.md", false, Some("f1")),
+            dentry("d2", "/b.md", false, Some("f2")),
+        ];
+        let ready_files: HashSet<String> = ["f1".into()].into_iter().collect();
+        let ready_dirs: HashSet<String> = HashSet::new();
+
+        let out = materialize_summary_entities(&dentries, &ready_files, &ready_dirs);
+
+        assert_eq!(out.len(), 1);
+        assert!(matches!(&out[0], SummaryEntity::File { file_id } if file_id == "f1"));
+    }
+
+    #[test]
+    fn materialize_dedupes_files_with_ref_count_gt_1() {
+        // Same file_id linked from two dentries — should yield only one entity.
+        let dentries = vec![
+            dentry("d1", "/copy1.md", false, Some("shared-f")),
+            dentry("d2", "/copy2.md", false, Some("shared-f")),
+        ];
+        let ready_files: HashSet<String> = ["shared-f".into()].into_iter().collect();
+        let ready_dirs: HashSet<String> = HashSet::new();
+
+        let out = materialize_summary_entities(&dentries, &ready_files, &ready_dirs);
+        assert_eq!(out.len(), 1, "deduped on file_id");
+    }
+
+    #[test]
+    fn materialize_emits_dir_when_dentry_ready() {
+        let dentries = vec![
+            dentry("d-root-docs", "/docs", true, None),
+            dentry("d-readme", "/docs/readme.md", false, Some("f1")),
+        ];
+        let ready_files: HashSet<String> = HashSet::new();
+        let ready_dirs: HashSet<String> = ["d-root-docs".into()].into_iter().collect();
+
+        let out = materialize_summary_entities(&dentries, &ready_files, &ready_dirs);
+
+        assert_eq!(out.len(), 1);
+        match &out[0] {
+            SummaryEntity::Dir { dentry_id, dentry_path } => {
+                assert_eq!(dentry_id, "d-root-docs");
+                assert_eq!(dentry_path, "/docs");
+            }
+            _ => panic!("expected Dir entity"),
+        }
+    }
+
+    #[test]
+    fn materialize_skips_files_without_ready_summary() {
+        // file_id present in dentry but NOT in ready_files → skipped.
+        let dentries = vec![dentry("d1", "/a.md", false, Some("f1"))];
+        let ready_files: HashSet<String> = HashSet::new();
+        let ready_dirs: HashSet<String> = HashSet::new();
+
+        let out = materialize_summary_entities(&dentries, &ready_files, &ready_dirs);
+        assert!(out.is_empty());
+    }
+
+    #[test]
+    fn materialize_handles_files_and_dirs_in_one_pass() {
+        let dentries = vec![
+            dentry("d-docs", "/docs", true, None),
+            dentry("d-readme", "/docs/readme.md", false, Some("f1")),
+            dentry("d-other", "/other.md", false, Some("f2")),
+        ];
+        let ready_files: HashSet<String> =
+            ["f1".into(), "f2".into()].into_iter().collect();
+        let ready_dirs: HashSet<String> = ["d-docs".into()].into_iter().collect();
+
+        let out = materialize_summary_entities(&dentries, &ready_files, &ready_dirs);
+        assert_eq!(out.len(), 3);
+
+        let ids: HashSet<&str> = out.iter().map(|e| e.entity_id()).collect();
+        assert_eq!(ids, ["f1", "f2", "d-docs"].into_iter().collect());
+    }
+
+    #[test]
+    fn materialize_empty_inputs_yield_empty_output() {
+        let out =
+            materialize_summary_entities(&[], &HashSet::new(), &HashSet::new());
+        assert!(out.is_empty());
     }
 }

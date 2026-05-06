@@ -9,8 +9,9 @@ use veda_core::store::{AuthStore, CollectionMetaStore, MetadataStore, TaskQueue}
 use veda_store::MysqlStore;
 use veda_types::{
     Account, AccountStatus, ApiKeyRecord, CollectionSchema, CollectionStatus, CollectionType,
-    Dentry, FileChunk, FileRecord, KeyPermission, KeyStatus, OutboxEvent, OutboxEventType,
-    OutboxStatus, SourceType, StorageType, Workspace, WorkspaceKey, WorkspaceStatus,
+    Dentry, FileChunk, FileRecord, FileSummary, KeyPermission, KeyStatus, OutboxEvent,
+    OutboxEventType, OutboxStatus, SourceType, StorageType, SummaryStatus, Workspace,
+    WorkspaceKey, WorkspaceStatus,
 };
 
 #[derive(Debug, Deserialize)]
@@ -70,6 +71,10 @@ async fn cleanup_workspace(store: &MysqlStore, workspace_id: &str) {
         .execute(pool)
         .await;
     let _ = sqlx::query(r#"DELETE FROM veda_fs_events WHERE workspace_id = ?"#)
+        .bind(workspace_id)
+        .execute(pool)
+        .await;
+    let _ = sqlx::query(r#"DELETE FROM veda_summaries WHERE workspace_id = ?"#)
         .bind(workspace_id)
         .execute(pool)
         .await;
@@ -675,6 +680,102 @@ async fn mysql_workspace_key_rejected_when_account_suspended() {
     );
 
     cleanup_account(&store, &acct_id).await;
+}
+
+// ── Ready-summary batch lookup (C8) ────────────────────
+//
+// `list_ready_summary_keys` returns the (file_id, dentry_id) sets in a
+// single SQL query. The reconciler used to issue O(N) per-dentry
+// lookups; this test pins the contract that replaces them.
+
+#[tokio::test]
+#[ignore]
+async fn mysql_list_ready_summary_keys_filters_status_and_workspace() {
+    let url = load_mysql_url();
+    let store = MysqlStore::new(&url).await.expect("connect");
+    store.migrate().await.expect("migrate");
+
+    let ws_a = Uuid::new_v4().to_string();
+    let ws_b = Uuid::new_v4().to_string();
+    let now = Utc::now();
+
+    let make_summary = |id: &str,
+                        ws: &str,
+                        file_id: Option<&str>,
+                        dentry_id: Option<&str>,
+                        status: SummaryStatus|
+     -> FileSummary {
+        FileSummary {
+            id: id.to_string(),
+            workspace_id: ws.to_string(),
+            file_id: file_id.map(|s| s.to_string()),
+            dentry_id: dentry_id.map(|s| s.to_string()),
+            l0_abstract: "abs".into(),
+            l1_overview: "ov".into(),
+            status,
+            created_at: now,
+            updated_at: now,
+        }
+    };
+
+    // Fixture matrix:
+    // - ws_a:
+    //   - file f-ready-1: Ready  (must appear)
+    //   - file f-ready-2: Ready  (must appear)
+    //   - file f-pending: Pending (must NOT appear)
+    //   - dir  d-ready:   Ready  (must appear)
+    //   - dir  d-failed:  Failed (must NOT appear)
+    // - ws_b:
+    //   - file f-other:   Ready  (must NOT leak across workspace)
+    let summaries = vec![
+        make_summary("s1", &ws_a, Some("f-ready-1"), None, SummaryStatus::Ready),
+        make_summary("s2", &ws_a, Some("f-ready-2"), None, SummaryStatus::Ready),
+        make_summary("s3", &ws_a, Some("f-pending"), None, SummaryStatus::Pending),
+        make_summary("s4", &ws_a, None, Some("d-ready"), SummaryStatus::Ready),
+        make_summary("s5", &ws_a, None, Some("d-failed"), SummaryStatus::Failed),
+        make_summary("s6", &ws_b, Some("f-other"), None, SummaryStatus::Ready),
+    ];
+    for s in &summaries {
+        store.upsert_summary(s).await.unwrap();
+    }
+
+    let (file_ids, dentry_ids) = store.list_ready_summary_keys(&ws_a).await.unwrap();
+    assert_eq!(
+        file_ids,
+        ["f-ready-1".to_string(), "f-ready-2".to_string()]
+            .into_iter()
+            .collect(),
+        "ready files in ws_a"
+    );
+    assert_eq!(
+        dentry_ids,
+        ["d-ready".to_string()].into_iter().collect(),
+        "ready dirs in ws_a"
+    );
+
+    let (other_files, other_dirs) = store.list_ready_summary_keys(&ws_b).await.unwrap();
+    assert_eq!(
+        other_files,
+        ["f-other".to_string()].into_iter().collect(),
+        "ready files in ws_b"
+    );
+    assert!(other_dirs.is_empty());
+
+    cleanup_workspace(&store, &ws_a).await;
+    cleanup_workspace(&store, &ws_b).await;
+}
+
+#[tokio::test]
+#[ignore]
+async fn mysql_list_ready_summary_keys_empty_workspace() {
+    let url = load_mysql_url();
+    let store = MysqlStore::new(&url).await.expect("connect");
+    store.migrate().await.expect("migrate");
+
+    let ws = Uuid::new_v4().to_string();
+    let (file_ids, dentry_ids) = store.list_ready_summary_keys(&ws).await.unwrap();
+    assert!(file_ids.is_empty());
+    assert!(dentry_ids.is_empty());
 }
 
 // ── Collection Schema tests ────────────────────────────
