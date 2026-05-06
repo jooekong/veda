@@ -12,7 +12,7 @@
 set -eu
 
 # ====== config (filled in by maintainer) ======
-DEPLOY_TOKEN="REPLACE_ME_DEPLOY_TOKEN"     # GitLab deploy token, scope=read_package_registry
+DEPLOY_TOKEN="aYm_fPpSwfdi7psCAGdQ"        # GitLab deploy token, scope=read_package_registry
 PROJECT_ID="9462"
 GITLAB_BASE="https://git.ddxq.mobi"
 DEFAULT_VERSION="0.1.0"
