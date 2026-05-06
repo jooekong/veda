@@ -1,8 +1,8 @@
-# Release pipeline for Veda CLI.
-# Triggers on tag push (e.g. `git tag 0.1.0 && git push origin 0.1.0`).
-# Cross-compiles linux x86_64 + aarch64 via cargo-zigbuild, uploads binaries
-# to the GitLab Generic Package Registry, then creates a Release entry.
-# Darwin binaries are added separately by scripts/release-darwin.sh.
+# Release pipeline for Veda CLI on internal GitLab.
+# Triggers on tag push (e.g. `git tag 0.1.0 && git push ddxq 0.1.0`).
+# Native x86_64-linux build only. Aarch64-linux users go through GitHub Actions
+# (which has internet access and ARM runners). Darwin binaries are added later
+# by scripts/release-darwin.sh from Joe's mac.
 
 stages:
   - build
@@ -11,7 +11,7 @@ stages:
 
 variables:
   REGISTRY: "${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/packages/generic/veda/${CI_COMMIT_TAG}"
-  ZIG_VERSION: "0.13.0"
+  TARGET: "x86_64-unknown-linux-gnu"
 
 build:linux:
   stage: build
@@ -21,30 +21,16 @@ build:linux:
   tags:
     - release
     - veda
-  parallel:
-    matrix:
-      - TARGET: [x86_64-unknown-linux-gnu, aarch64-unknown-linux-gnu]
   before_script:
     - apt-get update
-    - apt-get install -y --no-install-recommends curl xz-utils libfuse3-dev pkg-config
-    - curl -fsSL "https://ziglang.org/download/${ZIG_VERSION}/zig-linux-x86_64-${ZIG_VERSION}.tar.xz" | tar xJ -C /opt
-    - export PATH="/opt/zig-linux-x86_64-${ZIG_VERSION}:$PATH"
-    - cargo install --locked cargo-zigbuild
-    - rustup target add "${TARGET}"
+    - apt-get install -y --no-install-recommends libfuse3-dev pkg-config
   script:
-    - cargo zigbuild --release --target "${TARGET}" --bin veda
-    - mv "target/${TARGET}/release/veda" "veda-${TARGET}"
-    - sha256sum "veda-${TARGET}" > "veda-${TARGET}.sha256"
-    # veda-fuse cross-compile fails on aarch64 (pkg-config can't find aarch64 libfuse3).
-    # Build it only for the native x86_64-linux target. Other archs ship without fuse.
-    - |
-      if [ "${TARGET}" = "x86_64-unknown-linux-gnu" ]; then
-        cargo zigbuild --release --target "${TARGET}" -p veda-fuse --bin veda-fuse
-        mv "target/${TARGET}/release/veda-fuse" "veda-fuse-${TARGET}"
-        sha256sum "veda-fuse-${TARGET}" > "veda-fuse-${TARGET}.sha256"
-      else
-        echo "skipping veda-fuse for ${TARGET} (cross-arch FUSE compile unsupported)"
-      fi
+    - cargo build --release --bin veda
+    - cargo build --release -p veda-fuse --bin veda-fuse
+    - mv "target/release/veda"      "veda-${TARGET}"
+    - mv "target/release/veda-fuse" "veda-fuse-${TARGET}"
+    - sha256sum "veda-${TARGET}"      > "veda-${TARGET}.sha256"
+    - sha256sum "veda-fuse-${TARGET}" > "veda-fuse-${TARGET}.sha256"
   artifacts:
     paths:
       - veda-*
@@ -62,10 +48,9 @@ publish:linux:
   needs: ["build:linux"]
   script:
     - |
-      # use shell glob with nullglob to skip missing files (veda-fuse-aarch64* won't exist)
-      shopt -s nullglob 2>/dev/null || true
-      for f in veda-* veda-fuse-* skill.md; do
-        [ -f "$f" ] || continue
+      for f in veda-${TARGET} veda-${TARGET}.sha256 \
+               veda-fuse-${TARGET} veda-fuse-${TARGET}.sha256 \
+               skill.md; do
         echo "uploading $f..."
         curl --fail --show-error --silent \
              --header "JOB-TOKEN: $CI_JOB_TOKEN" \
@@ -85,7 +70,6 @@ release:create:
   script:
     - |
       release-cli create --name "Veda ${CI_COMMIT_TAG}" --tag-name "${CI_COMMIT_TAG}" \
-        --assets-link "{\"name\":\"veda-x86_64-linux\",\"url\":\"${REGISTRY}/veda-x86_64-unknown-linux-gnu\",\"link_type\":\"package\"}" \
-        --assets-link "{\"name\":\"veda-aarch64-linux\",\"url\":\"${REGISTRY}/veda-aarch64-unknown-linux-gnu\",\"link_type\":\"package\"}" \
-        --assets-link "{\"name\":\"veda-fuse-x86_64-linux\",\"url\":\"${REGISTRY}/veda-fuse-x86_64-unknown-linux-gnu\",\"link_type\":\"package\"}" \
+        --assets-link "{\"name\":\"veda-x86_64-linux\",\"url\":\"${REGISTRY}/veda-${TARGET}\",\"link_type\":\"package\"}" \
+        --assets-link "{\"name\":\"veda-fuse-x86_64-linux\",\"url\":\"${REGISTRY}/veda-fuse-${TARGET}\",\"link_type\":\"package\"}" \
         --assets-link "{\"name\":\"skill.md\",\"url\":\"${REGISTRY}/skill.md\",\"link_type\":\"other\"}"
