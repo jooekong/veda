@@ -1,29 +1,76 @@
-# This file is a template, and might need editing before it works on your project.
-# To contribute improvements to CI/CD templates, please follow the Development guide at:
-# https://docs.gitlab.com/ee/development/cicd/templates.html
-# This specific template is located at:
-# https://gitlab.com/gitlab-org/gitlab/-/blob/master/lib/gitlab/ci/templates/Rust.gitlab-ci.yml
+# Release pipeline for Veda CLI.
+# Triggers on tag push (e.g. `git tag 0.1.0 && git push origin 0.1.0`).
+# Cross-compiles linux x86_64 + aarch64 via cargo-zigbuild, uploads binaries
+# to the GitLab Generic Package Registry, then creates a Release entry.
+# Darwin binaries are added separately by scripts/release-darwin.sh.
 
-# Official language image. Look for the different tagged releases at:
-# https://hub.docker.com/r/library/rust/tags/
-image: "rust:latest"
+stages:
+  - build
+  - publish
+  - release
 
-# Optional: Pick zero or more services to be used on all builds.
-# Only needed when using a docker container to run your tests in.
-# Check out: https://docs.gitlab.com/ee/ci/services/index.html
-# services:
-#   - mysql:latest
-#   - redis:latest
-#   - postgres:latest
+variables:
+  REGISTRY: "${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/packages/generic/veda/${CI_COMMIT_TAG}"
+  ZIG_VERSION: "0.13.0"
 
-# Optional: Install a C compiler, cmake and git into the container.
-# You will often need this when you (or any of your dependencies) depends on C code.
-# before_script:
-#   - apt-get update -yqq
-#   - apt-get install -yqq --no-install-recommends build-essential
-
-# Use cargo to test the project
-test:cargo:
+build:linux:
+  stage: build
+  image: rust:1.83-bookworm
+  rules:
+    - if: $CI_COMMIT_TAG
+  # If your runner has tags, uncomment and match them:
+  # tags:
+  #   - docker
+  parallel:
+    matrix:
+      - TARGET: [x86_64-unknown-linux-gnu, aarch64-unknown-linux-gnu]
+  before_script:
+    - apt-get update
+    - apt-get install -y --no-install-recommends curl xz-utils libfuse3-dev pkg-config
+    - curl -fsSL "https://ziglang.org/download/${ZIG_VERSION}/zig-linux-x86_64-${ZIG_VERSION}.tar.xz" | tar xJ -C /opt
+    - export PATH="/opt/zig-linux-x86_64-${ZIG_VERSION}:$PATH"
+    - cargo install --locked cargo-zigbuild
+    - rustup target add "${TARGET}"
   script:
-    - rustc --version && cargo --version  # Print version info for debugging
-    - cargo test --workspace --verbose
+    - cargo zigbuild --release --target "${TARGET}" --bin veda
+    - cargo zigbuild --release --target "${TARGET}" -p veda-fuse --bin veda-fuse
+    - mv "target/${TARGET}/release/veda"      "veda-${TARGET}"
+    - mv "target/${TARGET}/release/veda-fuse" "veda-fuse-${TARGET}"
+    - sha256sum "veda-${TARGET}"      > "veda-${TARGET}.sha256"
+    - sha256sum "veda-fuse-${TARGET}" > "veda-fuse-${TARGET}.sha256"
+  artifacts:
+    paths:
+      - veda-*
+      - veda-fuse-*
+    expire_in: 1 week
+
+publish:linux:
+  stage: publish
+  image: curlimages/curl:8.5.0
+  rules:
+    - if: $CI_COMMIT_TAG
+  needs: ["build:linux"]
+  script:
+    - |
+      for f in veda-* veda-fuse-* skill.md; do
+        echo "uploading $f..."
+        curl --fail --show-error --silent \
+             --header "JOB-TOKEN: $CI_JOB_TOKEN" \
+             --upload-file "$f" \
+             "${REGISTRY}/$f"
+      done
+
+release:create:
+  stage: release
+  image: registry.gitlab.com/gitlab-org/release-cli:latest
+  rules:
+    - if: $CI_COMMIT_TAG
+  needs: ["publish:linux"]
+  script:
+    - |
+      release-cli create --name "Veda ${CI_COMMIT_TAG}" --tag-name "${CI_COMMIT_TAG}" \
+        --assets-link "{\"name\":\"veda-x86_64-linux\",\"url\":\"${REGISTRY}/veda-x86_64-unknown-linux-gnu\",\"link_type\":\"package\"}" \
+        --assets-link "{\"name\":\"veda-aarch64-linux\",\"url\":\"${REGISTRY}/veda-aarch64-unknown-linux-gnu\",\"link_type\":\"package\"}" \
+        --assets-link "{\"name\":\"veda-fuse-x86_64-linux\",\"url\":\"${REGISTRY}/veda-fuse-x86_64-unknown-linux-gnu\",\"link_type\":\"package\"}" \
+        --assets-link "{\"name\":\"veda-fuse-aarch64-linux\",\"url\":\"${REGISTRY}/veda-fuse-aarch64-unknown-linux-gnu\",\"link_type\":\"package\"}" \
+        --assets-link "{\"name\":\"skill.md\",\"url\":\"${REGISTRY}/skill.md\",\"link_type\":\"other\"}"
