@@ -8,8 +8,6 @@ members = [
     "crates/veda-sql",
     "crates/veda-server",
     "crates/veda-cli",
-]
-exclude = [
     "crates/veda-fuse",
 ]
 
