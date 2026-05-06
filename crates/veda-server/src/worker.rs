@@ -1,8 +1,10 @@
+use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
 use std::time::Duration;
 
 use chrono::Utc;
 use futures::stream::{self, StreamExt};
+use futures::FutureExt;
 use tokio::sync::watch;
 use tokio::time::sleep;
 use tracing::{debug, error, info, warn};
@@ -70,21 +72,36 @@ impl Worker {
                     .for_each_concurrent(concurrency, |task| async move {
                         let event_type = outbox_event_label(task.event_type);
                         let started = std::time::Instant::now();
-                        let result = self.process_task(&task).await;
+                        // catch_unwind so a panic in one task (e.g. a malformed
+                        // payload triggering an unreachable! deeper down) marks
+                        // that task as failed instead of killing the worker
+                        // future and leaving lease_until-stuck rows.
+                        let result = AssertUnwindSafe(self.process_task(&task))
+                            .catch_unwind()
+                            .await;
                         let elapsed = started.elapsed().as_secs_f64();
                         ::metrics::histogram!(
                             "veda_outbox_process_seconds",
                             "event_type" => event_type,
                         )
                         .record(elapsed);
-                        if let Err(e) = result {
-                            error!(task_id = task.id, err = %e, "task failed");
+                        let task_outcome = match result {
+                            Ok(Ok(())) => None,
+                            Ok(Err(e)) => Some(e.to_string()),
+                            Err(panic) => {
+                                let msg = panic_message(&panic);
+                                error!(task_id = task.id, %msg, "task panicked");
+                                Some(format!("panic: {msg}"))
+                            }
+                        };
+                        if let Some(err_msg) = task_outcome {
+                            error!(task_id = task.id, err = %err_msg, "task failed");
                             ::metrics::counter!(
                                 "veda_outbox_failed_total",
                                 "event_type" => event_type,
                             )
                             .increment(1);
-                            let _ = self.task_queue.fail(task.id, &e.to_string()).await;
+                            let _ = self.task_queue.fail(task.id, &err_msg).await;
                         }
                     })
                     .await;
@@ -539,5 +556,53 @@ fn outbox_event_label(event: OutboxEventType) -> &'static str {
         OutboxEventType::CollectionSync => "collection_sync",
         OutboxEventType::SummarySync => "summary_sync",
         OutboxEventType::DirSummarySync => "dir_summary_sync",
+    }
+}
+
+/// Best-effort extraction of a panic message from `catch_unwind`'s payload.
+fn panic_message(payload: &Box<dyn std::any::Any + Send>) -> String {
+    if let Some(s) = payload.downcast_ref::<&'static str>() {
+        (*s).to_string()
+    } else if let Some(s) = payload.downcast_ref::<String>() {
+        s.clone()
+    } else {
+        "(non-string panic payload)".to_string()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::panic::AssertUnwindSafe;
+
+    /// Drive a future that panics through `catch_unwind` and feed the payload
+    /// into `panic_message`. This exercises the exact path `Worker::run` takes
+    /// when a task handler panics, without spinning up a real worker.
+    async fn extract(panic: impl FnOnce() + std::panic::UnwindSafe) -> String {
+        let result =
+            AssertUnwindSafe(async move { panic() }).catch_unwind().await;
+        let payload = result.expect_err("panic should be caught");
+        panic_message(&payload)
+    }
+
+    #[tokio::test]
+    async fn extracts_static_str_panic() {
+        let msg = extract(|| panic!("static panic msg")).await;
+        assert_eq!(msg, "static panic msg");
+    }
+
+    #[tokio::test]
+    async fn extracts_owned_string_panic() {
+        let dynamic = String::from("owned panic ").repeat(2) + "msg";
+        let msg = extract(move || panic!("{}", dynamic)).await;
+        assert_eq!(msg, "owned panic owned panic msg");
+    }
+
+    #[tokio::test]
+    async fn falls_back_for_non_string_payload() {
+        // panic!(123_i32) sends an i32 — neither &str nor String. The fallback
+        // string keeps the worker from crashing on exotic payloads.
+        let msg = extract(|| std::panic::panic_any(123_i32)).await;
+        assert_eq!(msg, "(non-string panic payload)");
     }
 }
