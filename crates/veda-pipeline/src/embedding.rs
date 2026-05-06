@@ -10,6 +10,19 @@ use veda_types::{Result, VedaError};
 const BATCH_SIZE: usize = 100;
 const MAX_RETRIES: u32 = 3;
 const BASE_BACKOFF_MS: u64 = 500;
+/// Cap on `Retry-After` header (seconds). Without this, an upstream
+/// returning a long retry hint pins the worker's concurrency slot for
+/// hours — beyond the 10-min outbox lease, the task gets reclaimed and
+/// re-enters the same sleep, effectively deadlocking that slot.
+const MAX_RETRY_AFTER_SECS: u64 = 60;
+
+fn compute_backoff_ms(attempt: u32, retry_after_secs: Option<u64>) -> u64 {
+    if let Some(secs) = retry_after_secs {
+        secs.min(MAX_RETRY_AFTER_SECS).saturating_mul(1000)
+    } else {
+        BASE_BACKOFF_MS * 2u64.pow(attempt)
+    }
+}
 
 #[derive(Debug, Serialize)]
 struct EmbeddingRequest {
@@ -188,11 +201,7 @@ impl EmbeddingProvider {
                     if !e.retryable || attempt == MAX_RETRIES {
                         return Err(e.inner);
                     }
-                    let backoff_ms = if let Some(secs) = e.retry_after {
-                        secs * 1000
-                    } else {
-                        BASE_BACKOFF_MS * 2u64.pow(attempt)
-                    };
+                    let backoff_ms = compute_backoff_ms(attempt, e.retry_after);
                     warn!(attempt, backoff_ms, err = %e.inner, "embedding failed, retrying");
                     tokio::time::sleep(Duration::from_millis(backoff_ms)).await;
                     last_err = Some(e.inner);
@@ -287,5 +296,23 @@ mod tests {
     fn batch_size_constant_is_reasonable() {
         assert_eq!(BATCH_SIZE, 100);
         assert!(BATCH_SIZE < 2048);
+    }
+
+    #[test]
+    fn retry_after_caps_at_max() {
+        // Upstream returns 1-day hint → still bounded at 60s.
+        assert_eq!(compute_backoff_ms(0, Some(86400)), 60_000);
+    }
+
+    #[test]
+    fn retry_after_under_cap_passes_through() {
+        assert_eq!(compute_backoff_ms(0, Some(5)), 5_000);
+        assert_eq!(compute_backoff_ms(0, Some(60)), 60_000);
+    }
+
+    #[test]
+    fn no_retry_after_uses_exponential() {
+        assert_eq!(compute_backoff_ms(0, None), 500);
+        assert_eq!(compute_backoff_ms(2, None), 2_000);
     }
 }
