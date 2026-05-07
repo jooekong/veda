@@ -1,6 +1,8 @@
 use std::sync::Arc;
 
 use axum::extract::{Path, State};
+use axum::http::{header, StatusCode};
+use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use veda_types::api::{SearchApiRequest, SearchResultItem, SummaryResponse};
@@ -45,7 +47,7 @@ async fn get_summary(
     State(state): State<Arc<AppState>>,
     auth: AuthWorkspace,
     Path(path): Path<String>,
-) -> Result<Json<ApiResponse<SummaryResponse>>, AppError> {
+) -> Result<Response, AppError> {
     let path = format!("/{path}");
     let summary = state
         .search_service
@@ -57,8 +59,19 @@ async fn get_summary(
             path,
             l0_abstract: s.l0_abstract,
             l1_overview: s.l1_overview,
-        }))),
-        None => Err(veda_types::VedaError::NotFound("summary not found".into()).into()),
+        }))
+        .into_response()),
+        // Path exists (the service would have already returned NotFound otherwise)
+        // but L0/L1 generation is async, so the summary row hasn't appeared yet.
+        // Return 202 Accepted with Retry-After so callers know to poll instead
+        // of treating this as a hard "missing" 404.
+        None => {
+            let body = Json(ApiResponse::<()>::err("summary pending"));
+            let mut resp = (StatusCode::ACCEPTED, body).into_response();
+            resp.headers_mut()
+                .insert(header::RETRY_AFTER, "5".parse().unwrap());
+            Ok(resp)
+        }
     }
 }
 

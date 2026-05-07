@@ -368,6 +368,12 @@ async fn main() -> anyhow::Result<()> {
         }
         Commands::Summary { path } => {
             let resp = c.get_summary(cfg.ws_key()?, &path).await?;
+            // 202 Accepted (pending) returns success=false with no data.
+            if resp["success"].as_bool() == Some(false) {
+                let msg = resp["error"].as_str().unwrap_or("pending");
+                println!("Summary not ready yet ({msg}). Retry in a few seconds.");
+                std::process::exit(2);
+            }
             let data = &resp["data"];
             println!("Path: {}", data["path"].as_str().unwrap_or("?"));
             println!("\n--- L0 Abstract ---");

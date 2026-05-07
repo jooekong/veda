@@ -115,9 +115,11 @@ veda summary /path/to/file.md       # L0/L1 auto-generated summary for a file
 veda summary /                       # workspace-level summary
 ```
 
-L0/L1 summaries are generated **asynchronously**. A file uploaded seconds ago will
-return `404 not found: summary not found`. Either retry later or fall back to
-`veda cat` for the raw content.
+L0/L1 summaries are generated **asynchronously**. If you ask for a summary right
+after uploading, the CLI prints `Summary not ready yet (summary pending)` and exits
+with code 2 (server returns HTTP 202 Accepted with `Retry-After: 5`). Wait ~5 seconds
+and retry, or fall back to `veda cat` for the raw content. If the path itself
+doesn't exist you still get `404`.
 
 ### Structured collections
 
@@ -205,7 +207,7 @@ veda-fuse umount /mnt/veda
 | `no workspace selected`                | No active workspace  | `veda workspace list` → `veda workspace use <name>` |
 | `connection refused` / `Empty reply from server` | Server unreachable / hung | `veda config show`; verify server URL, ping it |
 | `401 unauthorized`                     | API key invalid      | `veda account login` to refresh                  |
-| `404 not found: summary not found`     | L0/L1 not yet generated (async) | Retry later, or `veda cat` for raw content |
+| `Summary not ready yet (summary pending)` (exit 2) | L0/L1 generation is async | Wait ~5s and retry, or `veda cat` for raw content |
 | 4xx with JSON error body               | API error            | Echo server's `error` field to user              |
 
 ## Don't do
