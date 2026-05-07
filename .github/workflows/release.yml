@@ -32,9 +32,11 @@ jobs:
             runs-on: ubuntu-latest
             cross: true
             with-fuse: false   # cross-compile of fuser/libfuse3 unsupported
+          # macos-14 (M1) hosts both: aarch64 native, x86_64 via cross-compile.
+          # macos-13 (Intel) free-runner queue is essentially dead on GitHub now.
           - target: x86_64-apple-darwin
-            runs-on: macos-13
-            cross: false
+            runs-on: macos-14
+            cross: true
             with-fuse: false
           - target: aarch64-apple-darwin
             runs-on: macos-14
@@ -59,19 +61,21 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y libfuse3-dev pkg-config
 
-      - name: Install zig (cross targets only)
-        if: matrix.cross
+      # zigbuild needed only for cross-compile from linux. Darwin -> darwin
+      # cross-compile uses Xcode toolchain (universal SDK on macos-14).
+      - name: Install zig (linux cross only)
+        if: matrix.cross && runner.os == 'Linux'
         uses: mlugg/setup-zig@v1
         with:
           version: ${{ env.ZIG_VERSION }}
 
-      - name: Install cargo-zigbuild
-        if: matrix.cross
+      - name: Install cargo-zigbuild (linux cross only)
+        if: matrix.cross && runner.os == 'Linux'
         run: cargo install --locked cargo-zigbuild
 
       - name: Build veda
         run: |
-          if [ "${{ matrix.cross }}" = "true" ]; then
+          if [ "${{ matrix.cross }}" = "true" ] && [ "${{ runner.os }}" = "Linux" ]; then
             cargo zigbuild --release --target "${{ matrix.target }}" --bin veda
           else
             cargo build --release --target "${{ matrix.target }}" --bin veda
@@ -81,7 +85,7 @@ jobs:
       - name: Build veda-fuse
         if: matrix.with-fuse
         run: |
-          if [ "${{ matrix.cross }}" = "true" ]; then
+          if [ "${{ matrix.cross }}" = "true" ] && [ "${{ runner.os }}" = "Linux" ]; then
             cargo zigbuild --release --target "${{ matrix.target }}" -p veda-fuse --bin veda-fuse
           else
             cargo build --release --target "${{ matrix.target }}" -p veda-fuse --bin veda-fuse
