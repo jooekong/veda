@@ -7,7 +7,7 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post, put};
 use axum::{Json, Router};
 use serde::Deserialize;
-use veda_types::api::{FileInfo, WriteFileResponse};
+use veda_types::api::{FileInfo, GrepHit, GrepRequest, WriteFileResponse};
 use veda_types::{ApiResponse, VedaError};
 
 use crate::auth::AuthWorkspace;
@@ -30,7 +30,27 @@ pub fn routes() -> Router<Arc<AppState>> {
         .route("/v1/fs-copy", post(copy_file))
         .route("/v1/fs-rename", post(rename_file))
         .route("/v1/fs-mkdir", post(mkdir))
+        .route("/v1/grep", post(grep))
         .merge(upload_routes)
+}
+
+async fn grep(
+    State(state): State<Arc<AppState>>,
+    auth: AuthWorkspace,
+    Json(req): Json<GrepRequest>,
+) -> Result<Json<ApiResponse<Vec<GrepHit>>>, AppError> {
+    let max = req.max_results.unwrap_or(100);
+    let hits = state
+        .fs_service
+        .grep(
+            &auth.workspace_id,
+            &req.pattern,
+            req.path_prefix.as_deref(),
+            req.ignore_case,
+            max,
+        )
+        .await?;
+    Ok(Json(ApiResponse::ok(hits)))
 }
 
 #[derive(Deserialize, Default)]

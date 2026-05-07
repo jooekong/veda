@@ -90,6 +90,24 @@ Flags: `--mode {hybrid,semantic,fulltext}`, `--limit N` (default 10),
 **Embedding is async**: a file uploaded just now may not appear in semantic results
 for a few seconds. If a search misses an obviously-present file, retry after 5s.
 
+### Grep (substring match)
+
+Use this when the user wants `grep`-style: literal substring, exhaustive, with
+file paths and line numbers — not BM25 ranking. No embedding lag (synchronous).
+
+```sh
+veda grep "TODO(joe)"                      # scan whole workspace
+veda grep "panic!" /code                   # scope to a path prefix
+veda grep "Outbox" -i                      # case-insensitive
+veda grep "fn main" --limit 200            # raise the cap (default 100, max 1000)
+```
+
+Output: `path:line_no: line` per hit.
+
+`veda grep` vs `veda search --mode fulltext`: fulltext is **BM25 ranking** (best for
+"find the most relevant chunks containing these terms"). Grep is **literal substring
+across all files** (best for symbols, identifiers, exact strings, exhaustive search).
+
 ### Summary
 
 ```sh
@@ -167,7 +185,8 @@ veda-fuse umount /mnt/veda
 |----------------------------------------|------------------------------------------|
 | Upload a local file                    | `veda cp local /remote`                  |
 | Find old notes by topic                | `veda search` (default hybrid)           |
-| Find exact identifier / string         | `veda search --mode fulltext`            |
+| Find exact identifier / string (ranked)| `veda search --mode fulltext`            |
+| Find every literal occurrence + line # | `veda grep` (substring, exhaustive)      |
 | Recall conceptually similar content    | `veda search --mode semantic`            |
 | Save tokens on long results            | `veda search --detail-level abstract`    |
 | Tabular data with schema               | Collection (not file)                    |

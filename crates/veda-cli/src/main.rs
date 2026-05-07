@@ -71,6 +71,19 @@ enum Commands {
         #[arg(long, default_value = "full")]
         detail_level: String,
     },
+    /// Grep file contents (substring match, returns file:line:content)
+    Grep {
+        /// Substring to find
+        pattern: String,
+        /// Optional path prefix to scope the scan (default: /)
+        path: Option<String>,
+        /// Case-insensitive match
+        #[arg(short = 'i', long)]
+        ignore_case: bool,
+        /// Maximum number of hits before stopping (1..=1000, default 100)
+        #[arg(long, default_value = "100")]
+        limit: usize,
+    },
     /// Show L0/L1 summary for a file or directory
     Summary {
         /// Remote path
@@ -326,6 +339,30 @@ async fn main() -> anyhow::Result<()> {
                         print!("\n  L1: {preview}...");
                     }
                     println!();
+                }
+            }
+        }
+        Commands::Grep {
+            pattern,
+            path,
+            ignore_case,
+            limit,
+        } => {
+            let resp = c
+                .grep(
+                    cfg.ws_key()?,
+                    &pattern,
+                    path.as_deref(),
+                    ignore_case,
+                    limit,
+                )
+                .await?;
+            if let Some(arr) = resp["data"].as_array() {
+                for hit in arr {
+                    let path = hit["path"].as_str().unwrap_or("?");
+                    let line_no = hit["line_no"].as_u64().unwrap_or(0);
+                    let line = hit["line"].as_str().unwrap_or("");
+                    println!("{path}:{line_no}: {line}");
                 }
             }
         }

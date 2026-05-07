@@ -680,6 +680,67 @@ impl FsService {
             .collect())
     }
 
+    /// Substring grep across files under `path_prefix` ("/" by default).
+    /// Returns up to `max_results` hits, each with file path, 1-indexed line
+    /// number, and the matching line. Stops scanning as soon as `max_results`
+    /// is reached. No regex / no glob filter — keep alpha simple.
+    pub async fn grep(
+        &self,
+        workspace_id: &str,
+        pattern: &str,
+        path_prefix: Option<&str>,
+        ignore_case: bool,
+        max_results: usize,
+    ) -> Result<Vec<api::GrepHit>> {
+        if pattern.is_empty() {
+            return Ok(Vec::new());
+        }
+        let max = max_results.clamp(1, 1000);
+        let prefix = path::normalize(path_prefix.unwrap_or("/"))?;
+
+        // Cap dentry walk separately from result cap; a workspace with 100k
+        // empty-of-match files shouldn't OOM the server.
+        let entries = self
+            .meta
+            .list_dentries_under_capped(workspace_id, &prefix, 50_000)
+            .await?;
+
+        let needle = if ignore_case {
+            pattern.to_lowercase()
+        } else {
+            pattern.to_string()
+        };
+
+        let mut hits = Vec::new();
+        for d in entries {
+            if d.is_dir || d.file_id.is_none() {
+                continue;
+            }
+            let content = match self.read_file(workspace_id, &d.path).await {
+                Ok(c) => c,
+                Err(_) => continue, // skip files we can't read (binary, missing, etc.)
+            };
+            for (i, line) in content.lines().enumerate() {
+                let matches = if ignore_case {
+                    line.to_lowercase().contains(&needle)
+                } else {
+                    line.contains(&needle)
+                };
+                if matches {
+                    hits.push(api::GrepHit {
+                        path: d.path.clone(),
+                        line_no: i + 1,
+                        line: line.to_string(),
+                    });
+                    if hits.len() >= max {
+                        return Ok(hits);
+                    }
+                }
+            }
+        }
+        Ok(hits)
+    }
+
     pub async fn stat(&self, workspace_id: &str, raw_path: &str) -> Result<api::FileInfo> {
         let norm = path::normalize(raw_path)?;
         // Root directory has no dentry row; synthesize a virtual one

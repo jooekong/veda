@@ -146,6 +146,24 @@ pub struct CollectionSearchRequest {
     pub filter: Option<serde_json::Value>,
 }
 
+// ── Grep ───────────────────────────────────────────────
+
+#[derive(Debug, Deserialize)]
+pub struct GrepRequest {
+    pub pattern: String,
+    pub path_prefix: Option<String>,
+    #[serde(default)]
+    pub ignore_case: bool,
+    pub max_results: Option<usize>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct GrepHit {
+    pub path: String,
+    pub line_no: usize,
+    pub line: String,
+}
+
 // ── SQL ────────────────────────────────────────────────
 
 #[derive(Debug, Deserialize)]

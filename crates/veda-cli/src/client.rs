@@ -222,6 +222,32 @@ impl Client {
         Self::check(resp).await
     }
 
+    pub async fn grep(
+        &self,
+        ws_key: &str,
+        pattern: &str,
+        path_prefix: Option<&str>,
+        ignore_case: bool,
+        max_results: usize,
+    ) -> Result<serde_json::Value> {
+        let mut body = serde_json::json!({
+            "pattern": pattern,
+            "ignore_case": ignore_case,
+            "max_results": max_results,
+        });
+        if let Some(p) = path_prefix {
+            body["path_prefix"] = serde_json::Value::String(p.to_string());
+        }
+        let resp = self
+            .http
+            .post(format!("{}/v1/grep", self.base))
+            .bearer_auth(ws_key)
+            .json(&body)
+            .send()
+            .await?;
+        Self::check(resp).await
+    }
+
     pub async fn get_summary(&self, ws_key: &str, path: &str) -> Result<serde_json::Value> {
         let path = path.trim_start_matches('/');
         let resp = self
