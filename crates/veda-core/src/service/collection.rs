@@ -180,13 +180,16 @@ impl CollectionService {
             .vector
             .search_collection(&milvus_name, workspace_id, &vector, limit)
             .await?;
-        // Strip the raw embedding vector from each result. It's huge (1024 floats
-        // per row) and a search caller already provided the query vector, so the
-        // returned vectors carry no information they didn't already have.
+        // Strip internal-only fields from each result.
+        // - `vector`: huge (1024 floats per row) and the caller already has the
+        //   query vector, so returned vectors carry no new information.
+        // - `workspace_id`: server-side multi-tenant routing key. Should never
+        //   leak to clients; they're already scoped by their workspace token.
         // Use SQL (`SELECT vector FROM ...`) if you really need the stored vector.
         for row in rows.iter_mut() {
             if let Some(obj) = row.as_object_mut() {
                 obj.remove("vector");
+                obj.remove("workspace_id");
             }
         }
         Ok(rows)
