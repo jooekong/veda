@@ -180,8 +180,42 @@ impl MilvusStore {
         Ok(v["data"]["has"].as_bool().unwrap_or(false))
     }
 
+    async fn collection_has_sparse_vector(&self) -> Result<bool> {
+        let v = self
+            .post(
+                "/v2/vectordb/collections/describe",
+                json!({ "collectionName": COLLECTION }),
+            )
+            .await?;
+        // Schema fields under data.fields[].name (REST v2). Look for the
+        // sparse_vector field — its presence means the BM25 schema is in
+        // place and we don't need to drop+recreate.
+        if let Some(fields) = v["data"]["fields"].as_array() {
+            for f in fields {
+                if f["name"].as_str() == Some("sparse_vector") {
+                    return Ok(true);
+                }
+            }
+        }
+        Ok(false)
+    }
+
+    async fn drop_collection(&self) -> Result<()> {
+        self.post_no_retry(
+            "/v2/vectordb/collections/drop",
+            json!({ "collectionName": COLLECTION }),
+        )
+        .await?;
+        Ok(())
+    }
+
     async fn create_collection(&self, embedding_dim: u32) -> Result<()> {
         let dim = embedding_dim as i64;
+        // Schema v2: adds `sparse_vector` field + BM25 function over `content`
+        // so hybrid_search can fuse two real ranking signals (dense ANN +
+        // sparse BM25) instead of just RRF-wrapping a single dense source.
+        // Requires Milvus 2.4+. `enable_analyzer` on content is what lets
+        // the BM25 function tokenize on insert.
         let body = json!({
             "collectionName": COLLECTION,
             "schema": {
@@ -210,12 +244,35 @@ impl MilvusStore {
                     {
                         "fieldName": "content",
                         "dataType": "VarChar",
-                        "elementTypeParams": { "max_length": 65535 }
+                        "elementTypeParams": {
+                            "max_length": 65535,
+                            "enable_analyzer": true,
+                            // Veda content is heavily mixed Chinese / English.
+                            // `standard` does whitespace+punct splitting, which
+                            // for Chinese yields one-token-per-sentence — BM25
+                            // becomes ~useless. `jieba` segments Chinese AND
+                            // falls back for ASCII, which gives sane BM25 over
+                            // both. Requires Milvus built with jieba support
+                            // (default milvusdb/milvus:latest has it).
+                            "analyzer_params": { "tokenizer": "jieba" }
+                        }
                     },
                     {
                         "fieldName": "vector",
                         "dataType": "FloatVector",
                         "elementTypeParams": { "dim": dim }
+                    },
+                    {
+                        "fieldName": "sparse_vector",
+                        "dataType": "SparseFloatVector"
+                    }
+                ],
+                "functions": [
+                    {
+                        "name": "bm25_content",
+                        "type": "BM25",
+                        "inputFieldNames": ["content"],
+                        "outputFieldNames": ["sparse_vector"]
                     }
                 ]
             }
@@ -228,12 +285,21 @@ impl MilvusStore {
     async fn ensure_vector_index(&self) -> Result<()> {
         let index_body = json!({
             "collectionName": COLLECTION,
-            "indexParams": [{
-                "index_type": "AUTOINDEX",
-                "metricType": "COSINE",
-                "fieldName": "vector",
-                "indexName": "vector"
-            }]
+            "indexParams": [
+                {
+                    "index_type": "AUTOINDEX",
+                    "metricType": "COSINE",
+                    "fieldName": "vector",
+                    "indexName": "vector"
+                },
+                {
+                    "index_type": "SPARSE_INVERTED_INDEX",
+                    "metricType": "BM25",
+                    "fieldName": "sparse_vector",
+                    "indexName": "sparse_vector",
+                    "params": { "bm25_k1": 1.2, "bm25_b": 0.75 }
+                }
+            ]
         });
         match self.post("/v2/vectordb/indexes/create", index_body).await {
             Ok(_) => Ok(()),
@@ -427,7 +493,12 @@ impl MilvusStore {
         let ws = milvus_quote(&req.workspace_id);
         let base_filter = format!("workspace_id == {ws}");
         let lim = req.limit.min(16_383).max(1);
-        let search_obj = json!({
+        // True hybrid: two real rankers fused by RRF.
+        //   1. dense ANN over `vector` (semantic similarity)
+        //   2. BM25 over `sparse_vector` (lexical relevance)
+        // Sending only the dense object (as the previous code did) made
+        // RRF a no-op identity reorder — hybrid degenerated into semantic.
+        let dense = json!({
             "data": [qv],
             "annsField": "vector",
             "filter": base_filter.clone(),
@@ -437,9 +508,18 @@ impl MilvusStore {
             "outputFields": ["id", "workspace_id", "file_id", "chunk_index", "content"],
             "metricType": "COSINE"
         });
+        let bm25 = json!({
+            "data": [req.query.clone()],
+            "annsField": "sparse_vector",
+            "filter": base_filter,
+            "limit": lim,
+            "offset": 0,
+            "outputFields": ["id", "workspace_id", "file_id", "chunk_index", "content"],
+            "metricType": "BM25"
+        });
         let body = json!({
             "collectionName": COLLECTION,
-            "search": [search_obj],
+            "search": [dense, bm25],
             "rerank": {
                 "strategy": "rrf",
                 "params": { "k": 60 }
@@ -466,50 +546,26 @@ impl MilvusStore {
         query: &str,
         limit: usize,
     ) -> Result<Vec<SearchHit>> {
+        // Real BM25 over the sparse_vector field (Milvus tokenizes via the
+        // BM25 function defined in the schema). Replaces the previous LIKE
+        // '%query%' substring scan, which had no ranking and didn't match
+        // the README's "BM25 keyword" claim. For literal-substring needs
+        // (with line numbers), use `veda grep` instead.
         let ws = milvus_quote(workspace_id);
-        let pat = format!(
-            "%{}%",
-            query
-                .replace('\\', "\\\\")
-                .replace('%', "\\%")
-                .replace('_', "\\_")
-                .replace('"', "\\\"")
-        );
-        let filter = format!(
-            "workspace_id == {ws} && content like {}",
-            milvus_quote(&pat)
-        );
         let lim = limit.min(16_383).max(1);
         let body = json!({
             "collectionName": COLLECTION,
-            "filter": filter,
+            "data": [query],
+            "annsField": "sparse_vector",
+            "filter": format!("workspace_id == {ws}"),
             "limit": lim,
             "outputFields": ["id", "file_id", "chunk_index", "content"],
+            "metricType": "BM25",
             "consistencyLevel": "Strong"
         });
-        let v = self.post("/v2/vectordb/entities/query", body).await?;
+        let v = self.post("/v2/vectordb/entities/search", body).await?;
         let rows = flatten_entity_rows(v.get("data"));
-        let mut hits = Vec::new();
-        for row in rows.iter().take(limit) {
-            hits.push(SearchHit {
-                file_id: row
-                    .get("file_id")
-                    .and_then(|x| x.as_str())
-                    .unwrap_or("")
-                    .to_string(),
-                chunk_index: row.get("chunk_index").and_then(|x| x.as_i64()).map(|x| x as i32),
-                content: row
-                    .get("content")
-                    .and_then(|x| x.as_str())
-                    .unwrap_or("")
-                    .to_string(),
-                score: 1.0,
-                path: None,
-                l0_abstract: None,
-                l1_overview: None,
-            });
-        }
-        Ok(hits)
+        Ok(Self::rows_to_hits(&rows, limit))
     }
 }
 
@@ -745,8 +801,24 @@ impl VectorStore for MilvusStore {
         Ok(seen.into_iter().collect())
     }
 
-    async fn init_collections(&self, embedding_dim: u32) -> Result<()> {
-        if !self.collection_exists().await? {
+    async fn init_collections(&self, embedding_dim: u32) -> Result<bool> {
+        let mut rebuilt = false;
+        if self.collection_exists().await? {
+            // Schema v1 → v2 migration: collection was created before the
+            // sparse_vector / BM25 function existed. Drop and recreate so
+            // the new schema can be applied. Caller is responsible for
+            // re-enqueueing ChunkSync events for all files so chunks
+            // (and their auto-computed sparse_vector) get reinserted.
+            if !self.collection_has_sparse_vector().await? {
+                tracing::warn!(
+                    "chunk collection lacks sparse_vector field; dropping and recreating \
+                     for BM25 hybrid search. All chunks will need re-ingestion."
+                );
+                self.drop_collection().await?;
+                self.create_collection(embedding_dim).await?;
+                rebuilt = true;
+            }
+        } else {
             self.create_collection(embedding_dim).await?;
         }
         self.ensure_vector_index().await?;
@@ -757,7 +829,7 @@ impl VectorStore for MilvusStore {
         .await?;
 
         self.init_summary_collection(embedding_dim).await?;
-        Ok(())
+        Ok(rebuilt)
     }
 }
 

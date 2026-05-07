@@ -93,7 +93,13 @@ services:
     restart: unless-stopped
 
   milvus:
-    image: milvusdb/milvus:v2.4.15
+    # Milvus 2.5+ required for the BM25 Function used by hybrid/fulltext
+    # search (chunk schema declares a sparse_vector field that Milvus
+    # auto-populates from `content` via a server-side BM25 function).
+    # 2.4.x lacks the Function feature and will reject create_collection.
+    # The image must also include the jieba analyzer (default in
+    # milvusdb/milvus:* tags); custom builds may need to enable it.
+    image: milvusdb/milvus:v2.5.5
     command: ["milvus", "run", "standalone"]
     environment:
       ETCD_ENDPOINTS: etcd:2379

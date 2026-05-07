@@ -400,7 +400,12 @@ pub trait VectorStore: Send + Sync {
     /// or dentry_id (for directory summaries) — reconciler resolves both.
     async fn list_summary_ids(&self, workspace_id: &str) -> Result<Vec<String>>;
 
-    async fn init_collections(&self, embedding_dim: u32) -> Result<()>;
+    /// Initialise vector store collections and indexes. Returns `true` when
+    /// the chunk collection had to be dropped and recreated for a schema
+    /// migration (e.g. adding the BM25 sparse_vector field). Caller should
+    /// re-enqueue ChunkSync events for every file so the new schema gets
+    /// repopulated.
+    async fn init_collections(&self, embedding_dim: u32) -> Result<bool>;
 }
 
 // ── Task Queue ─────────────────────────────────────────

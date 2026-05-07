@@ -11,7 +11,8 @@ use tracing::info;
 use veda_core::service::collection::CollectionService;
 use veda_core::service::fs::FsService;
 use veda_core::service::search::SearchService;
-use veda_core::store::{LlmService, VectorStore};
+use veda_core::store::{AuthStore, LlmService, MetadataStore, TaskQueue, VectorStore};
+use veda_types::types::{OutboxEvent, OutboxEventType, OutboxStatus};
 use veda_pipeline::embedding::EmbeddingProvider;
 use veda_pipeline::llm::LlmProvider;
 use veda_store::{MilvusStore, MysqlStore, PoolConfig};
@@ -95,7 +96,15 @@ async fn main() -> anyhow::Result<()> {
         cfg.embedding.batch_size,
     )?);
 
-    milvus.init_collections(cfg.embedding.dimension).await?;
+    let chunks_rebuilt = milvus.init_collections(cfg.embedding.dimension).await?;
+    if chunks_rebuilt {
+        // Schema migration just dropped the chunk collection; the worker
+        // wouldn't otherwise repopulate it because it relies on outbox
+        // events. Walk every workspace's dentries and enqueue a forced
+        // ChunkSync for each file so the new BM25 sparse_vector field
+        // gets populated for everything that existed pre-migration.
+        reembed_all_files_for_migration(&mysql).await?;
+    }
 
     let fs_service = Arc::new(FsService::new(mysql.clone()));
     let search_service = SearchService::new(mysql.clone(), milvus.clone(), embedding.clone());
@@ -294,5 +303,78 @@ async fn main() -> anyhow::Result<()> {
         let _ = handle.await;
     }
 
+    Ok(())
+}
+
+/// Walks every active workspace, collects every file dentry, and enqueues a
+/// forced ChunkSync into the outbox for each one. Used after a chunk-collection
+/// schema migration so the worker repopulates the new fields (e.g. BM25
+/// sparse_vector) for files that already existed pre-migration. Idempotent —
+/// `enqueue` is `INSERT IGNORE` style on the outbox table; if the same file
+/// is queued twice, the second is a no-op.
+async fn reembed_all_files_for_migration(mysql: &Arc<MysqlStore>) -> anyhow::Result<()> {
+    let auth: &dyn AuthStore = mysql.as_ref();
+    let meta: &dyn MetadataStore = mysql.as_ref();
+    let queue: &dyn TaskQueue = mysql.as_ref();
+
+    let workspace_ids = auth.list_active_workspace_ids().await?;
+    info!(
+        workspaces = workspace_ids.len(),
+        "schema migration: re-enqueueing ChunkSync for every file in every workspace"
+    );
+
+    let now = chrono::Utc::now();
+    let mut total = 0usize;
+    const PAGE_SIZE: usize = 1000;
+    for ws in &workspace_ids {
+        // Stream paginated listing instead of capped — a workspace with
+        // > 50k files would otherwise crash the server on startup with
+        // QuotaExceeded.
+        let mut after: Option<String> = None;
+        loop {
+            let dentries = meta
+                .list_dentries_under_page(ws, "/", after.as_deref(), PAGE_SIZE)
+                .await?;
+            if dentries.is_empty() {
+                break;
+            }
+            let last_path = dentries.last().map(|d| d.path.clone());
+            for d in dentries {
+                let Some(file_id) = d.file_id.clone() else {
+                    continue;
+                };
+                // has_pending_event keeps this idempotent if the function
+                // is somehow re-entered (e.g. server restart mid-migration).
+                if queue
+                    .has_pending_event(OutboxEventType::ChunkSync, ws, "file_id", &file_id)
+                    .await?
+                {
+                    continue;
+                }
+                let event = OutboxEvent {
+                    id: 0,
+                    workspace_id: ws.clone(),
+                    event_type: OutboxEventType::ChunkSync,
+                    payload: serde_json::json!({
+                        "file_id": file_id,
+                        "force_reembed": true,
+                    }),
+                    status: OutboxStatus::Pending,
+                    retry_count: 0,
+                    max_retries: 3,
+                    available_at: now,
+                    lease_until: None,
+                    created_at: now,
+                };
+                queue.enqueue(&event).await?;
+                total += 1;
+            }
+            after = last_path;
+        }
+    }
+    info!(
+        files_enqueued = total,
+        "schema migration: ChunkSync events enqueued; worker will rebuild chunks"
+    );
     Ok(())
 }
