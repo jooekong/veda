@@ -176,8 +176,19 @@ impl CollectionService {
             .ok_or_else(|| VedaError::EmbeddingFailed("empty embedding result".to_string()))?;
 
         let limit = if limit == 0 { 10 } else { limit };
-        self.vector
+        let mut rows = self
+            .vector
             .search_collection(&milvus_name, workspace_id, &vector, limit)
-            .await
+            .await?;
+        // Strip the raw embedding vector from each result. It's huge (1024 floats
+        // per row) and a search caller already provided the query vector, so the
+        // returned vectors carry no information they didn't already have.
+        // Use SQL (`SELECT vector FROM ...`) if you really need the stored vector.
+        for row in rows.iter_mut() {
+            if let Some(obj) = row.as_object_mut() {
+                obj.remove("vector");
+            }
+        }
+        Ok(rows)
     }
 }
