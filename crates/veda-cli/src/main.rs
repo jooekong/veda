@@ -4,7 +4,7 @@ mod config;
 use clap::{Parser, Subcommand};
 
 #[derive(Parser)]
-#[command(name = "veda", about = "Veda CLI client")]
+#[command(name = "veda", about = "Veda CLI client", version)]
 struct Cli {
     #[command(subcommand)]
     command: Commands,

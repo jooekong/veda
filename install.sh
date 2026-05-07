@@ -193,6 +193,24 @@ EOF
     install_binary "veda" "$target"
 
     if [ "$WITH_FUSE" -eq 1 ]; then
+        # Probe whether veda-fuse-$target exists on this release. Avoids
+        # hardcoding which platforms ship a prebuilt fuse binary; if the CI
+        # matrix changes (or a future release adds darwin fuse), the probe
+        # picks it up automatically.
+        fuse_url="https://github.com/$GITHUB_REPO/releases/download/$VERSION/veda-fuse-$target"
+        if ! curl -fsIL -o /dev/null --max-time 10 "$fuse_url"; then
+            log ""
+            log "veda CLI is installed."
+            log "veda-fuse-$target is not in release $VERSION."
+            log "(Currently the release only ships a prebuilt veda-fuse for"
+            log " x86_64-linux. darwin needs macFUSE SDK and aarch64 needs"
+            log " a cross-compile sysroot, both blocked on the CI runner.)"
+            log "To get veda-fuse on $target, compile from source:"
+            log "  git clone https://github.com/$GITHUB_REPO.git"
+            log "  cd veda && cargo build --release -p veda-fuse"
+            log "  cp target/release/veda-fuse $DEST/"
+            exit 0
+        fi
         preflight_fuse
         install_binary "veda-fuse" "$target"
     fi
