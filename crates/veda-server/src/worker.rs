@@ -142,6 +142,17 @@ impl Worker {
                 if self.llm.is_some() {
                     self.enqueue_summary_sync(&task.workspace_id, file_id)
                         .await?;
+                } else {
+                    // [llm] not configured: a previous summary (generated
+                    // when LLM was enabled) would otherwise persist and
+                    // serve stale content for an updated file. Delete the
+                    // metadata row first so get_summary returns 501
+                    // immediately; the Milvus side can lag without users
+                    // ever seeing stale L0/L1.
+                    self.meta.delete_summary_by_file(file_id).await?;
+                    self.vector
+                        .delete_summary(&task.workspace_id, file_id)
+                        .await?;
                 }
                 self.task_queue.complete(task.id).await?;
             }

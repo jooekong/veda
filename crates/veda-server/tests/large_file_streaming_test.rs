@@ -190,6 +190,7 @@ async fn worker_streams_chunks_for_large_file_embed() {
             &cfg.embedding.api_key,
             &cfg.embedding.model,
             Some(cfg.embedding.dimension),
+            100,
         )
         .unwrap(),
     );

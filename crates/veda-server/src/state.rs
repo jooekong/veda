@@ -20,4 +20,8 @@ pub struct AppState {
     /// Bearer token required to read `/v1/metrics`. `None` disables the
     /// endpoint entirely (returns 404). See `ServerConfig::metrics_token`.
     pub metrics_token: Option<String>,
+    /// Whether [llm] is configured. When false, summary generation is
+    /// permanently disabled, and `GET /v1/summary/...` returns 501 Not
+    /// Implemented instead of the misleading 202 "pending".
+    pub summary_enabled: bool,
 }

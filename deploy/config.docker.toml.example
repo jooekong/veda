@@ -35,6 +35,9 @@ api_url = "https://api.openai.com/v1/embeddings"
 api_key = "set-via-env"
 model = "text-embedding-3-small"
 dimension = 1536
+# Texts per upstream call. Default 100 — works for OpenAI (limit 2048+).
+# Aliyun Bailian / DashScope caps `input.contents` at 10; set:
+# batch_size = 10
 
 # Optional summary generation. Off by default — uncomment + fill in
 # api_key (or set VEDA_LLM_API_KEY) to enable.

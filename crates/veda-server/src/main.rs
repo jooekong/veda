@@ -92,6 +92,7 @@ async fn main() -> anyhow::Result<()> {
         &cfg.embedding.api_key,
         &cfg.embedding.model,
         Some(cfg.embedding.dimension),
+        cfg.embedding.batch_size,
     )?);
 
     milvus.init_collections(cfg.embedding.dimension).await?;
@@ -121,6 +122,7 @@ async fn main() -> anyhow::Result<()> {
         jwt_secret: cfg.jwt_secret.clone(),
         metrics: metrics.clone(),
         metrics_token: cfg.metrics_token.clone(),
+        summary_enabled: cfg.llm.is_some(),
     });
 
     let (shutdown_tx, shutdown_rx) = watch::channel(false);

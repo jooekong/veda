@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use axum::extract::{Path, State};
-use axum::http::{header, StatusCode};
+use axum::http::{header, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
@@ -61,15 +61,29 @@ async fn get_summary(
             l1_overview: s.l1_overview,
         }))
         .into_response()),
-        // Path exists (the service would have already returned NotFound otherwise)
-        // but L0/L1 generation is async, so the summary row hasn't appeared yet.
-        // Return 202 Accepted with Retry-After so callers know to poll instead
-        // of treating this as a hard "missing" 404.
+        // Path exists but summary row missing. Two distinct cases:
+        //   a) [llm] is not configured → it will NEVER be generated → 501
+        //   b) [llm] is configured, but L0/L1 still being produced → 202
+        // Without distinguishing these the user can't tell whether to give
+        // up or to retry, and we previously had a perpetual-pending bug
+        // when [llm] was missing on the alpha server.
+        None if !state.summary_enabled => {
+            let body = Json(ApiResponse::<()>::err(
+                "summary generation is disabled (server has no [llm] configured)",
+            ));
+            // RFC 7231 lets clients cache 501 by default. Force no-store so
+            // proxies don't pin the "disabled" state — once Joe restarts the
+            // server with [llm] configured, clients should see live status.
+            let mut resp = (StatusCode::NOT_IMPLEMENTED, body).into_response();
+            resp.headers_mut()
+                .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+            Ok(resp)
+        }
         None => {
             let body = Json(ApiResponse::<()>::err("summary pending"));
             let mut resp = (StatusCode::ACCEPTED, body).into_response();
             resp.headers_mut()
-                .insert(header::RETRY_AFTER, "5".parse().unwrap());
+                .insert(header::RETRY_AFTER, HeaderValue::from_static("5"));
             Ok(resp)
         }
     }

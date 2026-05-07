@@ -367,19 +367,33 @@ async fn main() -> anyhow::Result<()> {
             }
         }
         Commands::Summary { path } => {
-            let resp = c.get_summary(cfg.ws_key()?, &path).await?;
-            // 202 Accepted (pending) returns success=false with no data.
-            if resp["success"].as_bool() == Some(false) {
-                let msg = resp["error"].as_str().unwrap_or("pending");
-                println!("Summary not ready yet ({msg}). Retry in a few seconds.");
-                std::process::exit(2);
+            let (status, resp) = c.get_summary(cfg.ws_key()?, &path).await?;
+            match status {
+                200 => {
+                    let data = &resp["data"];
+                    println!("Path: {}", data["path"].as_str().unwrap_or("?"));
+                    println!("\n--- L0 Abstract ---");
+                    println!("{}", data["l0_abstract"].as_str().unwrap_or("(none)"));
+                    println!("\n--- L1 Overview ---");
+                    println!("{}", data["l1_overview"].as_str().unwrap_or("(none)"));
+                }
+                202 => {
+                    let msg = resp["error"].as_str().unwrap_or("pending");
+                    println!("Summary not ready yet ({msg}). Retry in a few seconds.");
+                    std::process::exit(2);
+                }
+                501 => {
+                    let msg = resp["error"].as_str().unwrap_or("summary disabled");
+                    println!("Summary unavailable: {msg}");
+                    println!("(Ask Joe to add an [llm] section to the server config.)");
+                    std::process::exit(3);
+                }
+                404 => {
+                    let msg = resp["error"].as_str().unwrap_or("not found");
+                    anyhow::bail!("HTTP 404: {msg}");
+                }
+                _ => anyhow::bail!("unexpected HTTP {status}: {resp}"),
             }
-            let data = &resp["data"];
-            println!("Path: {}", data["path"].as_str().unwrap_or("?"));
-            println!("\n--- L0 Abstract ---");
-            println!("{}", data["l0_abstract"].as_str().unwrap_or("(none)"));
-            println!("\n--- L1 Overview ---");
-            println!("{}", data["l1_overview"].as_str().unwrap_or("(none)"));
         }
         Commands::Collection { action } => match action {
             CollectionCmd::Create {

@@ -28,7 +28,8 @@ fn load_test_config() -> EmbeddingSection {
 
 fn make_provider() -> EmbeddingProvider {
     let cfg = load_test_config();
-    EmbeddingProvider::new(cfg.api_url, cfg.api_key, cfg.model, cfg.dimension).expect("provider")
+    EmbeddingProvider::new(cfg.api_url, cfg.api_key, cfg.model, cfg.dimension, 100)
+        .expect("provider")
 }
 
 #[tokio::test]

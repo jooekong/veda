@@ -248,7 +248,11 @@ impl Client {
         Self::check(resp).await
     }
 
-    pub async fn get_summary(&self, ws_key: &str, path: &str) -> Result<serde_json::Value> {
+    /// Returns (status_code, body). Unlike most endpoints, summary has three
+    /// meaningful statuses (200 ready / 202 pending / 501 disabled) that the
+    /// CLI needs to render differently, so we don't go through `check()`
+    /// (which collapses all non-2xx into a single anyhow error).
+    pub async fn get_summary(&self, ws_key: &str, path: &str) -> Result<(u16, serde_json::Value)> {
         let path = path.trim_start_matches('/');
         let resp = self
             .http
@@ -256,7 +260,11 @@ impl Client {
             .bearer_auth(ws_key)
             .send()
             .await?;
-        Self::check(resp).await
+        let status = resp.status().as_u16();
+        let text = resp.text().await.context("read response body")?;
+        let body: serde_json::Value =
+            serde_json::from_str(&text).context("parse JSON response")?;
+        Ok((status, body))
     }
 
     pub async fn create_collection(

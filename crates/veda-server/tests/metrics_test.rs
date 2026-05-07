@@ -80,6 +80,7 @@ async fn metrics_render_contains_expected_series() {
             &cfg.embedding.api_key,
             &cfg.embedding.model,
             Some(cfg.embedding.dimension),
+            100,
         )
         .unwrap(),
     );

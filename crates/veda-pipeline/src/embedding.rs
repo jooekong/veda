@@ -7,7 +7,6 @@ use tracing::warn;
 use veda_core::store::EmbeddingService;
 use veda_types::{Result, VedaError};
 
-const BATCH_SIZE: usize = 100;
 const MAX_RETRIES: u32 = 3;
 const BASE_BACKOFF_MS: u64 = 500;
 /// Cap on `Retry-After` header (seconds). Without this, an upstream
@@ -52,6 +51,9 @@ pub struct EmbeddingProvider {
     request_dimensions: Option<u32>,
     configured_dim: Option<usize>,
     discovered_dim: RwLock<Option<usize>>,
+    /// Max texts per upstream call. Aliyun Bailian caps at 10; OpenAI
+    /// tolerates 2048+. Configurable via `[embedding].batch_size`.
+    batch_size: usize,
 }
 
 impl EmbeddingProvider {
@@ -60,6 +62,7 @@ impl EmbeddingProvider {
         api_key: impl Into<String>,
         model: impl Into<String>,
         dimension: Option<u32>,
+        batch_size: usize,
     ) -> Result<Self> {
         let client = reqwest::Client::builder()
             .connect_timeout(Duration::from_secs(5))
@@ -68,6 +71,13 @@ impl EmbeddingProvider {
             .map_err(|e| VedaError::EmbeddingFailed(e.to_string()))?;
 
         let configured_dim = dimension.map(|d| d as usize);
+        // batch_size 0 would loop forever in chunks(); reject loudly so
+        // a misconfiguration shows up at startup, not as a stuck embed.
+        if batch_size == 0 {
+            return Err(VedaError::InvalidInput(
+                "[embedding].batch_size must be >= 1".into(),
+            ));
+        }
 
         Ok(Self {
             client,
@@ -77,6 +87,7 @@ impl EmbeddingProvider {
             request_dimensions: dimension,
             configured_dim,
             discovered_dim: RwLock::new(None),
+            batch_size,
         })
     }
 
@@ -232,11 +243,11 @@ impl EmbeddingService for EmbeddingProvider {
         // and silently under-counting `veda_embed_total{outcome="err"}` for
         // multi-batch failures.
         let result: Result<Vec<Vec<f32>>> = async {
-            if texts.len() <= BATCH_SIZE {
+            if texts.len() <= self.batch_size {
                 return self.embed_with_retry(texts).await;
             }
             let mut all = Vec::with_capacity(texts.len());
-            for batch in texts.chunks(BATCH_SIZE) {
+            for batch in texts.chunks(self.batch_size) {
                 all.extend(self.embed_with_retry(batch).await?);
             }
             Ok(all)
@@ -294,8 +305,12 @@ mod tests {
 
     #[test]
     fn batch_size_constant_is_reasonable() {
-        assert_eq!(BATCH_SIZE, 100);
-        assert!(BATCH_SIZE < 2048);
+        // The default lives in veda-server config now; this test just
+        // sanity-checks the documented range we expect callers to use.
+        const TYPICAL_OPENAI: usize = 100;
+        const TYPICAL_BAILIAN: usize = 10;
+        assert!(TYPICAL_OPENAI < 2048);
+        assert!(TYPICAL_BAILIAN >= 1);
     }
 
     #[test]

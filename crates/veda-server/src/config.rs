@@ -75,6 +75,15 @@ pub struct EmbeddingConfig {
     pub api_key: String,
     pub model: String,
     pub dimension: u32,
+    /// Maximum texts per embed API call. Default 100 — works for OpenAI
+    /// (limit is 2048+). Aliyun Bailian / DashScope caps `input.contents`
+    /// at 10, so set `batch_size = 10` for those providers.
+    #[serde(default = "default_embedding_batch_size")]
+    pub batch_size: usize,
+}
+
+fn default_embedding_batch_size() -> usize {
+    100
 }
 
 #[derive(Debug, Deserialize)]

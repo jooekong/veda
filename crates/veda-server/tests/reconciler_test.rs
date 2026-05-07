@@ -137,6 +137,7 @@ async fn build_runtime() -> (
             &cfg.embedding.api_key,
             &cfg.embedding.model,
             Some(cfg.embedding.dimension),
+            100,
         )
         .expect("embedding provider"),
     );
