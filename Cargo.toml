@@ -12,7 +12,10 @@ members = [
 ]
 
 [workspace.package]
-version = "0.1.0"
+# Bump this in lockstep with the next git tag. Captured into binaries via
+# clap's #[command(version)] (CARGO_PKG_VERSION). Mismatch causes `veda
+# --version` to lie. scripts/release.sh automates the bump.
+version = "0.1.3"
 edition = "2021"
 license = "MIT"
 
