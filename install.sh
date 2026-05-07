@@ -2,7 +2,7 @@
 # install.sh — Veda CLI installer
 #
 # Usage:
-#   curl -fL https://git.ddxq.mobi/middleware/dbpaas/veda/-/raw/main/install.sh | sh
+#   curl -fL https://raw.githubusercontent.com/jooekong/veda/main/install.sh | sh
 #   curl -fL ... | sh -s -- --with-fuse        # also install veda-fuse
 #
 # Env overrides:
@@ -11,10 +11,8 @@
 
 set -eu
 
-# ====== config (filled in by maintainer) ======
-DEPLOY_TOKEN="aYm_fPpSwfdi7psCAGdQ"        # GitLab deploy token, scope=read_package_registry
-PROJECT_ID="9462"
-GITLAB_BASE="https://git.ddxq.mobi"
+# ====== config ======
+GITHUB_REPO="jooekong/veda"
 DEFAULT_VERSION="0.1.0"
 DEFAULT_SERVER="http://10.79.51.161:3000"
 
@@ -44,9 +42,8 @@ detect_platform() {
 
 download_asset() {
     name="$1"
-    url="$GITLAB_BASE/api/v4/projects/$PROJECT_ID/packages/generic/veda/$VERSION/$name"
+    url="https://github.com/$GITHUB_REPO/releases/download/$VERSION/$name"
     curl --fail --show-error --silent --location \
-         --header "Deploy-Token: $DEPLOY_TOKEN" \
          "$url" -o "$TMP/$name" \
         || err "download failed: $name (check version $VERSION exists in releases)"
 }
@@ -138,9 +135,8 @@ preflight_fuse() {
 install_skill() {
     if [ -d "$HOME/.claude" ]; then
         mkdir -p "$HOME/.claude/skills/veda"
-        url="$GITLAB_BASE/api/v4/projects/$PROJECT_ID/packages/generic/veda/$VERSION/skill.md"
+        url="https://github.com/$GITHUB_REPO/releases/download/$VERSION/skill.md"
         if curl --fail --silent --location \
-                --header "Deploy-Token: $DEPLOY_TOKEN" \
                 "$url" -o "$HOME/.claude/skills/veda/SKILL.md"; then
             log "skill installed → ~/.claude/skills/veda/SKILL.md"
         else
@@ -170,7 +166,7 @@ print_next_steps() {
     if [ -d "$HOME/.claude" ]; then
         log "Claude Code: skill auto-installed; just ask Claude to use veda."
     else
-        log "Other agents: have them read $GITLAB_BASE/middleware/dbpaas/veda/-/raw/main/skill.md"
+        log "Other agents: have them read https://raw.githubusercontent.com/$GITHUB_REPO/main/skill.md"
     fi
 }
 
@@ -192,9 +188,6 @@ EOF
         esac
         shift
     done
-
-    [ "$DEPLOY_TOKEN" = "REPLACE_ME_DEPLOY_TOKEN" ] \
-        && err "DEPLOY_TOKEN not configured in install.sh"
 
     target=$(detect_platform)
     install_binary "veda" "$target"

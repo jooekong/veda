@@ -20,7 +20,7 @@ You interact with it via the `veda` binary; never construct HTTP requests direct
    ```
    If missing, install:
    ```sh
-   curl -fL https://git.ddxq.mobi/middleware/dbpaas/veda/-/raw/main/install.sh | sh
+   curl -fL https://raw.githubusercontent.com/jooekong/veda/main/install.sh | sh
    ```
    Add `--with-fuse` to also install `veda-fuse` for filesystem mounting.
 
@@ -163,6 +163,6 @@ veda-fuse umount /mnt/veda
 
 ## Reference
 
-- Repo: https://git.ddxq.mobi/middleware/dbpaas/veda
+- Repo: https://github.com/jooekong/veda
 - Server (alpha): http://10.79.51.161:3000
 - Issues: contact Joe
