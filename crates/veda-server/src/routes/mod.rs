@@ -19,6 +19,7 @@ const READY_TIMEOUT: Duration = Duration::from_secs(3);
 
 pub fn build_router(state: Arc<AppState>) -> Router {
     Router::new()
+        .route("/healthz", get(healthz))
         .route("/v1/ready", get(ready))
         .route("/v1/metrics", get(metrics_endpoint))
         .merge(account::routes())
@@ -105,6 +106,15 @@ struct ReadyResponse {
 struct ComponentHealth {
     name: &'static str,
     ok: bool,
+}
+
+/// Cheap liveness probe. Returns 200 immediately as long as the HTTP layer
+/// is responsive. Does NOT touch MySQL/Milvus — those are checked by
+/// /v1/ready (readiness). systemd watchdog / k8s livenessProbe should hit
+/// this endpoint, not /v1/ready, so a transient DB blip doesn't trigger
+/// process restarts that won't help.
+async fn healthz() -> &'static str {
+    "ok"
 }
 
 async fn ready(State(state): State<Arc<AppState>>) -> Response {
