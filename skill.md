@@ -42,7 +42,7 @@ You interact with it via the `veda` binary; never construct HTTP requests direct
    ```sh
    veda workspace list
    veda workspace create my-project    # if none exist
-   veda use my-project
+   veda workspace use my-project       # writes workspace_id + workspace_key into config
    ```
 
 5. **Verify**:
@@ -51,28 +51,31 @@ You interact with it via the `veda` binary; never construct HTTP requests direct
    ```
    Empty listing or existing files is fine. Errors mean a step above failed.
 
+## Path syntax
+
+Remote paths are plain absolute paths starting with `/`, scoped to the active workspace.
+The CLI **does not accept** `:/path` syntax — `:` is rejected as an invalid character.
+
 ## Core operations
 
 ### File operations
 
-Remote paths use `:/path` syntax (the `:` prefix means "in current workspace").
-
 ```sh
-veda cp ./README.md :/docs/readme.md            # upload
-veda cp ./report.pdf :/docs/report.pdf          # PDF — text auto-extracted
-veda cp - :/notes/scratch < some-input          # from stdin
-veda ls :/docs                                  # list dir
-veda cat :/docs/readme.md                       # full content
-veda cat :/docs/readme.md --lines 10:20         # line range
-veda mv :/old-name :/new-name                   # rename
-veda rm :/path -r                               # delete
-veda mkdir :/new-dir                            # create directory
-veda append :/notes/log "new entry"             # append to file
+veda cp ./README.md /docs/readme.md         # upload
+veda cp ./report.pdf /docs/report.pdf       # PDF — text auto-extracted
+veda cp - /notes/scratch < some-input       # from stdin (use "-" as src)
+veda ls /docs                                # list dir
+veda cat /docs/readme.md                     # full content
+veda cat /docs/readme.md --lines 1:20       # line range (1-indexed, inclusive)
+veda mv /old-name /new-name                  # rename
+veda rm /path                                # delete (recursive by default — no -r flag)
+veda mkdir /new-dir                          # create directory
+veda append /notes/log "new entry"          # append (use "-" for stdin)
 ```
 
 ### Search
 
-Three modes; default `hybrid` fuses semantic + BM25 with RRF. Pick the right mode:
+Three modes; default `hybrid` fuses semantic + BM25 with RRF.
 
 ```sh
 veda search "how does authentication work"                    # hybrid (best general)
@@ -81,44 +84,74 @@ veda search "code about retry semantics" --mode semantic      # conceptual only
 veda search "summary" --detail-level abstract                 # save tokens — return summaries
 ```
 
-`--detail-level`: `abstract` (cheapest), `overview`, `full` (default). `--limit N` sets result count.
+Flags: `--mode {hybrid,semantic,fulltext}`, `--limit N` (default 10),
+`--detail-level {abstract,overview,full}` (default `full`).
+
+**Embedding is async**: a file uploaded just now may not appear in semantic results
+for a few seconds. If a search misses an obviously-present file, retry after 5s.
 
 ### Summary
 
 ```sh
-veda summary :/path/to/file.md       # L0/L1 auto-generated summary for a file
-veda summary :/                      # workspace-level summary
+veda summary /path/to/file.md       # L0/L1 auto-generated summary for a file
+veda summary /                       # workspace-level summary
 ```
+
+L0/L1 summaries are generated **asynchronously**. A file uploaded seconds ago will
+return `404 not found: summary not found`. Either retry later or fall back to
+`veda cat` for the raw content.
 
 ### Structured collections
 
-Schema-first, vector-native. Field flags: `index` = filterable, `embed` = auto-embed this string field.
+Schema-first, vector-native.
 
 ```sh
+# Create with schema (JSON array). --embed-source picks which field is auto-embedded.
 veda collection create articles \
-  --field "title:string:index" \
-  --field "content:string:embed" \
-  --field "category:string:index"
+  --schema '[
+    {"name":"title","type":"string","index":true},
+    {"name":"content","type":"string"},
+    {"name":"category","type":"string","index":true}
+  ]' \
+  --embed-source content
 
-veda collection insert articles \
-  --data '{"title":"Intro to Rust","content":"Rust is a systems language...","category":"tech"}'
+# Insert: positional argument, JSON ARRAY of rows (not single object)
+veda collection insert articles '[
+  {"title":"Intro to Rust","content":"Rust is a systems language...","category":"tech"},
+  {"title":"Pasta Recipe","content":"Boil water...","category":"food"}
+]'
 
-veda collection search articles "systems programming" \
-  --filter "category == 'tech'" --limit 10
+# List / describe / delete
+veda collection list
+veda collection desc articles
+veda collection delete articles
 
-# Raw vector collection (you provide the vectors)
-veda collection create my-vecs --dim 768 --type raw
-veda insert --vector "[0.1,0.2,0.3]" --payload '{"label":"x"}'
+# Search by semantic similarity (no built-in --filter; use SQL for filtering)
+veda collection search articles "systems programming" --limit 5
+
+# Raw vector collection: declare a vector field in the schema
+veda collection create my-vecs \
+  --schema '[{"name":"v","type":"vector","dim":768},{"name":"label","type":"string"}]' \
+  --embed-source v
 ```
+
+**Important**: `veda collection search` output dumps the full embedding vector for
+every result (1024+ floats per row, ~30KB each). When parsing this in an LLM
+context, **always strip the `vector` field** before processing — only keep
+`title`, `content`, `category` (etc.) and `distance`. Or use `veda sql` instead
+for cleaner output.
 
 ### SQL queries
 
-DataFusion engine, standard SQL across collections.
+DataFusion engine. Cleaner output than `collection search` (no vector dump).
+Use this when you need filters or aggregations on a collection.
 
 ```sh
 veda sql "SELECT title, category FROM articles WHERE category = 'tech' LIMIT 5"
 veda sql "SELECT category, COUNT(*) FROM articles GROUP BY category"
 ```
+
+Output is JSON-line (one row per line).
 
 ### FUSE mount (only if installed with --with-fuse)
 
@@ -132,12 +165,13 @@ veda-fuse umount /mnt/veda
 
 | User wants                             | Use                                      |
 |----------------------------------------|------------------------------------------|
-| Upload a local file                    | `veda cp local :/remote`                 |
+| Upload a local file                    | `veda cp local /remote`                  |
 | Find old notes by topic                | `veda search` (default hybrid)           |
 | Find exact identifier / string         | `veda search --mode fulltext`            |
 | Recall conceptually similar content    | `veda search --mode semantic`            |
 | Save tokens on long results            | `veda search --detail-level abstract`    |
-| Tabular data with schema, filterable   | Collection (not file)                    |
+| Tabular data with schema               | Collection (not file)                    |
+| Filter / aggregate over a collection   | `veda sql` (collection search has no filter) |
 | Aggregation across many files          | `veda sql`                               |
 | Edit / grep many files locally         | FUSE mount + native tools                |
 | List / browse files                    | `veda ls`                                |
@@ -147,19 +181,24 @@ veda-fuse umount /mnt/veda
 
 | Error message                          | Meaning              | Fix                                              |
 |----------------------------------------|---------------------|--------------------------------------------------|
+| `invalid path: invalid character in segment: :` | Used `:/path` syntax | Drop the `:` — paths are plain `/path`     |
 | `no API key configured`                | Not authenticated    | Ask user to run `veda account create` or `login` |
-| `no workspace selected`                | No active workspace  | `veda workspace list` → `veda use <name>`        |
-| `connection refused`                   | Server unreachable   | `veda config show`; verify server URL            |
+| `no workspace selected`                | No active workspace  | `veda workspace list` → `veda workspace use <name>` |
+| `connection refused` / `Empty reply from server` | Server unreachable / hung | `veda config show`; verify server URL, ping it |
 | `401 unauthorized`                     | API key invalid      | `veda account login` to refresh                  |
-| 4xx with JSON error body               | API error            | Echo server's `message` field to user            |
+| `404 not found: summary not found`     | L0/L1 not yet generated (async) | Retry later, or `veda cat` for raw content |
+| 4xx with JSON error body               | API error            | Echo server's `error` field to user              |
 
 ## Don't do
 
-- Don't store large binaries — PDFs/images keep extracted text only, the original is dropped.
+- Don't store large binaries — PDFs/images keep extracted text only; the original is dropped.
 - Don't use `veda search` for exact path lookups — use `ls` / `cat` instead.
-- Don't write to `:/` root — pick a semantic prefix like `:/notes/`, `:/code/`, `:/docs/`.
-- Don't repeat the user's password / API key in chat — they live in `~/.config/veda/config.toml` (mode 0600) once configured.
+- Don't write to `/` root — pick a semantic prefix like `/notes/`, `/code/`, `/docs/`.
+- Don't repeat the user's password / API key in chat — they live in
+  `~/.config/veda/config.toml` (mode 0600) once configured.
 - Don't construct HTTP requests directly — always go through the `veda` CLI.
+- Don't display raw `veda collection search` output to the user — strip the
+  `vector` field first or use `veda sql` instead.
 
 ## Reference
 
