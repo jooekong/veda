@@ -238,16 +238,23 @@ async fn main() -> anyhow::Result<()> {
             }
         },
         Commands::Cp { src, dst } => {
-            let content = if src == "-" {
+            if src == "-" {
                 use std::io::Read;
                 let mut buf = String::new();
                 std::io::stdin().read_to_string(&mut buf)?;
-                buf
+                let resp = c.write_file(cfg.ws_key()?, &dst, &buf).await?;
+                println!("Written: revision {}", resp["data"]["revision"]);
             } else {
-                std::fs::read_to_string(&src)?
-            };
-            let resp = c.write_file(cfg.ws_key()?, &dst, &content).await?;
-            println!("Written: revision {}", resp["data"]["revision"]);
+                let src_path = std::path::Path::new(&src);
+                if src_path.is_dir() {
+                    let n = cp_dir_recursive(&c, cfg.ws_key()?, src_path, &dst).await?;
+                    println!("Uploaded {n} file(s) under {dst}");
+                } else {
+                    let content = std::fs::read_to_string(&src)?;
+                    let resp = c.write_file(cfg.ws_key()?, &dst, &content).await?;
+                    println!("Written: revision {}", resp["data"]["revision"]);
+                }
+            }
         }
         Commands::Cat { path, lines } => {
             let content = c.read_file(cfg.ws_key()?, &path, lines.as_deref()).await?;
@@ -465,5 +472,58 @@ async fn main() -> anyhow::Result<()> {
         },
     }
 
+    Ok(())
+}
+
+/// Recursively upload every file under `src_root` to `dst_root` on the server.
+/// Remote path = dst_root + path-relative-to-src_root. Skips empty directories.
+/// Returns the number of files uploaded.
+async fn cp_dir_recursive(
+    client: &client::Client,
+    ws_key: &str,
+    src_root: &std::path::Path,
+    dst_root: &str,
+) -> anyhow::Result<usize> {
+    let dst_root = dst_root.trim_end_matches('/');
+    let mut files = Vec::new();
+    collect_files(src_root, &mut files)?;
+    let mut count = 0usize;
+    for f in &files {
+        let rel = f.strip_prefix(src_root)?;
+        // POSIX path on the server side regardless of host OS
+        let rel_str = rel
+            .components()
+            .map(|c| c.as_os_str().to_string_lossy().into_owned())
+            .collect::<Vec<_>>()
+            .join("/");
+        let remote = format!("{dst_root}/{rel_str}");
+        let content = std::fs::read_to_string(f).map_err(|e| {
+            anyhow::anyhow!("read {} failed: {e} (binary files are not supported)", f.display())
+        })?;
+        client.write_file(ws_key, &remote, &content).await?;
+        println!("  {} -> {remote}", f.display());
+        count += 1;
+    }
+    Ok(count)
+}
+
+fn collect_files(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) -> std::io::Result<()> {
+    for entry in std::fs::read_dir(dir)? {
+        let entry = entry?;
+        // Use file_type() (does NOT follow symlinks) to avoid infinite recursion
+        // through directory symlinks, and to prevent silently uploading files
+        // outside the intended source root via a symlink escape.
+        let ft = entry.file_type()?;
+        if ft.is_symlink() {
+            eprintln!("skip symlink: {}", entry.path().display());
+            continue;
+        }
+        let p = entry.path();
+        if ft.is_dir() {
+            collect_files(&p, out)?;
+        } else if ft.is_file() {
+            out.push(p);
+        }
+    }
     Ok(())
 }
