@@ -20,7 +20,7 @@ veda-pipeline   embedding、chunking、提取、LLM 摘要   (已实现)
 veda-sql        DataFusion SQL 引擎                 (已实现)
 veda-server     Axum HTTP 层                        (已实现)
 veda-cli        CLI 客户端                          (已实现)
-veda-fuse       FUSE 挂载（不在默认 workspace）      (已实现)
+veda-fuse       FUSE 挂载                           (已实现)
 ```
 
 ## 已实现能力
@@ -42,6 +42,12 @@ veda-fuse       FUSE 挂载（不在默认 workspace）      (已实现)
   - SSE：后台线程连接 /v1/events，远程变更时失效 attr+read+dir cache；cursor 原子落盘持久化（debounce 1s）
   - 其他：statfs 返回合理值
 - `veda-server`：新增 `GET /v1/events` SSE 端点（轮询 veda_fs_events 表，cursor-based）；`GET /v1/fs/{path}` 支持 `Range` header 返回 206 Partial Content
+- v0.1.5 批：
+  - 搜索：真 BM25 hybrid（dense + sparse RRF via Milvus 2.5 `hybrid_search`），fulltext 改为 BM25 sparse，jieba 分词中文，自动 schema 迁移（drop+rebuild + 全量 ChunkSync 入队）；`SearchHit.score_type` 标 `rrf` / `bm25` / `cosine`；`/v1/search` 路由响应剥离内部字段（vector / workspace_id）
+  - Worker：paginated chunk read（chunk_sync + summary_sync 共享 `load_full_content`），`catch_unwind` 隔离 task panic；summary debounce 30s + burst window 5min（`veda_summary_enqueue_total{burst=...}` 计数）；L1 prompt 结构化 + 多语言（zh/ja/ko/en 自动判断）
+  - 端点：`/healthz` 轻量存活探针；`GET /v1/grep` 字面量子串扫描；`GET /v1/summary/{path}` 三态响应（200 ready / 202 pending+Retry-After / 501 disabled+Cache-Control:no-store）
+  - 配置：`embedding.batch_size`（含 `VEDA_EMBEDDING_BATCH_SIZE`），`last_embedded_content_hash` 水印 + `force_reembed` 标志
+  - CLI：`veda --version`，`veda cp -r` 递归目录上传（跳 symlink），`veda grep`
 
 ## 测试策略
 

@@ -105,26 +105,38 @@ One-sentence summary:"#;
 
 /// Detect a coarse output language from a sample of the content. Returns a
 /// label suitable for the {language} prompt slot. Heuristic only — looks at
-/// the ratio of CJK characters in the first 500 chars; >25% CJK → `zh-CN`,
-/// else `en`. Other languages collapse to `en` (LLM still does fine if the
-/// prompt is en but content is e.g. Spanish — it'll match the content).
+/// the first 500 chars and counts unique-script signals separately:
+/// Hiragana/Katakana → `ja`, Hangul → `ko`, Han (CJK Unified / Extension A)
+/// → `zh-CN`. The first to cross 25% wins, in that order, since kana and
+/// hangul are unique to their language while Han chars are shared between
+/// Chinese and Japanese kanji-only segments. Anything else → `en`.
 pub fn detect_output_language(sample: &str) -> &'static str {
     let chars: Vec<char> = sample.chars().take(500).collect();
-    if chars.is_empty() {
+    let n = chars.len();
+    if n == 0 {
         return "en";
     }
-    let cjk = chars
-        .iter()
-        .filter(|c| {
-            let code = **c as u32;
-            (0x4E00..=0x9FFF).contains(&code)        // CJK Unified
-                || (0x3400..=0x4DBF).contains(&code) // CJK Extension A
-                || (0x3040..=0x309F).contains(&code) // Hiragana
-                || (0x30A0..=0x30FF).contains(&code) // Katakana
-                || (0xAC00..=0xD7AF).contains(&code) // Hangul
-        })
-        .count();
-    if cjk * 4 > chars.len() {
+    let mut kana = 0usize;
+    let mut hangul = 0usize;
+    let mut han = 0usize;
+    for c in &chars {
+        let code = *c as u32;
+        if (0x3040..=0x309F).contains(&code) || (0x30A0..=0x30FF).contains(&code) {
+            kana += 1;
+        } else if (0xAC00..=0xD7AF).contains(&code) {
+            hangul += 1;
+        } else if (0x4E00..=0x9FFF).contains(&code) || (0x3400..=0x4DBF).contains(&code) {
+            han += 1;
+        }
+    }
+    // Threshold = strictly over 25%. Order matters: kana/hangul are unique
+    // markers; Han comes last so a Japanese sample with kanji + hiragana
+    // resolves to `ja`, not `zh-CN`.
+    if kana * 4 > n {
+        "ja"
+    } else if hangul * 4 > n {
+        "ko"
+    } else if han * 4 > n {
         "zh-CN"
     } else {
         "en"
@@ -320,12 +332,24 @@ mod tests {
     }
 
     #[test]
-    fn detect_lang_hiragana_katakana_hangul_count_as_cjk() {
-        // Japanese hiragana
-        assert_eq!(detect_output_language("こんにちは世界"), "zh-CN");
-        // Japanese katakana
-        assert_eq!(detect_output_language("カタカナテスト"), "zh-CN");
-        // Korean hangul
-        assert_eq!(detect_output_language("안녕하세요세계"), "zh-CN");
+    fn detect_lang_japanese_hiragana() {
+        assert_eq!(detect_output_language("こんにちは世界"), "ja");
+    }
+
+    #[test]
+    fn detect_lang_japanese_katakana() {
+        assert_eq!(detect_output_language("カタカナテスト"), "ja");
+    }
+
+    #[test]
+    fn detect_lang_korean_hangul() {
+        assert_eq!(detect_output_language("안녕하세요세계"), "ko");
+    }
+
+    #[test]
+    fn detect_lang_japanese_with_kanji_resolves_to_ja_not_zh() {
+        // Mixed kanji + hiragana — Japanese, not Chinese. Order of script
+        // checks matters: kana wins over han.
+        assert_eq!(detect_output_language("これは日本語のテスト"), "ja");
     }
 }

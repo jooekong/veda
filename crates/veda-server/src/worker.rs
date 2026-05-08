@@ -206,6 +206,42 @@ impl Worker {
         Ok(())
     }
 
+    /// Load a file's full content into a single `String`, paginating chunked
+    /// storage in batches of 32 chunks. Caps peak memory at ~file_size + one
+    /// batch (the alternative — `get_file_chunks(None, None)` — holds the
+    /// full `Vec<FileChunk>` plus the assembled buffer simultaneously, ~2x).
+    async fn load_full_content(&self, file: &FileRecord) -> veda_types::Result<String> {
+        match file.storage_type {
+            StorageType::Inline => Ok(self
+                .meta
+                .get_file_content(&file.id)
+                .await?
+                .unwrap_or_default()),
+            StorageType::Chunked => {
+                let total = file.size_bytes.max(0) as usize;
+                let mut buf = String::with_capacity(total);
+                let byte_lens = self.meta.list_chunk_byte_lens(&file.id).await?;
+                if let (Some(first), Some(last)) = (byte_lens.first(), byte_lens.last()) {
+                    const CHUNK_BATCH: i32 = 32;
+                    let mut lo = first.0;
+                    let last_idx = last.0;
+                    while lo <= last_idx {
+                        let hi = lo.saturating_add(CHUNK_BATCH - 1).min(last_idx);
+                        let batch = self
+                            .meta
+                            .get_chunks_in_index_range(&file.id, lo, hi)
+                            .await?;
+                        for c in batch {
+                            buf.push_str(&c.content);
+                        }
+                        lo = hi.saturating_add(1);
+                    }
+                }
+                Ok(buf)
+            }
+        }
+    }
+
     async fn handle_chunk_sync(
         &self,
         workspace_id: &str,
@@ -239,41 +275,7 @@ impl Worker {
             return Ok(());
         }
 
-        let content = match file.storage_type {
-            StorageType::Inline => self
-                .meta
-                .get_file_content(file_id)
-                .await?
-                .unwrap_or_default(),
-            StorageType::Chunked => {
-                // Paginated read: pull chunks in fixed-size index batches and
-                // drop each batch's `Vec<FileChunk>` after appending. This caps
-                // peak memory at ~file_size + 1 batch (was ~2x file_size when
-                // we held the full Vec<FileChunk> AND the assembled buf).
-                let total = file.size_bytes.max(0) as usize;
-                let mut buf = String::with_capacity(total);
-                let byte_lens = self.meta.list_chunk_byte_lens(file_id).await?;
-                if let (Some(first), Some(last)) =
-                    (byte_lens.first(), byte_lens.last())
-                {
-                    const CHUNK_BATCH: i32 = 32;
-                    let mut lo = first.0;
-                    let last_idx = last.0;
-                    while lo <= last_idx {
-                        let hi = lo.saturating_add(CHUNK_BATCH - 1).min(last_idx);
-                        let batch = self
-                            .meta
-                            .get_chunks_in_index_range(file_id, lo, hi)
-                            .await?;
-                        for c in batch {
-                            buf.push_str(&c.content);
-                        }
-                        lo = hi.saturating_add(1);
-                    }
-                }
-                buf
-            }
-        };
+        let content = self.load_full_content(&file).await?;
 
         let sem_chunks = semantic_chunk(&content, 2048);
         // Drop the assembled file buffer before the embed loop allocates per-batch
@@ -420,17 +422,7 @@ impl Worker {
             return Ok(());
         };
 
-        let content = match file.storage_type {
-            StorageType::Inline => self
-                .meta
-                .get_file_content(file_id)
-                .await?
-                .unwrap_or_default(),
-            StorageType::Chunked => {
-                let chunks = self.meta.get_file_chunks(file_id, None, None).await?;
-                chunks.into_iter().map(|c| c.content).collect::<String>()
-            }
-        };
+        let content = self.load_full_content(&file).await?;
 
         if content.trim().is_empty() {
             return Ok(());

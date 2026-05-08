@@ -546,9 +546,10 @@ async fn fs_events_retention_cleans_old_rows() {
 2. **Doc-level ACL + Quota**（依赖 P1-6 account_id 修复）
 3. **大文件 FUSE 完整支持**（setattr 截断 server-side API、WriteHandle spill to disk）
 4. **多文档类型**：PDF / OCR / tree-sitter chunking
-5. **真 hybrid search**（BM25 或 Milvus 2.5+ FTS）
-6. **审计日志 + OpenTelemetry**
-7. **Connector / OpenAPI / SDK**
+5. **审计日志 + OpenTelemetry**
+6. **Connector / OpenAPI / SDK**
+
+> **已交付**（提前于本计划）：真 hybrid search（BM25 + Milvus 2.5 FTS + jieba）已在 0.1.4 上线，对应原 §6.5。
 
 ---
 

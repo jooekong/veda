@@ -333,13 +333,15 @@ Grafana 在 `http://localhost:3001`（默认 admin/admin）。Prometheus data so
 
 ### CLI
 
-- `veda cp` 把文件全量读入内存，不要用于 >10MB 文件，用 HTTP API 直接 PUT
+- `veda cp` 单文件全量读入内存，不要用于 >10MB 文件
+- 目录递归上传 (`veda cp ./dir /remote -r`) 是 sequential 的，跳过 symlink；任一单文件仍受 50MB 上限
 
 ### 搜索
 
-- 全文搜索基于 Milvus filter 上的子串匹配，无 BM25 / TF-IDF 加权
-- Hybrid 模式做了 ANN + lexical 融合，但 lexical 信号偏弱
+- Hybrid = dense ANN + BM25 sparse, RRF 融合（Milvus 2.5 hybrid_search）
+- Fulltext = BM25 over 同一 sparse 字段；中文 BM25 用 jieba 分词
 - 搜索结果引用 `chunk_index` 不稳定，文件重写后历史引用可能错位
+- `score` 数值跨模式不可比；客户端读 `score_type`（`rrf` / `bm25` / `cosine`）后再做大小判断
 
 ### 文档类型
 

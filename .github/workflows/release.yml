@@ -11,7 +11,7 @@ on:
       - '*'
 
 permissions:
-  contents: write    # needed by softprops/action-gh-release
+  contents: write    # needed by `gh release create`
 
 env:
   ZIG_VERSION: "0.13.0"

@@ -13,7 +13,7 @@ set -eu
 
 # ====== config ======
 GITHUB_REPO="jooekong/veda"
-DEFAULT_VERSION="0.1.0"
+DEFAULT_VERSION="0.1.5"
 DEFAULT_SERVER="http://10.79.51.161:3000"
 
 # ====== state ======
@@ -161,7 +161,8 @@ print_next_steps() {
     log "  1. veda config set server_url $DEFAULT_SERVER"
     log "  2. veda account create --name <you> --email <email> --password <password>"
     log "  3. veda config set api_key <key from above>"
-    log "  4. veda workspace create my-workspace && veda use my-workspace"
+    log "  4. veda workspace create my-workspace      # prints the workspace id"
+    log "  5. veda workspace use <id-from-above>      # creates a workspace key"
     log ""
     if [ -d "$HOME/.claude" ]; then
         log "Claude Code: skill auto-installed; just ask Claude to use veda."

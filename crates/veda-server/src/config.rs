@@ -265,6 +265,11 @@ impl ServerConfig {
                 self.embedding.dimension = n;
             }
         }
+        if let Ok(v) = std::env::var("VEDA_EMBEDDING_BATCH_SIZE") {
+            if let Ok(n) = v.parse() {
+                self.embedding.batch_size = n;
+            }
+        }
         if let Ok(v) = std::env::var("VEDA_LLM_API_URL") {
             let llm = self.llm.get_or_insert_with(|| LlmConfig {
                 api_url: String::new(),

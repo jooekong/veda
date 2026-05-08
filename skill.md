@@ -61,8 +61,8 @@ The CLI **does not accept** `:/path` syntax — `:` is rejected as an invalid ch
 ### File operations
 
 ```sh
-veda cp ./README.md /docs/readme.md         # upload
-veda cp ./report.pdf /docs/report.pdf       # PDF — text auto-extracted
+veda cp ./README.md /docs/readme.md         # upload (UTF-8 text only)
+veda cp ./src /code -r                       # recursive directory upload
 veda cp - /notes/scratch < some-input       # from stdin (use "-" as src)
 veda ls /docs                                # list dir
 veda cat /docs/readme.md                     # full content
@@ -155,11 +155,9 @@ veda collection create my-vecs \
   --embed-source v
 ```
 
-**Important**: `veda collection search` output dumps the full embedding vector for
-every result (1024+ floats per row, ~30KB each). When parsing this in an LLM
-context, **always strip the `vector` field** before processing — only keep
-`title`, `content`, `category` (etc.) and `distance`. Or use `veda sql` instead
-for cleaner output.
+Server strips internal fields (`vector`, `workspace_id`) from collection
+search output, so results are LLM-ready as-is. Prefer `veda sql` when you
+need filters, aggregates, or tabular formatting.
 
 ### SQL queries
 
@@ -212,14 +210,13 @@ veda-fuse umount /mnt/veda
 
 ## Don't do
 
-- Don't store large binaries — PDFs/images keep extracted text only; the original is dropped.
+- Don't upload binaries — `veda cp` rejects non-UTF-8 input; PDFs/images
+  aren't supported (no extraction backend wired up).
 - Don't use `veda search` for exact path lookups — use `ls` / `cat` instead.
 - Don't write to `/` root — pick a semantic prefix like `/notes/`, `/code/`, `/docs/`.
 - Don't repeat the user's password / API key in chat — they live in
   `~/.config/veda/config.toml` (mode 0600) once configured.
 - Don't construct HTTP requests directly — always go through the `veda` CLI.
-- Don't display raw `veda collection search` output to the user — strip the
-  `vector` field first or use `veda sql` instead.
 
 ## Reference
 
