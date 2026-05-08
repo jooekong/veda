@@ -102,7 +102,7 @@ docker compose up -d
 docker compose ps
 ```
 
-> ⚠️ **第一次 `up -d` 会触发本地 `cargo build --release` 来构建 veda-server / veda-migrate 镜像，预计 10-20 分钟**（在普通 4 核 VM 上）。后续重启 60-120 秒。如果你想跳过构建，等我们 push 预编译镜像到 ghcr。
+> ⚠️ **第一次 `up -d` 会触发本地 `cargo build --release` 来构建 veda-server 镜像，预计 10-20 分钟**（在普通 4 核 VM 上）。后续重启 60-120 秒。如果你想跳过构建，等我们 push 预编译镜像到 ghcr。
 
 期望状态（`docker compose ps`）：
 
@@ -112,7 +112,6 @@ docker compose ps
 | `etcd` | `running (healthy)` |
 | `minio` | `running (healthy)` |
 | `milvus` | `running (healthy)` |
-| `veda-migrate` | **`Exited (0)`** ← 一次性 job，不是 bug |
 | `veda-server` | `running` |
 | `prometheus` | `running` |
 | `grafana` | `running` |
@@ -397,8 +396,8 @@ docker compose down            # 容器停掉，volumes 保留，重启不丢数
 systemd 路径：
 
 ```bash
-sudo systemctl stop veda-server veda-migrate
-sudo systemctl disable veda-server veda-migrate
+sudo systemctl stop veda-server
+sudo systemctl disable veda-server
 ```
 
 ---

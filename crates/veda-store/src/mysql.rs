@@ -608,35 +608,6 @@ impl MysqlStore {
                 .await
                 .map_err(|e| VedaError::Storage(e.to_string()))?;
         }
-
-        // Idempotent column adds for upgrading existing schemas. errno 1060
-        // (duplicate column) is treated as success so re-running migrate
-        // against an already-migrated database is a no-op.
-        let alters = ["ALTER TABLE veda_files ADD COLUMN last_embedded_content_hash VARCHAR(64) NULL"];
-        for s in alters {
-            match sqlx::query(s).execute(&self.pool).await {
-                Ok(_) => {}
-                Err(sqlx::Error::Database(ref e))
-                    if e.try_downcast_ref::<sqlx::mysql::MySqlDatabaseError>()
-                        .is_some_and(|x| x.number() == 1060) => {}
-                Err(e) => return Err(VedaError::Storage(e.to_string())),
-            }
-        }
-
-        // Idempotent index adds. errno 1061 is "Duplicate key name", treated as
-        // already-applied. Required for retention sweeps over `created_at` to
-        // avoid full-table scans + long row-lock holds on large event tables.
-        let index_alters = ["ALTER TABLE veda_fs_events ADD INDEX idx_created_at (created_at)"];
-        for s in index_alters {
-            match sqlx::query(s).execute(&self.pool).await {
-                Ok(_) => {}
-                Err(sqlx::Error::Database(ref e))
-                    if e.try_downcast_ref::<sqlx::mysql::MySqlDatabaseError>()
-                        .is_some_and(|x| x.number() == 1061) => {}
-                Err(e) => return Err(VedaError::Storage(e.to_string())),
-            }
-        }
-
         Ok(())
     }
 

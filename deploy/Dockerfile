@@ -1,8 +1,7 @@
-# Two-stage build. We compile veda-server and veda-migrate in a fat
-# rust:bookworm image, then copy just the binaries + a minimal runtime
-# (Debian slim with libssl3 / ca-certificates for HTTPS to Milvus and
-# the embedding API) into the final layer. Total runtime image is well
-# under 100MB.
+# Two-stage build. We compile veda-server in a fat rust:bookworm image,
+# then copy just the binary + a minimal runtime (Debian slim with
+# ca-certificates for HTTPS to Milvus and the embedding API) into the
+# final layer. Total runtime image is well under 100MB.
 
 FROM rust:1.83-bookworm AS builder
 
@@ -30,16 +29,15 @@ RUN set -eux; \
     mkdir -p crates/veda-cli/src; \
     echo "" > crates/veda-cli/src/lib.rs; \
     echo "fn main() {}" > crates/veda-cli/src/main.rs; \
-    mkdir -p crates/veda-server/src crates/veda-server/src/bin; \
+    mkdir -p crates/veda-server/src; \
     echo "fn main() {}" > crates/veda-server/src/main.rs; \
-    echo "fn main() {}" > crates/veda-server/src/bin/veda-migrate.rs; \
     echo "" > crates/veda-server/src/lib.rs; \
-    cargo build --release --bin veda-server --bin veda-migrate; \
+    cargo build --release --bin veda-server; \
     rm -rf crates
 
 # Now copy the real source and rebuild — only veda-* crates recompile.
 COPY crates ./crates
-RUN cargo build --release --bin veda-server --bin veda-migrate
+RUN cargo build --release --bin veda-server
 
 # Runtime image. With reqwest pinned to rustls-tls (no native OpenSSL
 # linkage) we only need ca-certificates for outbound HTTPS root trust.
@@ -50,7 +48,6 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=builder /src/target/release/veda-server /usr/local/bin/veda-server
-COPY --from=builder /src/target/release/veda-migrate /usr/local/bin/veda-migrate
 
 # Run as non-root. UID 10001 is conventional for app services and
 # matches the default `veda` user we create on the systemd path.

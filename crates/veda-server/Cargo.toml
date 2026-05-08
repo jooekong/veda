@@ -8,10 +8,6 @@ license.workspace = true
 name = "veda-server"
 path = "src/main.rs"
 
-[[bin]]
-name = "veda-migrate"
-path = "src/bin/veda-migrate.rs"
-
 [dependencies]
 veda-types.workspace = true
 veda-core.workspace = true

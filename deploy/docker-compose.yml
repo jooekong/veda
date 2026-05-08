@@ -1,6 +1,6 @@
-# Single-host alpha stack: mysql + milvus + veda-server (+ migrate one-shot)
-# + prometheus + grafana. Designed to come up green from a fresh `docker
-# compose up -d` on a clean host within ~30s of all images being pulled.
+# Single-host alpha stack: mysql + milvus + veda-server + prometheus +
+# grafana. Designed to come up green from a fresh `docker compose up -d`
+# on a clean host within ~30s of all images being pulled.
 #
 # Setup (one-time):
 #   1. cp deploy/.env.example deploy/.env  (and edit secrets)
@@ -17,10 +17,9 @@
 #   open http://localhost:9090   # prometheus
 #   open http://localhost:3001   # grafana (admin/admin)
 #
-# Migration: the `veda-migrate` service is a one-shot that runs `migrate`
-# then exits 0. veda-server depends_on it with `condition: service_completed_successfully`,
-# so it won't start until schema is up to date. Re-running `docker compose up`
-# is idempotent — migrate is a no-op when nothing has changed.
+# Schema bootstrap: veda-server runs CREATE TABLE IF NOT EXISTS on every
+# startup (idempotent). Demo phase — no separate migration job, no
+# back-compat ALTERs.
 
 services:
   # ── Storage ────────────────────────────────────────────────────────
@@ -129,30 +128,11 @@ services:
     restart: unless-stopped
 
   # ── Veda ───────────────────────────────────────────────────────────
-  # One-shot migration. exits 0 after schema is applied. veda-server
-  # depends_on this with service_completed_successfully so we're sure
-  # `migrate()` ran before the server starts answering /v1/* requests.
-  veda-migrate:
+  veda-server:
     build:
       context: ..
       dockerfile: deploy/Dockerfile
     image: veda:local
-    entrypoint: ["/usr/local/bin/veda-migrate"]
-    # Both binaries take a positional config path, NOT --config.
-    command: ["/etc/veda/config.toml"]
-    environment:
-      VEDA_MYSQL_URL: mysql://${MYSQL_USER:-veda}:${MYSQL_PASSWORD:-veda-dev}@mysql:3306/${MYSQL_DATABASE:-veda}
-    volumes:
-      - ./config.docker.toml:/etc/veda/config.toml:ro
-    depends_on:
-      mysql:
-        condition: service_healthy
-    restart: "no"  # one-shot
-
-  veda-server:
-    image: veda:local
-    # Build is on veda-migrate so we don't double-build; both services
-    # use the same image tag.
     environment:
       VEDA_MYSQL_URL: mysql://${MYSQL_USER:-veda}:${MYSQL_PASSWORD:-veda-dev}@mysql:3306/${MYSQL_DATABASE:-veda}
       VEDA_MILVUS_URL: http://milvus:19530
@@ -161,18 +141,18 @@ services:
       VEDA_EMBEDDING_API_KEY: ${VEDA_EMBEDDING_API_KEY:?set VEDA_EMBEDDING_API_KEY in .env}
       VEDA_LLM_API_KEY: ${VEDA_LLM_API_KEY:-}
       RUST_LOG: ${RUST_LOG:-info,veda=debug}
-    # Positional config path (not --config). --skip-migrate avoids a
-    # redundant migrate pass on startup since veda-migrate already ran.
-    command: ["/etc/veda/config.toml", "--skip-migrate"]
+    # Positional config path (not --config). Server runs schema bootstrap
+    # on every start; idempotent against an already-bootstrapped DB.
+    command: ["/etc/veda/config.toml"]
     volumes:
       - ./config.docker.toml:/etc/veda/config.toml:ro
     ports:
       - "${VEDA_PORT:-3000}:3000"
     depends_on:
+      mysql:
+        condition: service_healthy
       milvus:
         condition: service_healthy
-      veda-migrate:
-        condition: service_completed_successfully
     restart: unless-stopped
 
   # ── Observability ──────────────────────────────────────────────────

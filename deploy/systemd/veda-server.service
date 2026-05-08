@@ -1,13 +1,11 @@
 # systemd unit for veda-server on a host with native MySQL + Milvus.
 # Install:
 #   sudo cp deploy/systemd/veda-server.service /etc/systemd/system/
-#   sudo cp deploy/systemd/veda-migrate.service /etc/systemd/system/
 #   sudo useradd --system --no-create-home --home-dir /var/lib/veda veda
 #   sudo install -d -o veda -g veda /etc/veda /var/lib/veda
 #   sudo install -m 0640 -o veda -g veda config/server.toml /etc/veda/config.toml
-#   sudo install -m 0755 target/release/veda-server target/release/veda-migrate /usr/local/bin/
+#   sudo install -m 0755 target/release/veda-server /usr/local/bin/
 #   sudo systemctl daemon-reload
-#   sudo systemctl enable --now veda-migrate.service     # one-shot, runs once
 #   sudo systemctl enable --now veda-server.service
 #
 # Logs:  journalctl -u veda-server -f
@@ -16,13 +14,7 @@
 [Unit]
 Description=Veda server
 Documentation=https://github.com/jooekong/veda
-# We Wants= (not Requires=) the migrate one-shot so the server still
-# comes back after a reboot when migrate is permanently active. The
-# After= ordering blocks server start until migrate has *exited* —
-# this relies on veda-migrate.service being Type=oneshot; if someone
-# changes that to Type=simple, server may start mid-migration.
-Wants=veda-migrate.service
-After=network-online.target veda-migrate.service
+After=network-online.target
 Requires=network-online.target
 
 [Service]
@@ -30,7 +22,7 @@ Type=simple
 User=veda
 Group=veda
 EnvironmentFile=-/etc/veda/veda.env
-ExecStart=/usr/local/bin/veda-server /etc/veda/config.toml --skip-migrate
+ExecStart=/usr/local/bin/veda-server /etc/veda/config.toml
 Restart=on-failure
 RestartSec=5s
 # 10s shutdown grace lets in-flight HTTP requests finish before SIGKILL;

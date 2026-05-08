@@ -180,35 +180,6 @@ impl MilvusStore {
         Ok(v["data"]["has"].as_bool().unwrap_or(false))
     }
 
-    async fn collection_has_sparse_vector(&self) -> Result<bool> {
-        let v = self
-            .post(
-                "/v2/vectordb/collections/describe",
-                json!({ "collectionName": COLLECTION }),
-            )
-            .await?;
-        // Schema fields under data.fields[].name (REST v2). Look for the
-        // sparse_vector field — its presence means the BM25 schema is in
-        // place and we don't need to drop+recreate.
-        if let Some(fields) = v["data"]["fields"].as_array() {
-            for f in fields {
-                if f["name"].as_str() == Some("sparse_vector") {
-                    return Ok(true);
-                }
-            }
-        }
-        Ok(false)
-    }
-
-    async fn drop_collection(&self) -> Result<()> {
-        self.post_no_retry(
-            "/v2/vectordb/collections/drop",
-            json!({ "collectionName": COLLECTION }),
-        )
-        .await?;
-        Ok(())
-    }
-
     async fn create_collection(&self, embedding_dim: u32) -> Result<()> {
         let dim = embedding_dim as i64;
         // Schema v2: adds `sparse_vector` field + BM25 function over `content`
@@ -809,24 +780,8 @@ impl VectorStore for MilvusStore {
         Ok(seen.into_iter().collect())
     }
 
-    async fn init_collections(&self, embedding_dim: u32) -> Result<bool> {
-        let mut rebuilt = false;
-        if self.collection_exists().await? {
-            // Schema v1 → v2 migration: collection was created before the
-            // sparse_vector / BM25 function existed. Drop and recreate so
-            // the new schema can be applied. Caller is responsible for
-            // re-enqueueing ChunkSync events for all files so chunks
-            // (and their auto-computed sparse_vector) get reinserted.
-            if !self.collection_has_sparse_vector().await? {
-                tracing::warn!(
-                    "chunk collection lacks sparse_vector field; dropping and recreating \
-                     for BM25 hybrid search. All chunks will need re-ingestion."
-                );
-                self.drop_collection().await?;
-                self.create_collection(embedding_dim).await?;
-                rebuilt = true;
-            }
-        } else {
+    async fn init_collections(&self, embedding_dim: u32) -> Result<()> {
+        if !self.collection_exists().await? {
             self.create_collection(embedding_dim).await?;
         }
         self.ensure_vector_index().await?;
@@ -837,7 +792,7 @@ impl VectorStore for MilvusStore {
         .await?;
 
         self.init_summary_collection(embedding_dim).await?;
-        Ok(rebuilt)
+        Ok(())
     }
 }
 
