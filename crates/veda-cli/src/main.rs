@@ -20,13 +20,6 @@ impl SearchDetail {
     }
 }
 
-#[derive(Copy, Clone, Debug, ValueEnum, PartialEq, Eq)]
-enum SummaryLevel {
-    Abstract,
-    Overview,
-    Both,
-}
-
 #[derive(Parser)]
 #[command(name = "veda", about = "Veda CLI client", version)]
 struct Cli {
@@ -108,14 +101,17 @@ enum Commands {
         #[arg(long, default_value = "100")]
         limit: usize,
     },
-    /// Show L0/L1 summary for a file or directory
+    /// Show the L0 abstract (one-sentence summary) for a file or directory.
+    /// Use `veda overview` for the longer L1 prose.
     Summary {
         /// Remote path
         path: String,
-        /// Which level(s) to print: abstract (L0 only), overview (L1 only),
-        /// or both (default).
-        #[arg(long, value_enum, default_value_t = SummaryLevel::Both)]
-        level: SummaryLevel,
+    },
+    /// Show the L1 overview (~2k tokens of structured prose) for a file
+    /// or directory. Pricier than `veda summary`; use that first.
+    Overview {
+        /// Remote path
+        path: String,
     },
     /// Collection management
     Collection {
@@ -213,6 +209,42 @@ fn mask_secret(s: &str) -> String {
         "***".into()
     } else {
         format!("{}...{}", &s[..6], &s[s.len() - 4..])
+    }
+}
+
+async fn print_summary_layer(
+    c: &client::Client,
+    ws_key: &str,
+    path: &str,
+    endpoint: &str,
+    label: &str,
+    json_field: &str,
+) -> anyhow::Result<()> {
+    let (status, resp) = c.get_summary_layer(ws_key, path, endpoint).await?;
+    match status {
+        200 => {
+            let data = &resp["data"];
+            println!("Path: {}", data["path"].as_str().unwrap_or("?"));
+            println!("\n--- {label} ---");
+            println!("{}", data[json_field].as_str().unwrap_or("(none)"));
+            Ok(())
+        }
+        202 => {
+            let msg = resp["error"].as_str().unwrap_or("pending");
+            println!("Summary not ready yet ({msg}). Retry in a few seconds.");
+            std::process::exit(2);
+        }
+        501 => {
+            let msg = resp["error"].as_str().unwrap_or("summary disabled");
+            println!("Summary unavailable: {msg}");
+            println!("(Ask Joe to add an [llm] section to the server config.)");
+            std::process::exit(3);
+        }
+        404 => {
+            let msg = resp["error"].as_str().unwrap_or("not found");
+            anyhow::bail!("HTTP 404: {msg}");
+        }
+        _ => anyhow::bail!("unexpected HTTP {status}: {resp}"),
     }
 }
 
@@ -395,40 +427,13 @@ async fn main() -> anyhow::Result<()> {
                 }
             }
         }
-        Commands::Summary { path, level } => {
-            let (status, resp) = c.get_summary(cfg.ws_key()?, &path).await?;
-            match status {
-                200 => {
-                    let data = &resp["data"];
-                    let want_l0 = matches!(level, SummaryLevel::Abstract | SummaryLevel::Both);
-                    let want_l1 = matches!(level, SummaryLevel::Overview | SummaryLevel::Both);
-                    println!("Path: {}", data["path"].as_str().unwrap_or("?"));
-                    if want_l0 {
-                        println!("\n--- L0 Abstract ---");
-                        println!("{}", data["l0_abstract"].as_str().unwrap_or("(none)"));
-                    }
-                    if want_l1 {
-                        println!("\n--- L1 Overview ---");
-                        println!("{}", data["l1_overview"].as_str().unwrap_or("(none)"));
-                    }
-                }
-                202 => {
-                    let msg = resp["error"].as_str().unwrap_or("pending");
-                    println!("Summary not ready yet ({msg}). Retry in a few seconds.");
-                    std::process::exit(2);
-                }
-                501 => {
-                    let msg = resp["error"].as_str().unwrap_or("summary disabled");
-                    println!("Summary unavailable: {msg}");
-                    println!("(Ask Joe to add an [llm] section to the server config.)");
-                    std::process::exit(3);
-                }
-                404 => {
-                    let msg = resp["error"].as_str().unwrap_or("not found");
-                    anyhow::bail!("HTTP 404: {msg}");
-                }
-                _ => anyhow::bail!("unexpected HTTP {status}: {resp}"),
-            }
+        Commands::Summary { path } => {
+            print_summary_layer(&c, cfg.ws_key()?, &path, "summary", "L0 Abstract", "l0_abstract")
+                .await?;
+        }
+        Commands::Overview { path } => {
+            print_summary_layer(&c, cfg.ws_key()?, &path, "overview", "L1 Overview", "l1_overview")
+                .await?;
         }
         Commands::Collection { action } => match action {
             CollectionCmd::Create {

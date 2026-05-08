@@ -121,10 +121,22 @@ impl From<SearchHit> for SearchResultItem {
     }
 }
 
+/// Response for `GET /v1/summary/{path}` — the L0 abstract layer, intended
+/// as the cheap default. Roughly one sentence; suitable for quick context
+/// previews and vector filtering. Clients that need detailed prose should
+/// hit `/v1/overview/{path}` instead.
 #[derive(Debug, Serialize)]
-pub struct SummaryResponse {
+pub struct AbstractResponse {
     pub path: String,
     pub l0_abstract: String,
+}
+
+/// Response for `GET /v1/overview/{path}` — the L1 overview layer (~2k
+/// tokens, structured prose). Returned only on explicit request because it
+/// is significantly more expensive to send than the abstract.
+#[derive(Debug, Serialize)]
+pub struct OverviewResponse {
+    pub path: String,
     pub l1_overview: String,
 }
 

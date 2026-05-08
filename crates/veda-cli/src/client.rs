@@ -248,15 +248,20 @@ impl Client {
         Self::check(resp).await
     }
 
-    /// Returns (status_code, body). Unlike most endpoints, summary has three
-    /// meaningful statuses (200 ready / 202 pending / 501 disabled) that the
-    /// CLI needs to render differently, so we don't go through `check()`
+    /// Returns (status_code, body). Both summary endpoints have the same
+    /// three-state contract (200 ready / 202 pending / 501 disabled) that
+    /// the CLI renders differently, so we don't go through `check()`
     /// (which collapses all non-2xx into a single anyhow error).
-    pub async fn get_summary(&self, ws_key: &str, path: &str) -> Result<(u16, serde_json::Value)> {
+    pub async fn get_summary_layer(
+        &self,
+        ws_key: &str,
+        path: &str,
+        endpoint: &str,
+    ) -> Result<(u16, serde_json::Value)> {
         let path = path.trim_start_matches('/');
         let resp = self
             .http
-            .get(format!("{}/v1/summary/{path}", self.base))
+            .get(format!("{}/v1/{endpoint}/{path}", self.base))
             .bearer_auth(ws_key)
             .send()
             .await?;

@@ -5,7 +5,7 @@ use axum::http::{header, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
-use veda_types::api::{SearchApiRequest, SearchResultItem, SummaryResponse};
+use veda_types::api::{AbstractResponse, OverviewResponse, SearchApiRequest, SearchResultItem};
 use veda_types::{ApiResponse, DetailLevel};
 
 use crate::auth::AuthWorkspace;
@@ -15,7 +15,8 @@ use crate::state::AppState;
 pub fn routes() -> Router<Arc<AppState>> {
     Router::new()
         .route("/v1/search", post(search))
-        .route("/v1/summary/{*path}", get(get_summary))
+        .route("/v1/summary/{*path}", get(get_abstract))
+        .route("/v1/overview/{*path}", get(get_overview))
 }
 
 async fn search(
@@ -43,7 +44,7 @@ async fn search(
     Ok(Json(ApiResponse::ok(results)))
 }
 
-async fn get_summary(
+async fn get_abstract(
     State(state): State<Arc<AppState>>,
     auth: AuthWorkspace,
     Path(path): Path<String>,
@@ -55,37 +56,60 @@ async fn get_summary(
         .await?;
 
     match summary {
-        Some(s) => Ok(Json(ApiResponse::ok(SummaryResponse {
+        Some(s) => Ok(Json(ApiResponse::ok(AbstractResponse {
             path,
             l0_abstract: s.l0_abstract,
+        }))
+        .into_response()),
+        None => Ok(summary_pending_response(state.summary_enabled)),
+    }
+}
+
+async fn get_overview(
+    State(state): State<Arc<AppState>>,
+    auth: AuthWorkspace,
+    Path(path): Path<String>,
+) -> Result<Response, AppError> {
+    let path = format!("/{path}");
+    let summary = state
+        .search_service
+        .get_summary(&auth.workspace_id, &path)
+        .await?;
+
+    match summary {
+        Some(s) => Ok(Json(ApiResponse::ok(OverviewResponse {
+            path,
             l1_overview: s.l1_overview,
         }))
         .into_response()),
-        // Path exists but summary row missing. Two distinct cases:
-        //   a) [llm] is not configured → it will NEVER be generated → 501
-        //   b) [llm] is configured, but L0/L1 still being produced → 202
-        // Without distinguishing these the user can't tell whether to give
-        // up or to retry, and we previously had a perpetual-pending bug
-        // when [llm] was missing on the alpha server.
-        None if !state.summary_enabled => {
-            let body = Json(ApiResponse::<()>::err(
-                "summary generation is disabled (server has no [llm] configured)",
-            ));
-            // RFC 7231 lets clients cache 501 by default. Force no-store so
-            // proxies don't pin the "disabled" state — once Joe restarts the
-            // server with [llm] configured, clients should see live status.
-            let mut resp = (StatusCode::NOT_IMPLEMENTED, body).into_response();
-            resp.headers_mut()
-                .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
-            Ok(resp)
-        }
-        None => {
-            let body = Json(ApiResponse::<()>::err("summary pending"));
-            let mut resp = (StatusCode::ACCEPTED, body).into_response();
-            resp.headers_mut()
-                .insert(header::RETRY_AFTER, HeaderValue::from_static("5"));
-            Ok(resp)
-        }
+        None => Ok(summary_pending_response(state.summary_enabled)),
+    }
+}
+
+/// Path exists but the summary row is missing. Two distinct cases:
+///   a) [llm] is not configured → never will be generated → 501
+///   b) [llm] is configured, but L0/L1 are still being produced → 202
+/// Without distinguishing these the user can't tell whether to give up
+/// or to retry, and we previously had a perpetual-pending bug when
+/// [llm] was missing on the alpha server.
+fn summary_pending_response(summary_enabled: bool) -> Response {
+    if !summary_enabled {
+        let body = Json(ApiResponse::<()>::err(
+            "summary generation is disabled (server has no [llm] configured)",
+        ));
+        // RFC 7231 lets clients cache 501 by default. Force no-store so
+        // proxies don't pin the "disabled" state — once Joe restarts the
+        // server with [llm] configured, clients should see live status.
+        let mut resp = (StatusCode::NOT_IMPLEMENTED, body).into_response();
+        resp.headers_mut()
+            .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+        resp
+    } else {
+        let body = Json(ApiResponse::<()>::err("summary pending"));
+        let mut resp = (StatusCode::ACCEPTED, body).into_response();
+        resp.headers_mut()
+            .insert(header::RETRY_AFTER, HeaderValue::from_static("5"));
+        resp
     }
 }
 

@@ -110,14 +110,20 @@ across all files** (best for symbols, identifiers, exact strings, exhaustive sea
 
 ### Summary
 
+Two layers, queried separately. **Default to `summary` (L0)** — it's a single
+sentence, cheap to fetch and usually all the agent needs to decide whether
+the file is relevant. Only escalate to `overview` (L1, ~2k tokens of
+structured prose) when the abstract is too thin to act on.
+
 ```sh
-veda summary /path/to/file.md       # L0/L1 auto-generated summary for a file
-veda summary /                       # workspace-level summary
+veda summary /path/to/file.md      # L0 abstract — one sentence, cheap
+veda summary /                      # workspace-level abstract
+veda overview /path/to/file.md     # L1 overview — detailed prose, on demand
 ```
 
-L0/L1 summaries are generated **asynchronously**. If you ask for a summary right
-after uploading, the CLI prints `Summary not ready yet (summary pending)` and exits
-with code 2 (server returns HTTP 202 Accepted with `Retry-After: 5`). Wait ~5 seconds
+Both layers are generated **asynchronously**. If you ask right after uploading,
+the CLI prints `Summary not ready yet (summary pending)` and exits with code
+2 (server returns HTTP 202 Accepted with `Retry-After: 5`). Wait ~5 seconds
 and retry, or fall back to `veda cat` for the raw content. If the path itself
 doesn't exist you still get `404`.
 
