@@ -1,7 +1,31 @@
 mod client;
 mod config;
 
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
+
+#[derive(Copy, Clone, Debug, ValueEnum)]
+enum SearchDetail {
+    Abstract,
+    Overview,
+    Full,
+}
+
+impl SearchDetail {
+    fn as_str(self) -> &'static str {
+        match self {
+            SearchDetail::Abstract => "abstract",
+            SearchDetail::Overview => "overview",
+            SearchDetail::Full => "full",
+        }
+    }
+}
+
+#[derive(Copy, Clone, Debug, ValueEnum, PartialEq, Eq)]
+enum SummaryLevel {
+    Abstract,
+    Overview,
+    Both,
+}
 
 #[derive(Parser)]
 #[command(name = "veda", about = "Veda CLI client", version)]
@@ -67,9 +91,9 @@ enum Commands {
         mode: String,
         #[arg(long, default_value = "10")]
         limit: usize,
-        /// Detail level: abstract, overview, full
-        #[arg(long, default_value = "full")]
-        detail_level: String,
+        /// Detail level
+        #[arg(long, value_enum, default_value_t = SearchDetail::Full)]
+        detail_level: SearchDetail,
     },
     /// Grep file contents (substring match, returns file:line:content)
     Grep {
@@ -90,8 +114,8 @@ enum Commands {
         path: String,
         /// Which level(s) to print: abstract (L0 only), overview (L1 only),
         /// or both (default).
-        #[arg(long, default_value = "both")]
-        level: String,
+        #[arg(long, value_enum, default_value_t = SummaryLevel::Both)]
+        level: SummaryLevel,
     },
     /// Collection management
     Collection {
@@ -322,13 +346,13 @@ async fn main() -> anyhow::Result<()> {
             detail_level,
         } => {
             let resp = c
-                .search(cfg.ws_key()?, &query, &mode, limit, &detail_level)
+                .search(cfg.ws_key()?, &query, &mode, limit, detail_level.as_str())
                 .await?;
             if let Some(arr) = resp["data"].as_array() {
                 for hit in arr {
                     let path = hit["path"].as_str().unwrap_or("?");
                     let score = hit["score"].as_f64().unwrap_or(0.0);
-                    let st = hit["score_type"].as_str().unwrap_or("?");
+                    let st = hit["score_type"].as_str().unwrap_or("unknown");
                     let content = hit["content"]
                         .as_str()
                         .unwrap_or("")
@@ -376,11 +400,8 @@ async fn main() -> anyhow::Result<()> {
             match status {
                 200 => {
                     let data = &resp["data"];
-                    let want_l0 = matches!(level.as_str(), "abstract" | "both");
-                    let want_l1 = matches!(level.as_str(), "overview" | "both");
-                    if !want_l0 && !want_l1 {
-                        anyhow::bail!("--level must be abstract|overview|both");
-                    }
+                    let want_l0 = matches!(level, SummaryLevel::Abstract | SummaryLevel::Both);
+                    let want_l1 = matches!(level, SummaryLevel::Overview | SummaryLevel::Both);
                     println!("Path: {}", data["path"].as_str().unwrap_or("?"));
                     if want_l0 {
                         println!("\n--- L0 Abstract ---");

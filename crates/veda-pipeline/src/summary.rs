@@ -184,7 +184,11 @@ pub async fn aggregate_dir_summary(
 }
 
 fn truncate_content(content: &str, max_chars: usize) -> String {
-    if content.len() <= max_chars {
+    // Count chars, not bytes — `len()` is byte length so CJK text would
+    // truncate at roughly 1/3 of the intended limit. `nth(max_chars)`
+    // short-circuits as soon as the iterator passes the cap, so we don't
+    // walk the whole string for short inputs.
+    if content.chars().nth(max_chars).is_none() {
         return content.to_string();
     }
     let half = max_chars / 2;
@@ -226,6 +230,22 @@ mod tests {
         let result = truncate_content(&s, 100);
         assert!(result.contains("[... content truncated ...]"));
         assert!(result.len() < 200);
+    }
+
+    #[test]
+    fn truncate_counts_chars_not_bytes() {
+        // Each CJK char is 3 bytes in UTF-8. 200 chars = 600 bytes.
+        // With cap=300, byte-based check would truncate; char-based must not.
+        let s: String = "中".repeat(200);
+        let result = truncate_content(&s, 300);
+        assert_eq!(result, s, "200 CJK chars should not be truncated under cap=300");
+    }
+
+    #[test]
+    fn truncate_cjk_actually_truncates_when_over() {
+        let s: String = "中".repeat(200);
+        let result = truncate_content(&s, 100);
+        assert!(result.contains("[... content truncated ...]"));
     }
 
     #[tokio::test]

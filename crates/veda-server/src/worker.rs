@@ -3,6 +3,16 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use chrono::Utc;
+use futures::stream::{self, StreamExt};
+use futures::FutureExt;
+use tokio::sync::watch;
+use tokio::time::sleep;
+use tracing::{debug, error, info, warn};
+
+use veda_core::store::{EmbeddingService, LlmService, MetadataStore, TaskQueue, VectorStore};
+use veda_pipeline::chunking::semantic_chunk;
+use veda_pipeline::summary;
+use veda_types::*;
 
 /// Delay before a SummarySync / DirSummarySync becomes claimable when the
 /// edit appears to be part of a burst. Pairs with has_pending_event dedup to
@@ -14,16 +24,6 @@ const SUMMARY_DEBOUNCE_SECS: i64 = 30;
 /// task runs immediately. Without this, even a single edit on a long-quiet
 /// file would wait the full debounce delay before showing fresh summary.
 const SUMMARY_BURST_WINDOW_SECS: i64 = 5 * 60;
-use futures::stream::{self, StreamExt};
-use futures::FutureExt;
-use tokio::sync::watch;
-use tokio::time::sleep;
-use tracing::{debug, error, info, warn};
-
-use veda_core::store::{EmbeddingService, LlmService, MetadataStore, TaskQueue, VectorStore};
-use veda_pipeline::chunking::semantic_chunk;
-use veda_pipeline::summary;
-use veda_types::*;
 
 pub struct Worker {
     meta: Arc<dyn MetadataStore>,
