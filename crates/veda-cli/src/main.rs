@@ -101,14 +101,14 @@ enum Commands {
         #[arg(long, default_value = "100")]
         limit: usize,
     },
-    /// Show the L0 abstract (one-sentence summary) for a file or directory.
-    /// Use `veda overview` for the longer L1 prose.
-    Summary {
+    /// Show the L0 abstract — a single condensed sentence about the file
+    /// or directory. Use `veda overview` for the longer L1 prose.
+    Abstract {
         /// Remote path
         path: String,
     },
     /// Show the L1 overview (~2k tokens of structured prose) for a file
-    /// or directory. Pricier than `veda summary`; use that first.
+    /// or directory. Pricier than `veda abstract`; use that first.
     Overview {
         /// Remote path
         path: String,
@@ -427,8 +427,8 @@ async fn main() -> anyhow::Result<()> {
                 }
             }
         }
-        Commands::Summary { path } => {
-            print_summary_layer(&c, cfg.ws_key()?, &path, "summary", "L0 Abstract", "l0_abstract")
+        Commands::Abstract { path } => {
+            print_summary_layer(&c, cfg.ws_key()?, &path, "abstract", "L0 Abstract", "l0_abstract")
                 .await?;
         }
         Commands::Overview { path } => {

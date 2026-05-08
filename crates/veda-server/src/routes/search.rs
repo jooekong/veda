@@ -15,7 +15,7 @@ use crate::state::AppState;
 pub fn routes() -> Router<Arc<AppState>> {
     Router::new()
         .route("/v1/search", post(search))
-        .route("/v1/summary/{*path}", get(get_abstract))
+        .route("/v1/abstract/{*path}", get(get_abstract))
         .route("/v1/overview/{*path}", get(get_overview))
 }
 

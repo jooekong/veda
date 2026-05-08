@@ -108,17 +108,17 @@ Output: `path:line_no: line` per hit.
 "find the most relevant chunks containing these terms"). Grep is **literal substring
 across all files** (best for symbols, identifiers, exact strings, exhaustive search).
 
-### Summary
+### Summary layers (abstract / overview)
 
-Two layers, queried separately. **Default to `summary` (L0)** — it's a single
+Two layers, queried separately. **Default to `abstract` (L0)** — it's a single
 sentence, cheap to fetch and usually all the agent needs to decide whether
 the file is relevant. Only escalate to `overview` (L1, ~2k tokens of
 structured prose) when the abstract is too thin to act on.
 
 ```sh
-veda summary /path/to/file.md      # L0 abstract — one sentence, cheap
-veda summary /                      # workspace-level abstract
-veda overview /path/to/file.md     # L1 overview — detailed prose, on demand
+veda abstract /path/to/file.md     # L0 — one sentence, cheap
+veda abstract /                     # workspace-level abstract
+veda overview /path/to/file.md     # L1 — detailed prose, on demand
 ```
 
 Both layers are generated **asynchronously**. If you ask right after uploading,
