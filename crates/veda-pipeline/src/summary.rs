@@ -103,44 +103,48 @@ Overview:
 
 One-sentence summary:"#;
 
-/// Detect a coarse output language from a sample of the content. Returns a
-/// label suitable for the {language} prompt slot. Heuristic only — looks at
-/// the first 500 chars and counts unique-script signals separately:
-/// Hiragana/Katakana → `ja`, Hangul → `ko`, Han (CJK Unified / Extension A)
-/// → `zh-CN`. The first to cross 25% wins, in that order, since kana and
-/// hangul are unique to their language while Han chars are shared between
-/// Chinese and Japanese kanji-only segments. Anything else → `en`.
+/// Detect a coarse output language from a sample of the content. Returns
+/// a label for the {language} prompt slot. Policy: only `en` or `zh-CN`,
+/// never ja/ko.
+///
+/// Han chars are shared between Chinese and Japanese kanji, so the test
+/// can't be "is there Han?". Instead: among the CJK signal, how much is
+/// kana/hangul (Japanese/Korean exclusives)? If that share is high, the
+/// doc is Japanese or Korean and we fall back to `en`. Otherwise Han
+/// majority → `zh-CN`. Heuristic only; looks at the first 500 chars.
 pub fn detect_output_language(sample: &str) -> &'static str {
     let chars: Vec<char> = sample.chars().take(500).collect();
     let n = chars.len();
     if n == 0 {
         return "en";
     }
-    let mut kana = 0usize;
-    let mut hangul = 0usize;
+    let mut non_chinese_cjk = 0usize;
     let mut han = 0usize;
     for c in &chars {
         let code = *c as u32;
-        if (0x3040..=0x309F).contains(&code) || (0x30A0..=0x30FF).contains(&code) {
-            kana += 1;
-        } else if (0xAC00..=0xD7AF).contains(&code) {
-            hangul += 1;
-        } else if (0x4E00..=0x9FFF).contains(&code) || (0x3400..=0x4DBF).contains(&code) {
+        if (0x3040..=0x309F).contains(&code)        // Hiragana
+            || (0x30A0..=0x30FF).contains(&code)    // Katakana
+            || (0xAC00..=0xD7AF).contains(&code)    // Hangul
+        {
+            non_chinese_cjk += 1;
+        } else if (0x4E00..=0x9FFF).contains(&code) // CJK Unified
+            || (0x3400..=0x4DBF).contains(&code)    // CJK Extension A
+        {
             han += 1;
         }
     }
-    // Threshold = strictly over 25%. Order matters: kana/hangul are unique
-    // markers; Han comes last so a Japanese sample with kanji + hiragana
-    // resolves to `ja`, not `zh-CN`.
-    if kana * 4 > n {
-        "ja"
-    } else if hangul * 4 > n {
-        "ko"
-    } else if han * 4 > n {
-        "zh-CN"
-    } else {
-        "en"
+    // Han-majority text: zh-CN unless > 25% of the Han count is also
+    // kana/hangul (which means it's really Japanese with kanji or Korean
+    // with hanja, not Chinese). This keeps a Chinese doc with the
+    // occasional katakana product name as zh-CN while flipping a real
+    // Japanese passage to en.
+    if han * 4 > n {
+        if non_chinese_cjk * 4 > han {
+            return "en";
+        }
+        return "zh-CN";
     }
+    "en"
 }
 
 pub async fn generate_l0(llm: &dyn LlmService, content: &str) -> Result<String> {
@@ -332,24 +336,34 @@ mod tests {
     }
 
     #[test]
-    fn detect_lang_japanese_hiragana() {
-        assert_eq!(detect_output_language("こんにちは世界"), "ja");
+    fn detect_lang_japanese_falls_back_to_en() {
+        // Policy: never produce ja summaries. Pure-hiragana, katakana, and
+        // mixed kanji+hiragana inputs all resolve to "en".
+        assert_eq!(detect_output_language("こんにちは世界"), "en");
+        assert_eq!(detect_output_language("カタカナテスト"), "en");
+        assert_eq!(detect_output_language("これは日本語のテスト"), "en");
     }
 
     #[test]
-    fn detect_lang_japanese_katakana() {
-        assert_eq!(detect_output_language("カタカナテスト"), "ja");
+    fn detect_lang_korean_falls_back_to_en() {
+        // Policy: never produce ko summaries either.
+        assert_eq!(detect_output_language("안녕하세요세계"), "en");
     }
 
     #[test]
-    fn detect_lang_korean_hangul() {
-        assert_eq!(detect_output_language("안녕하세요세계"), "ko");
+    fn detect_lang_chinese_with_japanese_loanword_stays_zh() {
+        // The realistic Chinese-tech-doc case: a Chinese doc with one
+        // katakana product reference is still primarily Chinese.
+        // 1 katakana / many Han → kana share well under 25% of Han.
+        let mixed = "这是一段中文技术文档主要介绍系统的核心架构以及实现细节カ式产品名称仅作示例";
+        assert_eq!(detect_output_language(mixed), "zh-CN");
     }
 
     #[test]
-    fn detect_lang_japanese_with_kanji_resolves_to_ja_not_zh() {
-        // Mixed kanji + hiragana — Japanese, not Chinese. Order of script
-        // checks matters: kana wins over han.
-        assert_eq!(detect_output_language("これは日本語のテスト"), "ja");
+    fn detect_lang_chinese_with_many_kana_flips_to_en() {
+        // The other half: when kana share rises above 25% of Han, treat
+        // as Japanese (kanji + hiragana) → en.
+        let mixed = "中文开头ありがとうございますこれは長い日本語の引用続きの文章もっと";
+        assert_eq!(detect_output_language(mixed), "en");
     }
 }
