@@ -1,8 +1,22 @@
 use veda_core::store::LlmService;
 use veda_types::Result;
 
-const L0_PROMPT: &str = r#"Summarize the following content in ONE concise sentence (max ~100 tokens).
-Focus on what this content IS and its primary purpose. Do not include meta-commentary.
+// Prompt template variables supported (replaced before sending to LLM):
+//   {content}    — file content (truncated)
+//   {children}   — newline-joined "[N]. summary" for directory aggregation
+//   {overview}   — directory L1 text used to derive directory L0
+//   {language}   — auto-detected output language ("en" | "zh-CN") so the
+//                  summary is in the same language as the source.
+//
+// Single-file prompts (L0/L1) and directory prompts (L1 from children, L0
+// from L1) live in this file; the worker selects between them based on
+// whether the dentry is a file or a directory.
+
+const L0_PROMPT: &str = r#"Output language: {language}.
+
+Summarize the following content in ONE concise sentence (max ~100 tokens).
+Focus on what this content IS and its primary purpose. Do not include
+meta-commentary or hedging phrases.
 
 Content:
 ---
@@ -11,12 +25,28 @@ Content:
 
 One-sentence summary:"#;
 
-const L1_PROMPT: &str = r#"Create a structured overview (max ~2000 tokens) for the following content.
-Include:
-- A brief description of what this content covers
-- Key sections or topics with one-line descriptions
-- Important facts, APIs, or concepts mentioned
-- Navigation hints (e.g. which sub-sections contain what)
+const L1_PROMPT: &str = r#"Output language: {language}.
+
+Generate a structured overview document for the following file. Use the
+exact Markdown layout below and stay under ~2000 tokens.
+
+# <File-name or one-line title>
+
+<Brief Description: a 50-150 word paragraph immediately after the title,
+NO heading. Explain what this file is, what it covers, who it's for, and
+include the core keywords for search.>
+
+## Key Sections
+- **<heading>** – <one-line description>
+- ...
+
+## Important Concepts / APIs
+- <name> – <one-line definition or signature>
+- ...
+
+## Navigation Hints
+- For X → see <section/subsection name>
+- ...
 
 Content:
 ---
@@ -25,23 +55,46 @@ Content:
 
 Structured overview:"#;
 
-const L1_DIR_PROMPT: &str = r#"Create a structured overview (max ~2000 tokens) for a directory that contains the following items.
-Each item below is a one-sentence summary (L0 abstract) of a child file or subdirectory.
+const L1_DIR_PROMPT: &str = r#"Output language: {language}.
 
-Child summaries:
+Generate an overview document for a directory based on the listed children.
+Treat children as parts of the same project unless their summaries clearly
+indicate independent projects. Use this exact Markdown layout, total length
+400-800 words.
+
+# <Directory>
+
+<Brief Description: 50-150 word plain paragraph right after the title (no
+sub-heading). What this directory is, what it covers, and who it's for.
+Include core keywords for search.>
+
+## Quick Navigation
+Use a decision-tree style. Phrase as "What do you want to learn / do?"
+Each line ends with → and references children by their numeric label
+([1], [2], ...). Concise keyword descriptions only.
+- What do you want to ...? → see [N] <one-line>
+- ...
+
+## Detailed Description
+One H3 subsection per child, reusing the child's summary as the body.
+
+### [1]
+<reuse the provided summary>
+
+### [2]
+...
+
+Children (numbered):
 ---
 {children}
 ---
 
-Create a cohesive overview that:
-- Describes what this directory contains as a whole
-- Groups related items if applicable
-- Highlights the most important items
+Overview:"#;
 
-Structured overview:"#;
+const DIR_L0_PROMPT: &str = r#"Output language: {language}.
 
-const DIR_L0_PROMPT: &str = r#"Summarize the following directory overview in ONE concise sentence (max ~100 tokens).
-Focus on what this directory contains as a whole.
+Summarize the following directory overview in ONE concise sentence
+(max ~100 tokens). Focus on what the directory contains as a whole.
 
 Overview:
 ---
@@ -50,15 +103,49 @@ Overview:
 
 One-sentence summary:"#;
 
+/// Detect a coarse output language from a sample of the content. Returns a
+/// label suitable for the {language} prompt slot. Heuristic only — looks at
+/// the ratio of CJK characters in the first 500 chars; >25% CJK → `zh-CN`,
+/// else `en`. Other languages collapse to `en` (LLM still does fine if the
+/// prompt is en but content is e.g. Spanish — it'll match the content).
+pub fn detect_output_language(sample: &str) -> &'static str {
+    let chars: Vec<char> = sample.chars().take(500).collect();
+    if chars.is_empty() {
+        return "en";
+    }
+    let cjk = chars
+        .iter()
+        .filter(|c| {
+            let code = **c as u32;
+            (0x4E00..=0x9FFF).contains(&code)        // CJK Unified
+                || (0x3400..=0x4DBF).contains(&code) // CJK Extension A
+                || (0x3040..=0x309F).contains(&code) // Hiragana
+                || (0x30A0..=0x30FF).contains(&code) // Katakana
+                || (0xAC00..=0xD7AF).contains(&code) // Hangul
+        })
+        .count();
+    if cjk * 4 > chars.len() {
+        "zh-CN"
+    } else {
+        "en"
+    }
+}
+
 pub async fn generate_l0(llm: &dyn LlmService, content: &str) -> Result<String> {
     let truncated = truncate_content(content, 12_000);
-    let prompt = L0_PROMPT.replace("{content}", &truncated);
+    let lang = detect_output_language(&truncated);
+    let prompt = L0_PROMPT
+        .replace("{language}", lang)
+        .replace("{content}", &truncated);
     llm.summarize(&prompt, 150).await
 }
 
 pub async fn generate_l1(llm: &dyn LlmService, content: &str, max_tokens: usize) -> Result<String> {
     let truncated = truncate_content(content, 12_000);
-    let prompt = L1_PROMPT.replace("{content}", &truncated);
+    let lang = detect_output_language(&truncated);
+    let prompt = L1_PROMPT
+        .replace("{language}", lang)
+        .replace("{content}", &truncated);
     llm.summarize(&prompt, max_tokens).await
 }
 
@@ -70,14 +157,27 @@ pub async fn aggregate_dir_summary(
     let children_text = child_l0s
         .iter()
         .enumerate()
-        .map(|(i, s)| format!("{}. {}", i + 1, s))
+        .map(|(i, s)| format!("[{}]. {}", i + 1, s))
         .collect::<Vec<_>>()
         .join("\n");
+    // Cap children_text so a directory with thousands of children doesn't
+    // blow the LLM context window or run up cost. 8000 chars ~ 2k tokens.
+    // Truncating happens after numbering so the keep portion still has
+    // numeric refs that match the prompt's `[N]` notation.
+    let children_text = truncate_content(&children_text, 8_000);
 
-    let l1_prompt = L1_DIR_PROMPT.replace("{children}", &children_text);
+    // Use the children's combined text to detect the directory's dominant
+    // language; mixed-language repos fall back to en.
+    let lang = detect_output_language(&children_text);
+
+    let l1_prompt = L1_DIR_PROMPT
+        .replace("{language}", lang)
+        .replace("{children}", &children_text);
     let l1 = llm.summarize(&l1_prompt, max_overview_tokens).await?;
 
-    let l0_prompt = DIR_L0_PROMPT.replace("{overview}", &l1);
+    let l0_prompt = DIR_L0_PROMPT
+        .replace("{language}", lang)
+        .replace("{overview}", &l1);
     let l0 = llm.summarize(&l0_prompt, 150).await?;
 
     Ok((l0, l1))

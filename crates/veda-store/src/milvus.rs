@@ -283,38 +283,44 @@ impl MilvusStore {
     }
 
     async fn ensure_vector_index(&self) -> Result<()> {
-        let index_body = json!({
-            "collectionName": COLLECTION,
-            "indexParams": [
-                {
+        // Two indexes can't be created in one POST when one is AUTOINDEX
+        // (Milvus 2.5 rejects extra params on the AUTOINDEX entry). Issue
+        // them separately.
+        for body in [
+            json!({
+                "collectionName": COLLECTION,
+                "indexParams": [{
                     "index_type": "AUTOINDEX",
                     "metricType": "COSINE",
                     "fieldName": "vector",
                     "indexName": "vector"
-                },
-                {
+                }]
+            }),
+            json!({
+                "collectionName": COLLECTION,
+                "indexParams": [{
                     "index_type": "SPARSE_INVERTED_INDEX",
                     "metricType": "BM25",
                     "fieldName": "sparse_vector",
-                    "indexName": "sparse_vector",
-                    "params": { "bm25_k1": 1.2, "bm25_b": 0.75 }
-                }
-            ]
-        });
-        match self.post("/v2/vectordb/indexes/create", index_body).await {
-            Ok(_) => Ok(()),
-            Err(e) => {
-                let m = e.to_string();
-                if m.contains("same index name")
-                    || m.contains("IndexAlreadyExists")
-                    || m.contains("index already exist")
-                {
-                    Ok(())
-                } else {
-                    Err(e)
+                    "indexName": "sparse_vector"
+                }]
+            }),
+        ] {
+            match self.post("/v2/vectordb/indexes/create", body).await {
+                Ok(_) => {}
+                Err(e) => {
+                    let m = e.to_string();
+                    if m.contains("same index name")
+                        || m.contains("IndexAlreadyExists")
+                        || m.contains("index already exist")
+                    {
+                        continue;
+                    }
+                    return Err(e);
                 }
             }
         }
+        Ok(())
     }
 
     async fn init_summary_collection(&self, embedding_dim: u32) -> Result<()> {
@@ -410,6 +416,7 @@ impl MilvusStore {
                     chunk_index: None,
                     content: content.to_string(),
                     score,
+                    score_type: "cosine".to_string(),
                     path: None,
                     l0_abstract: Some(content.to_string()),
                     l1_overview: None,
@@ -418,7 +425,7 @@ impl MilvusStore {
             .collect()
     }
 
-    fn rows_to_hits(rows: &[Value], limit: usize) -> Vec<SearchHit> {
+    fn rows_to_hits(rows: &[Value], limit: usize, score_type: &str) -> Vec<SearchHit> {
         let mut out = Vec::new();
         for row in rows.iter().take(limit) {
             let file_id = row
@@ -443,6 +450,7 @@ impl MilvusStore {
                 chunk_index,
                 content,
                 score,
+                score_type: score_type.to_string(),
                 path: None,
                 l0_abstract: None,
                 l1_overview: None,
@@ -485,7 +493,7 @@ impl MilvusStore {
         });
         let v = self.post("/v2/vectordb/entities/search", body).await?;
         let rows = flatten_entity_rows(v.get("data"));
-        Ok(Self::rows_to_hits(&rows, limit))
+        Ok(Self::rows_to_hits(&rows, limit, "cosine"))
     }
 
     async fn hybrid_search_remote(&self, req: &SearchRequest) -> Result<Option<Vec<SearchHit>>> {
@@ -531,7 +539,7 @@ impl MilvusStore {
         match self.post("/v2/vectordb/entities/hybrid_search", body).await {
             Ok(v) => {
                 let rows = flatten_entity_rows(v.get("data"));
-                Ok(Some(Self::rows_to_hits(&rows, req.limit)))
+                Ok(Some(Self::rows_to_hits(&rows, req.limit, "rrf")))
             }
             Err(e) => {
                 warn!(err = %e, "hybrid_search_remote failed, falling back to ANN search");
@@ -565,7 +573,7 @@ impl MilvusStore {
         });
         let v = self.post("/v2/vectordb/entities/search", body).await?;
         let rows = flatten_entity_rows(v.get("data"));
-        Ok(Self::rows_to_hits(&rows, limit))
+        Ok(Self::rows_to_hits(&rows, limit, "bm25"))
     }
 }
 

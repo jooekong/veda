@@ -3,6 +3,17 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use chrono::Utc;
+
+/// Delay before a SummarySync / DirSummarySync becomes claimable when the
+/// edit appears to be part of a burst. Pairs with has_pending_event dedup to
+/// coalesce repeated edits within the window into a single regeneration.
+const SUMMARY_DEBOUNCE_SECS: i64 = 30;
+
+/// If the most recent existing summary for a file/dir is older than this,
+/// the current edit is treated as isolated (not part of a burst) and the
+/// task runs immediately. Without this, even a single edit on a long-quiet
+/// file would wait the full debounce delay before showing fresh summary.
+const SUMMARY_BURST_WINDOW_SECS: i64 = 5 * 60;
 use futures::stream::{self, StreamExt};
 use futures::FutureExt;
 use tokio::sync::watch;
@@ -345,6 +356,20 @@ impl Worker {
             return Ok(());
         }
         let now = Utc::now();
+        // If the existing summary is older than the burst window (or doesn't
+        // exist), this edit is likely isolated — run immediately. Inside the
+        // window, debounce so a burst of saves coalesces into one task.
+        let in_burst = self
+            .meta
+            .get_summary_by_file(file_id)
+            .await?
+            .map(|s| (now - s.updated_at).num_seconds() < SUMMARY_BURST_WINDOW_SECS)
+            .unwrap_or(false);
+        let available_at = if in_burst {
+            now + chrono::Duration::seconds(SUMMARY_DEBOUNCE_SECS)
+        } else {
+            now
+        };
         let event = OutboxEvent {
             id: 0,
             workspace_id: workspace_id.to_string(),
@@ -353,7 +378,7 @@ impl Worker {
             status: OutboxStatus::Pending,
             retry_count: 0,
             max_retries: 3,
-            available_at: now,
+            available_at,
             lease_until: None,
             created_at: now,
         };
@@ -463,6 +488,17 @@ impl Worker {
             return Ok(());
         }
         let now = Utc::now();
+        let in_burst = self
+            .meta
+            .get_summary_by_dentry(dentry_id)
+            .await?
+            .map(|s| (now - s.updated_at).num_seconds() < SUMMARY_BURST_WINDOW_SECS)
+            .unwrap_or(false);
+        let available_at = if in_burst {
+            now + chrono::Duration::seconds(SUMMARY_DEBOUNCE_SECS)
+        } else {
+            now
+        };
         let event = OutboxEvent {
             id: 0,
             workspace_id: workspace_id.to_string(),
@@ -474,7 +510,7 @@ impl Worker {
             status: OutboxStatus::Pending,
             retry_count: 0,
             max_retries: 3,
-            available_at: now,
+            available_at,
             lease_until: None,
             created_at: now,
         };

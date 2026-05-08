@@ -88,6 +88,10 @@ enum Commands {
     Summary {
         /// Remote path
         path: String,
+        /// Which level(s) to print: abstract (L0 only), overview (L1 only),
+        /// or both (default).
+        #[arg(long, default_value = "both")]
+        level: String,
     },
     /// Collection management
     Collection {
@@ -324,13 +328,14 @@ async fn main() -> anyhow::Result<()> {
                 for hit in arr {
                     let path = hit["path"].as_str().unwrap_or("?");
                     let score = hit["score"].as_f64().unwrap_or(0.0);
+                    let st = hit["score_type"].as_str().unwrap_or("?");
                     let content = hit["content"]
                         .as_str()
                         .unwrap_or("")
                         .chars()
                         .take(80)
                         .collect::<String>();
-                    print!("{score:.3}\t{path}\t{content}");
+                    print!("{score:.3}({st})\t{path}\t{content}");
                     if let Some(l0) = hit["l0_abstract"].as_str() {
                         print!("\n  L0: {l0}");
                     }
@@ -366,16 +371,25 @@ async fn main() -> anyhow::Result<()> {
                 }
             }
         }
-        Commands::Summary { path } => {
+        Commands::Summary { path, level } => {
             let (status, resp) = c.get_summary(cfg.ws_key()?, &path).await?;
             match status {
                 200 => {
                     let data = &resp["data"];
+                    let want_l0 = matches!(level.as_str(), "abstract" | "both");
+                    let want_l1 = matches!(level.as_str(), "overview" | "both");
+                    if !want_l0 && !want_l1 {
+                        anyhow::bail!("--level must be abstract|overview|both");
+                    }
                     println!("Path: {}", data["path"].as_str().unwrap_or("?"));
-                    println!("\n--- L0 Abstract ---");
-                    println!("{}", data["l0_abstract"].as_str().unwrap_or("(none)"));
-                    println!("\n--- L1 Overview ---");
-                    println!("{}", data["l1_overview"].as_str().unwrap_or("(none)"));
+                    if want_l0 {
+                        println!("\n--- L0 Abstract ---");
+                        println!("{}", data["l0_abstract"].as_str().unwrap_or("(none)"));
+                    }
+                    if want_l1 {
+                        println!("\n--- L1 Overview ---");
+                        println!("{}", data["l1_overview"].as_str().unwrap_or("(none)"));
+                    }
                 }
                 202 => {
                     let msg = resp["error"].as_str().unwrap_or("pending");

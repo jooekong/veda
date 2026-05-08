@@ -328,11 +328,22 @@ pub struct SearchHit {
     pub chunk_index: Option<i32>,
     pub content: String,
     pub score: f32,
+    /// What `score` actually means: "rrf" (hybrid fusion, ~[0, 0.033]),
+    /// "bm25" (raw BM25, ~[0, 30]), or "cosine" (cosine similarity,
+    /// ~[0, 1]). Scores are NOT comparable across types — agents/clients
+    /// must read this field before reasoning about magnitude.
+    #[serde(default = "default_score_type")]
+    pub score_type: String,
     pub path: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub l0_abstract: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub l1_overview: Option<String>,
+}
+
+fn default_score_type() -> String {
+    // Used only by serde when older payloads omit the field.
+    "unknown".to_string()
 }
 
 // ── Vector / Embedding ─────────────────────────────────

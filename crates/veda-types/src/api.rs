@@ -98,6 +98,9 @@ pub struct SearchResultItem {
     pub chunk_index: Option<i32>,
     pub content: String,
     pub score: f32,
+    /// "rrf" / "bm25" / "cosine". See `SearchHit::score_type` — scores from
+    /// different types are not comparable.
+    pub score_type: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub l0_abstract: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -111,6 +114,7 @@ impl From<SearchHit> for SearchResultItem {
             chunk_index: h.chunk_index,
             content: h.content,
             score: h.score,
+            score_type: h.score_type,
             l0_abstract: h.l0_abstract,
             l1_overview: h.l1_overview,
         }
@@ -188,6 +192,7 @@ mod tests {
             chunk_index: Some(0),
             content: "hello".into(),
             score: 0.9,
+            score_type: "cosine".into(),
             path: path.map(|s| s.to_string()),
             l0_abstract: None,
             l1_overview: None,
