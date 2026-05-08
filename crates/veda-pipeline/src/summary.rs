@@ -262,4 +262,50 @@ mod tests {
         assert!(!l0.is_empty());
         assert!(!l1.is_empty());
     }
+
+    #[test]
+    fn detect_lang_empty_defaults_to_en() {
+        assert_eq!(detect_output_language(""), "en");
+    }
+
+    #[test]
+    fn detect_lang_pure_ascii() {
+        assert_eq!(
+            detect_output_language("The quick brown fox jumps over the lazy dog."),
+            "en"
+        );
+    }
+
+    #[test]
+    fn detect_lang_pure_cjk() {
+        assert_eq!(detect_output_language("敏捷的棕色狐狸跳过懒狗"), "zh-CN");
+    }
+
+    #[test]
+    fn detect_lang_threshold_edge() {
+        // Threshold is `cjk * 4 > len` (strict), i.e. just over 25%.
+        // Exactly 1 CJK in 4 chars: 4 > 4 is false → "en".
+        assert_eq!(detect_output_language("中abc"), "en");
+        // 2 CJK in 7 chars: 8 > 7 → "zh-CN".
+        assert_eq!(detect_output_language("中文abcde"), "zh-CN");
+    }
+
+    #[test]
+    fn detect_lang_mixed_majority_cjk() {
+        // ~50% CJK; well over the 25% threshold.
+        assert_eq!(
+            detect_output_language("Rust 是一门系统编程语言, focus on safety"),
+            "zh-CN"
+        );
+    }
+
+    #[test]
+    fn detect_lang_hiragana_katakana_hangul_count_as_cjk() {
+        // Japanese hiragana
+        assert_eq!(detect_output_language("こんにちは世界"), "zh-CN");
+        // Japanese katakana
+        assert_eq!(detect_output_language("カタカナテスト"), "zh-CN");
+        // Korean hangul
+        assert_eq!(detect_output_language("안녕하세요세계"), "zh-CN");
+    }
 }

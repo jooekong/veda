@@ -356,9 +356,17 @@ impl Worker {
             return Ok(());
         }
         let now = Utc::now();
-        // If the existing summary is older than the burst window (or doesn't
-        // exist), this edit is likely isolated — run immediately. Inside the
-        // window, debounce so a burst of saves coalesces into one task.
+        // Burst detection uses `summary.updated_at` (when the previous LLM
+        // run finished) — not file.updated_at. Trade-off: the very first
+        // edit after a long quiet period generates a summary immediately
+        // (no debounce, since no prior summary exists), and the second edit
+        // within ~5min sees that fresh summary and gets debounced. So a
+        // back-to-back burst on a never-summarized file produces 2 LLM
+        // calls, not 1; subsequent bursts coalesce as expected. A tighter
+        // implementation would track "last edit time" separately, but the
+        // outbox dedup (has_pending_event above) already collapses repeats
+        // that arrive while a task is queued, so the only leak is the
+        // first edit of a brand-new file — accepted.
         let in_burst = self
             .meta
             .get_summary_by_file(file_id)
@@ -370,6 +378,18 @@ impl Worker {
         } else {
             now
         };
+        let debounce_secs = if in_burst { SUMMARY_DEBOUNCE_SECS } else { 0 };
+        debug!(
+            file_id,
+            in_burst,
+            debounce_secs,
+            "enqueueing summary_sync"
+        );
+        ::metrics::counter!(
+            "veda_summary_enqueue_total",
+            "burst" => if in_burst { "in_burst" } else { "isolated" },
+        )
+        .increment(1);
         let event = OutboxEvent {
             id: 0,
             workspace_id: workspace_id.to_string(),

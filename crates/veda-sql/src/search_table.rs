@@ -21,6 +21,7 @@ fn search_schema() -> SchemaRef {
         Field::new("chunk_index", DataType::Int64, true),
         Field::new("content", DataType::Utf8, false),
         Field::new("score", DataType::Float64, false),
+        Field::new("score_type", DataType::Utf8, false),
         Field::new("path", DataType::Utf8, true),
     ]))
 }
@@ -98,6 +99,7 @@ impl TableFunctionImpl for VedaSearchFactory {
         let mut idx_b = Int64Builder::with_capacity(n);
         let mut content_b = StringBuilder::with_capacity(n, n * 256);
         let mut score_b = Float64Builder::with_capacity(n);
+        let mut score_type_b = StringBuilder::with_capacity(n, n * 8);
         let mut path_b = StringBuilder::with_capacity(n, n * 64);
 
         for h in &hits {
@@ -108,6 +110,7 @@ impl TableFunctionImpl for VedaSearchFactory {
             }
             content_b.append_value(&h.content);
             score_b.append_value(h.score as f64);
+            score_type_b.append_value(&h.score_type);
             match &h.path {
                 Some(p) => path_b.append_value(p),
                 None => path_b.append_null(),
@@ -121,6 +124,7 @@ impl TableFunctionImpl for VedaSearchFactory {
                 Arc::new(idx_b.finish()),
                 Arc::new(content_b.finish()),
                 Arc::new(score_b.finish()),
+                Arc::new(score_type_b.finish()),
                 Arc::new(path_b.finish()),
             ],
         )?;
