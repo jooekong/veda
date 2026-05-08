@@ -1,5 +1,7 @@
 mod client;
 mod config;
+mod init;
+mod status;
 
 use clap::{Parser, Subcommand, ValueEnum};
 
@@ -33,6 +35,46 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
+    /// Quick re-auth: store an existing API key (typically copied from
+    /// another machine) into ~/.config/veda/config.toml. For first-time
+    /// setup use `veda init` instead.
+    Login {
+        /// API key to use (no env-var fallback by design — make the
+        /// switch explicit so a stale shell var can't silently override
+        /// the config you meant to keep)
+        #[arg(long)]
+        api_key: String,
+    },
+    /// Show current config (server URL, key state, workspace) and a
+    /// best-effort server reachability ping.
+    Status,
+    /// First-time setup: create account + default workspace, save the
+    /// keys, all in one shot. With all flags it runs silently; without
+    /// flags it prompts. Use `--login` to attach an existing account
+    /// instead of creating a new one. The global `--server` flag picks
+    /// the server URL.
+    Init {
+        /// Use an existing account instead of creating a new one.
+        /// Skips `--name`; `--email` + `--password` are required.
+        #[arg(long)]
+        login: bool,
+        /// Display name for new account (ignored with --login)
+        #[arg(long)]
+        name: Option<String>,
+        #[arg(long)]
+        email: Option<String>,
+        /// Pass via env or terminal prompt; `--password` on argv is
+        /// visible in `ps`. Required in --non-interactive mode.
+        #[arg(long)]
+        password: Option<String>,
+        /// Workspace name (default "default")
+        #[arg(long)]
+        workspace: Option<String>,
+        /// Fail with a clear error instead of prompting for missing
+        /// fields. Designed for CI / scripts.
+        #[arg(long)]
+        non_interactive: bool,
+    },
     /// Account management
     Account {
         #[command(subcommand)]
@@ -212,6 +254,163 @@ fn mask_secret(s: &str) -> String {
     }
 }
 
+/// Prompt for a value with an optional `[default]` hint. Returns the
+/// trimmed input, or the default if input was empty. Re-prompts on empty
+/// input when there is no default. Errors on stdin EOF or read failure.
+fn prompt_or(label: &str, default: Option<&str>) -> anyhow::Result<String> {
+    use std::io::{BufRead, Write};
+    loop {
+        match default {
+            Some(d) => print!("{label} [{d}]: "),
+            None => print!("{label}: "),
+        }
+        std::io::stdout().flush()?;
+        let mut buf = String::new();
+        let n = std::io::stdin().lock().read_line(&mut buf)?;
+        if n == 0 {
+            anyhow::bail!("unexpected EOF on stdin while reading {label}");
+        }
+        let trimmed = buf.trim();
+        if trimmed.is_empty() {
+            if let Some(d) = default {
+                return Ok(d.to_string());
+            }
+            // No default + empty input → prompt again.
+            continue;
+        }
+        return Ok(trimmed.to_string());
+    }
+}
+
+/// Resolve an init param: prefer the flag, else prompt, else apply
+/// default. In `--non-interactive` mode, missing-with-no-default is a
+/// hard error rather than a prompt.
+fn resolve_field(
+    label: &str,
+    flag: Option<String>,
+    default: Option<&str>,
+    non_interactive: bool,
+    has_default: bool,
+) -> anyhow::Result<String> {
+    if let Some(v) = flag {
+        let trimmed = v.trim();
+        if trimmed.is_empty() && !has_default {
+            anyhow::bail!("--{} cannot be empty", label.to_lowercase().replace(' ', "-"));
+        }
+        return Ok(if trimmed.is_empty() {
+            default.unwrap_or("").to_string()
+        } else {
+            trimmed.to_string()
+        });
+    }
+    if non_interactive {
+        if let Some(d) = default {
+            return Ok(d.to_string());
+        }
+        anyhow::bail!(
+            "--non-interactive but --{} not provided",
+            label.to_lowercase().replace(' ', "-")
+        );
+    }
+    prompt_or(label, default)
+}
+
+/// Resolve the password specifically: never echo, never default. Reads
+/// from `--password`, then `VEDA_PASSWORD`, then a tty prompt. Errors in
+/// non-interactive mode if neither source is set.
+fn resolve_password(flag: Option<String>, non_interactive: bool) -> anyhow::Result<String> {
+    if let Some(v) = flag {
+        if v.is_empty() {
+            anyhow::bail!("--password cannot be empty");
+        }
+        return Ok(v);
+    }
+    if let Ok(v) = std::env::var("VEDA_PASSWORD") {
+        if !v.is_empty() {
+            return Ok(v);
+        }
+    }
+    if non_interactive {
+        anyhow::bail!(
+            "--non-interactive but neither --password nor $VEDA_PASSWORD set"
+        );
+    }
+    let pw = rpassword::prompt_password("Password: ")?;
+    if pw.is_empty() {
+        anyhow::bail!("password cannot be empty");
+    }
+    Ok(pw)
+}
+
+#[cfg(test)]
+mod resolve_tests {
+    use super::*;
+
+    #[test]
+    fn resolve_field_uses_flag_value() {
+        let out = resolve_field("Email", Some("a@b.com".into()), None, true, false).unwrap();
+        assert_eq!(out, "a@b.com");
+    }
+
+    #[test]
+    fn resolve_field_trims_flag_value() {
+        let out = resolve_field("Email", Some("  a@b.com  ".into()), None, true, false).unwrap();
+        assert_eq!(out, "a@b.com");
+    }
+
+    #[test]
+    fn resolve_field_empty_flag_with_default_uses_default() {
+        let out = resolve_field("Workspace", Some("".into()), Some("default"), true, true).unwrap();
+        assert_eq!(out, "default");
+    }
+
+    #[test]
+    fn resolve_field_empty_flag_without_default_errors() {
+        let err = resolve_field("Email", Some("".into()), None, true, false).unwrap_err();
+        assert!(err.to_string().contains("--email"), "msg: {err}");
+    }
+
+    #[test]
+    fn resolve_field_non_interactive_no_flag_with_default_uses_default() {
+        let out = resolve_field("Workspace", None, Some("default"), true, true).unwrap();
+        assert_eq!(out, "default");
+    }
+
+    #[test]
+    fn resolve_field_non_interactive_no_flag_no_default_errors() {
+        let err = resolve_field("Email", None, None, true, false).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("non-interactive"), "msg: {msg}");
+        assert!(msg.contains("--email"), "msg: {msg}");
+    }
+
+    #[test]
+    fn resolve_password_uses_flag() {
+        let out = resolve_password(Some("hunter2".into()), true).unwrap();
+        assert_eq!(out, "hunter2");
+    }
+
+    #[test]
+    fn resolve_password_empty_flag_errors() {
+        let err = resolve_password(Some("".into()), true).unwrap_err();
+        assert!(err.to_string().contains("--password"), "msg: {err}");
+    }
+
+    #[test]
+    fn resolve_password_non_interactive_no_flag_no_env_errors() {
+        // Make sure VEDA_PASSWORD isn't leaking in from the parent shell.
+        // SAFETY: tests in this module mutate process env. Other tests
+        // in this binary don't read VEDA_PASSWORD, so removal is local.
+        unsafe {
+            std::env::remove_var("VEDA_PASSWORD");
+        }
+        let err = resolve_password(None, true).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("non-interactive"), "msg: {msg}");
+        assert!(msg.contains("VEDA_PASSWORD"), "msg: {msg}");
+    }
+}
+
 async fn print_summary_layer(
     c: &client::Client,
     ws_key: &str,
@@ -260,6 +459,86 @@ async fn main() -> anyhow::Result<()> {
     let c = client::Client::new(&cfg.server_url);
 
     match cli.command {
+        Commands::Login { api_key } => {
+            init::apply_login(&mut cfg, api_key);
+            cfg.save()?;
+            println!("API key saved to config.");
+            println!("Run `veda init` (or `veda workspace use <id>`) to pick a workspace.");
+        }
+        Commands::Status => {
+            // Skip the ping when nothing is configured — there's no
+            // server to talk to that the user opted into.
+            let reachable = if cfg.api_key.is_some() || cfg.workspace_key.is_some() {
+                Some(status::ping_server(&cfg.server_url).await)
+            } else {
+                None
+            };
+            print!("{}", status::render_status(&cfg, reachable));
+        }
+        Commands::Init {
+            login,
+            name,
+            email,
+            password,
+            workspace,
+            non_interactive,
+        } => {
+            // The global `--server` flag was already merged into cfg at the
+            // top of main, so cfg.server_url is the source of truth. Prompt
+            // to confirm/change in interactive mode; in non-interactive mode
+            // accept whatever the config has (default
+            // http://localhost:3000 if unset).
+            let server_url = if non_interactive {
+                cfg.server_url.clone()
+            } else {
+                prompt_or("Server URL", Some(&cfg.server_url))?
+            };
+
+            let name = if login {
+                String::new()
+            } else {
+                resolve_field("Name", name, None, non_interactive, false)?
+            };
+            let email = resolve_field("Email", email, None, non_interactive, false)?;
+            let password = resolve_password(password, non_interactive)?;
+            let workspace = resolve_field(
+                "Workspace name",
+                workspace,
+                Some("default"),
+                non_interactive,
+                true,
+            )?;
+
+            let params = init::InitParams {
+                server_url,
+                login,
+                name,
+                email,
+                password,
+                workspace,
+            };
+            let new_client = client::Client::new(&params.server_url);
+            let outcome = init::run_init(&new_client, &mut cfg, params).await?;
+            cfg.save()?;
+
+            let cfg_path = config::CliConfig::default_path()
+                .map(|p| p.display().to_string())
+                .unwrap_or_else(|_| "<config path>".into());
+            println!();
+            if outcome.created_account {
+                println!("✓ account created (id {})", outcome.account_id);
+            } else {
+                println!("✓ logged in (account id {})", outcome.account_id);
+            }
+            if outcome.created_workspace {
+                println!("✓ workspace created (id {})", outcome.workspace_id);
+            } else {
+                println!("✓ using existing workspace (id {})", outcome.workspace_id);
+            }
+            println!("✓ workspace key saved to {cfg_path}");
+            println!();
+            println!("Try: veda cp ./README.md /docs/readme.md");
+        }
         Commands::Account { action } => match action {
             AccountCmd::Create {
                 name,

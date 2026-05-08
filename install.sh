@@ -157,12 +157,11 @@ print_next_steps() {
             ;;
     esac
     log ""
-    log "Next steps:"
-    log "  1. veda config set server_url $DEFAULT_SERVER"
-    log "  2. veda account create --name <you> --email <email> --password <password>"
-    log "  3. veda config set api_key <key from above>"
-    log "  4. veda workspace create my-workspace      # prints the workspace id"
-    log "  5. veda workspace use <id-from-above>      # creates a workspace key"
+    log "Next: run 'veda init' for guided setup (~30 seconds), or"
+    log "      'veda init --server $DEFAULT_SERVER --login --email ... --password ...' to"
+    log "      attach an existing account non-interactively."
+    log ""
+    log "After setup, 'veda status' confirms config + server reachability."
     log ""
     if [ -d "$HOME/.claude" ]; then
         log "Claude Code: skill auto-installed; just ask Claude to use veda."

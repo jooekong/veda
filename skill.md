@@ -56,6 +56,20 @@ You interact with it via the `veda` binary; never construct HTTP requests direct
 Remote paths are plain absolute paths starting with `/`, scoped to the active workspace.
 The CLI **does not accept** `:/path` syntax — `:` is rejected as an invalid character.
 
+## Setup
+
+If `veda status` reports unconfigured (or `veda <anything>` errors with "no
+API key configured"), the user hasn't run setup yet. Single-command bootstrap:
+
+```sh
+veda init                                    # interactive — prompts for everything
+veda init --login --email X --password Y    # attach existing account silently
+veda init --workspace dogfood                # different workspace name
+```
+
+`veda status` shows current config + server reachability. `veda login --api-key K`
+swaps the API key without touching workspace state.
+
 ## Core operations
 
 ### File operations
