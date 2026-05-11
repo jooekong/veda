@@ -9,9 +9,9 @@
 
 | 文档                | 职责                      | 何时读     |
 | ----------------- | ----------------------- | ------- |
-| `ARCHITECTURE.md` | 系统现状：模块结构、已实现能力、已知问题    | 每次开始工作前 |
-| `docs/PLANS.md`   | Phase 总览 + 当前 sprint 任务 | 每次开始工作前 |
-| `docs/design.md`  | 整体设计、API 定义、Schema 定义   | 做设计决策前  |
+| `ARCHITECTURE.md`       | 系统现状：模块结构、已实现能力、已知问题    | 每次开始工作前 |
+| `docs/design/plans.md`  | Phase 总览 + 当前 sprint 任务 | 每次开始工作前 |
+| `docs/design/design.md` | 整体设计、API 定义、Schema 定义   | 做设计决策前  |
 
 
 ---
@@ -22,7 +22,7 @@
 | 事件           | 更新哪里                     |
 | ------------ | ------------------------ |
 | 实现新功能 / 修改架构 | `ARCHITECTURE.md`        |
-| 完成 sprint 任务 | `docs/PLANS.md`（勾选 + 状态） |
+| 完成 sprint 任务 | `docs/design/plans.md`（勾选 + 状态） |
 
 
 **禁止**：把规划中的能力写成已实现。
@@ -35,7 +35,7 @@
   - `veda-types` — 零依赖的领域类型和错误定义
   - `veda-core` — trait 定义 + 业务逻辑（不依赖具体存储实现）
   - `veda-store` — MySQL + Milvus 的 trait 实现
-  - `veda-pipeline` — embedding、chunking、PDF/OCR 提取
+  - `veda-pipeline` — embedding、chunking、文本提取（PDF/OCR planned）
   - `veda-sql` — DataFusion SQL 引擎
   - `veda-server` — Axum HTTP 层（薄壳，只做路由和中间件）
   - `veda-cli` — CLI 客户端（纯 HTTP，不直接连数据库）

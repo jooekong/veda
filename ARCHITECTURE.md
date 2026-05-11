@@ -58,14 +58,13 @@ veda-fuse       FUSE 挂载                           (已实现)
 
 ## 待实现
 
-- Reconciler（MySQL ↔ Milvus 数据对比自愈）
 - Prometheus metrics 导出
 - PDF text extraction / Image OCR
 - CLI/FUSE 端到端测试、Docker Compose、K8s Helm chart
 
 ## 关键设计决策
 
-详见 `docs/design.md`。摘要：
+详见 `docs/design/design.md`。摘要：
 
 - MySQL = control plane (元数据、认证、outbox)
 - Milvus = data plane (向量搜索、structured collection 数据)

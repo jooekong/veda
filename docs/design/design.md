@@ -11,11 +11,11 @@
 | ------ | ---------------------------------------- |
 | 规模     | 中型团队（5-50人），10万-100万文件，需要高可用             |
 | 部署     | Kubernetes                               |
-| 文件类型   | 文本 + PDF/图片（提取文本，**不存原始二进制**）            |
+| 文件类型   | 文本（PDF/图片提取 planned，**不存原始二进制**）            |
 | 一致性    | 最终一致 + 异常 Outbox 自愈，不做分布式强一致             |
 | 多租户    | 共享数据库，行级隔离（`workspace_id`）               |
 | Worker | 内嵌 tokio task（可配置禁用，独立部署）                |
-| API    | REST + WebSocket（文件系统事件）                 |
+| API    | REST + SSE（文件系统事件）                       |
 | SQL 引擎 | DataFusion                               |
 | 存储     | 不引入 S3，文本存 MySQL，语义 chunk 存 Milvus       |
 | 测试     | trait 抽象 + mock 单测 + testcontainers 集成测试 |
@@ -33,7 +33,7 @@ veda/
 │   ├── veda-types/      零依赖：领域类型、错误定义、API DTO
 │   ├── veda-core/       trait 定义 + 业务逻辑（不依赖具体存储实现）
 │   ├── veda-store/      MySQL + Milvus 的 trait 实现
-│   ├── veda-pipeline/   embedding、chunking、PDF/OCR 提取
+│   ├── veda-pipeline/   embedding、chunking、文本提取（PDF/OCR planned）
 │   ├── veda-sql/        DataFusion SQL 引擎（隔离 Arrow 重编译）
 │   ├── veda-server/     Axum HTTP 层（薄壳：路由 + 中间件 + 启动）
 │   ├── veda-cli/        CLI 客户端（纯 HTTP，不直接连数据库）
@@ -48,7 +48,7 @@ veda-types          (零外部依赖，只有 serde/thiserror/uuid/chrono)
 veda-core           (依赖 veda-types + async-trait + sha2)
     ↑
 ├── veda-store      (依赖 veda-core + sqlx + reqwest)
-├── veda-pipeline   (依赖 veda-core + reqwest + pdf-extract)
+├── veda-pipeline   (依赖 veda-core + reqwest)
 └── veda-sql        (依赖 veda-core + datafusion + arrow)
         ↑
     veda-server     (依赖 store + pipeline + sql + axum)
@@ -62,7 +62,7 @@ veda-core           (依赖 veda-types + async-trait + sha2)
 | `veda-types`    | 零编译依赖，CLI/FUSE 只依赖它，不拉存储层              |
 | `veda-core`     | 业务逻辑可独立单测（mock trait），不需要 MySQL/Milvus |
 | `veda-store`    | 隔离 `sqlx` + Milvus HTTP 客户端，可独立集成测试    |
-| `veda-pipeline` | 隔离 `pdf-extract`/OCR 重依赖，改路由不触发重编译     |
+| `veda-pipeline` | 隔离 LLM/embedding HTTP 客户端，改路由不触发重编译  |
 | `veda-sql`      | 隔离 DataFusion + Arrow（占编译时间 60%+）      |
 | `veda-server`   | 薄壳，只做 Axum 路由/中间件/启动                   |
 
@@ -264,7 +264,7 @@ CREATE TABLE collection_schemas (
 );
 ```
 
-### 3.5 WebSocket 事件
+### 3.5 SSE 事件
 
 ```sql
 CREATE TABLE fs_events (
@@ -387,7 +387,7 @@ PUT /v1/fs/main.rs (content = "fn main() {}")
 | UPDATE files                | 不更新 revision、content、updated_at |
 | file_contents / file_chunks | 不写内容                            |
 | INSERT outbox               | 不触发 re-embedding                |
-| INSERT fs_events            | 不发 WebSocket 事件                 |
+| INSERT fs_events            | 不发 SSE 事件                       |
 | Milvus upsert               | 不触发向量重建                         |
 
 
@@ -736,7 +736,7 @@ tokio::select! {
 | 大文件                   | >256KB 文件正确分块存储和读取                        |
 | 行号读取                  | `?lines=N:M` 正确返回指定行                      |
 | 去重                    | 相同内容不重复写入                                 |
-| WebSocket             | 文件变更实时推送                                  |
+| SSE                   | 文件变更实时推送                                  |
 
 
 ### 12.2 性能验收

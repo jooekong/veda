@@ -6,7 +6,7 @@ A programmable knowledge store that unifies filesystem, vector search, and SQL q
 
 Veda is the successor to vecfs, rebuilt from the ground up with multi-tenancy, structured collections, and a cleaner architecture:
 
-- **Filesystem** — store text/PDF/images via familiar `cp`, `cat`, `ls`, `rm` operations
+- **Filesystem** — store text files via familiar `cp`, `cat`, `ls`, `rm` operations (PDF/OCR planned)
 - **Vector search** — every file is automatically chunked, embedded, and indexed for semantic + full-text hybrid search
 - **Structured collections** — create tables with auto-embedding, like a vector-native database
 - **SQL queries** — query files and collections with DataFusion SQL engine
@@ -15,7 +15,7 @@ Veda is the successor to vecfs, rebuilt from the ground up with multi-tenancy, s
 ## Architecture
 
 ```
-           CLI (veda)                REST API / WebSocket
+           CLI (veda)                REST API / SSE
                │                          │
                └────────┬────────────────┘
                         │
@@ -48,7 +48,7 @@ Veda is the successor to vecfs, rebuilt from the ground up with multi-tenancy, s
 - **Layered file storage**: ≤256KB inline in MySQL `file_contents`, >256KB chunked in `file_chunks`
 - **Content-addressed dedup**: SHA256 fingerprint skips writes when content hasn't changed
 - **Outbox pattern**: MySQL outbox table replaces `semantic_tasks` for Milvus eventual consistency
-- **No S3**: PDF/images store extracted text only, no original binary storage
+- **Text-first storage**: text files only in v0; PDF/OCR extraction planned, no binary blobs
 - **Structured collections**: data stored directly in Milvus with synchronous embedding, MySQL only stores schema metadata
 
 ## Quick Start
@@ -120,7 +120,6 @@ veda use my-project
 ```bash
 # Upload files
 veda cp ./README.md :/docs/readme.md
-veda cp ./report.pdf :/docs/report.pdf    # extracts text for search
 
 # Browse
 veda ls :/docs
@@ -183,14 +182,15 @@ veda/
 │   ├── veda-types/      # Domain types, error definitions (zero dep)
 │   ├── veda-core/       # Traits + business logic (no storage impl)
 │   ├── veda-store/      # MySQL + Milvus implementations
-│   ├── veda-pipeline/   # Embedding, chunking, PDF/OCR extraction
+│   ├── veda-pipeline/   # Embedding, chunking, text extraction (PDF/OCR planned)
 │   ├── veda-sql/        # DataFusion SQL engine
 │   ├── veda-server/     # Axum HTTP server (thin shell)
 │   ├── veda-cli/        # CLI client
 │   └── veda-fuse/       # FUSE mount (optional, excluded from default build)
 ├── docs/
-│   ├── design.md        # Complete design document
-│   └── PLANS.md         # Sprint planning
+│   └── design/
+│       ├── design.md    # Complete design document
+│       └── plans.md     # Sprint planning
 └── AGENTS.md
 ```
 
