@@ -211,84 +211,47 @@ impl ServerConfig {
     }
 
     fn apply_env_overrides(&mut self) {
-        if let Ok(v) = std::env::var("VEDA_LISTEN") {
-            self.listen = v;
-        }
-        if let Ok(v) = std::env::var("VEDA_JWT_SECRET") {
-            self.jwt_secret = v;
-        }
-        if let Ok(v) = std::env::var("VEDA_MYSQL_URL") {
-            self.mysql.database_url = v;
-        }
-        if let Ok(v) = std::env::var("VEDA_MYSQL_MAX_CONNECTIONS") {
-            if let Ok(n) = v.parse() {
-                self.mysql.max_connections = n;
-            }
-        }
-        if let Ok(v) = std::env::var("VEDA_MYSQL_MIN_CONNECTIONS") {
-            if let Ok(n) = v.parse() {
-                self.mysql.min_connections = n;
-            }
-        }
-        if let Ok(v) = std::env::var("VEDA_MYSQL_ACQUIRE_TIMEOUT_SECS") {
-            if let Ok(n) = v.parse() {
-                self.mysql.acquire_timeout_secs = n;
-            }
-        }
-        if let Ok(v) = std::env::var("VEDA_MYSQL_IDLE_TIMEOUT_SECS") {
-            if let Ok(n) = v.parse() {
-                self.mysql.idle_timeout_secs = n;
-            }
-        }
-        if let Ok(v) = std::env::var("VEDA_MYSQL_MAX_LIFETIME_SECS") {
-            if let Ok(n) = v.parse() {
-                self.mysql.max_lifetime_secs = n;
-            }
-        }
-        if let Ok(v) = std::env::var("VEDA_MILVUS_URL") {
-            self.milvus.url = v;
-        }
+        env_str("VEDA_LISTEN", &mut self.listen);
+        env_str("VEDA_JWT_SECRET", &mut self.jwt_secret);
+
+        env_str("VEDA_MYSQL_URL", &mut self.mysql.database_url);
+        env_parse("VEDA_MYSQL_MAX_CONNECTIONS", &mut self.mysql.max_connections);
+        env_parse("VEDA_MYSQL_MIN_CONNECTIONS", &mut self.mysql.min_connections);
+        env_parse("VEDA_MYSQL_ACQUIRE_TIMEOUT_SECS", &mut self.mysql.acquire_timeout_secs);
+        env_parse("VEDA_MYSQL_IDLE_TIMEOUT_SECS", &mut self.mysql.idle_timeout_secs);
+        env_parse("VEDA_MYSQL_MAX_LIFETIME_SECS", &mut self.mysql.max_lifetime_secs);
+
+        env_str("VEDA_MILVUS_URL", &mut self.milvus.url);
         if let Ok(v) = std::env::var("VEDA_MILVUS_TOKEN") {
             self.milvus.token = Some(v);
         }
-        if let Ok(v) = std::env::var("VEDA_EMBEDDING_API_URL") {
-            self.embedding.api_url = v;
-        }
-        if let Ok(v) = std::env::var("VEDA_EMBEDDING_API_KEY") {
-            self.embedding.api_key = v;
-        }
-        if let Ok(v) = std::env::var("VEDA_EMBEDDING_MODEL") {
-            self.embedding.model = v;
-        }
-        if let Ok(v) = std::env::var("VEDA_EMBEDDING_DIMENSION") {
-            if let Ok(n) = v.parse() {
-                self.embedding.dimension = n;
-            }
-        }
-        if let Ok(v) = std::env::var("VEDA_EMBEDDING_BATCH_SIZE") {
-            if let Ok(n) = v.parse() {
-                self.embedding.batch_size = n;
-            }
-        }
+
+        env_str("VEDA_EMBEDDING_API_URL", &mut self.embedding.api_url);
+        env_str("VEDA_EMBEDDING_API_KEY", &mut self.embedding.api_key);
+        env_str("VEDA_EMBEDDING_MODEL", &mut self.embedding.model);
+        env_parse("VEDA_EMBEDDING_DIMENSION", &mut self.embedding.dimension);
+        env_parse("VEDA_EMBEDDING_BATCH_SIZE", &mut self.embedding.batch_size);
+
+        // LLM: API_URL acts as the "enable" switch — it lazily creates the
+        // section if absent. KEY and MODEL only override when LLM is already
+        // configured (a stray VEDA_LLM_MODEL must not silently half-init it).
         if let Ok(v) = std::env::var("VEDA_LLM_API_URL") {
-            let llm = self.llm.get_or_insert_with(|| LlmConfig {
-                api_url: String::new(),
-                api_key: String::new(),
-                model: String::new(),
-                max_summary_tokens: default_max_summary_tokens(),
-            });
-            llm.api_url = v;
+            self.llm
+                .get_or_insert_with(|| LlmConfig {
+                    api_url: String::new(),
+                    api_key: String::new(),
+                    model: String::new(),
+                    max_summary_tokens: default_max_summary_tokens(),
+                })
+                .api_url = v;
         }
-        if let Ok(v) = std::env::var("VEDA_LLM_API_KEY") {
-            if let Some(llm) = &mut self.llm {
-                llm.api_key = v;
-            }
+        if let (Ok(v), Some(llm)) = (std::env::var("VEDA_LLM_API_KEY"), self.llm.as_mut()) {
+            llm.api_key = v;
         }
-        if let Ok(v) = std::env::var("VEDA_LLM_MODEL") {
-            if let Some(llm) = &mut self.llm {
-                llm.model = v;
-            }
+        if let (Ok(v), Some(llm)) = (std::env::var("VEDA_LLM_MODEL"), self.llm.as_mut()) {
+            llm.model = v;
         }
+
         if let Ok(v) = std::env::var("VEDA_ALLOWED_ORIGINS") {
             let origins: Vec<String> = v
                 .split(',')
@@ -299,42 +262,37 @@ impl ServerConfig {
                 self.allowed_origins = origins;
             }
         }
-        if let Ok(v) = std::env::var("VEDA_RECONCILER_ENABLED") {
-            if let Ok(b) = v.parse() {
-                self.reconciler.enabled = b;
-            }
-        }
-        if let Ok(v) = std::env::var("VEDA_RECONCILER_INTERVAL_SECS") {
-            if let Ok(n) = v.parse() {
-                self.reconciler.interval_secs = n;
-            }
-        }
-        if let Ok(v) = std::env::var("VEDA_RETENTION_ENABLED") {
-            if let Ok(b) = v.parse() {
-                self.retention.enabled = b;
-            }
-        }
-        if let Ok(v) = std::env::var("VEDA_RETENTION_INTERVAL_SECS") {
-            if let Ok(n) = v.parse() {
-                self.retention.interval_secs = n;
-            }
-        }
-        if let Ok(v) = std::env::var("VEDA_RETENTION_EVENTS_DAYS") {
-            if let Ok(n) = v.parse() {
-                self.retention.events_retention_days = n;
-            }
-        }
-        if let Ok(v) = std::env::var("VEDA_DEV_MODE") {
-            if let Ok(b) = v.parse() {
-                self.dev_mode = b;
-            }
-        }
+
+        env_parse("VEDA_RECONCILER_ENABLED", &mut self.reconciler.enabled);
+        env_parse("VEDA_RECONCILER_INTERVAL_SECS", &mut self.reconciler.interval_secs);
+        env_parse("VEDA_RETENTION_ENABLED", &mut self.retention.enabled);
+        env_parse("VEDA_RETENTION_INTERVAL_SECS", &mut self.retention.interval_secs);
+        env_parse("VEDA_RETENTION_EVENTS_DAYS", &mut self.retention.events_retention_days);
+        env_parse("VEDA_DEV_MODE", &mut self.dev_mode);
+
         if let Ok(v) = std::env::var("VEDA_METRICS_TOKEN") {
             // An explicitly empty env var means "disable metrics auth", which
             // we don't allow — empty or unset both leave the endpoint 404.
             if !v.is_empty() {
                 self.metrics_token = Some(v);
             }
+        }
+    }
+}
+
+/// Override `slot` from env var `key` when set. Empty string counts.
+fn env_str(key: &str, slot: &mut String) {
+    if let Ok(v) = std::env::var(key) {
+        *slot = v;
+    }
+}
+
+/// Override `slot` when env var parses cleanly. Malformed values are
+/// silently kept at the TOML value — see `invalid_numeric_env_is_ignored`.
+fn env_parse<T: std::str::FromStr>(key: &str, slot: &mut T) {
+    if let Ok(v) = std::env::var(key) {
+        if let Ok(n) = v.parse() {
+            *slot = n;
         }
     }
 }
