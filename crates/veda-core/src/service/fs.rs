@@ -857,14 +857,7 @@ impl FsService {
         }
 
         for fid in &file_ids_to_cleanup {
-            let remaining = tx.decrement_ref_count(fid).await?;
-            if remaining <= 0 {
-                tx.delete_file_content(fid).await?;
-                tx.delete_file_chunks(fid).await?;
-                let outbox = make_outbox(workspace_id, OutboxEventType::ChunkDelete, fid);
-                tx.insert_outbox(&outbox).await?;
-                tx.delete_file(fid).await?;
-            }
+            cleanup_file_if_orphan(&mut *tx, workspace_id, fid).await?;
         }
 
         let evt = make_fs_event(
@@ -1424,34 +1417,39 @@ async fn ensure_parents(
     workspace_id: &str,
     full_path: &str,
 ) -> Result<()> {
-    let parent = path::parent(full_path);
-    if parent == "/" {
-        return Ok(());
-    }
-
-    let existing = store.get_dentry(workspace_id, parent).await?;
-    if let Some(d) = existing {
-        if !d.is_dir {
-            return Err(VedaError::InvalidPath(format!("{parent} exists as a file")));
+    // Walk from leaf to root collecting missing directories. Stop at the
+    // first existing dir (no need to climb further) or root.
+    let mut missing: Vec<&str> = Vec::new();
+    let mut cur = path::parent(full_path);
+    while cur != "/" {
+        match store.get_dentry(workspace_id, cur).await? {
+            Some(d) if d.is_dir => break,
+            Some(_) => return Err(VedaError::InvalidPath(format!("{cur} exists as a file"))),
+            None => {
+                missing.push(cur);
+                cur = path::parent(cur);
+            }
         }
-        return Ok(());
     }
 
-    Box::pin(ensure_parents(store, workspace_id, parent)).await?;
-
+    // Insert from root to leaf so each parent exists before its child.
+    // insert_dentry_ignore is idempotent against concurrent racers.
     let now = Utc::now();
-    let dentry = Dentry {
-        id: Uuid::new_v4().to_string(),
-        workspace_id: workspace_id.to_string(),
-        parent_path: path::parent(parent).to_string(),
-        name: path::filename(parent).to_string(),
-        path: parent.to_string(),
-        file_id: None,
-        is_dir: true,
-        created_at: now,
-        updated_at: now,
-    };
-    store.insert_dentry_ignore(&dentry).await
+    for parent in missing.into_iter().rev() {
+        let dentry = Dentry {
+            id: Uuid::new_v4().to_string(),
+            workspace_id: workspace_id.to_string(),
+            parent_path: path::parent(parent).to_string(),
+            name: path::filename(parent).to_string(),
+            path: parent.to_string(),
+            file_id: None,
+            is_dir: true,
+            created_at: now,
+            updated_at: now,
+        };
+        store.insert_dentry_ignore(&dentry).await?;
+    }
+    Ok(())
 }
 
 fn make_outbox(workspace_id: &str, event_type: OutboxEventType, file_id: &str) -> OutboxEvent {
