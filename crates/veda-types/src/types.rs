@@ -327,7 +327,14 @@ fn default_search_limit() -> usize {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SearchHit {
+    /// Internal join key — never sent to clients. Server-side resolves
+    /// `path` from it; once that's done the field carries no information
+    /// the caller would have permission to act on. `default` lets
+    /// downstream code reuse this struct to *deserialize* the public
+    /// search response (where the field is absent) without errors.
+    #[serde(skip_serializing, default)]
     pub file_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub chunk_index: Option<i32>,
     pub content: String,
     pub score: f32,
@@ -337,6 +344,11 @@ pub struct SearchHit {
     /// must read this field before reasoning about magnitude.
     #[serde(default = "default_score_type")]
     pub score_type: String,
+    /// None means the backend couldn't resolve a path for this hit
+    /// (detached file_id with no live dentry). Clients should treat
+    /// it as "unknown", not "/" — that's why the key is omitted
+    /// rather than emitted as null.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub path: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub l0_abstract: Option<String>,

@@ -1,7 +1,7 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-use crate::types::{CollectionType, DetailLevel, FieldDefinition, SearchHit, SearchMode};
+use crate::types::{CollectionType, DetailLevel, FieldDefinition, SearchMode};
 
 // ── Account ────────────────────────────────────────────
 
@@ -87,40 +87,6 @@ pub struct SearchApiRequest {
     pub detail_level: Option<DetailLevel>,
 }
 
-#[derive(Debug, Serialize)]
-pub struct SearchResultItem {
-    // None means the backend could not resolve a path for this hit (e.g. a
-    // detached file_id with no live dentry). Clients should treat it as
-    // "unknown", not "/".
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub path: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub chunk_index: Option<i32>,
-    pub content: String,
-    pub score: f32,
-    /// "rrf" / "bm25" / "cosine". See `SearchHit::score_type` — scores from
-    /// different types are not comparable.
-    pub score_type: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub l0_abstract: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub l1_overview: Option<String>,
-}
-
-impl From<SearchHit> for SearchResultItem {
-    fn from(h: SearchHit) -> Self {
-        Self {
-            path: h.path,
-            chunk_index: h.chunk_index,
-            content: h.content,
-            score: h.score,
-            score_type: h.score_type,
-            l0_abstract: h.l0_abstract,
-            l1_overview: h.l1_overview,
-        }
-    }
-}
-
 /// Response for `GET /v1/summary/{path}` — the L0 abstract layer, intended
 /// as the cheap default. Roughly one sentence; suitable for quick context
 /// previews and vector filtering. Clients that need detailed prose should
@@ -195,7 +161,6 @@ pub struct SqlResponse {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use crate::types::SearchHit;
 
     fn sample_hit(path: Option<&str>) -> SearchHit {
@@ -212,27 +177,43 @@ mod tests {
     }
 
     #[test]
-    fn search_result_omits_path_when_none() {
+    fn search_hit_omits_path_when_none() {
         // Detached file_id (no live dentry) → path None → JSON must not
         // contain a "path" key, so clients can distinguish "unknown" from "/".
-        let item: SearchResultItem = sample_hit(None).into();
-        let json = serde_json::to_value(&item).unwrap();
+        let json = serde_json::to_value(sample_hit(None)).unwrap();
         assert!(json.get("path").is_none(), "path key should be absent");
         assert_eq!(json["content"], "hello");
     }
 
     #[test]
-    fn search_result_includes_path_when_some() {
-        let item: SearchResultItem = sample_hit(Some("/docs/a.md")).into();
-        let json = serde_json::to_value(&item).unwrap();
+    fn search_hit_includes_path_when_some() {
+        let json = serde_json::to_value(sample_hit(Some("/docs/a.md"))).unwrap();
         assert_eq!(json["path"], "/docs/a.md");
     }
 
     #[test]
-    fn search_result_round_trips_path_option() {
-        let item: SearchResultItem = sample_hit(None).into();
-        assert!(item.path.is_none());
-        let item2: SearchResultItem = sample_hit(Some("/x")).into();
-        assert_eq!(item2.path.as_deref(), Some("/x"));
+    fn search_hit_never_serializes_file_id() {
+        // file_id is an internal join key. Leaking it gives clients no
+        // useful info — paths are the addressable identifier in the
+        // public API — and would tempt them to reason about it.
+        let json = serde_json::to_value(sample_hit(Some("/x"))).unwrap();
+        assert!(json.get("file_id").is_none(), "file_id must stay server-side");
+    }
+
+    #[test]
+    fn search_hit_deserializes_without_file_id() {
+        // Mirrors what a CLI / SDK sees on the wire: server omits
+        // file_id, so SearchHit must round-trip cleanly when it's
+        // missing on the way in. Regression for Codex review.
+        let wire = serde_json::json!({
+            "chunk_index": 0,
+            "content": "hello",
+            "score": 0.9,
+            "score_type": "cosine",
+            "path": "/x"
+        });
+        let de: SearchHit = serde_json::from_value(wire).unwrap();
+        assert_eq!(de.file_id, "");
+        assert_eq!(de.path.as_deref(), Some("/x"));
     }
 }

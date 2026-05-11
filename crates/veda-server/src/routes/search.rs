@@ -5,8 +5,8 @@ use axum::http::{header, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
-use veda_types::api::{AbstractResponse, OverviewResponse, SearchApiRequest, SearchResultItem};
-use veda_types::{ApiResponse, DetailLevel};
+use veda_types::api::{AbstractResponse, OverviewResponse, SearchApiRequest};
+use veda_types::{ApiResponse, DetailLevel, SearchHit};
 
 use crate::auth::AuthWorkspace;
 use crate::error::AppError;
@@ -23,7 +23,7 @@ async fn search(
     State(state): State<Arc<AppState>>,
     auth: AuthWorkspace,
     Json(req): Json<SearchApiRequest>,
-) -> Result<Json<ApiResponse<Vec<SearchResultItem>>>, AppError> {
+) -> Result<Json<ApiResponse<Vec<SearchHit>>>, AppError> {
     let mode = req.mode.unwrap_or_default();
     let limit = req.limit.unwrap_or(10).min(100);
     let detail_level = req.detail_level.unwrap_or(DetailLevel::Full);
@@ -39,9 +39,9 @@ async fn search(
             detail_level,
         )
         .await?;
-    let results: Vec<SearchResultItem> = hits.into_iter().map(SearchResultItem::from).collect();
-
-    Ok(Json(ApiResponse::ok(results)))
+    // `SearchHit` serializes to the public shape directly — file_id is
+    // marked `#[serde(skip_serializing)]` so it stays server-side.
+    Ok(Json(ApiResponse::ok(hits)))
 }
 
 async fn get_abstract(
