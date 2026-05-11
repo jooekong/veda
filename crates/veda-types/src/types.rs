@@ -28,6 +28,10 @@ pub enum KeyStatus {
 #[serde(rename_all = "snake_case")]
 pub enum KeyPermission {
     Read,
+    // Wire/DB value is `readwrite` (no underscore) — see
+    // `POST /v1/workspaces/{id}/keys` and the `veda_workspace_keys.permission`
+    // column DEFAULT. Override `rename_all = "snake_case"` to keep that.
+    #[serde(rename = "readwrite")]
     ReadWrite,
 }
 
@@ -51,7 +55,6 @@ pub enum SourceType {
 pub enum OutboxEventType {
     ChunkSync,
     ChunkDelete,
-    CollectionSync,
     SummarySync,
     DirSummarySync,
 }

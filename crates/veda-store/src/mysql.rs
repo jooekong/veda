@@ -5,10 +5,9 @@ use sqlx::types::Json;
 use sqlx::{MySqlPool, Row, Transaction};
 use veda_core::store::{AuthStore, CollectionMetaStore, MetadataStore, MetadataTx, TaskQueue};
 use veda_types::{
-    Account, AccountStatus, ApiKeyRecord, CollectionSchema, CollectionStatus, CollectionType,
-    Dentry, FileChunk, FileRecord, FileSummary, FsEvent, FsEventType, KeyPermission, KeyStatus,
-    OutboxEvent, OutboxEventType, OutboxStatus, Result, SourceType, StorageStats, StorageType,
-    SummaryStatus, VedaError, Workspace, WorkspaceKey, WorkspaceStatus,
+    Account, ApiKeyRecord, CollectionSchema, Dentry, FileChunk, FileRecord, FileSummary, FsEvent,
+    OutboxEvent, OutboxEventType, OutboxStatus, Result, StorageStats, StorageType, SummaryStatus,
+    VedaError, Workspace, WorkspaceKey,
 };
 
 // Batched INSERT sizes chosen to stay well under a conservative
@@ -32,97 +31,17 @@ fn escape_like(s: &str) -> String {
         .replace('_', "\\_")
 }
 
-fn parse_storage_type(s: &str) -> Result<StorageType> {
-    match s {
-        "inline" => Ok(StorageType::Inline),
-        "chunked" => Ok(StorageType::Chunked),
-        _ => Err(storage_err(format!("unknown storage_type: {s}"))),
-    }
+/// Map a `snake_case` MySQL ENUM column back to its veda-types enum,
+/// piggybacking on serde's `#[serde(rename_all = "snake_case")]` derive
+/// so adding/removing an enum variant requires zero changes here.
+fn db_enum<T: serde::de::DeserializeOwned>(field: &'static str, s: &str) -> Result<T> {
+    serde_plain::from_str(s).map_err(|_| storage_err(format!("unknown {field}: {s}")))
 }
 
-fn storage_type_str(s: StorageType) -> &'static str {
-    match s {
-        StorageType::Inline => "inline",
-        StorageType::Chunked => "chunked",
-    }
-}
-
-fn parse_source_type(s: &str) -> Result<SourceType> {
-    match s {
-        "text" => Ok(SourceType::Text),
-        "pdf" => Ok(SourceType::Pdf),
-        "image" => Ok(SourceType::Image),
-        _ => Err(storage_err(format!("unknown source_type: {s}"))),
-    }
-}
-
-fn source_type_str(s: SourceType) -> &'static str {
-    match s {
-        SourceType::Text => "text",
-        SourceType::Pdf => "pdf",
-        SourceType::Image => "image",
-    }
-}
-
-fn parse_outbox_event_type(s: &str) -> Result<OutboxEventType> {
-    match s {
-        "chunk_sync" => Ok(OutboxEventType::ChunkSync),
-        "chunk_delete" => Ok(OutboxEventType::ChunkDelete),
-        "collection_sync" => Ok(OutboxEventType::CollectionSync),
-        "summary_sync" => Ok(OutboxEventType::SummarySync),
-        "dir_summary_sync" => Ok(OutboxEventType::DirSummarySync),
-        _ => Err(storage_err(format!("unknown outbox event_type: {s}"))),
-    }
-}
-
-fn outbox_event_type_str(t: OutboxEventType) -> &'static str {
-    match t {
-        OutboxEventType::ChunkSync => "chunk_sync",
-        OutboxEventType::ChunkDelete => "chunk_delete",
-        OutboxEventType::CollectionSync => "collection_sync",
-        OutboxEventType::SummarySync => "summary_sync",
-        OutboxEventType::DirSummarySync => "dir_summary_sync",
-    }
-}
-
-fn parse_outbox_status(s: &str) -> Result<OutboxStatus> {
-    match s {
-        "pending" => Ok(OutboxStatus::Pending),
-        "processing" => Ok(OutboxStatus::Processing),
-        "completed" => Ok(OutboxStatus::Completed),
-        "failed" => Ok(OutboxStatus::Failed),
-        "dead" => Ok(OutboxStatus::Dead),
-        _ => Err(storage_err(format!("unknown outbox status: {s}"))),
-    }
-}
-
-fn outbox_status_str(s: OutboxStatus) -> &'static str {
-    match s {
-        OutboxStatus::Pending => "pending",
-        OutboxStatus::Processing => "processing",
-        OutboxStatus::Completed => "completed",
-        OutboxStatus::Failed => "failed",
-        OutboxStatus::Dead => "dead",
-    }
-}
-
-fn fs_event_type_str(t: FsEventType) -> &'static str {
-    match t {
-        FsEventType::Create => "create",
-        FsEventType::Update => "update",
-        FsEventType::Delete => "delete",
-        FsEventType::Move => "move",
-    }
-}
-
-fn parse_fs_event_type(s: &str) -> Result<FsEventType> {
-    match s {
-        "create" => Ok(FsEventType::Create),
-        "update" => Ok(FsEventType::Update),
-        "delete" => Ok(FsEventType::Delete),
-        "move" => Ok(FsEventType::Move),
-        _ => Err(storage_err(format!("unknown fs_event_type: {s}"))),
-    }
+/// Counterpart of `db_enum`. Unit-variant enums always serialize cleanly,
+/// so the only failure mode is misuse — `expect` documents that contract.
+fn db_enum_str<T: serde::Serialize>(val: &T) -> String {
+    serde_plain::to_string(val).expect("unit enum must serialize to string")
 }
 
 fn row_to_fs_event(row: &sqlx::mysql::MySqlRow) -> Result<FsEvent> {
@@ -130,101 +49,11 @@ fn row_to_fs_event(row: &sqlx::mysql::MySqlRow) -> Result<FsEvent> {
     Ok(FsEvent {
         id: row.try_get("id").map_err(storage_err)?,
         workspace_id: row.try_get("workspace_id").map_err(storage_err)?,
-        event_type: parse_fs_event_type(&et)?,
+        event_type: db_enum("fs_event_type", &et)?,
         path: row.try_get("path").map_err(storage_err)?,
         file_id: row.try_get("file_id").map_err(storage_err)?,
         created_at: row.try_get("created_at").map_err(storage_err)?,
     })
-}
-
-fn parse_account_status(s: &str) -> Result<AccountStatus> {
-    match s {
-        "active" => Ok(AccountStatus::Active),
-        "suspended" => Ok(AccountStatus::Suspended),
-        _ => Err(storage_err(format!("unknown account_status: {s}"))),
-    }
-}
-
-fn account_status_str(s: AccountStatus) -> &'static str {
-    match s {
-        AccountStatus::Active => "active",
-        AccountStatus::Suspended => "suspended",
-    }
-}
-
-fn parse_workspace_status(s: &str) -> Result<WorkspaceStatus> {
-    match s {
-        "active" => Ok(WorkspaceStatus::Active),
-        "archived" => Ok(WorkspaceStatus::Archived),
-        _ => Err(storage_err(format!("unknown workspace_status: {s}"))),
-    }
-}
-
-fn workspace_status_str(s: WorkspaceStatus) -> &'static str {
-    match s {
-        WorkspaceStatus::Active => "active",
-        WorkspaceStatus::Archived => "archived",
-    }
-}
-
-fn parse_key_status(s: &str) -> Result<KeyStatus> {
-    match s {
-        "active" => Ok(KeyStatus::Active),
-        "revoked" => Ok(KeyStatus::Revoked),
-        _ => Err(storage_err(format!("unknown key_status: {s}"))),
-    }
-}
-
-fn key_status_str(s: KeyStatus) -> &'static str {
-    match s {
-        KeyStatus::Active => "active",
-        KeyStatus::Revoked => "revoked",
-    }
-}
-
-fn parse_key_permission(s: &str) -> Result<KeyPermission> {
-    match s {
-        "read" => Ok(KeyPermission::Read),
-        "readwrite" => Ok(KeyPermission::ReadWrite),
-        _ => Err(storage_err(format!("unknown key_permission: {s}"))),
-    }
-}
-
-fn key_permission_str(s: KeyPermission) -> &'static str {
-    match s {
-        KeyPermission::Read => "read",
-        KeyPermission::ReadWrite => "readwrite",
-    }
-}
-
-fn parse_collection_type(s: &str) -> Result<CollectionType> {
-    match s {
-        "structured" => Ok(CollectionType::Structured),
-        "raw" => Ok(CollectionType::Raw),
-        _ => Err(storage_err(format!("unknown collection_type: {s}"))),
-    }
-}
-
-fn collection_type_str(s: CollectionType) -> &'static str {
-    match s {
-        CollectionType::Structured => "structured",
-        CollectionType::Raw => "raw",
-    }
-}
-
-fn parse_collection_status(s: &str) -> Result<CollectionStatus> {
-    match s {
-        "active" => Ok(CollectionStatus::Active),
-        "deleting" => Ok(CollectionStatus::Deleting),
-        _ => Err(storage_err(format!("unknown collection_status: {s}"))),
-    }
-}
-
-fn collection_status_str(s: CollectionStatus) -> &'static str {
-    match s {
-        CollectionStatus::Active => "active",
-        CollectionStatus::Deleting => "deleting",
-    }
 }
 
 fn row_to_collection_schema(row: &sqlx::mysql::MySqlRow) -> Result<CollectionSchema> {
@@ -236,11 +65,11 @@ fn row_to_collection_schema(row: &sqlx::mysql::MySqlRow) -> Result<CollectionSch
         id: row.try_get("id").map_err(storage_err)?,
         workspace_id: row.try_get("workspace_id").map_err(storage_err)?,
         name: row.try_get("name").map_err(storage_err)?,
-        collection_type: parse_collection_type(&ct)?,
+        collection_type: db_enum("collection_type", &ct)?,
         schema_json,
         embedding_source: row.try_get("embedding_source").map_err(storage_err)?,
         embedding_dim: row.try_get("embedding_dim").map_err(storage_err)?,
-        status: parse_collection_status(&st)?,
+        status: db_enum("collection_status", &st)?,
         created_at: row.try_get("created_at").map_err(storage_err)?,
         updated_at: row.try_get("updated_at").map_err(storage_err)?,
     })
@@ -253,7 +82,7 @@ fn row_to_account(row: &sqlx::mysql::MySqlRow) -> Result<Account> {
         name: row.try_get("name").map_err(storage_err)?,
         email: row.try_get("email").map_err(storage_err)?,
         password_hash: row.try_get("password_hash").map_err(storage_err)?,
-        status: parse_account_status(&st)?,
+        status: db_enum("account_status", &st)?,
         created_at: row.try_get("created_at").map_err(storage_err)?,
         updated_at: row.try_get("updated_at").map_err(storage_err)?,
     })
@@ -265,7 +94,7 @@ fn row_to_workspace(row: &sqlx::mysql::MySqlRow) -> Result<Workspace> {
         id: row.try_get("id").map_err(storage_err)?,
         account_id: row.try_get("account_id").map_err(storage_err)?,
         name: row.try_get("name").map_err(storage_err)?,
-        status: parse_workspace_status(&st)?,
+        status: db_enum("workspace_status", &st)?,
         created_at: row.try_get("created_at").map_err(storage_err)?,
         updated_at: row.try_get("updated_at").map_err(storage_err)?,
     })
@@ -278,7 +107,7 @@ fn row_to_api_key(row: &sqlx::mysql::MySqlRow) -> Result<ApiKeyRecord> {
         account_id: row.try_get("account_id").map_err(storage_err)?,
         name: row.try_get("name").map_err(storage_err)?,
         key_hash: row.try_get("key_hash").map_err(storage_err)?,
-        status: parse_key_status(&st)?,
+        status: db_enum("key_status", &st)?,
         created_at: row.try_get("created_at").map_err(storage_err)?,
     })
 }
@@ -291,8 +120,8 @@ fn row_to_workspace_key(row: &sqlx::mysql::MySqlRow) -> Result<WorkspaceKey> {
         workspace_id: row.try_get("workspace_id").map_err(storage_err)?,
         name: row.try_get("name").map_err(storage_err)?,
         key_hash: row.try_get("key_hash").map_err(storage_err)?,
-        permission: parse_key_permission(&perm)?,
-        status: parse_key_status(&st)?,
+        permission: db_enum("key_permission", &perm)?,
+        status: db_enum("key_status", &st)?,
         created_at: row.try_get("created_at").map_err(storage_err)?,
     })
 }
@@ -320,8 +149,8 @@ fn row_to_file(row: &sqlx::mysql::MySqlRow) -> Result<FileRecord> {
         workspace_id: row.try_get("workspace_id").map_err(storage_err)?,
         size_bytes: row.try_get("size_bytes").map_err(storage_err)?,
         mime_type: row.try_get("mime_type").map_err(storage_err)?,
-        storage_type: parse_storage_type(&st)?,
-        source_type: parse_source_type(&src)?,
+        storage_type: db_enum("storage_type", &st)?,
+        source_type: db_enum("source_type", &src)?,
         line_count: row.try_get("line_count").map_err(storage_err)?,
         checksum_sha256: row.try_get("checksum_sha256").map_err(storage_err)?,
         revision: row.try_get("revision").map_err(storage_err)?,
@@ -353,9 +182,9 @@ fn row_to_outbox(row: &sqlx::mysql::MySqlRow) -> Result<OutboxEvent> {
     Ok(OutboxEvent {
         id: row.try_get("id").map_err(storage_err)?,
         workspace_id: row.try_get("workspace_id").map_err(storage_err)?,
-        event_type: parse_outbox_event_type(&et)?,
+        event_type: db_enum("outbox_event_type", &et)?,
         payload,
-        status: parse_outbox_status(&st)?,
+        status: db_enum("outbox_status", &st)?,
         retry_count: row.try_get("retry_count").map_err(storage_err)?,
         max_retries: row.try_get("max_retries").map_err(storage_err)?,
         available_at: row.try_get("available_at").map_err(storage_err)?,
@@ -763,7 +592,7 @@ async fn get_file_chunks_conn(
 }
 
 async fn insert_fs_event_conn(conn: &mut sqlx::MySqlConnection, event: &FsEvent) -> Result<()> {
-    let et = fs_event_type_str(event.event_type);
+    let et = db_enum_str(&event.event_type);
     if event.id == 0 {
         sqlx::query(
             r#"INSERT INTO veda_fs_events (workspace_id, event_type, path, file_id, created_at)
@@ -797,8 +626,8 @@ async fn insert_fs_event_conn(conn: &mut sqlx::MySqlConnection, event: &FsEvent)
 
 async fn insert_outbox_conn(conn: &mut sqlx::MySqlConnection, event: &OutboxEvent) -> Result<()> {
     let payload = serde_json::to_string(&event.payload).map_err(|e| storage_err(e.to_string()))?;
-    let status = outbox_status_str(event.status);
-    let et = outbox_event_type_str(event.event_type);
+    let status = db_enum_str(&event.status);
+    let et = db_enum_str(&event.event_type);
     if event.id == 0 {
         sqlx::query(
             r#"INSERT INTO veda_outbox
@@ -1321,7 +1150,7 @@ impl MetadataStore for MysqlStore {
         .bind(&summary.dentry_id)
         .bind(&summary.l0_abstract)
         .bind(&summary.l1_overview)
-        .bind(summary_status_str(summary.status))
+        .bind(db_enum_str(&summary.status))
         .execute(&self.pool)
         .await
         .map_err(storage_err)?;
@@ -1366,21 +1195,9 @@ impl MetadataStore for MysqlStore {
     }
 }
 
-fn summary_status_str(s: SummaryStatus) -> &'static str {
-    match s {
-        SummaryStatus::Pending => "pending",
-        SummaryStatus::Ready => "ready",
-        SummaryStatus::Failed => "failed",
-    }
-}
-
 fn row_to_summary(row: &sqlx::mysql::MySqlRow) -> Result<FileSummary> {
     let status_str: String = row.try_get("status").map_err(storage_err)?;
-    let status = match status_str.as_str() {
-        "ready" => SummaryStatus::Ready,
-        "failed" => SummaryStatus::Failed,
-        _ => SummaryStatus::Pending,
-    };
+    let status: SummaryStatus = db_enum("summary_status", &status_str)?;
     Ok(FileSummary {
         id: row.try_get("id").map_err(storage_err)?,
         workspace_id: row.try_get("workspace_id").map_err(storage_err)?,
@@ -1597,8 +1414,8 @@ impl MetadataTx for MysqlMetadataTx {
         .bind(&file.workspace_id)
         .bind(file.size_bytes)
         .bind(&file.mime_type)
-        .bind(storage_type_str(file.storage_type))
-        .bind(source_type_str(file.source_type))
+        .bind(db_enum_str(&file.storage_type))
+        .bind(db_enum_str(&file.source_type))
         .bind(file.line_count)
         .bind(&file.checksum_sha256)
         .bind(file.revision)
@@ -1631,7 +1448,7 @@ impl MetadataTx for MysqlMetadataTx {
         .bind(size_bytes)
         .bind(checksum)
         .bind(line_count)
-        .bind(storage_type_str(storage_type))
+        .bind(db_enum_str(&storage_type))
         .bind(file_id)
         .bind(expected_rev)
         .execute(t.as_mut())
@@ -1816,7 +1633,7 @@ impl MetadataTx for MysqlMetadataTx {
         file_id: &str,
     ) -> Result<bool> {
         let t = self.tx_mut()?;
-        let et = outbox_event_type_str(event.event_type);
+        let et = db_enum_str(&event.event_type);
         // Only deduplicate against `pending` events. A `processing` event is
         // already in flight against an older snapshot of the file; if we
         // dedupe against it, the new content's ChunkSync gets dropped and the
@@ -1863,7 +1680,7 @@ impl MetadataTx for MysqlMetadataTx {
             for e in batch {
                 q = q
                     .bind(&e.workspace_id)
-                    .bind(fs_event_type_str(e.event_type))
+                    .bind(db_enum_str(&e.event_type))
                     .bind(&e.path)
                     .bind(&e.file_id)
                     .bind(e.created_at.naive_utc());
@@ -2036,7 +1853,7 @@ impl TaskQueue for MysqlStore {
         payload_key: &str,
         payload_value: &str,
     ) -> Result<bool> {
-        let et = outbox_event_type_str(event_type);
+        let et = db_enum_str(&event_type);
         let json_path = format!("$.{payload_key}");
         let row: Option<(i64,)> = sqlx::query_as(
             r#"SELECT COUNT(*) FROM veda_outbox
@@ -2067,7 +1884,7 @@ impl AuthStore for MysqlStore {
         .bind(&account.name)
         .bind(&account.email)
         .bind(&account.password_hash)
-        .bind(account_status_str(account.status))
+        .bind(db_enum_str(&account.status))
         .bind(account.created_at.naive_utc())
         .bind(account.updated_at.naive_utc())
         .execute(&self.pool)
@@ -2109,7 +1926,7 @@ impl AuthStore for MysqlStore {
         .bind(&key.account_id)
         .bind(&key.name)
         .bind(&key.key_hash)
-        .bind(key_status_str(key.status))
+        .bind(db_enum_str(&key.status))
         .bind(key.created_at.naive_utc())
         .execute(&self.pool)
         .await
@@ -2162,7 +1979,7 @@ impl AuthStore for MysqlStore {
         .bind(&workspace.id)
         .bind(&workspace.account_id)
         .bind(&workspace.name)
-        .bind(workspace_status_str(workspace.status))
+        .bind(db_enum_str(&workspace.status))
         .bind(workspace.created_at.naive_utc())
         .bind(workspace.updated_at.naive_utc())
         .execute(&self.pool)
@@ -2223,8 +2040,8 @@ impl AuthStore for MysqlStore {
         .bind(&key.workspace_id)
         .bind(&key.name)
         .bind(&key.key_hash)
-        .bind(key_permission_str(key.permission))
-        .bind(key_status_str(key.status))
+        .bind(db_enum_str(&key.permission))
+        .bind(db_enum_str(&key.status))
         .bind(key.created_at.naive_utc())
         .execute(&self.pool)
         .await
@@ -2286,11 +2103,11 @@ impl CollectionMetaStore for MysqlStore {
         .bind(&schema.id)
         .bind(&schema.workspace_id)
         .bind(&schema.name)
-        .bind(collection_type_str(schema.collection_type))
+        .bind(db_enum_str(&schema.collection_type))
         .bind(&schema_str)
         .bind(&schema.embedding_source)
         .bind(schema.embedding_dim)
-        .bind(collection_status_str(schema.status))
+        .bind(db_enum_str(&schema.status))
         .bind(schema.created_at.naive_utc())
         .bind(schema.updated_at.naive_utc())
         .execute(&self.pool)

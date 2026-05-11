@@ -197,11 +197,6 @@ impl Worker {
                     .await?;
                 self.task_queue.complete(task.id).await?;
             }
-            OutboxEventType::CollectionSync => {
-                let msg = "CollectionSync not implemented";
-                warn!(task_id = task.id, msg);
-                return Err(VedaError::Internal(msg.to_string()));
-            }
         }
         Ok(())
     }
@@ -612,7 +607,6 @@ fn outbox_event_label(event: OutboxEventType) -> &'static str {
     match event {
         OutboxEventType::ChunkSync => "chunk_sync",
         OutboxEventType::ChunkDelete => "chunk_delete",
-        OutboxEventType::CollectionSync => "collection_sync",
         OutboxEventType::SummarySync => "summary_sync",
         OutboxEventType::DirSummarySync => "dir_summary_sync",
     }

@@ -34,7 +34,8 @@ fn outbox_event_type_serde() {
     let types = vec![
         (OutboxEventType::ChunkSync, "\"chunk_sync\""),
         (OutboxEventType::ChunkDelete, "\"chunk_delete\""),
-        (OutboxEventType::CollectionSync, "\"collection_sync\""),
+        (OutboxEventType::SummarySync, "\"summary_sync\""),
+        (OutboxEventType::DirSummarySync, "\"dir_summary_sync\""),
     ];
     for (val, expected) in types {
         assert_eq!(serde_json::to_string(&val).unwrap(), expected);
@@ -46,6 +47,23 @@ fn outbox_event_type_serde() {
 #[test]
 fn search_mode_default_is_hybrid() {
     assert_eq!(SearchMode::default(), SearchMode::Hybrid);
+}
+
+#[test]
+fn key_permission_serde() {
+    // Lock the wire/DB value as `readwrite` (no underscore) — the API
+    // route and `veda_workspace_keys.permission` column both use it.
+    // Without an explicit `#[serde(rename = ...)]` the `rename_all =
+    // "snake_case"` derive would produce `read_write` and break the DB.
+    let cases = vec![
+        (KeyPermission::Read, "\"read\""),
+        (KeyPermission::ReadWrite, "\"readwrite\""),
+    ];
+    for (val, expected) in cases {
+        assert_eq!(serde_json::to_string(&val).unwrap(), expected);
+        let de: KeyPermission = serde_json::from_str(expected).unwrap();
+        assert_eq!(de, val);
+    }
 }
 
 #[test]
