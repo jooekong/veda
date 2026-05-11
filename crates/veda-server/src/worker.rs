@@ -14,6 +14,8 @@ use veda_pipeline::chunking::semantic_chunk;
 use veda_pipeline::summary;
 use veda_types::*;
 
+use crate::outbox::enqueue_dedup;
+
 /// Delay before a SummarySync / DirSummarySync becomes claimable when the
 /// edit appears to be part of a burst. Pairs with has_pending_event dedup to
 /// coalesce repeated edits within the window into a single regeneration.
@@ -339,31 +341,17 @@ impl Worker {
         workspace_id: &str,
         file_id: &str,
     ) -> veda_types::Result<()> {
-        if self
-            .task_queue
-            .has_pending_event(
-                OutboxEventType::SummarySync,
-                workspace_id,
-                "file_id",
-                file_id,
-            )
-            .await?
-        {
-            info!(file_id, "summary_sync already pending, skipping enqueue");
-            return Ok(());
-        }
-        let now = Utc::now();
         // Burst detection uses `summary.updated_at` (when the previous LLM
         // run finished) — not file.updated_at. Trade-off: the very first
         // edit after a long quiet period generates a summary immediately
-        // (no debounce, since no prior summary exists), and the second edit
-        // within ~5min sees that fresh summary and gets debounced. So a
-        // back-to-back burst on a never-summarized file produces 2 LLM
-        // calls, not 1; subsequent bursts coalesce as expected. A tighter
-        // implementation would track "last edit time" separately, but the
-        // outbox dedup (has_pending_event above) already collapses repeats
-        // that arrive while a task is queued, so the only leak is the
-        // first edit of a brand-new file — accepted.
+        // (no debounce, since no prior summary exists), and the second
+        // edit within ~5min sees that fresh summary and gets debounced.
+        // A back-to-back burst on a never-summarized file produces 2 LLM
+        // calls, not 1; subsequent bursts coalesce as expected. The
+        // has_pending_event dedup in enqueue_dedup already collapses
+        // repeats arriving while a task is queued — the only leak is the
+        // first edit of a brand-new file, accepted.
+        let now = Utc::now();
         let in_burst = self
             .meta
             .get_summary_by_file(file_id)
@@ -375,31 +363,27 @@ impl Worker {
         } else {
             now
         };
-        let debounce_secs = if in_burst { SUMMARY_DEBOUNCE_SECS } else { 0 };
-        debug!(
+        let inserted = enqueue_dedup(
+            &*self.task_queue,
+            workspace_id,
+            OutboxEventType::SummarySync,
+            "file_id",
             file_id,
-            in_burst,
-            debounce_secs,
-            "enqueueing summary_sync"
-        );
+            serde_json::json!({"file_id": file_id}),
+            available_at,
+        )
+        .await?;
+        if !inserted {
+            info!(file_id, "summary_sync already pending, skipping enqueue");
+            return Ok(());
+        }
+        let debounce_secs = if in_burst { SUMMARY_DEBOUNCE_SECS } else { 0 };
+        debug!(file_id, in_burst, debounce_secs, "enqueued summary_sync");
         ::metrics::counter!(
             "veda_summary_enqueue_total",
             "burst" => if in_burst { "in_burst" } else { "isolated" },
         )
         .increment(1);
-        let event = OutboxEvent {
-            id: 0,
-            workspace_id: workspace_id.to_string(),
-            event_type: OutboxEventType::SummarySync,
-            payload: serde_json::json!({"file_id": file_id}),
-            status: OutboxStatus::Pending,
-            retry_count: 0,
-            max_retries: 3,
-            available_at,
-            lease_until: None,
-            created_at: now,
-        };
-        self.task_queue.enqueue(&event).await?;
         Ok(())
     }
 
@@ -478,22 +462,6 @@ impl Worker {
         dentry_id: &str,
         parent_path: &str,
     ) -> veda_types::Result<()> {
-        if self
-            .task_queue
-            .has_pending_event(
-                OutboxEventType::DirSummarySync,
-                workspace_id,
-                "dentry_id",
-                dentry_id,
-            )
-            .await?
-        {
-            info!(
-                dentry_id,
-                "dir_summary_sync already pending, skipping enqueue"
-            );
-            return Ok(());
-        }
         let now = Utc::now();
         let in_burst = self
             .meta
@@ -506,22 +474,22 @@ impl Worker {
         } else {
             now
         };
-        let event = OutboxEvent {
-            id: 0,
-            workspace_id: workspace_id.to_string(),
-            event_type: OutboxEventType::DirSummarySync,
-            payload: serde_json::json!({
+        let inserted = enqueue_dedup(
+            &*self.task_queue,
+            workspace_id,
+            OutboxEventType::DirSummarySync,
+            "dentry_id",
+            dentry_id,
+            serde_json::json!({
                 "dentry_id": dentry_id,
                 "parent_path": parent_path,
             }),
-            status: OutboxStatus::Pending,
-            retry_count: 0,
-            max_retries: 3,
             available_at,
-            lease_until: None,
-            created_at: now,
-        };
-        self.task_queue.enqueue(&event).await?;
+        )
+        .await?;
+        if !inserted {
+            info!(dentry_id, "dir_summary_sync already pending, skipping enqueue");
+        }
         Ok(())
     }
 

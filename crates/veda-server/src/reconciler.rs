@@ -23,7 +23,9 @@ use tokio::time::sleep;
 use tracing::{debug, info, warn};
 
 use veda_core::store::{AuthStore, MetadataStore, TaskQueue, VectorStore};
-use veda_types::{Dentry, OutboxEvent, OutboxEventType, OutboxStatus};
+use veda_types::{Dentry, OutboxEventType};
+
+use crate::outbox::enqueue_dedup;
 
 /// Per-workspace reconciliation outcome.
 #[derive(Debug, Default, Clone)]
@@ -570,35 +572,19 @@ impl Reconciler {
         workspace_id: &str,
         file_id: &str,
     ) -> veda_types::Result<()> {
-        if self
-            .task_queue
-            .has_pending_event(
-                OutboxEventType::ChunkSync,
-                workspace_id,
-                "file_id",
-                file_id,
-            )
-            .await?
-        {
-            return Ok(());
-        }
-        let now = Utc::now();
-        let event = OutboxEvent {
-            id: 0,
-            workspace_id: workspace_id.to_string(),
-            event_type: OutboxEventType::ChunkSync,
-            payload: serde_json::json!({
+        enqueue_dedup(
+            &*self.task_queue,
+            workspace_id,
+            OutboxEventType::ChunkSync,
+            "file_id",
+            file_id,
+            serde_json::json!({
                 "file_id": file_id,
                 "force_reembed": true,
             }),
-            status: OutboxStatus::Pending,
-            retry_count: 0,
-            max_retries: 3,
-            available_at: now,
-            lease_until: None,
-            created_at: now,
-        };
-        self.task_queue.enqueue(&event).await?;
+            Utc::now(),
+        )
+        .await?;
         Ok(())
     }
 
@@ -608,35 +594,19 @@ impl Reconciler {
         dentry_id: &str,
         dentry_path: &str,
     ) -> veda_types::Result<()> {
-        if self
-            .task_queue
-            .has_pending_event(
-                OutboxEventType::DirSummarySync,
-                workspace_id,
-                "dentry_id",
-                dentry_id,
-            )
-            .await?
-        {
-            return Ok(());
-        }
-        let now = Utc::now();
-        let event = OutboxEvent {
-            id: 0,
-            workspace_id: workspace_id.to_string(),
-            event_type: OutboxEventType::DirSummarySync,
-            payload: serde_json::json!({
+        enqueue_dedup(
+            &*self.task_queue,
+            workspace_id,
+            OutboxEventType::DirSummarySync,
+            "dentry_id",
+            dentry_id,
+            serde_json::json!({
                 "dentry_id": dentry_id,
                 "parent_path": dentry_path,
             }),
-            status: OutboxStatus::Pending,
-            retry_count: 0,
-            max_retries: 3,
-            available_at: now,
-            lease_until: None,
-            created_at: now,
-        };
-        self.task_queue.enqueue(&event).await?;
+            Utc::now(),
+        )
+        .await?;
         Ok(())
     }
 
@@ -645,32 +615,16 @@ impl Reconciler {
         workspace_id: &str,
         file_id: &str,
     ) -> veda_types::Result<()> {
-        if self
-            .task_queue
-            .has_pending_event(
-                OutboxEventType::SummarySync,
-                workspace_id,
-                "file_id",
-                file_id,
-            )
-            .await?
-        {
-            return Ok(());
-        }
-        let now = Utc::now();
-        let event = OutboxEvent {
-            id: 0,
-            workspace_id: workspace_id.to_string(),
-            event_type: OutboxEventType::SummarySync,
-            payload: serde_json::json!({"file_id": file_id}),
-            status: OutboxStatus::Pending,
-            retry_count: 0,
-            max_retries: 3,
-            available_at: now,
-            lease_until: None,
-            created_at: now,
-        };
-        self.task_queue.enqueue(&event).await?;
+        enqueue_dedup(
+            &*self.task_queue,
+            workspace_id,
+            OutboxEventType::SummarySync,
+            "file_id",
+            file_id,
+            serde_json::json!({"file_id": file_id}),
+            Utc::now(),
+        )
+        .await?;
         Ok(())
     }
 }

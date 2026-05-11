@@ -7,6 +7,7 @@ pub mod auth;
 pub mod config;
 pub mod error;
 pub mod obs;
+pub mod outbox;
 pub mod reconciler;
 pub mod routes;
 pub mod state;
