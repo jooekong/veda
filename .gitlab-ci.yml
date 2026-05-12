@@ -58,10 +58,19 @@ build:linux:
     - mv "target/release/veda-fuse" "veda-fuse-${TARGET}"
     - sha256sum "veda-${TARGET}"      > "veda-${TARGET}.sha256"
     - sha256sum "veda-fuse-${TARGET}" > "veda-fuse-${TARGET}.sha256"
+  # Explicit file list: glob `veda-*` previously matched 4 items as
+  # "files and directories" (gitlab uploader log), and the publish stage
+  # couldn't find the binary by name in its working dir. Naming each
+  # path removes any ambiguity about what gets archived.
+  # skill.md is needed by both publish and release stages, ride along
+  # with the binaries so publish doesn't need a separate git checkout.
   artifacts:
     paths:
-      - veda-*
-      - veda-fuse-*
+      - veda-${TARGET}
+      - veda-${TARGET}.sha256
+      - veda-fuse-${TARGET}
+      - veda-fuse-${TARGET}.sha256
+      - skill.md
     expire_in: 1 week
 
 publish:linux:
@@ -72,8 +81,17 @@ publish:linux:
   tags:
     - release
     - veda
-  needs: ["build:linux"]
+  # Use the long-form `needs:` so `artifacts: true` is explicit — under
+  # GitLab 18 the short form `needs: ["build:linux"]` sometimes ships
+  # without artifacts, which is exactly what bit job 1291760 (curl
+  # exit 26, file not found).
+  needs:
+    - job: build:linux
+      artifacts: true
   script:
+    # Sanity check — surface what artifacts actually landed before the
+    # first curl runs, so a future failure points at the cause.
+    - ls -la
     - |
       for f in veda-${TARGET} veda-${TARGET}.sha256 \
                veda-fuse-${TARGET} veda-fuse-${TARGET}.sha256 \
