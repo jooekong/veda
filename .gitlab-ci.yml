@@ -1,8 +1,14 @@
-# Release pipeline for Veda CLI on internal GitLab.
+# Release pipeline for Veda on internal GitLab.
 # Triggers on tag push (e.g. `git tag 0.1.0 && git push ddxq 0.1.0`).
-# Native x86_64-linux build only. Aarch64-linux users go through GitHub Actions
-# (which has internet access and ARM runners). Darwin binaries are added later
-# by scripts/release-darwin.sh from Joe's mac.
+#
+# Matrix:
+#   - x86_64-unknown-linux-gnu — docker rust:1.90 on the linux runner
+#   - x86_64-apple-darwin      — shell executor on the intel mac runner
+#
+# Darwin aarch64 is not built yet — adding it requires a working
+# cross-compile of veda-fuse against macFUSE for arm64, which we
+# haven't validated. CLI-only aarch64-darwin is straightforward to
+# add later (just drop the veda-fuse build for that target).
 
 stages:
   - build
@@ -11,15 +17,6 @@ stages:
 
 variables:
   REGISTRY: "${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/packages/generic/veda/${CI_COMMIT_TAG}"
-  TARGET: "x86_64-unknown-linux-gnu"
-  # Egress to deb.debian.org / crates.io from this runner is throttled
-  # to ~22 KB/s; in-region mirrors clock 25-30 MB/s. CARGO_HOME is
-  # pinned under CI_PROJECT_DIR so the generated config.toml lives
-  # alongside the project (and so we can wire `cache:` in later
-  # without moving anything — the runner's cache backend currently
-  # isn't configured, see config.toml `[runners.cache]`).
-  CARGO_HOME: "${CI_PROJECT_DIR}/.cargo"
-  CARGO_NET_GIT_FETCH_WITH_CLI: "true"
 
 build:linux:
   stage: build
@@ -29,6 +26,14 @@ build:linux:
   tags:
     - release
     - veda
+  variables:
+    TARGET: x86_64-unknown-linux-gnu
+    # CARGO_HOME under CI_PROJECT_DIR so the future cache: block can
+    # reach the registry — the default $HOME/.cargo lives outside the
+    # cached path. (Cache backend not yet configured on the runner,
+    # see config.toml `[runners.cache]`.)
+    CARGO_HOME: "${CI_PROJECT_DIR}/.cargo"
+    CARGO_NET_GIT_FETCH_WITH_CLI: "true"
   before_script:
     # Swap to in-region apt + cargo mirrors before any network fetch.
     # aliyun debian: ~26 MB/s vs ~22 KB/s upstream.
@@ -64,22 +69,50 @@ build:linux:
     # and can't open them. `a+rX` adds world-read to files and
     # exec-where-already-exec to dirs/binaries.
     - chmod a+rX "veda-${TARGET}" "veda-${TARGET}.sha256" "veda-fuse-${TARGET}" "veda-fuse-${TARGET}.sha256"
-  # Explicit file list: glob `veda-*` previously matched 4 items as
-  # "files and directories" (gitlab uploader log), and the publish stage
-  # couldn't find the binary by name in its working dir. Naming each
-  # path removes any ambiguity about what gets archived.
-  # skill.md is needed by both publish and release stages, ride along
-  # with the binaries so publish doesn't need a separate git checkout.
   artifacts:
     paths:
-      - veda-${TARGET}
-      - veda-${TARGET}.sha256
-      - veda-fuse-${TARGET}
-      - veda-fuse-${TARGET}.sha256
+      - veda-x86_64-unknown-linux-gnu
+      - veda-x86_64-unknown-linux-gnu.sha256
+      - veda-fuse-x86_64-unknown-linux-gnu
+      - veda-fuse-x86_64-unknown-linux-gnu.sha256
       - skill.md
     expire_in: 1 week
 
-publish:linux:
+build:darwin-x86_64:
+  stage: build
+  rules:
+    - if: $CI_COMMIT_TAG
+  tags:
+    - macos
+    - veda
+  variables:
+    TARGET: x86_64-apple-darwin
+  before_script:
+    # Belt-and-suspenders: ensure the target is installed even if the
+    # runner host got reinstalled or rustup was wiped. No-op if already there.
+    - rustup target add ${TARGET}
+    # Visibility for the trace — which toolchain are we building with.
+    - rustc --version
+    - cargo --version
+  script:
+    - cargo build --release --target ${TARGET} --bin veda
+    - cargo build --release --target ${TARGET} -p veda-fuse --bin veda-fuse
+    - mv "target/${TARGET}/release/veda"      "veda-${TARGET}"
+    - mv "target/${TARGET}/release/veda-fuse" "veda-fuse-${TARGET}"
+    # macOS doesn't ship coreutils' sha256sum by default; use shasum -a 256
+    # which is part of every base install.
+    - shasum -a 256 "veda-${TARGET}"      > "veda-${TARGET}.sha256"
+    - shasum -a 256 "veda-fuse-${TARGET}" > "veda-fuse-${TARGET}.sha256"
+    - chmod a+rX "veda-${TARGET}" "veda-${TARGET}.sha256" "veda-fuse-${TARGET}" "veda-fuse-${TARGET}.sha256"
+  artifacts:
+    paths:
+      - veda-x86_64-apple-darwin
+      - veda-x86_64-apple-darwin.sha256
+      - veda-fuse-x86_64-apple-darwin
+      - veda-fuse-x86_64-apple-darwin.sha256
+    expire_in: 1 week
+
+publish:all:
   stage: publish
   image: curlimages/curl:8.5.0
   rules:
@@ -87,21 +120,21 @@ publish:linux:
   tags:
     - release
     - veda
-  # Use the long-form `needs:` so `artifacts: true` is explicit — under
-  # GitLab 18 the short form `needs: ["build:linux"]` sometimes ships
-  # without artifacts, which is exactly what bit job 1291760 (curl
-  # exit 26, file not found).
+  # Long-form `needs:` with explicit `artifacts: true` — under GitLab 18
+  # the short form silently shipped without artifacts (job 1291760).
   needs:
     - job: build:linux
       artifacts: true
+    - job: build:darwin-x86_64
+      artifacts: true
   script:
-    # Sanity check — surface what artifacts actually landed before the
-    # first curl runs, so a future failure points at the cause.
     - ls -la
+    # Glob walks whatever artifacts landed; adding a new build:darwin-aarch64
+    # later needs no edits here. -- sentinel keeps curl from interpreting
+    # filenames that start with `-` as flags.
     - |
-      for f in veda-${TARGET} veda-${TARGET}.sha256 \
-               veda-fuse-${TARGET} veda-fuse-${TARGET}.sha256 \
-               skill.md; do
+      for f in veda-* veda-fuse-* skill.md; do
+        # Skip the sha256 files only? No — we want them in the registry too.
         echo "uploading $f..."
         curl --fail --show-error --silent \
              --header "JOB-TOKEN: $CI_JOB_TOKEN" \
@@ -117,10 +150,12 @@ release:create:
   tags:
     - release
     - veda
-  needs: ["publish:linux"]
+  needs: ["publish:all"]
   script:
     - |
       release-cli create --name "Veda ${CI_COMMIT_TAG}" --tag-name "${CI_COMMIT_TAG}" \
-        --assets-link "{\"name\":\"veda-x86_64-linux\",\"url\":\"${REGISTRY}/veda-${TARGET}\",\"link_type\":\"package\"}" \
-        --assets-link "{\"name\":\"veda-fuse-x86_64-linux\",\"url\":\"${REGISTRY}/veda-fuse-${TARGET}\",\"link_type\":\"package\"}" \
+        --assets-link "{\"name\":\"veda-x86_64-linux\",\"url\":\"${REGISTRY}/veda-x86_64-unknown-linux-gnu\",\"link_type\":\"package\"}" \
+        --assets-link "{\"name\":\"veda-fuse-x86_64-linux\",\"url\":\"${REGISTRY}/veda-fuse-x86_64-unknown-linux-gnu\",\"link_type\":\"package\"}" \
+        --assets-link "{\"name\":\"veda-x86_64-darwin\",\"url\":\"${REGISTRY}/veda-x86_64-apple-darwin\",\"link_type\":\"package\"}" \
+        --assets-link "{\"name\":\"veda-fuse-x86_64-darwin\",\"url\":\"${REGISTRY}/veda-fuse-x86_64-apple-darwin\",\"link_type\":\"package\"}" \
         --assets-link "{\"name\":\"skill.md\",\"url\":\"${REGISTRY}/skill.md\",\"link_type\":\"other\"}"
