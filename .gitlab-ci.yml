@@ -112,6 +112,41 @@ build:darwin-x86_64:
       - veda-fuse-x86_64-apple-darwin.sha256
     expire_in: 1 week
 
+build:darwin-aarch64:
+  stage: build
+  rules:
+    - if: $CI_COMMIT_TAG
+  tags:
+    - macos
+    - veda
+  variables:
+    TARGET: aarch64-apple-darwin
+  before_script:
+    - rustup target add ${TARGET}
+    - rustc --version
+    - cargo --version
+  # Cross-compile from Intel host. Xcode's universal SDK supplies the
+  # arm64-apple-darwin libs and clang/ld via xcrun, so no extra
+  # toolchain (zigbuild etc) is needed. macFUSE 4.x ships as a
+  # universal binary, so veda-fuse links cleanly against the arm64
+  # slice. If a future macFUSE release stops shipping arm64, drop the
+  # `-p veda-fuse` build below and trim the artifacts list to CLI only.
+  script:
+    - cargo build --release --target ${TARGET} --bin veda
+    - cargo build --release --target ${TARGET} -p veda-fuse --bin veda-fuse
+    - mv "target/${TARGET}/release/veda"      "veda-${TARGET}"
+    - mv "target/${TARGET}/release/veda-fuse" "veda-fuse-${TARGET}"
+    - shasum -a 256 "veda-${TARGET}"      > "veda-${TARGET}.sha256"
+    - shasum -a 256 "veda-fuse-${TARGET}" > "veda-fuse-${TARGET}.sha256"
+    - chmod a+rX "veda-${TARGET}" "veda-${TARGET}.sha256" "veda-fuse-${TARGET}" "veda-fuse-${TARGET}.sha256"
+  artifacts:
+    paths:
+      - veda-aarch64-apple-darwin
+      - veda-aarch64-apple-darwin.sha256
+      - veda-fuse-aarch64-apple-darwin
+      - veda-fuse-aarch64-apple-darwin.sha256
+    expire_in: 1 week
+
 publish:all:
   stage: publish
   image: curlimages/curl:8.5.0
@@ -126,6 +161,8 @@ publish:all:
     - job: build:linux
       artifacts: true
     - job: build:darwin-x86_64
+      artifacts: true
+    - job: build:darwin-aarch64
       artifacts: true
   script:
     - ls -la
@@ -158,4 +195,6 @@ release:create:
         --assets-link "{\"name\":\"veda-fuse-x86_64-linux\",\"url\":\"${REGISTRY}/veda-fuse-x86_64-unknown-linux-gnu\",\"link_type\":\"package\"}" \
         --assets-link "{\"name\":\"veda-x86_64-darwin\",\"url\":\"${REGISTRY}/veda-x86_64-apple-darwin\",\"link_type\":\"package\"}" \
         --assets-link "{\"name\":\"veda-fuse-x86_64-darwin\",\"url\":\"${REGISTRY}/veda-fuse-x86_64-apple-darwin\",\"link_type\":\"package\"}" \
+        --assets-link "{\"name\":\"veda-aarch64-darwin\",\"url\":\"${REGISTRY}/veda-aarch64-apple-darwin\",\"link_type\":\"package\"}" \
+        --assets-link "{\"name\":\"veda-fuse-aarch64-darwin\",\"url\":\"${REGISTRY}/veda-fuse-aarch64-apple-darwin\",\"link_type\":\"package\"}" \
         --assets-link "{\"name\":\"skill.md\",\"url\":\"${REGISTRY}/skill.md\",\"link_type\":\"other\"}"
