@@ -12,6 +12,12 @@ stages:
 variables:
   REGISTRY: "${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/packages/generic/veda/${CI_COMMIT_TAG}"
   TARGET: "x86_64-unknown-linux-gnu"
+  # Egress to deb.debian.org / crates.io from this runner is throttled
+  # to ~22 KB/s; in-region mirrors clock 25-30 MB/s. CARGO_HOME under
+  # CI_PROJECT_DIR is what makes the cache below reach the registry —
+  # the default $HOME/.cargo lives outside the cached path.
+  CARGO_HOME: "${CI_PROJECT_DIR}/.cargo"
+  CARGO_NET_GIT_FETCH_WITH_CLI: "true"
 
 build:linux:
   stage: build
@@ -21,7 +27,25 @@ build:linux:
   tags:
     - release
     - veda
+  cache:
+    key: veda-cargo-${TARGET}
+    paths:
+      - .cargo/registry/
+      - .cargo/git/
+      - target/
   before_script:
+    # Swap to in-region apt + cargo mirrors before any network fetch.
+    # aliyun debian: ~26 MB/s vs ~22 KB/s upstream.
+    - sed -i 's|http://deb.debian.org|https://mirrors.aliyun.com|g' /etc/apt/sources.list.d/debian.sources
+    - mkdir -p "${CARGO_HOME}"
+    - |
+      cat > "${CARGO_HOME}/config.toml" <<'EOF'
+      [source.crates-io]
+      replace-with = "rsproxy-sparse"
+
+      [source.rsproxy-sparse]
+      registry = "sparse+https://rsproxy.cn/index/"
+      EOF
     - apt-get update
     - apt-get install -y --no-install-recommends libfuse3-dev pkg-config
   script:
