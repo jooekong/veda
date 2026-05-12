@@ -3,7 +3,7 @@
 # ca-certificates for HTTPS to Milvus and the embedding API) into the
 # final layer. Total runtime image is well under 100MB.
 
-FROM rust:1.83-bookworm AS builder
+FROM rust:1.85-bookworm AS builder
 
 WORKDIR /src
 
