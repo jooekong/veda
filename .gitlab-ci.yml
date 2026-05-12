@@ -58,6 +58,12 @@ build:linux:
     - mv "target/release/veda-fuse" "veda-fuse-${TARGET}"
     - sha256sum "veda-${TARGET}"      > "veda-${TARGET}.sha256"
     - sha256sum "veda-fuse-${TARGET}" > "veda-fuse-${TARGET}.sha256"
+    # rust:1.90-bookworm sets umask 027 — without this chmod, the
+    # binaries land 0750 and the sha256 files 0640, root-owned. The
+    # publish stage's curlimages/curl runs as USER curl_user (UID 100)
+    # and can't open them. `a+rX` adds world-read to files and
+    # exec-where-already-exec to dirs/binaries.
+    - chmod a+rX "veda-${TARGET}" "veda-${TARGET}.sha256" "veda-fuse-${TARGET}" "veda-fuse-${TARGET}.sha256"
   # Explicit file list: glob `veda-*` previously matched 4 items as
   # "files and directories" (gitlab uploader log), and the publish stage
   # couldn't find the binary by name in its working dir. Naming each
