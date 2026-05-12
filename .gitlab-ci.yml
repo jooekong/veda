@@ -23,7 +23,7 @@ variables:
 
 build:linux:
   stage: build
-  image: rust:1.85-bookworm
+  image: rust:1.90-bookworm
   rules:
     - if: $CI_COMMIT_TAG
   tags:
