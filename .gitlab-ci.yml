@@ -34,13 +34,20 @@ build:linux:
     # aliyun debian: ~26 MB/s vs ~22 KB/s upstream.
     - sed -i 's|http://deb.debian.org|https://mirrors.aliyun.com|g' /etc/apt/sources.list.d/debian.sources
     - mkdir -p "${CARGO_HOME}"
+    # rsproxy sparse vs USTC git: cargo's git protocol clones the entire
+    # crates.io-index repo (~640k objects) on every cache-miss build —
+    # measured 1458s wall time including ~175 "spurious network error"
+    # retries on this runner. rsproxy's sparse protocol fetches one
+    # JSON per crate on demand; metadata probe was 0.13-1.17s per
+    # crate (10/10 success). If rsproxy.cn ever returns errors, the
+    # fallback is to revert this block, not to flip to USTC git.
     - |
       cat > "${CARGO_HOME}/config.toml" <<'EOF'
       [source.crates-io]
-      replace-with = "ustc"
+      replace-with = "rsproxy-sparse"
 
-      [source.ustc]
-      registry = "https://mirrors.ustc.edu.cn/crates.io-index"
+      [source.rsproxy-sparse]
+      registry = "sparse+https://rsproxy.cn/index/"
       EOF
     - apt-get update
     - apt-get install -y --no-install-recommends libfuse3-dev pkg-config
