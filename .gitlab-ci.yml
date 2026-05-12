@@ -37,10 +37,10 @@ build:linux:
     - |
       cat > "${CARGO_HOME}/config.toml" <<'EOF'
       [source.crates-io]
-      replace-with = "rsproxy-sparse"
+      replace-with = "ustc"
 
-      [source.rsproxy-sparse]
-      registry = "sparse+https://rsproxy.cn/index/"
+      [source.ustc]
+      registry = "https://mirrors.ustc.edu.cn/crates.io-index"
       EOF
     - apt-get update
     - apt-get install -y --no-install-recommends libfuse3-dev pkg-config
