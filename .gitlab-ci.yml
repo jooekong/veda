@@ -13,9 +13,11 @@ variables:
   REGISTRY: "${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/packages/generic/veda/${CI_COMMIT_TAG}"
   TARGET: "x86_64-unknown-linux-gnu"
   # Egress to deb.debian.org / crates.io from this runner is throttled
-  # to ~22 KB/s; in-region mirrors clock 25-30 MB/s. CARGO_HOME under
-  # CI_PROJECT_DIR is what makes the cache below reach the registry —
-  # the default $HOME/.cargo lives outside the cached path.
+  # to ~22 KB/s; in-region mirrors clock 25-30 MB/s. CARGO_HOME is
+  # pinned under CI_PROJECT_DIR so the generated config.toml lives
+  # alongside the project (and so we can wire `cache:` in later
+  # without moving anything — the runner's cache backend currently
+  # isn't configured, see config.toml `[runners.cache]`).
   CARGO_HOME: "${CI_PROJECT_DIR}/.cargo"
   CARGO_NET_GIT_FETCH_WITH_CLI: "true"
 
@@ -27,12 +29,6 @@ build:linux:
   tags:
     - release
     - veda
-  cache:
-    key: veda-cargo-${TARGET}
-    paths:
-      - .cargo/registry/
-      - .cargo/git/
-      - target/
   before_script:
     # Swap to in-region apt + cargo mirrors before any network fetch.
     # aliyun debian: ~26 MB/s vs ~22 KB/s upstream.
