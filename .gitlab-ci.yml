@@ -164,12 +164,15 @@ publish:all:
       artifacts: true
   script:
     - ls -la
-    # Glob walks whatever artifacts landed; adding a new build:darwin-aarch64
-    # later needs no edits here. -- sentinel keeps curl from interpreting
-    # filenames that start with `-` as flags.
+    # Glob walks whatever artifacts landed; adding a new build target
+    # later needs no edits here. `veda-*` already matches `veda-fuse-*`
+    # (the latter is a prefix subset), so listing `veda-fuse-*`
+    # separately would upload the fuse binaries twice — fine today
+    # because the project allows duplicate Generic Package uploads,
+    # but a `curl --fail` away from breaking if that setting flips.
+    # Codex review caught this on the 24h batch.
     - |
-      for f in veda-* veda-fuse-* skill.md; do
-        # Skip the sha256 files only? No — we want them in the registry too.
+      for f in veda-* skill.md; do
         echo "uploading $f..."
         curl --fail --show-error --silent \
              --header "JOB-TOKEN: $CI_JOB_TOKEN" \
