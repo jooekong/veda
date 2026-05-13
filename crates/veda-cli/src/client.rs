@@ -3,6 +3,33 @@ use std::time::Duration;
 use anyhow::{bail, Context, Result};
 use sha2::{Digest, Sha256};
 
+/// HTTP error preserving the server's status code so callers can match
+/// on specific codes via [`status_code`]. Wrap with `.context()` as
+/// usual — the chain walk recovers `ApiError` through any layers of
+/// context wrapping.
+#[derive(Debug)]
+pub struct ApiError {
+    pub status: reqwest::StatusCode,
+    pub body: String,
+}
+
+impl std::fmt::Display for ApiError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "HTTP {}: {}", self.status, self.body)
+    }
+}
+
+impl std::error::Error for ApiError {}
+
+/// Pull a status code out of an anyhow error chain, if any link is an
+/// `ApiError`. Returns `None` for network/parse errors so callers can
+/// distinguish "server said 409" from "couldn't reach server."
+pub fn status_code(err: &anyhow::Error) -> Option<u16> {
+    err.chain()
+        .find_map(|e| e.downcast_ref::<ApiError>())
+        .map(|a| a.status.as_u16())
+}
+
 pub struct Client {
     base: String,
     http: reqwest::Client,
@@ -31,7 +58,7 @@ impl Client {
         let status = resp.status();
         let text = resp.text().await.context("read response body")?;
         if !status.is_success() {
-            bail!("HTTP {status}: {text}");
+            return Err(ApiError { status, body: text }.into());
         }
         serde_json::from_str(&text).context("parse JSON response")
     }
@@ -56,6 +83,43 @@ impl Client {
             .http
             .post(format!("{}/v1/accounts/login", self.base))
             .json(&serde_json::json!({"email": email, "password": password}))
+            .send()
+            .await?;
+        Self::check(resp).await
+    }
+
+    /// Zero-input onboarding: server mints account + vk_ + default
+    /// workspace + wk_ in one shot. Used by `veda init` when no
+    /// `--email` is given.
+    pub async fn anonymous_onboard(&self) -> Result<serde_json::Value> {
+        let resp = self
+            .http
+            .post(format!("{}/v1/accounts/anonymous", self.base))
+            .send()
+            .await?;
+        Self::check(resp).await
+    }
+
+    /// Upgrade the current anonymous account (identified by `api_key`)
+    /// to a named one. The same `api_key` keeps working after the
+    /// claim. `name` is optional — `None` keeps the auto-generated
+    /// `anon-xxxx`.
+    pub async fn claim_account(
+        &self,
+        api_key: &str,
+        email: &str,
+        password: &str,
+        name: Option<&str>,
+    ) -> Result<serde_json::Value> {
+        let mut body = serde_json::json!({"email": email, "password": password});
+        if let Some(n) = name {
+            body["name"] = serde_json::Value::String(n.to_string());
+        }
+        let resp = self
+            .http
+            .post(format!("{}/v1/accounts/claim", self.base))
+            .bearer_auth(api_key)
+            .json(&body)
             .send()
             .await?;
         Self::check(resp).await
@@ -250,8 +314,8 @@ impl Client {
 
     /// Returns (status_code, body). Both summary endpoints have the same
     /// three-state contract (200 ready / 202 pending / 501 disabled) that
-    /// the CLI renders differently, so we don't go through `check()`
-    /// (which collapses all non-2xx into a single anyhow error).
+    /// the CLI renders differently. `check()` returns only the body on
+    /// success, so we sidestep it to keep the status code on every branch.
     pub async fn get_summary_layer(
         &self,
         ws_key: &str,
@@ -369,5 +433,83 @@ impl Client {
             .send()
             .await?;
         Self::check(resp).await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use wiremock::matchers::method;
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    #[test]
+    fn api_error_display_includes_status_and_body() {
+        let err = ApiError {
+            status: reqwest::StatusCode::CONFLICT,
+            body: "email already registered".into(),
+        };
+        let s = err.to_string();
+        assert!(s.contains("409"), "got: {s}");
+        assert!(s.contains("email already registered"), "got: {s}");
+    }
+
+    #[test]
+    fn status_code_extracts_through_context_wrap() {
+        // Real-world shape: ApiError wrapped by .context() in init.rs.
+        // Pins that downcast still finds it after wrapping.
+        let api = ApiError {
+            status: reqwest::StatusCode::CONFLICT,
+            body: "x".into(),
+        };
+        let err: anyhow::Error = anyhow::Error::from(api).context("account creation failed");
+        assert_eq!(status_code(&err), Some(409));
+    }
+
+    #[test]
+    fn status_code_returns_none_for_non_http_error() {
+        let err: anyhow::Error = anyhow::anyhow!("network glitch");
+        assert_eq!(status_code(&err), None);
+    }
+
+    #[tokio::test]
+    async fn check_2xx_returns_parsed_json() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({"ok": true})),
+            )
+            .mount(&server)
+            .await;
+        let resp = reqwest::get(server.uri()).await.unwrap();
+        let v = Client::check(resp).await.unwrap();
+        assert_eq!(v["ok"], true);
+    }
+
+    #[tokio::test]
+    async fn check_4xx_returns_apierror_with_status_and_body() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(409).set_body_string("email taken"))
+            .mount(&server)
+            .await;
+        let resp = reqwest::get(server.uri()).await.unwrap();
+        let err = Client::check(resp).await.unwrap_err();
+        assert_eq!(status_code(&err), Some(409));
+        let api: &ApiError = err.downcast_ref().expect("err should carry ApiError");
+        assert!(api.body.contains("email taken"), "got: {}", api.body);
+    }
+
+    #[tokio::test]
+    async fn check_5xx_also_carries_status() {
+        // Server errors must be distinguishable from client errors so
+        // callers can decide retry vs surface-to-user.
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(503).set_body_string("upstream down"))
+            .mount(&server)
+            .await;
+        let resp = reqwest::get(server.uri()).await.unwrap();
+        let err = Client::check(resp).await.unwrap_err();
+        assert_eq!(status_code(&err), Some(503));
     }
 }

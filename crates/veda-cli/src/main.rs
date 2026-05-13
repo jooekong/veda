@@ -35,36 +35,43 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Quick re-auth: store an existing API key (typically copied from
-    /// another machine) into ~/.config/veda/config.toml. For first-time
-    /// setup use `veda init` instead.
+    /// Quick re-auth: store an existing key (typically copied from
+    /// another machine) into ~/.config/veda/config.toml. Accepts both
+    /// account keys (`vk_*`) and workspace keys (`wk_*`); the prefix
+    /// determines which slot the key lands in. For first-time setup
+    /// use `veda init` instead.
     Login {
-        /// API key to use (no env-var fallback by design — make the
-        /// switch explicit so a stale shell var can't silently override
-        /// the config you meant to keep)
+        /// API key to use. `vk_*` is an account key (run `veda init`
+        /// afterwards to pick a workspace); `wk_*` is a workspace key
+        /// (data commands work immediately, but account-scope commands
+        /// won't). No env-var fallback by design — make the switch
+        /// explicit so a stale shell var can't silently override the
+        /// config you meant to keep.
         #[arg(long)]
         api_key: String,
     },
     /// Show current config (server URL, key state, workspace) and a
     /// best-effort server reachability ping.
     Status,
-    /// First-time setup: create account + default workspace, save the
-    /// keys, all in one shot. With all flags it runs silently; without
-    /// flags it prompts. Use `--login` to attach an existing account
-    /// instead of creating a new one. The global `--server` flag picks
-    /// the server URL.
+    /// First-time setup. Default: zero-input anonymous onboard (server
+    /// mints an account + default workspace + keys in one shot,
+    /// nothing to type). Pass `--email` to register a named account
+    /// instead, or `--login` to attach an existing one. The global
+    /// `--server` flag picks the server URL.
     Init {
-        /// Use an existing account instead of creating a new one.
-        /// Skips `--name`; `--email` + `--password` are required.
+        /// Use an existing account (implies named mode). Skips
+        /// `--name`; `--email` + `--password` are required.
         #[arg(long)]
         login: bool,
-        /// Display name for new account (ignored with --login)
+        /// Display name for new account (named mode only).
         #[arg(long)]
         name: Option<String>,
+        /// Email for named account. Presence switches from anonymous
+        /// to named onboarding.
         #[arg(long)]
         email: Option<String>,
         /// Pass via env or terminal prompt; `--password` on argv is
-        /// visible in `ps`. Required in --non-interactive mode.
+        /// visible in `ps`. Required in --non-interactive named mode.
         #[arg(long)]
         password: Option<String>,
         /// Workspace name (default "default")
@@ -75,12 +82,31 @@ enum Commands {
         #[arg(long)]
         non_interactive: bool,
     },
-    /// Account management
+    /// Upgrade the anonymous account created by `veda init` into a
+    /// named one by attaching email + password. The current API key
+    /// keeps working; only the account's recoverable identity changes.
+    Claim {
+        #[arg(long)]
+        email: String,
+        /// Pass via terminal prompt or `VEDA_PASSWORD`; argv leaks via
+        /// `ps`.
+        #[arg(long)]
+        password: Option<String>,
+        /// Optional human-friendly name (replaces auto-generated
+        /// `anon-xxxx`). Empty string is rejected.
+        #[arg(long)]
+        name: Option<String>,
+    },
+    /// Account management (hidden — use `veda init` instead; kept as
+    /// an escape hatch for debugging).
+    #[command(hide = true)]
     Account {
         #[command(subcommand)]
         action: AccountCmd,
     },
-    /// Workspace management
+    /// Workspace management (hidden — `veda init` creates and selects
+    /// the default workspace; kept as an escape hatch).
+    #[command(hide = true)]
     Workspace {
         #[command(subcommand)]
         action: WorkspaceCmd,
@@ -162,7 +188,9 @@ enum Commands {
     },
     /// Execute SQL query
     Sql { query: String },
-    /// Configuration management
+    /// Configuration management (hidden — `veda init` / `veda login`
+    /// handle the common cases; kept for direct edits).
+    #[command(hide = true)]
     Config {
         #[command(subcommand)]
         action: ConfigCmd,
@@ -460,10 +488,31 @@ async fn main() -> anyhow::Result<()> {
 
     match cli.command {
         Commands::Login { api_key } => {
-            init::apply_login(&mut cfg, api_key);
-            cfg.save()?;
-            println!("API key saved to config.");
-            println!("Run `veda init` (or `veda workspace use <id>`) to pick a workspace.");
+            // Prefix-route by key type. Server-side, `vk_` is the
+            // account key (mints workspaces, lists them) and `wk_` is
+            // the workspace key (data-plane only). Storing a wk_ into
+            // the api_key slot would give a confusing 401 on the first
+            // command, so route up front.
+            if api_key.starts_with("wk_") {
+                init::apply_workspace_key(&mut cfg, api_key);
+                cfg.save()?;
+                println!("Workspace key saved.");
+                println!(
+                    "Data commands (cp/cat/ls/...) work now. The workspace ID is unknown — \
+                     account-scope commands won't work; paste a `vk_` key with `veda login \
+                     --api-key vk_…` if you need them."
+                );
+            } else if api_key.starts_with("vk_") {
+                init::apply_login(&mut cfg, api_key);
+                cfg.save()?;
+                println!("API key saved to config.");
+                println!("Run `veda init` (or `veda workspace use <id>`) to pick a workspace.");
+            } else {
+                anyhow::bail!(
+                    "api_key must start with 'vk_' (account key) or 'wk_' (workspace key); \
+                     got a key with neither prefix"
+                );
+            }
         }
         Commands::Status => {
             // Skip the ping when nothing is configured — there's no
@@ -484,30 +533,88 @@ async fn main() -> anyhow::Result<()> {
             non_interactive,
         } => {
             // The global `--server` flag was already merged into cfg at the
-            // top of main, so cfg.server_url is the source of truth. Prompt
-            // to confirm/change in interactive mode; in non-interactive mode
-            // accept whatever the config has (default
-            // http://localhost:3000 if unset).
-            let server_url = if non_interactive {
+            // top of main, so cfg.server_url is the source of truth.
+            // Anonymous mode is genuinely zero-prompt — confirming the
+            // server URL would defeat the "0-input" pitch and breaks
+            // non-tty contexts (curl | sh, CI). Only prompt in named
+            // mode when the user has signaled they want interaction.
+            let is_anonymous =
+                email.is_none() && !login && name.is_none() && workspace.is_none();
+            let server_url = if non_interactive || is_anonymous {
                 cfg.server_url.clone()
             } else {
                 prompt_or("Server URL", Some(&cfg.server_url))?
             };
 
+            // Anonymous onboard is the default: no email/password
+            // required, one server round-trip, instantly usable.
+            // Switch to named mode iff the user provided any flag
+            // that signals "I want a recoverable / custom identity"
+            // — --email, --login, --name, or --workspace (anon always
+            // uses the "default" workspace, so a custom name implies
+            // named mode).
+            if is_anonymous {
+                // Refuse to overwrite an existing identity. Running
+                // `veda init` again after onboarding would silently
+                // throw away the previous account binding, which is
+                // hard to recover from. The user has to clear config
+                // (or pass --email / --login) on purpose.
+                if cfg.api_key.is_some() || cfg.workspace_key.is_some() {
+                    anyhow::bail!(
+                        "this machine is already onboarded (see `veda status`). \
+                         To attach a different account use `veda login --api-key <key>`, \
+                         or delete the config file first."
+                    );
+                }
+                let new_client = client::Client::new(&server_url);
+                let outcome_result =
+                    init::run_anonymous(&new_client, &mut cfg, server_url).await;
+                cfg.save()?;
+                let outcome = outcome_result?;
+                let cfg_path = config::CliConfig::default_path()
+                    .map(|p| p.display().to_string())
+                    .unwrap_or_else(|_| "<config path>".into());
+                println!();
+                println!("✓ anonymous account created (id {})", outcome.account_id);
+                println!("✓ default workspace ready (id {})", outcome.workspace_id);
+                println!("✓ keys saved to {cfg_path}");
+                println!();
+                println!("Try: veda cp ./README.md /docs/readme.md");
+                println!(
+                    "Later, attach an email so you can recover this account from another \
+                     machine: veda claim --email you@example.com"
+                );
+                return Ok(());
+            }
+
+            let email = resolve_field("Email", email, None, non_interactive, false)?;
+            // In non-interactive named mode the user often only has
+            // email + password (e.g. CI / agent). Derive name from
+            // the email's local-part so they don't have to repeat
+            // themselves; the server-side 409 fallback to login means
+            // the name only matters when actually creating a new
+            // account.
+            let derived_name: Option<String> = email
+                .split('@')
+                .next()
+                .filter(|s| !s.is_empty())
+                .map(str::to_string);
             let name = if login {
                 String::new()
             } else {
-                resolve_field("Name", name, None, non_interactive, false)?
+                resolve_field("Name", name.or(derived_name), None, non_interactive, false)?
             };
-            let email = resolve_field("Email", email, None, non_interactive, false)?;
             let password = resolve_password(password, non_interactive)?;
-            let workspace = resolve_field(
-                "Workspace name",
-                workspace,
-                Some("default"),
-                non_interactive,
-                true,
-            )?;
+            // Workspace is silent: `--workspace foo` overrides for the
+            // rare power user, otherwise everyone gets `default`. No
+            // prompt — knowing the workspace concept shouldn't be a
+            // prerequisite for first-time onboarding.
+            let workspace = workspace
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .unwrap_or("default")
+                .to_string();
 
             let params = init::InitParams {
                 server_url,
@@ -518,8 +625,13 @@ async fn main() -> anyhow::Result<()> {
                 workspace,
             };
             let new_client = client::Client::new(&params.server_url);
-            let outcome = init::run_init(&new_client, &mut cfg, params).await?;
+            // Save unconditionally so partial successes (e.g. account
+            // created but workspace-key mint failed) leave the user
+            // with a real `api_key` they can recover with — the
+            // contract documented in run_init's comment.
+            let outcome_result = init::run_init(&new_client, &mut cfg, params).await;
             cfg.save()?;
+            let outcome = outcome_result?;
 
             let cfg_path = config::CliConfig::default_path()
                 .map(|p| p.display().to_string())
@@ -538,6 +650,29 @@ async fn main() -> anyhow::Result<()> {
             println!("✓ workspace key saved to {cfg_path}");
             println!();
             println!("Try: veda cp ./README.md /docs/readme.md");
+        }
+        Commands::Claim {
+            email,
+            password,
+            name,
+        } => {
+            // Fall back to VEDA_API_KEY env when the config has no
+            // key — supports "I pasted my anon vk_ into the shell but
+            // didn't persist it yet" flow. Cfg is the source of truth
+            // when both are set so a stale env var can't silently
+            // hijack the claim to a wrong account.
+            if cfg.api_key.as_deref().map_or(true, str::is_empty) {
+                if let Ok(env_key) = std::env::var("VEDA_API_KEY") {
+                    if !env_key.is_empty() {
+                        cfg.api_key = Some(env_key);
+                    }
+                }
+            }
+            let password = resolve_password(password, false)?;
+            let new_client = client::Client::new(&cfg.server_url);
+            let account_id = init::run_claim(&new_client, &cfg, email, password, name).await?;
+            println!("✓ account claimed (id {account_id})");
+            println!("Your API key is unchanged; future logins use email + password.");
         }
         Commands::Account { action } => match action {
             AccountCmd::Create {

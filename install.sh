@@ -2,23 +2,38 @@
 # install.sh — Veda CLI installer
 #
 # Usage:
-#   curl -fL https://raw.githubusercontent.com/jooekong/veda/main/install.sh | sh
-#   curl -fL ... | sh -s -- --with-fuse        # also install veda-fuse
+#   curl -fL <install-url> | sh                       # default: install from internal GitLab
+#   curl -fL ... | sh -s -- --with-fuse               # also install veda-fuse
+#   curl -fL ... | sh -s -- --from-github             # install from public GitHub releases
 #
 # Env overrides:
-#   VEDA_VERSION       Version to install (default below)
+#   VEDA_VERSION       Version to install
 #   VEDA_INSTALL_DIR   Where to put binaries (default: $HOME/.local/bin)
+#   VEDA_SOURCE        gitlab (default) | github
 
 set -eu
 
 # ====== config ======
 GITHUB_REPO="jooekong/veda"
-DEFAULT_VERSION="0.1.5"
-DEFAULT_SERVER="http://10.79.51.161:3000"
+GITLAB_HOST="git.ddxq.mobi"
+GITLAB_PROJECT_PATH="middleware/dbpaas/veda"
+GITLAB_PROJECT_ID="9462"
+# Read-only deploy token, scope=read_package_registry. Lets the script
+# pull release artifacts without prompting the user for credentials.
+# The token can only GET this project's packages; the GitLab instance
+# is internal-only, so the blast radius if this script leaks is bounded
+# to "someone on the internal network can fetch binaries they could
+# already read by signing in to GitLab."
+GITLAB_DEPLOY_TOKEN="j4s2baP6aEybzSrsxq76"
+
+DEFAULT_VERSION_GITLAB="0.0.11-test"
+DEFAULT_VERSION_GITHUB="0.1.4"
+DEFAULT_SERVER="https://veda.dbpaas.dingdongxiaoqu.com"
 
 # ====== state ======
 WITH_FUSE=0
-VERSION="${VEDA_VERSION:-$DEFAULT_VERSION}"
+SOURCE="${VEDA_SOURCE:-gitlab}"
+VERSION="${VEDA_VERSION:-}"
 DEST="${VEDA_INSTALL_DIR:-$HOME/.local/bin}"
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT INT TERM
@@ -35,17 +50,41 @@ detect_platform() {
         Darwin-x86_64) echo "x86_64-apple-darwin" ;;
         Darwin-arm64)  echo "aarch64-apple-darwin" ;;
         Linux-x86_64)  echo "x86_64-unknown-linux-gnu" ;;
-        Linux-aarch64) echo "aarch64-unknown-linux-gnu" ;;
-        *) err "unsupported platform: $os-$arch" ;;
+        *) err "unsupported platform: $os-$arch (supported: macOS Intel/Apple Silicon, Linux x86_64)" ;;
     esac
+}
+
+asset_url() {
+    name="$1"
+    case "$SOURCE" in
+        gitlab)
+            printf 'https://%s/api/v4/projects/%s/packages/generic/veda/%s/%s' \
+                "$GITLAB_HOST" "$GITLAB_PROJECT_ID" "$VERSION" "$name"
+            ;;
+        github)
+            printf 'https://github.com/%s/releases/download/%s/%s' \
+                "$GITHUB_REPO" "$VERSION" "$name"
+            ;;
+        *)
+            err "unknown VEDA_SOURCE: $SOURCE (expected gitlab or github)"
+            ;;
+    esac
+}
+
+curl_with_auth() {
+    if [ "$SOURCE" = "gitlab" ]; then
+        curl --header "Deploy-Token: $GITLAB_DEPLOY_TOKEN" "$@"
+    else
+        curl "$@"
+    fi
 }
 
 download_asset() {
     name="$1"
-    url="https://github.com/$GITHUB_REPO/releases/download/$VERSION/$name"
-    curl --fail --show-error --silent --location \
+    url=$(asset_url "$name")
+    curl_with_auth --fail --show-error --silent --location \
          "$url" -o "$TMP/$name" \
-        || err "download failed: $name (check version $VERSION exists in releases)"
+        || err "download failed: $name (check version $VERSION exists on $SOURCE)"
 }
 
 verify_sha256() {
@@ -135,8 +174,8 @@ preflight_fuse() {
 install_skill() {
     if [ -d "$HOME/.claude" ]; then
         mkdir -p "$HOME/.claude/skills/veda"
-        url="https://github.com/$GITHUB_REPO/releases/download/$VERSION/skill.md"
-        if curl --fail --silent --location \
+        url=$(asset_url "skill.md")
+        if curl_with_auth --fail --silent --location \
                 "$url" -o "$HOME/.claude/skills/veda/SKILL.md"; then
             log "skill installed → ~/.claude/skills/veda/SKILL.md"
         else
@@ -145,9 +184,22 @@ install_skill() {
     fi
 }
 
+# Write the server URL into the freshly-installed binary's config so the
+# user (or agent) doesn't have to `veda config set` as step zero. Uses
+# the absolute path because `curl | sh` runs in a shell whose PATH has
+# not been re-evaluated since we dropped the binary into $DEST.
+configure_server_url() {
+    if "$DEST/veda" config set server_url "$DEFAULT_SERVER" >/dev/null 2>&1; then
+        log "✓ server URL set to $DEFAULT_SERVER"
+    else
+        warn "could not write server_url to config; run 'veda config set server_url $DEFAULT_SERVER' manually"
+    fi
+}
+
 print_next_steps() {
     log ""
     log "✓ veda is installed at $DEST/veda"
+    configure_server_url
     case ":$PATH:" in
         *":$DEST:"*) ;;
         *)
@@ -157,30 +209,40 @@ print_next_steps() {
             ;;
     esac
     log ""
-    log "Next: run 'veda init' for guided setup (~30 seconds), or"
-    log "      'veda init --server $DEFAULT_SERVER --login --email ... --password ...' to"
-    log "      attach an existing account non-interactively."
-    log ""
-    log "After setup, 'veda status' confirms config + server reachability."
+    log "Next: run 'veda init' — zero-input anonymous onboard, instantly usable."
+    log "      Add --email for a named account, or upgrade later via 'veda claim'."
     log ""
     if [ -d "$HOME/.claude" ]; then
         log "Claude Code: skill auto-installed; just ask Claude to use veda."
     else
-        log "Other agents: have them read https://raw.githubusercontent.com/$GITHUB_REPO/main/skill.md"
+        case "$SOURCE" in
+            gitlab) skill_doc="http://$GITLAB_HOST/$GITLAB_PROJECT_PATH/-/raw/main/skill.md" ;;
+            github) skill_doc="https://raw.githubusercontent.com/$GITHUB_REPO/main/skill.md" ;;
+        esac
+        log "Other agents: have them read $skill_doc"
     fi
 }
 
 main() {
     while [ $# -gt 0 ]; do
         case "$1" in
-            --with-fuse) WITH_FUSE=1 ;;
+            --with-fuse)   WITH_FUSE=1 ;;
+            --from-github) SOURCE=github ;;
+            --from-gitlab) SOURCE=gitlab ;;
             -h|--help)
                 cat >&2 <<EOF
-Usage: install.sh [--with-fuse]
+Usage: install.sh [--with-fuse] [--from-github|--from-gitlab]
+
+Default source: gitlab (internal $GITLAB_HOST). Use --from-github to
+install from public GitHub releases.
+
+Supported platforms: macOS Intel, macOS Apple Silicon, Linux x86_64.
 
 Env overrides:
-  VEDA_VERSION       Version to install (default: $DEFAULT_VERSION)
+  VEDA_VERSION       Version to install
+                     (default: $DEFAULT_VERSION_GITLAB on gitlab, $DEFAULT_VERSION_GITHUB on github)
   VEDA_INSTALL_DIR   Where to put binaries (default: \$HOME/.local/bin)
+  VEDA_SOURCE        gitlab (default) | github
 EOF
                 exit 0
                 ;;
@@ -189,22 +251,28 @@ EOF
         shift
     done
 
+    case "$SOURCE" in
+        gitlab) : "${VERSION:=$DEFAULT_VERSION_GITLAB}" ;;
+        github) : "${VERSION:=$DEFAULT_VERSION_GITHUB}" ;;
+        *) err "VEDA_SOURCE must be gitlab or github, got: $SOURCE" ;;
+    esac
+
     target=$(detect_platform)
     install_binary "veda" "$target"
 
     if [ "$WITH_FUSE" -eq 1 ]; then
         # Probe whether veda-fuse-$target exists on this release. Avoids
         # hardcoding which platforms ship a prebuilt fuse binary; if the CI
-        # matrix changes (or a future release adds darwin fuse), the probe
-        # picks it up automatically.
-        fuse_url="https://github.com/$GITHUB_REPO/releases/download/$VERSION/veda-fuse-$target"
-        if ! curl -fsIL -o /dev/null --max-time 10 "$fuse_url"; then
+        # matrix changes (or a future release adds darwin-aarch64 fuse), the
+        # probe picks it up automatically.
+        fuse_url=$(asset_url "veda-fuse-$target")
+        if ! curl_with_auth -fsIL -o /dev/null --max-time 10 "$fuse_url"; then
             log ""
             log "veda CLI is installed."
-            log "veda-fuse-$target is not in release $VERSION."
-            log "(Currently the release only ships a prebuilt veda-fuse for"
-            log " x86_64-linux. darwin needs macFUSE SDK and aarch64 needs"
-            log " a cross-compile sysroot, both blocked on the CI runner.)"
+            log "veda-fuse-$target is not in release $VERSION on $SOURCE."
+            log "(Currently only x86_64-linux and x86_64-darwin ship a prebuilt"
+            log " veda-fuse. aarch64-darwin needs a cross-compile sysroot for"
+            log " macFUSE which we haven't validated on CI.)"
             log "To get veda-fuse on $target, compile from source:"
             log "  git clone https://github.com/$GITHUB_REPO.git"
             log "  cd veda && cargo build --release -p veda-fuse"

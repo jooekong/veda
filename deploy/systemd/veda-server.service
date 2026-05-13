@@ -1,10 +1,11 @@
 # systemd unit for veda-server on a host with native MySQL + Milvus.
 # Install:
+#   sudo useradd --system --no-create-home --home-dir /data/veda veda
+#   sudo install -d -o root -g root /data/veda /data/veda/bin /data/veda/config
+#   sudo install -d -o veda -g veda /data/veda/data
+#   sudo install -m 0755 target/release/veda-server /data/veda/bin/
+#   sudo install -m 0640 -o root -g veda config/server.toml /data/veda/config/config.toml
 #   sudo cp deploy/systemd/veda-server.service /etc/systemd/system/
-#   sudo useradd --system --no-create-home --home-dir /var/lib/veda veda
-#   sudo install -d -o veda -g veda /etc/veda /var/lib/veda
-#   sudo install -m 0640 -o veda -g veda config/server.toml /etc/veda/config.toml
-#   sudo install -m 0755 target/release/veda-server /usr/local/bin/
 #   sudo systemctl daemon-reload
 #   sudo systemctl enable --now veda-server.service
 #
@@ -21,20 +22,23 @@ Requires=network-online.target
 Type=simple
 User=veda
 Group=veda
-EnvironmentFile=-/etc/veda/veda.env
-ExecStart=/usr/local/bin/veda-server /etc/veda/config.toml
+# Optional env overrides — secrets here win over config.toml. The leading
+# `-` makes the file optional so the unit still starts if it's absent.
+EnvironmentFile=-/data/veda/config/veda.env
+WorkingDirectory=/data/veda/data
+ExecStart=/data/veda/bin/veda-server /data/veda/config/config.toml
 Restart=on-failure
 RestartSec=5s
 # 10s shutdown grace lets in-flight HTTP requests finish before SIGKILL;
 # the server's tokio shutdown handler already wires graceful drain.
 TimeoutStopSec=10s
 
-# Hardening. We don't write outside /var/lib/veda so the rest is read-only.
+# Hardening. We only write under /data/veda/data so the rest is read-only.
 NoNewPrivileges=true
 ProtectSystem=strict
 ProtectHome=true
 PrivateTmp=true
-ReadWritePaths=/var/lib/veda
+ReadWritePaths=/data/veda/data
 # A 4 GB RSS cap catches a leak before it OOMs the whole box. Veda's
 # steady-state RSS is well under 1 GB; raise this if you embed huge files.
 MemoryMax=4G

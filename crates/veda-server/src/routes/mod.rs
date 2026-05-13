@@ -17,9 +17,15 @@ use serde::Serialize;
 
 const READY_TIMEOUT: Duration = Duration::from_secs(3);
 
+// install.sh embedded at build time. Updates ship via redeploy — the
+// served script is pinned to whatever was in the repo when this binary
+// was built. Path is relative to this source file; 4 levels up = repo root.
+const INSTALL_SH: &str = include_str!("../../../../install.sh");
+
 pub fn build_router(state: Arc<AppState>) -> Router {
     Router::new()
         .route("/healthz", get(healthz))
+        .route("/install.sh", get(install_script))
         .route("/v1/ready", get(ready))
         .route("/v1/metrics", get(metrics_endpoint))
         .merge(account::routes())
@@ -115,6 +121,17 @@ struct ComponentHealth {
 /// process restarts that won't help.
 async fn healthz() -> &'static str {
     "ok"
+}
+
+async fn install_script() -> impl IntoResponse {
+    (
+        StatusCode::OK,
+        [
+            (axum::http::header::CONTENT_TYPE, "text/x-shellscript; charset=utf-8"),
+            (axum::http::header::CACHE_CONTROL, "public, max-age=300"),
+        ],
+        INSTALL_SH,
+    )
 }
 
 async fn ready(State(state): State<Arc<AppState>>) -> Response {

@@ -1,6 +1,7 @@
 //! MySQL-backed metadata store, transactional metadata, and outbox task queue.
 
 use async_trait::async_trait;
+use chrono::Utc;
 use sqlx::types::Json;
 use sqlx::{MySqlPool, Row, Transaction};
 use veda_core::store::{AuthStore, CollectionMetaStore, MetadataStore, MetadataTx, TaskQueue};
@@ -23,6 +24,19 @@ fn storage_err(e: impl std::fmt::Display) -> VedaError {
         return VedaError::Deadlock(msg);
     }
     VedaError::Storage(msg)
+}
+
+/// Variant of `storage_err` for UPDATEs on `veda_accounts.email` where
+/// the unique index can fire on a race. Maps MySQL 1062 (ER_DUP_ENTRY)
+/// to a typed `AlreadyExists`; everything else falls through to the
+/// generic translator.
+fn translate_account_email_conflict(e: sqlx::Error) -> VedaError {
+    if let sqlx::Error::Database(db) = &e {
+        if db.code().as_deref() == Some("1062") {
+            return VedaError::AlreadyExists("email already registered".into());
+        }
+    }
+    storage_err(e)
 }
 
 fn escape_like(s: &str) -> String {
@@ -1915,6 +1929,116 @@ impl AuthStore for MysqlStore {
         .await
         .map_err(storage_err)?;
         row.map(|r| row_to_account(&r)).transpose()
+    }
+
+    async fn claim_account(
+        &self,
+        id: &str,
+        email: &str,
+        password_hash: &str,
+        name: Option<&str>,
+    ) -> Result<()> {
+        // `AND email IS NULL` makes claim idempotent + race-safe: a
+        // racing second claim sees 0 rows affected (rather than
+        // overwriting the first claim's email/password). COALESCE
+        // keeps the existing name when caller passes None.
+        let res = sqlx::query(
+            r#"UPDATE veda_accounts
+               SET email = ?,
+                   password_hash = ?,
+                   name = COALESCE(?, name),
+                   updated_at = ?
+               WHERE id = ? AND email IS NULL"#,
+        )
+        .bind(email)
+        .bind(password_hash)
+        .bind(name)
+        .bind(Utc::now().naive_utc())
+        .bind(id)
+        .execute(&self.pool)
+        .await
+        .map_err(translate_account_email_conflict)?;
+        if res.rows_affected() == 0 {
+            // Either the id doesn't exist, or the account was already
+            // claimed (email IS NOT NULL). Map to Unauthorized so the
+            // caller's vk_ being valid doesn't leak which condition
+            // hit.
+            return Err(VedaError::Unauthorized(
+                "account is no longer anonymous".into(),
+            ));
+        }
+        Ok(())
+    }
+
+    async fn create_anonymous_bundle(
+        &self,
+        account: &Account,
+        api_key: &ApiKeyRecord,
+        workspace: &Workspace,
+        ws_key: &WorkspaceKey,
+    ) -> Result<()> {
+        let mut tx = self.pool.begin().await.map_err(storage_err)?;
+
+        sqlx::query(
+            r#"INSERT INTO veda_accounts (id, name, email, password_hash, status, created_at, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?)"#,
+        )
+        .bind(&account.id)
+        .bind(&account.name)
+        .bind(&account.email)
+        .bind(&account.password_hash)
+        .bind(db_enum_str(&account.status))
+        .bind(account.created_at.naive_utc())
+        .bind(account.updated_at.naive_utc())
+        .execute(&mut *tx)
+        .await
+        .map_err(storage_err)?;
+
+        sqlx::query(
+            r#"INSERT INTO veda_api_keys (id, account_id, name, key_hash, status, created_at)
+               VALUES (?, ?, ?, ?, ?, ?)"#,
+        )
+        .bind(&api_key.id)
+        .bind(&api_key.account_id)
+        .bind(&api_key.name)
+        .bind(&api_key.key_hash)
+        .bind(db_enum_str(&api_key.status))
+        .bind(api_key.created_at.naive_utc())
+        .execute(&mut *tx)
+        .await
+        .map_err(storage_err)?;
+
+        sqlx::query(
+            r#"INSERT INTO veda_workspaces (id, account_id, name, status, created_at, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?)"#,
+        )
+        .bind(&workspace.id)
+        .bind(&workspace.account_id)
+        .bind(&workspace.name)
+        .bind(db_enum_str(&workspace.status))
+        .bind(workspace.created_at.naive_utc())
+        .bind(workspace.updated_at.naive_utc())
+        .execute(&mut *tx)
+        .await
+        .map_err(storage_err)?;
+
+        sqlx::query(
+            r#"INSERT INTO veda_workspace_keys (id, workspace_id, name, key_hash, permission, status, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?)"#,
+        )
+        .bind(&ws_key.id)
+        .bind(&ws_key.workspace_id)
+        .bind(&ws_key.name)
+        .bind(&ws_key.key_hash)
+        .bind(db_enum_str(&ws_key.permission))
+        .bind(db_enum_str(&ws_key.status))
+        .bind(ws_key.created_at.naive_utc())
+        .execute(&mut *tx)
+        .await
+        .map_err(storage_err)?;
+
+        tx.commit().await.map_err(storage_err)?;
+        Ok(())
     }
 
     async fn create_api_key(&self, key: &ApiKeyRecord) -> Result<()> {

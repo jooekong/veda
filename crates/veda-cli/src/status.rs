@@ -53,7 +53,11 @@ pub fn render_status(cfg: &CliConfig, reachable: Option<bool>) -> String {
     let ws_state = match (&cfg.workspace_id, &cfg.workspace_key) {
         (Some(id), Some(_)) => format!("✓ {id}"),
         (Some(id), None) => format!("✗ {id} (no workspace key — re-run `veda workspace use {id}`)"),
-        (None, _) => "✗ none selected".to_string(),
+        // wk_*-only paste: the workspace key alone is enough to run
+        // data commands; the id is unknown because the server has no
+        // "what workspace does this key belong to" endpoint.
+        (None, Some(_)) => "✓ workspace key configured (id unknown)".to_string(),
+        (None, None) => "✗ none selected".to_string(),
     };
     format!(
         "{server_line}\nAPI key:   {api_key_state}\nWorkspace: {ws_state}\n"
@@ -144,6 +148,25 @@ mod tests {
         };
         let out = render_status(&cfg, Some(true));
         assert!(out.contains("none selected"));
+    }
+
+    #[test]
+    fn render_workspace_key_only_renders_as_ready() {
+        // Paste-a-wk_ shape: `veda login --api-key wk_xxx` clears
+        // workspace_id (server has no lookup endpoint) and api_key.
+        // Data commands still work, so status must not call this
+        // "none selected" — that would mislead users into thinking
+        // onboarding failed.
+        let cfg = CliConfig {
+            api_key: None,
+            workspace_id: None,
+            workspace_key: Some("wk-x".into()),
+            ..CliConfig::default()
+        };
+        let out = render_status(&cfg, Some(true));
+        assert!(out.contains("workspace key configured"), "out: {out}");
+        assert!(out.contains("id unknown"), "out: {out}");
+        assert!(!out.contains("none selected"), "out: {out}");
     }
 
     #[tokio::test]

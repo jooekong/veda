@@ -478,6 +478,33 @@ pub trait AuthStore: Send + Sync {
     async fn create_account(&self, account: &Account) -> Result<()>;
     async fn get_account(&self, id: &str) -> Result<Option<Account>>;
     async fn get_account_by_email(&self, email: &str) -> Result<Option<Account>>;
+    /// Attach an email + password hash to an existing anonymous
+    /// account (rows with `email IS NULL`), optionally renaming it.
+    /// Used by `veda claim` to upgrade anon identities to recoverable
+    /// ones. The implementation guards `WHERE email IS NULL`, so a
+    /// concurrent claim that already won the race surfaces as
+    /// `Unauthorized` (zero rows affected), and a stale email collision
+    /// surfaces as `AlreadyExists` (MySQL 1062 mapped). Caller hashes
+    /// the password.
+    async fn claim_account(
+        &self,
+        id: &str,
+        email: &str,
+        password_hash: &str,
+        name: Option<&str>,
+    ) -> Result<()>;
+
+    /// Atomically create an account + its `vk_` api key + a default
+    /// workspace + a `wk_` workspace key inside one transaction. Used
+    /// by anonymous onboarding so a mid-way failure can't leave an
+    /// orphan account with no workspace.
+    async fn create_anonymous_bundle(
+        &self,
+        account: &Account,
+        api_key: &ApiKeyRecord,
+        workspace: &Workspace,
+        ws_key: &WorkspaceKey,
+    ) -> Result<()>;
 
     // api key
     async fn create_api_key(&self, key: &ApiKeyRecord) -> Result<()>;

@@ -14,42 +14,61 @@ You interact with it via the `veda` binary; never construct HTTP requests direct
 
 ## Bootstrap (first-time setup)
 
+Onboarding is now anonymous-first: two commands and you're usable.
+
 1. **Check the binary is installed**:
    ```sh
    which veda
    ```
-   If missing, install:
+   If missing, install (the installer writes the default server URL into the
+   config automatically; no extra `config set` step needed):
    ```sh
-   curl -fL https://raw.githubusercontent.com/jooekong/veda/main/install.sh | sh
+   curl -fL https://veda.dbpaas.dingdongxiaoqu.com/install.sh | sh
    ```
    Add `--with-fuse` to also install `veda-fuse` for filesystem mounting.
 
-2. **Configure server URL** (one-time):
+2. **Onboard**:
    ```sh
-   veda config set server_url http://10.79.51.161:3000
+   veda init
    ```
+   That's it. Zero prompts. The server mints an anonymous account + a default
+   workspace + both keys in one round-trip, and `veda init` writes them all to
+   `~/.config/veda/config.toml`. Run `veda status` to confirm.
 
-3. **Get an API key** — ask the user to run this themselves; do not type their password for them:
-   ```sh
-   veda account create --name "Their Name" --email user@example.com --password '<their-password>'
-   ```
-   The user runs it, copies the printed `api_key`, and pastes it back. Then:
-   ```sh
-   veda config set api_key <pasted-key>
-   ```
-
-4. **Create or pick a workspace**:
-   ```sh
-   veda workspace list
-   veda workspace create my-project    # if none exist
-   veda workspace use my-project       # writes workspace_id + workspace_key into config
-   ```
-
-5. **Verify**:
+3. **Verify**:
    ```sh
    veda ls /
    ```
-   Empty listing or existing files is fine. Errors mean a step above failed.
+   Empty listing is the expected first-run state. Errors mean step 1 or 2 failed.
+
+### Upgrading anonymous to a named account
+
+Anonymous identities live in `~/.config/veda/config.toml` only — useful for a
+single machine, but you can't recover the account from another box. When the
+user wants to attach an email/password (e.g. before moving to a new laptop):
+
+```sh
+veda claim --email you@example.com
+```
+
+`--password` is prompted (or read from `VEDA_PASSWORD`); the existing `vk_` key
+keeps working, so no command line breaks.
+
+### Existing user on a new machine
+
+After `veda init` writes a fresh anon account on the new machine, you don't
+want that — you want the claimed account. Two options:
+
+```sh
+# Option A: paste the api_key from the old machine
+veda login --api-key vk_…   # account key → still need 'veda init' afterwards? no:
+                            # use the equivalent below for a one-shot flow
+
+# Option B: log in with email/password
+rm ~/.config/veda/config.toml         # clear the anon state veda init wrote
+veda config set server_url https://veda.dbpaas.dingdongxiaoqu.com
+veda init --login --email you@example.com   # prompts password
+```
 
 ## Path syntax
 
@@ -58,17 +77,20 @@ The CLI **does not accept** `:/path` syntax — `:` is rejected as an invalid ch
 
 ## Setup
 
-If `veda status` reports unconfigured (or `veda <anything>` errors with "no
-API key configured"), the user hasn't run setup yet. Single-command bootstrap:
+If `veda status` reports unconfigured (or any `veda <cmd>` errors with "no
+API key configured"), the user hasn't onboarded yet. Single-command bootstrap:
 
 ```sh
-veda init                                    # interactive — prompts for everything
-veda init --login --email X --password Y    # attach existing account silently
-veda init --workspace dogfood                # different workspace name
+veda init                                  # zero-prompt anonymous onboard (default)
+veda init --email X --password Y           # register a named account (non-interactive)
+veda init --login --email X --password Y   # attach an existing account silently
+veda init --workspace dogfood              # named mode with custom workspace name
+veda claim --email X                       # upgrade an existing anon account to named
 ```
 
 `veda status` shows current config + server reachability. `veda login --api-key K`
-swaps the API key without touching workspace state.
+swaps an existing `vk_*` (account) or `wk_*` (workspace) key without touching
+the rest of the config.
 
 ## Core operations
 
@@ -221,10 +243,11 @@ veda-fuse umount /mnt/veda
 | Error message                          | Meaning              | Fix                                              |
 |----------------------------------------|---------------------|--------------------------------------------------|
 | `invalid path: invalid character in segment: :` | Used `:/path` syntax | Drop the `:` — paths are plain `/path`     |
-| `no API key configured`                | Not authenticated    | Ask user to run `veda account create` or `login` |
-| `no workspace selected`                | No active workspace  | `veda workspace list` → `veda workspace use <name>` |
-| `connection refused` / `Empty reply from server` | Server unreachable / hung | `veda config show`; verify server URL, ping it |
-| `401 unauthorized`                     | API key invalid      | `veda account login` to refresh                  |
+| `no API key configured`                | Not authenticated    | Run `veda init` (anon) or `veda login --api-key <key>` |
+| `no workspace selected`                | No active workspace  | Run `veda init` (anon onboard sets one) or `veda login --api-key wk_…` |
+| `already onboarded`                    | `veda init` blocked from overwriting | Either `veda status` is what you want, or delete `~/.config/veda/config.toml` first |
+| `connection refused` / `Empty reply from server` | Server unreachable / hung | `veda status` (checks reachability); verify `server_url` |
+| `401 unauthorized`                     | API key invalid      | If you have email/password: `veda init --login --email …`; else paste a fresh key with `veda login --api-key`                 |
 | `Summary not ready yet (summary pending)` (exit 2) | L0/L1 generation is async | Wait ~5s and retry, or `veda cat` for raw content |
 | 4xx with JSON error body               | API error            | Echo server's `error` field to user              |
 
@@ -241,5 +264,5 @@ veda-fuse umount /mnt/veda
 ## Reference
 
 - Repo: https://github.com/jooekong/veda
-- Server (alpha): http://10.79.51.161:3000
+- Server (alpha): https://veda.dbpaas.dingdongxiaoqu.com
 - Issues: contact Joe

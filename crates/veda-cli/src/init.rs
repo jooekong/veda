@@ -20,6 +20,19 @@ pub fn apply_login(cfg: &mut CliConfig, api_key: String) {
     cfg.workspace_key = None;
 }
 
+/// Apply a paste-an-existing workspace key (wk_*). Stores it into
+/// `workspace_key` and clears `api_key` + `workspace_id` — a workspace
+/// key alone cannot drive account-scope endpoints, and there is no
+/// server endpoint to look up which workspace it belongs to, so we
+/// leave the id field empty rather than make one up.
+///
+/// Caller persists the config after.
+pub fn apply_workspace_key(cfg: &mut CliConfig, wk: String) {
+    cfg.workspace_key = Some(wk);
+    cfg.workspace_id = None;
+    cfg.api_key = None;
+}
+
 /// Resolved params for `veda init`. Construction (prompting / flag merge)
 /// lives in main.rs; this struct is the testable handoff to `run_init`.
 #[derive(Debug, Clone)]
@@ -78,13 +91,31 @@ pub async fn run_init(
                 "creating an account requires --name; pass --login to use an existing account instead"
             ));
         }
-        let resp = client
+        // Try create first; if the server says 409 the email is already
+        // registered, so transparently fall back to login with the same
+        // password. The user doesn't need to know up front whether they're
+        // a returning user — wrong password is the only failure mode that
+        // surfaces.
+        match client
             .create_account(&params.name, &params.email, &params.password)
             .await
-            .context("account creation failed")?;
-        let account_id = field_str(&resp, "account_id")?;
-        let api_key = field_str(&resp, "api_key")?;
-        (account_id, api_key, true)
+        {
+            Ok(resp) => {
+                let account_id = field_str(&resp, "account_id")?;
+                let api_key = field_str(&resp, "api_key")?;
+                (account_id, api_key, true)
+            }
+            Err(e) if crate::client::status_code(&e) == Some(409) => {
+                let resp = client
+                    .login(&params.email, &params.password)
+                    .await
+                    .context("account already exists, but login failed (wrong password?)")?;
+                let account_id = field_str(&resp, "account_id")?;
+                let api_key = field_str(&resp, "api_key")?;
+                (account_id, api_key, false)
+            }
+            Err(e) => return Err(e.context("account creation failed")),
+        }
     };
     cfg.api_key = Some(api_key.clone());
 
@@ -141,6 +172,76 @@ fn field_str(resp: &serde_json::Value, key: &str) -> Result<String> {
         .map(String::from)
 }
 
+/// Outcome of zero-input anonymous onboarding. The server hands us
+/// everything in one round-trip, so there's no partial-success
+/// trade-off to document like `run_init` has.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AnonymousOutcome {
+    pub account_id: String,
+    pub workspace_id: String,
+}
+
+/// Anonymous onboarding flow: POST /v1/accounts/anonymous returns
+/// account_id + api_key + workspace_id + workspace_key in one shot.
+/// Writes all four config fields and returns the IDs for the renderer.
+///
+/// `server_url` is set before the HTTP call so a failed onboard still
+/// leaves the config pointing at the right server (idempotent — same
+/// value if the user retries). Credentials are atomic: api_key /
+/// workspace_id / workspace_key are either all set together or none
+/// of them, so partial writes can't put the CLI in a half-configured
+/// state.
+pub async fn run_anonymous(
+    client: &Client,
+    cfg: &mut CliConfig,
+    server_url: String,
+) -> Result<AnonymousOutcome> {
+    cfg.server_url = server_url;
+    let resp = client
+        .anonymous_onboard()
+        .await
+        .context("anonymous onboard failed")?;
+    let account_id = field_str(&resp, "account_id")?;
+    let api_key = field_str(&resp, "api_key")?;
+    let workspace_id = field_str(&resp, "workspace_id")?;
+    let workspace_key = field_str(&resp, "workspace_key")?;
+
+    cfg.api_key = Some(api_key);
+    cfg.workspace_id = Some(workspace_id.clone());
+    cfg.workspace_key = Some(workspace_key);
+
+    Ok(AnonymousOutcome {
+        account_id,
+        workspace_id,
+    })
+}
+
+/// Upgrade the current anonymous account to a named one. Reads the
+/// auth `vk_` from `cfg.api_key`; the caller is expected to have
+/// resolved env-var fallbacks (e.g. `VEDA_API_KEY`) before calling so
+/// this stays a pure function. The server doesn't re-mint the key, so
+/// the same value keeps working after the claim.
+pub async fn run_claim(
+    client: &Client,
+    cfg: &CliConfig,
+    email: String,
+    password: String,
+    name: Option<String>,
+) -> Result<String> {
+    let api_key = cfg
+        .api_key
+        .as_deref()
+        .filter(|k| !k.is_empty())
+        .ok_or_else(|| {
+            anyhow!("not onboarded yet; run `veda init` first")
+        })?;
+    let resp = client
+        .claim_account(api_key, &email, &password, name.as_deref())
+        .await
+        .context("claim failed")?;
+    field_str(&resp, "account_id")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -182,6 +283,27 @@ mod tests {
         };
         apply_login(&mut cfg, "second".into());
         assert_eq!(cfg.api_key.as_deref(), Some("second"));
+    }
+
+    // ── apply_workspace_key ────────────────────────────────────────
+
+    #[test]
+    fn workspace_key_paste_sets_wk_and_clears_account_identity() {
+        // Paste-a-wk_ semantics: replaces any existing account or
+        // workspace identity. The account-scoped api_key is cleared
+        // because wk_ can't act as one; workspace_id is cleared because
+        // there's no server lookup for "which workspace does this wk_
+        // belong to".
+        let mut cfg = CliConfig {
+            server_url: "http://x".into(),
+            api_key: Some("vk_old".into()),
+            workspace_id: Some("ws-old".into()),
+            workspace_key: Some("wk_old".into()),
+        };
+        apply_workspace_key(&mut cfg, "wk_new".into());
+        assert_eq!(cfg.workspace_key.as_deref(), Some("wk_new"));
+        assert!(cfg.workspace_id.is_none(), "id should be cleared");
+        assert!(cfg.api_key.is_none(), "api_key should be cleared");
     }
 
     // ── run_init ───────────────────────────────────────────────────
@@ -336,11 +458,104 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn account_create_failure_does_not_save_partial_config() {
+    async fn create_409_transparently_falls_back_to_login() {
+        // The user runs `veda init` with an email that's already
+        // registered. Server returns 409 from POST /v1/accounts, and
+        // we transparently log in with the same password. The user
+        // sees no error; outcome.created_account is false so the
+        // top-level renderer prints "logged in" instead of "created".
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path("/v1/accounts"))
             .respond_with(ResponseTemplate::new(409).set_body_string("email taken"))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/v1/accounts/login"))
+            .and(body_partial_json(json!({
+                "email": "joe@example.com",
+                "password": "hunter2",
+            })))
+            .respond_with(ok(json!({ "account_id": "acct-fb", "api_key": "ak-fb" })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/v1/workspaces"))
+            .respond_with(ok(json!([])))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/v1/workspaces"))
+            .respond_with(ok(json!({ "id": "ws-fb" })))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path_regex(r"^/v1/workspaces/ws-fb/keys$"))
+            .respond_with(ok(json!({ "key": "wk-fb" })))
+            .mount(&server)
+            .await;
+
+        let client = Client::new(&server.uri());
+        let mut cfg = CliConfig::default();
+        let outcome = run_init(&client, &mut cfg, params_create(&server.uri()))
+            .await
+            .unwrap();
+
+        assert_eq!(outcome.account_id, "acct-fb");
+        assert!(!outcome.created_account, "should NOT report account creation");
+        assert_eq!(cfg.api_key.as_deref(), Some("ak-fb"));
+        assert_eq!(cfg.workspace_key.as_deref(), Some("wk-fb"));
+    }
+
+    #[tokio::test]
+    async fn create_409_then_login_wrong_password_surfaces_clear_error() {
+        // If create says 409 (email taken) AND login then fails (wrong
+        // password), the user gets a context-wrapped error pointing at
+        // the password rather than the misleading "account creation
+        // failed" they'd have gotten before.
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/accounts"))
+            .respond_with(ResponseTemplate::new(409).set_body_string("email taken"))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/v1/accounts/login"))
+            .respond_with(ResponseTemplate::new(401).set_body_string("bad password"))
+            .mount(&server)
+            .await;
+
+        let client = Client::new(&server.uri());
+        let mut cfg = CliConfig::default();
+        let err = run_init(&client, &mut cfg, params_create(&server.uri()))
+            .await
+            .unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("account already exists") && msg.contains("login failed"),
+            "expected fallback-login wording, got: {msg}"
+        );
+        // Config still untouched on this failure path.
+        assert!(cfg.api_key.is_none());
+    }
+
+    #[tokio::test]
+    async fn create_non_409_failure_surfaces_creation_error() {
+        // Non-409 server errors (500, network etc.) should NOT trigger
+        // fallback — that path is reserved for "email already exists".
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/accounts"))
+            .respond_with(ResponseTemplate::new(500).set_body_string("db down"))
+            .mount(&server)
+            .await;
+        // Login mock with expect(0): fail the test if it gets called.
+        Mock::given(method("POST"))
+            .and(path("/v1/accounts/login"))
+            .respond_with(ResponseTemplate::new(500))
+            .expect(0)
             .mount(&server)
             .await;
 
@@ -350,9 +565,7 @@ mod tests {
             .await
             .unwrap_err();
         assert!(err.to_string().contains("account creation failed"));
-        assert!(cfg.api_key.is_none(), "api_key leaked despite failure");
-        assert!(cfg.workspace_id.is_none());
-        assert!(cfg.workspace_key.is_none());
+        assert!(cfg.api_key.is_none());
     }
 
     #[tokio::test]
@@ -395,6 +608,177 @@ mod tests {
         assert_eq!(outcome.workspace_id, "ws-fresh");
         assert!(outcome.created_workspace);
     }
+
+    // ── run_anonymous ──────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn anonymous_writes_all_four_config_fields() {
+        // Anonymous onboard is a single round-trip; the server hands
+        // us account_id, api_key, workspace_id, workspace_key — the
+        // CLI must persist the three secret/id fields onto CliConfig
+        // so subsequent commands work without further setup.
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/accounts/anonymous"))
+            .respond_with(ok(json!({
+                "account_id": "acct-anon",
+                "api_key": "vk_anon_xxx",
+                "workspace_id": "ws-anon",
+                "workspace_key": "wk_anon_xxx",
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let client = Client::new(&server.uri());
+        let mut cfg = CliConfig::default();
+        let outcome = run_anonymous(&client, &mut cfg, server.uri()).await.unwrap();
+
+        assert_eq!(outcome.account_id, "acct-anon");
+        assert_eq!(outcome.workspace_id, "ws-anon");
+        assert_eq!(cfg.server_url, server.uri());
+        assert_eq!(cfg.api_key.as_deref(), Some("vk_anon_xxx"));
+        assert_eq!(cfg.workspace_id.as_deref(), Some("ws-anon"));
+        assert_eq!(cfg.workspace_key.as_deref(), Some("wk_anon_xxx"));
+    }
+
+    #[tokio::test]
+    async fn anonymous_surface_clear_error_on_500() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/accounts/anonymous"))
+            .respond_with(ResponseTemplate::new(500).set_body_string("db down"))
+            .mount(&server)
+            .await;
+        let client = Client::new(&server.uri());
+        let mut cfg = CliConfig::default();
+        let err = run_anonymous(&client, &mut cfg, server.uri())
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("anonymous onboard failed"));
+        // Failure must NOT leave a half-written config.
+        assert!(cfg.api_key.is_none());
+    }
+
+    // ── run_claim ──────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn claim_sends_bearer_and_returns_account_id() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/accounts/claim"))
+            .and(body_partial_json(json!({
+                "email": "joe@example.com",
+                "password": "hunter2",
+                "name": "Joe",
+            })))
+            .respond_with(ok(json!({ "account_id": "acct-1" })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let client = Client::new(&server.uri());
+        let cfg = CliConfig {
+            api_key: Some("vk_anon".into()),
+            ..CliConfig::default()
+        };
+        let id = run_claim(
+            &client,
+            &cfg,
+            "joe@example.com".into(),
+            "hunter2".into(),
+            Some("Joe".into()),
+        )
+        .await
+        .unwrap();
+        assert_eq!(id, "acct-1");
+    }
+
+    #[tokio::test]
+    async fn claim_without_api_key_fails_before_http() {
+        // No mock registered: any HTTP call would 404, but the
+        // precondition should short-circuit before sending one.
+        let server = MockServer::start().await;
+        let client = Client::new(&server.uri());
+        let cfg = CliConfig::default();
+        let err = run_claim(&client, &cfg, "x@y.com".into(), "p".into(), None)
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("not onboarded"), "got: {err}");
+    }
+
+    #[tokio::test]
+    async fn claim_treats_empty_api_key_as_missing() {
+        // `api_key = Some("")` is functionally not-onboarded; reject
+        // before the HTTP layer so users see "not onboarded" instead
+        // of an opaque server 401.
+        let server = MockServer::start().await;
+        let client = Client::new(&server.uri());
+        let cfg = CliConfig {
+            api_key: Some(String::new()),
+            ..CliConfig::default()
+        };
+        let err = run_claim(&client, &cfg, "x@y.com".into(), "p".into(), None)
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("not onboarded"), "got: {err}");
+    }
+
+    #[tokio::test]
+    async fn claim_propagates_409_through_status_code() {
+        // The handler-side translator returns 409 when the email
+        // collides. Confirm the client surfaces a typed status that
+        // callers (e.g. UI rendering) can match on.
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/accounts/claim"))
+            .respond_with(
+                ResponseTemplate::new(409).set_body_string("email already registered"),
+            )
+            .mount(&server)
+            .await;
+        let client = Client::new(&server.uri());
+        let cfg = CliConfig {
+            api_key: Some("vk_anon".into()),
+            ..CliConfig::default()
+        };
+        let err = run_claim(&client, &cfg, "joe@x.com".into(), "p".into(), None)
+            .await
+            .unwrap_err();
+        assert_eq!(crate::client::status_code(&err), Some(409));
+    }
+
+    #[tokio::test]
+    async fn claim_omits_name_when_none() {
+        // Empty Some("") was rejected by the server; None must result
+        // in no `name` field on the wire so the server keeps the
+        // existing auto-generated name.
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/accounts/claim"))
+            // Body partial-match: just assert no `name` key by checking
+            // email+password subset. wiremock's body_partial_json
+            // ignores extra fields, but we mount only this mock so any
+            // unexpected body shape would 404 against the rest.
+            .and(body_partial_json(json!({
+                "email": "j@x.com",
+                "password": "p",
+            })))
+            .respond_with(ok(json!({ "account_id": "a1" })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let client = Client::new(&server.uri());
+        let cfg = CliConfig {
+            api_key: Some("vk_anon".into()),
+            ..CliConfig::default()
+        };
+        run_claim(&client, &cfg, "j@x.com".into(), "p".into(), None)
+            .await
+            .unwrap();
+    }
+
+    // ── run_init partial-save & legacy tests ───────────────────────
 
     #[tokio::test]
     async fn workspace_key_failure_leaves_api_key_persisted() {

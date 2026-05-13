@@ -30,6 +30,35 @@ pub struct LoginResponse {
     pub api_key: String,
 }
 
+/// One-shot anonymous onboarding. Mints an account with no email /
+/// password (claim later), a default workspace, and both an account
+/// key and a workspace key, so the CLI is fully usable after a single
+/// round-trip.
+#[derive(Debug, Serialize)]
+pub struct AnonymousOnboardResponse {
+    pub account_id: String,
+    pub api_key: String,
+    pub workspace_id: String,
+    pub workspace_key: String,
+}
+
+/// Upgrade an anonymous account to a named one by attaching email +
+/// password. The same `api_key` continues to work; the only change
+/// is the account now has a recoverable identity.
+#[derive(Debug, Deserialize)]
+pub struct ClaimAccountRequest {
+    pub email: String,
+    pub password: String,
+    /// Optional human-friendly name; if absent the auto-generated
+    /// `anon-xxxx` is kept.
+    pub name: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ClaimAccountResponse {
+    pub account_id: String,
+}
+
 // ── Workspace ──────────────────────────────────────────
 
 #[derive(Debug, Deserialize)]
