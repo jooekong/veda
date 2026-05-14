@@ -442,15 +442,19 @@ impl Filesystem for VedaFs {
             (ino, FileType::Directory, ".".to_string()),
             (parent_ino, FileType::Directory, "..".to_string()),
         ];
-        // ino=0 means "no hint": kernel will issue lookup if it wants to use
-        // the entry, which is the path that properly tracks nlookup.
-        let table = self.inodes.lock().unwrap();
+        // Pre-create inodes for every entry. Earlier this used a 0-ino
+        // hint ("kernel will lookup if it wants to use the entry"),
+        // which Linux FUSE accepts but macFUSE silently drops, so `ls`
+        // on a populated workspace only returned the subset of entries
+        // that had already been `lookup`'d into the inode table. The
+        // small extra cost of always allocating is worth the cross-
+        // platform consistency, and matches what readdirplus already
+        // does.
         for de in entries.iter() {
-            let hint_ino = table.get_ino(&de.path).unwrap_or(0);
+            let child_ino = self.inode_get_or_create(&de.path);
             let kind = if de.is_dir { FileType::Directory } else { FileType::RegularFile };
-            full_entries.push((hint_ino, kind, de.name.clone()));
+            full_entries.push((child_ino, kind, de.name.clone()));
         }
-        drop(table);
         for (i, (child_ino, kind, name)) in full_entries.iter().enumerate().skip(offset as usize) {
             if reply.add(*child_ino, (i + 1) as i64, *kind, name) { break; }
         }
