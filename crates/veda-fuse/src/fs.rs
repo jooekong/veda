@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use std::ffi::OsStr;
 use std::os::fd::RawFd;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use fuser::{
@@ -11,10 +11,35 @@ use fuser::{
 use tracing::{debug, warn};
 
 use crate::cache::ReadCache;
-use crate::client::{ClientError, DirEntry, FileInfo, VedaClient};
+use crate::client::{ClientError, DirEntry, FileInfo, SidecarOutcome, SummaryKind, VedaClient};
 use crate::inode::InodeTable;
 
 const BLOCK_SIZE: u32 = 512;
+
+/// Sidecar entries injected into every directory's readdir output.
+/// Both are read-only — see [`is_magic_name`] and the lookup / write
+/// branches in `Filesystem` below. Order is fixed (.abstract before
+/// .overview) so behaviour is deterministic across runs.
+const MAGIC_NAMES: &[(&str, SummaryKind)] = &[
+    (".abstract", SummaryKind::Abstract),
+    (".overview", SummaryKind::Overview),
+];
+
+/// Rendered when the server says the summary is enqueued but not
+/// yet generated (HTTP 202). One short line + newline, sized so
+/// `cat` shows visible content rather than an empty file. Tools
+/// retry naturally on the next attr_ttl tick.
+const SIDECAR_PENDING_BODY: &str = "summary pending; retry after a few seconds\n";
+
+/// Look the basename up against the magic-name table. Returns the
+/// summary kind to fetch from the server, or `None` if the name is
+/// a regular entry.
+fn is_magic_name(name: &str) -> Option<SummaryKind> {
+    MAGIC_NAMES
+        .iter()
+        .find(|(n, _)| *n == name)
+        .map(|(_, kind)| *kind)
+}
 
 pub(crate) fn parent_path(path: &str) -> &str {
     if path == "/" { return "/"; }
@@ -286,6 +311,100 @@ impl VedaFs {
         }
     }
 
+    /// Stable mtime/ctime for synthetic sidecars. Pinned to the
+    /// first call (process start) instead of `SystemTime::now()` per
+    /// invocation, because every `getattr` after attr_ttl expires
+    /// re-renders the attr — tools that compare timestamps (`rsync
+    /// -a`, `make`, `git status -uno`) would otherwise see a phantom
+    /// modification on each TTL boundary and re-read the sidecar.
+    fn magic_mtime() -> SystemTime {
+        static MAGIC_MTIME: OnceLock<SystemTime> = OnceLock::new();
+        *MAGIC_MTIME.get_or_init(SystemTime::now)
+    }
+
+    /// Fabricate a `FileAttr` for a sidecar (`.abstract` / `.overview`).
+    /// Size matches the body returned by the server so `cat` reads
+    /// the right slice; mode is 0444 because the file is read-only
+    /// regardless of mount mode; mtime/ctime use a process-wide
+    /// constant (see `magic_mtime`) so timestamp-sensitive tools
+    /// don't see phantom modifications.
+    fn magic_attr(ino: u64, body_size: u64) -> FileAttr {
+        let pinned = Self::magic_mtime();
+        FileAttr {
+            ino,
+            size: body_size,
+            blocks: (body_size + BLOCK_SIZE as u64 - 1) / BLOCK_SIZE as u64,
+            atime: pinned,
+            mtime: pinned,
+            ctime: pinned,
+            crtime: pinned,
+            kind: FileType::RegularFile,
+            perm: 0o444,
+            nlink: 1,
+            uid: unsafe { libc::getuid() },
+            gid: unsafe { libc::getgid() },
+            rdev: 0,
+            blksize: BLOCK_SIZE,
+            flags: 0,
+        }
+    }
+
+    /// Fetch the magic sidecar body, drive cache, return the attr
+    /// FUSE should publish for the entry. The mapping:
+    ///   200 Body(b)   → attr.size = b.len(); body cached at the
+    ///                   magic path so the subsequent `read` is a
+    ///                   single in-memory slice.
+    ///   202 Pending   → render a one-line placeholder so `cat`
+    ///                   shows progress; cached at attr_ttl so the
+    ///                   next attempt auto-refreshes.
+    ///   501 Disabled  → ENOENT. The deployment has no LLM, so the
+    ///                   sidecar is effectively absent and `ls -a`
+    ///                   shouldn't expose it as readable.
+    ///   404 NotFound  → ENOENT. The parent directory has no
+    ///                   summary (workspace-root edge, or a path
+    ///                   that doesn't exist server-side).
+    fn magic_lookup(&self, target_path: &str, ino: u64, kind: SummaryKind) -> Result<FileAttr, i32> {
+        // The HTTP `path` we hand the server is the parent directory
+        // — that's what gets summarised. `target_path` already has
+        // the magic suffix stripped because the caller built it with
+        // `parent_path` semantics in mind.
+        let outcome = self
+            .client
+            .get_summary(target_path, kind)
+            .map_err(|ref e| Self::err_to_errno(e))?;
+        let body = match outcome {
+            SidecarOutcome::Body(b) => b,
+            SidecarOutcome::Pending => SIDECAR_PENDING_BODY.as_bytes().to_vec(),
+            SidecarOutcome::Disabled | SidecarOutcome::NotFound => return Err(libc::ENOENT),
+        };
+        let size = body.len() as u64;
+        // Stash the body in the regular read cache so the
+        // immediately-following `read` doesn't make a second HTTP
+        // call. The key is the synthetic sidecar path (e.g.
+        // `/docs/.abstract`); the server-side reserved-name check
+        // prevents a real file from sharing the key.
+        let sidecar_path = match kind {
+            SummaryKind::Abstract => format!("{}/.abstract", target_path.trim_end_matches('/')),
+            SummaryKind::Overview => format!("{}/.overview", target_path.trim_end_matches('/')),
+        };
+        let (_, gen) = self.cache_get_with_gen(&sidecar_path);
+        self.cache_put(&sidecar_path, body, gen);
+        Ok(Self::magic_attr(ino, size))
+    }
+
+    /// True iff `ino`'s last path segment matches a magic sidecar
+    /// name. Used by the write-side ops (`setattr`, `unlink`,
+    /// `rename`) to reject mutations on the synthetic entries.
+    fn is_magic_ino(&self, ino: u64) -> bool {
+        match self.inode_get_path(ino) {
+            Some(p) => {
+                let basename = p.rsplit('/').next().unwrap_or("");
+                is_magic_name(basename).is_some()
+            }
+            None => false,
+        }
+    }
+
     fn flush_handle(&mut self, fh: u64, ino: u64) -> Result<(), i32> {
         let is_dirty = self.write_handles.get(&fh).map_or(false, |h| h.dirty);
         if !is_dirty {
@@ -340,6 +459,32 @@ impl Filesystem for VedaFs {
             return;
         }
 
+        // Magic sidecar dispatch MUST run before the dir_cache_has_child
+        // shortcut: the magic names are not in the upstream dir
+        // listing (and therefore not in DirCacheEntry.child_names),
+        // so the cache would otherwise return Some(false) and
+        // synthesise an ENOENT for `cat /docs/.abstract` whenever a
+        // prior `ls -a /docs` had populated the cache.
+        //
+        // KNOWN LIMITATION: a workspace that pre-dates the server-
+        // side reserved-name blacklist may already contain a real
+        // file at `.abstract` / `.overview`. Under FUSE the synthetic
+        // sidecar shadows it: lookup/read return summary content
+        // instead of the legacy data. The data is still reachable
+        // via the CLI (`veda cat`), and `veda mv` can rename it out
+        // of the way. See skill.md "Legacy sidecar collision".
+        if let Some(kind) = is_magic_name(name_str) {
+            let ino = self.inode_get_or_create_with_nlookup(&child_path);
+            match self.magic_lookup(&parent_path, ino, kind) {
+                Ok(attr) => {
+                    self.inode_set_attr(ino, attr);
+                    reply.entry(&self.config.attr_ttl, &attr, 0);
+                }
+                Err(errno) => reply.error(errno),
+            }
+            return;
+        }
+
         if let Some(false) = self.dir_cache_has_child(parent, name_str) {
             reply.error(libc::ENOENT);
             return;
@@ -372,6 +517,23 @@ impl Filesystem for VedaFs {
             Some(p) => p,
             None => { reply.error(libc::ENOENT); return; }
         };
+        // Sidecar path: skip `client.stat` (the synthetic entry has
+        // no server-side FS row to stat against) and refresh via the
+        // summary endpoint instead. Without this, the readdirplus
+        // zero-TTL stub or an expired lookup cache would cause
+        // `stat /docs/.abstract` to 404.
+        let basename = path.rsplit('/').next().unwrap_or("");
+        if let Some(kind) = is_magic_name(basename) {
+            let parent = parent_path(&path).to_string();
+            match self.magic_lookup(&parent, ino, kind) {
+                Ok(attr) => {
+                    self.inode_set_attr(ino, attr);
+                    reply.attr(&self.config.attr_ttl, &attr);
+                }
+                Err(errno) => reply.error(errno),
+            }
+            return;
+        }
         match self.stat_and_cache_attr(&path, ino) {
             Ok(attr) => reply.attr(&self.config.attr_ttl, &attr),
             Err(errno) => reply.error(errno),
@@ -388,6 +550,14 @@ impl Filesystem for VedaFs {
         _bkuptime: Option<SystemTime>, _flags: Option<u32>,
         reply: ReplyAttr,
     ) {
+        // Sidecars are synthetic read-only entries — no truncate,
+        // no chmod, no utime. Returning EROFS keeps the contract
+        // visible (vs ENOSYS, which would let some tools fall back
+        // silently and look like success).
+        if self.is_magic_ino(ino) {
+            reply.error(libc::EROFS);
+            return;
+        }
         if let Some(new_size) = size {
             if self.config.read_only { reply.error(libc::EROFS); return; }
             let path = match self.inode_get_path(ino) {
@@ -455,6 +625,18 @@ impl Filesystem for VedaFs {
             let kind = if de.is_dir { FileType::Directory } else { FileType::RegularFile };
             full_entries.push((child_ino, kind, de.name.clone()));
         }
+        // Append the synthetic summary sidecars at the end of every
+        // directory listing. A legacy file with the same name would
+        // appear twice in `ls -a` (real file + synthetic entry) but
+        // FUSE lookup/read still take the magic branch (see lookup
+        // for the documented shadowing trade-off). New writes can't
+        // create the collision — server-side reserved-name guard at
+        // veda-server/src/routes/fs.rs blocks them.
+        for (magic_name, _) in MAGIC_NAMES {
+            let magic_path = Self::resolve_child_path(&path, magic_name);
+            let magic_ino = self.inode_get_or_create(&magic_path);
+            full_entries.push((magic_ino, FileType::RegularFile, magic_name.to_string()));
+        }
         for (i, (child_ino, kind, name)) in full_entries.iter().enumerate().skip(offset as usize) {
             if reply.add(*child_ino, (i + 1) as i64, *kind, name) { break; }
         }
@@ -489,6 +671,19 @@ impl Filesystem for VedaFs {
             }
             full.push((child_ino, de.name.clone(), attr, cache_ok));
         }
+        // Synthetic sidecar entries. attr is a size-0 stub because
+        // we haven't fetched the body yet and a readdirplus call
+        // shouldn't itself touch the LLM — the next `cat` will hit
+        // `lookup`, which fills in the real size. cache_ok=false
+        // tells the loop below to publish them with a zero TTL so
+        // the stub attr doesn't outlive the next lookup. See
+        // readdir for the legacy-collision shadowing note.
+        for (magic_name, _) in MAGIC_NAMES {
+            let magic_path = Self::resolve_child_path(&path, magic_name);
+            let magic_ino = self.inode_get_or_create(&magic_path);
+            let stub_attr = Self::magic_attr(magic_ino, 0);
+            full.push((magic_ino, magic_name.to_string(), stub_attr, false));
+        }
         let zero_ttl = Duration::ZERO;
         let mut table = self.inodes.lock().unwrap();
         for (i, (child_ino, name, attr, cache_ok)) in full.iter().enumerate().skip(offset as usize) {
@@ -502,8 +697,22 @@ impl Filesystem for VedaFs {
     }
 
     fn open(&mut self, _req: &Request, ino: u64, flags: i32, reply: ReplyOpen) {
-        let fh = self.alloc_fh();
         let writable = (flags & libc::O_ACCMODE) != libc::O_RDONLY;
+        // Sidecars (.abstract / .overview) are synthetic read-only
+        // entries even when the mount is RW. Reject any non-RDONLY
+        // open up front — otherwise create+write+release would
+        // happily allocate a write handle and surface a confusing
+        // EIO at flush time when the server rejects the path.
+        if self.is_magic_ino(ino) {
+            if writable || (flags & libc::O_TRUNC) != 0 {
+                reply.error(libc::EROFS);
+                return;
+            }
+            let fh = self.alloc_fh();
+            reply.opened(fh, 0);
+            return;
+        }
+        let fh = self.alloc_fh();
         if writable && self.config.read_only { reply.error(libc::EROFS); return; }
         if writable {
             let path = match self.inode_get_path(ino) {
@@ -557,6 +766,45 @@ impl Filesystem for VedaFs {
             None => { reply.error(libc::ENOENT); return; }
         };
 
+        // Sidecar read: `lookup` already cached the body at the
+        // synthetic path; we just slice from cache. If the cache TTL
+        // expired between lookup and read (5s window) we re-fetch
+        // through `magic_lookup`, which repopulates the cache.
+        let basename = path.rsplit('/').next().unwrap_or("");
+        if let Some(kind) = is_magic_name(basename) {
+            let (cached, _) = self.cache_get_with_gen(&path);
+            let body = match cached {
+                Some(b) => b,
+                None => {
+                    let parent = parent_path(&path).to_string();
+                    if let Err(errno) = self.magic_lookup(&parent, ino, kind) {
+                        reply.error(errno);
+                        return;
+                    }
+                    match self.cache_get_with_gen(&path).0 {
+                        Some(b) => b,
+                        None => {
+                            // magic_lookup populated the cache but
+                            // we couldn't read it back — would only
+                            // happen on a TOCTOU eviction, treat as
+                            // empty since the placeholder semantics
+                            // are "pending or empty".
+                            reply.data(&[]);
+                            return;
+                        }
+                    }
+                }
+            };
+            let off = offset as usize;
+            if off >= body.len() {
+                reply.data(&[]);
+            } else {
+                let end = std::cmp::min(off.saturating_add(size as usize), body.len());
+                reply.data(&body[off..end]);
+            }
+            return;
+        }
+
         let (cached, gen) = self.cache_get_with_gen(&path);
         if let Some(cached) = cached {
             let off = offset as usize;
@@ -596,6 +844,16 @@ impl Filesystem for VedaFs {
         _write_flags: u32, _flags: i32, _lock_owner: Option<u64>,
         reply: ReplyWrite,
     ) {
+        // The `open` handler already refuses writable opens on magic
+        // ino, but `write` auto-creates a `WriteHandle` on the first
+        // call when `fh` is unknown (handles dropped fh tracking
+        // across reopens). Without this guard, a `write` to a magic
+        // ino would buffer locally and only surface EIO at flush.
+        // EROFS up front matches the sidecar contract.
+        if self.is_magic_ino(ino) {
+            reply.error(libc::EROFS);
+            return;
+        }
         if !self.write_handles.contains_key(&fh) {
             if self.write_handles.values().any(|h| h.ino == ino && h.dirty) {
                 warn!(ino, "concurrent dirty write handles for same inode");
@@ -650,6 +908,14 @@ impl Filesystem for VedaFs {
         let name_str = match name.to_str() {
             Some(s) => s, None => { reply.error(libc::EINVAL); return; }
         };
+        // Refuse to create a real file with a sidecar name. The
+        // server-side reserved-name check would also reject this,
+        // but failing locally with EROFS is faster + more accurate
+        // (server would map to EIO).
+        if is_magic_name(name_str).is_some() {
+            reply.error(libc::EROFS);
+            return;
+        }
         let parent_path = match self.inode_get_path(parent) {
             Some(p) => p, None => { reply.error(libc::ENOENT); return; }
         };
@@ -684,6 +950,10 @@ impl Filesystem for VedaFs {
         let name_str = match name.to_str() {
             Some(s) => s, None => { reply.error(libc::EINVAL); return; }
         };
+        if is_magic_name(name_str).is_some() {
+            reply.error(libc::EROFS);
+            return;
+        }
         let parent_path = match self.inode_get_path(parent) {
             Some(p) => p, None => { reply.error(libc::ENOENT); return; }
         };
@@ -712,6 +982,10 @@ impl Filesystem for VedaFs {
         let name_str = match name.to_str() {
             Some(s) => s, None => { reply.error(libc::EINVAL); return; }
         };
+        if is_magic_name(name_str).is_some() {
+            reply.error(libc::EROFS);
+            return;
+        }
         let parent_path = match self.inode_get_path(parent) {
             Some(p) => p, None => { reply.error(libc::ENOENT); return; }
         };
@@ -732,6 +1006,14 @@ impl Filesystem for VedaFs {
         let name_str = match name.to_str() {
             Some(s) => s, None => { reply.error(libc::EINVAL); return; }
         };
+        if is_magic_name(name_str).is_some() {
+            // Symmetric with unlink/create/rename: sidecars aren't
+            // directories anyway, so the server would 404, but
+            // returning EROFS locally keeps the contract uniform and
+            // saves a round-trip.
+            reply.error(libc::EROFS);
+            return;
+        }
         let parent_path = match self.inode_get_path(parent) {
             Some(p) => p, None => { reply.error(libc::ENOENT); return; }
         };
@@ -762,6 +1044,14 @@ impl Filesystem for VedaFs {
         let newname_str = match newname.to_str() {
             Some(s) => s, None => { reply.error(libc::EINVAL); return; }
         };
+        // Renaming `.abstract` itself, or renaming any file *into*
+        // a sidecar name, must fail locally — the server's reserved-
+        // name check would reject the destination anyway but EROFS
+        // is the accurate verb for "can't touch the magic entries".
+        if is_magic_name(name_str).is_some() || is_magic_name(newname_str).is_some() {
+            reply.error(libc::EROFS);
+            return;
+        }
         let parent_path = match self.inode_get_path(parent) {
             Some(p) => p, None => { reply.error(libc::ENOENT); return; }
         };
@@ -907,6 +1197,61 @@ mod tests {
         let after = SystemTime::now();
         // Should fall within the call window — proves we used wall clock.
         assert!(attr.mtime >= before && attr.mtime <= after);
+    }
+
+    // ── magic sidecar helpers ─────────────────────────────────────
+
+    #[test]
+    fn is_magic_name_recognises_both_sidecars() {
+        assert!(matches!(
+            is_magic_name(".abstract"),
+            Some(SummaryKind::Abstract)
+        ));
+        assert!(matches!(
+            is_magic_name(".overview"),
+            Some(SummaryKind::Overview)
+        ));
+    }
+
+    #[test]
+    fn is_magic_name_rejects_non_exact_matches() {
+        // The reserved names match byte-for-byte. Tail decoration,
+        // prefixes, or different files starting with a dot must not
+        // be hijacked.
+        assert!(is_magic_name(".abstracts").is_none(), "trailing s");
+        assert!(is_magic_name(".abstract.bak").is_none(), "trailing .bak");
+        assert!(is_magic_name("abstract").is_none(), "no leading dot");
+        assert!(is_magic_name(".Abstract").is_none(), "case-sensitive");
+        assert!(is_magic_name("").is_none());
+    }
+
+    #[test]
+    fn magic_attr_marks_read_only_and_sizes_from_body() {
+        // Sidecar attr contract: regular file kind, mode 0444, no
+        // hard links beyond the entry itself, and `size` mirrors
+        // the body we will hand to `read`. nlink=1 because there's
+        // no other path that points at the synthetic inode.
+        let attr = VedaFs::magic_attr(99, 4096);
+        assert_eq!(attr.size, 4096);
+        assert_eq!(attr.perm, 0o444);
+        assert!(matches!(attr.kind, FileType::RegularFile));
+        assert_eq!(attr.nlink, 1);
+        assert_eq!(attr.ino, 99);
+    }
+
+    #[test]
+    fn pending_body_is_one_line_with_newline() {
+        // Tools that line-buffer (`while read line`, log tail) need
+        // a trailing newline so the placeholder shows up promptly
+        // instead of being held in the buffer until a future fetch
+        // appends more. Pinned because dropping it silently would
+        // make `cat` look like it hung.
+        assert!(SIDECAR_PENDING_BODY.ends_with('\n'));
+        assert_eq!(
+            SIDECAR_PENDING_BODY.matches('\n').count(),
+            1,
+            "must be a single line"
+        );
     }
 
     #[test]

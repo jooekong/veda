@@ -15,8 +15,30 @@ use crate::state::AppState;
 pub fn routes() -> Router<Arc<AppState>> {
     Router::new()
         .route("/v1/search", post(search))
+        // Workspace-root summaries: `{*path}` is a greedy wildcard
+        // and Axum refuses to match it against an empty segment, so
+        // a bare `/v1/abstract` is impossible under the same handler.
+        // Pair the wildcard with a no-path variant that hands the
+        // service a literal `"/"`. Used by `veda abstract /` and by
+        // the FUSE sidecar at the mount root.
+        .route("/v1/abstract", get(get_abstract_root))
         .route("/v1/abstract/{*path}", get(get_abstract))
+        .route("/v1/overview", get(get_overview_root))
         .route("/v1/overview/{*path}", get(get_overview))
+}
+
+async fn get_abstract_root(
+    State(state): State<Arc<AppState>>,
+    auth: AuthWorkspace,
+) -> Result<Response, AppError> {
+    serve_abstract(state, auth, "/".to_string()).await
+}
+
+async fn get_overview_root(
+    State(state): State<Arc<AppState>>,
+    auth: AuthWorkspace,
+) -> Result<Response, AppError> {
+    serve_overview(state, auth, "/".to_string()).await
 }
 
 async fn search(
@@ -49,12 +71,26 @@ async fn get_abstract(
     auth: AuthWorkspace,
     Path(path): Path<String>,
 ) -> Result<Response, AppError> {
-    let path = format!("/{path}");
+    serve_abstract(state, auth, format!("/{path}")).await
+}
+
+async fn get_overview(
+    State(state): State<Arc<AppState>>,
+    auth: AuthWorkspace,
+    Path(path): Path<String>,
+) -> Result<Response, AppError> {
+    serve_overview(state, auth, format!("/{path}")).await
+}
+
+async fn serve_abstract(
+    state: Arc<AppState>,
+    auth: AuthWorkspace,
+    path: String,
+) -> Result<Response, AppError> {
     let summary = state
         .search_service
         .get_summary(&auth.workspace_id, &path)
         .await?;
-
     match summary {
         Some(s) => Ok(Json(ApiResponse::ok(AbstractResponse {
             path,
@@ -65,17 +101,15 @@ async fn get_abstract(
     }
 }
 
-async fn get_overview(
-    State(state): State<Arc<AppState>>,
+async fn serve_overview(
+    state: Arc<AppState>,
     auth: AuthWorkspace,
-    Path(path): Path<String>,
+    path: String,
 ) -> Result<Response, AppError> {
-    let path = format!("/{path}");
     let summary = state
         .search_service
         .get_summary(&auth.workspace_id, &path)
         .await?;
-
     match summary {
         Some(s) => Ok(Json(ApiResponse::ok(OverviewResponse {
             path,

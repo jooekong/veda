@@ -243,6 +243,26 @@ veda-fuse mount /mnt/veda --server $SERVER --key $WORKSPACE_KEY
 veda-fuse umount /mnt/veda
 ```
 
+Every mounted directory exposes two read-only summary sidecars:
+
+```sh
+cat /mnt/veda/docs/.abstract     # L0 one-sentence summary
+cat /mnt/veda/docs/.overview     # L1 ~2k-token detailed summary
+ls -a /mnt/veda/docs             # includes .abstract / .overview
+```
+
+The sidecars are server-generated; you can't write them (EROFS). Each
+behaves like a regular file once `cat` returns — `head`, `wc`, etc.
+work normally. If the server hasn't finished generating a summary yet,
+`cat` returns `summary pending; retry after a few seconds`.
+
+**Legacy collision**: if a pre-existing workspace contains a real file
+literally named `.abstract` or `.overview` (created before the
+reserved-name guard landed), the FUSE sidecar shadows it on read.
+The real file is still accessible via the CLI (`veda cat`,
+`veda mv` to rename it out of the way) — new writes to those names
+are now rejected by the server.
+
 ## Decision rules — pick the right command
 
 | User wants                             | Use                                      |
