@@ -2,6 +2,7 @@ mod client;
 mod config;
 mod init;
 mod status;
+mod workspace;
 
 use clap::{Parser, Subcommand, ValueEnum};
 
@@ -31,6 +32,12 @@ struct Cli {
     /// Server URL (overrides config)
     #[arg(long, global = true)]
     server: Option<String>,
+
+    /// Use a non-active workspace profile for this command only
+    /// (does not change the config). Alias must already exist in the
+    /// config — add it first with `veda workspace add <alias>`.
+    #[arg(long, global = true)]
+    workspace: Option<String>,
 }
 
 #[derive(Subcommand)]
@@ -74,9 +81,12 @@ enum Commands {
         /// visible in `ps`. Required in --non-interactive named mode.
         #[arg(long)]
         password: Option<String>,
-        /// Workspace name (default "default")
+        /// Server-side workspace name to create or select (default
+        /// "default"). Renamed from `--workspace` so the global
+        /// `--workspace <alias>` flag (profile selector) keeps its
+        /// intuitive meaning.
         #[arg(long)]
-        workspace: Option<String>,
+        workspace_name: Option<String>,
         /// Fail with a clear error instead of prompting for missing
         /// fields. Designed for CI / scripts.
         #[arg(long)]
@@ -104,9 +114,10 @@ enum Commands {
         #[command(subcommand)]
         action: AccountCmd,
     },
-    /// Workspace management (hidden — `veda init` creates and selects
-    /// the default workspace; kept as an escape hatch).
-    #[command(hide = true)]
+    /// Workspace profile management — add / switch / list / rm local
+    /// aliases for server-side workspaces. `veda init` already creates
+    /// and selects "default"; only needed when juggling multiple
+    /// workspaces from one machine.
     Workspace {
         #[command(subcommand)]
         action: WorkspaceCmd,
@@ -219,17 +230,31 @@ enum AccountCmd {
 
 #[derive(Subcommand)]
 enum WorkspaceCmd {
-    /// Create a new workspace
-    Create {
+    /// Mint a workspace key and store it under <alias> for future use.
+    /// Without --workspace-id, the server creates a fresh workspace
+    /// named after the alias. With --workspace-id, mints a key for an
+    /// existing workspace (useful when sharing a workspace across
+    /// machines).
+    Add {
+        /// Local alias (used with `--workspace <alias>` and `switch`).
+        alias: String,
+        /// Existing server workspace id. Omit to create a new workspace.
         #[arg(long)]
-        name: String,
+        workspace_id: Option<String>,
     },
-    /// List workspaces
+    /// Set the active workspace profile. Future commands without
+    /// `--workspace` use this one.
+    Switch {
+        /// Alias to switch to (must already exist).
+        alias: String,
+    },
+    /// List configured workspace profiles. Active one is marked with ★.
     List,
-    /// Select active workspace and create a workspace key
-    Use {
-        /// Workspace ID
-        id: String,
+    /// Remove a local workspace profile (alias-only, does NOT revoke
+    /// the wk_ key on the server — there is no server endpoint for
+    /// that yet). The active profile cannot be removed; switch first.
+    Rm {
+        alias: String,
     },
 }
 
@@ -272,6 +297,106 @@ enum ConfigCmd {
     Show,
     /// Set a configuration value
     Set { key: String, value: String },
+}
+
+/// Destructiveness levels for [`confirm_or_announce`].
+enum WriteAction {
+    /// User-visible verb for the prompt / announcement banner.
+    /// Examples: "delete", "move", "copy to".
+    Verb(&'static str),
+}
+
+/// Resolve the global `--workspace <alias>` flag against the parsed
+/// config + command. Returns the validated alias to use as the
+/// in-memory active profile (or `None` if the flag wasn't given).
+///
+/// - Errors when the flag is combined with `veda workspace` subcommands:
+///   those commands take their target alias as a positional arg, and
+///   mixing in a global override created a soft-bypass of `workspace
+///   rm`'s active-alias guard. Reject up front instead of trying to
+///   layer the two semantics.
+/// - Errors when the alias isn't present in `[workspaces.…]` so users
+///   get an immediate "alias not configured" message instead of a
+///   confusing "no workspace selected" from the first data command.
+fn resolve_workspace_override(
+    cfg: &config::CliConfig,
+    flag: Option<&str>,
+    command: &Commands,
+) -> anyhow::Result<Option<String>> {
+    let Some(ws) = flag else {
+        return Ok(None);
+    };
+    if matches!(command, Commands::Workspace { .. }) {
+        anyhow::bail!(
+            "`--workspace <alias>` cannot be combined with `veda workspace` subcommands; \
+             those take the alias directly as a positional arg"
+        );
+    }
+    cfg.workspace_for(ws)
+        .map_err(|e| anyhow::anyhow!("--workspace {ws}: {e}"))?;
+    Ok(Some(ws.to_string()))
+}
+
+/// One-line "<Verb> <path> in workspace '<alias>'" banner. Pure
+/// string formatter so tests can assert the wording without poking
+/// stdin/stdout.
+fn announce_text(verb: &str, path: &str, workspace_alias: &str) -> String {
+    let pretty = capitalise_first(verb);
+    format!("{pretty} {path} in workspace '{workspace_alias}'")
+}
+
+/// Print a one-line "<verb> <path> in workspace '<alias>'" banner so
+/// a user (or operator reading agent logs) can spot a command that
+/// hit the wrong workspace. Returns `Ok(())` for "go ahead", `Err`
+/// for "user said no".
+///
+/// On a TTY this is interactive with a y/N prompt (default no). On a
+/// non-TTY (script, agent, pipe) it never blocks — but it still
+/// prints to stderr, so the workspace alias shows up in agent logs
+/// for the caller to verify after the fact.
+///
+/// `confirm` controls whether we wait for an answer on a TTY. Bulk
+/// non-destructive writes (`cp`, `mv`, `append`, `mkdir`) pass
+/// `confirm=false` and just announce; `rm` passes `confirm=true`.
+fn confirm_or_announce(
+    workspace_alias: &str,
+    action: WriteAction,
+    path: &str,
+    confirm: bool,
+) -> anyhow::Result<()> {
+    use std::io::{IsTerminal, Write};
+    let WriteAction::Verb(verb) = action;
+    // TTY check on stdin, not stdout: `veda rm /x > out.log` keeps
+    // stdin attached to the terminal but redirects stdout, and the
+    // user still wants the confirmation prompt to fire. Looking at
+    // stdout instead would silently delete in that case. Prompt is
+    // written to stderr so a redirected stdout still sees just the
+    // command's normal output.
+    let interactive_stdin = std::io::stdin().is_terminal();
+    if confirm && interactive_stdin {
+        eprint!("Will {verb} {path} in workspace '{workspace_alias}' — confirm? [y/N] ");
+        std::io::stderr().flush()?;
+        let mut buf = String::new();
+        std::io::stdin().read_line(&mut buf)?;
+        let t = buf.trim().to_lowercase();
+        if t != "y" && t != "yes" {
+            anyhow::bail!("aborted");
+        }
+    } else {
+        // Non-interactive (or non-destructive) path: announce but
+        // don't block. Goes to stderr for the same reason — keeps
+        // stdout clean for pipes.
+        eprintln!("{}", announce_text(verb, path, workspace_alias));
+    }
+    Ok(())
+}
+
+fn capitalise_first(s: &str) -> String {
+    let mut cs = s.chars();
+    match cs.next() {
+        Some(c) => c.to_uppercase().chain(cs).collect(),
+        None => String::new(),
+    }
 }
 
 fn mask_secret(s: &str) -> String {
@@ -437,6 +562,166 @@ mod resolve_tests {
         assert!(msg.contains("non-interactive"), "msg: {msg}");
         assert!(msg.contains("VEDA_PASSWORD"), "msg: {msg}");
     }
+
+    // ── announce_text / capitalise_first ───────────────────────────
+
+    #[test]
+    fn capitalise_first_uppercases_only_first_codepoint() {
+        assert_eq!(capitalise_first("delete"), "Delete");
+        assert_eq!(capitalise_first(""), "");
+        assert_eq!(capitalise_first("移动"), "移动"); // CJK has no case → no-op
+    }
+
+    #[test]
+    fn announce_text_includes_verb_path_and_workspace_alias() {
+        // Banner contract: verb capitalised, path + alias inline so
+        // grepping agent logs for the alias is trivial.
+        let line = announce_text("delete", "/notes/foo.md", "default");
+        assert_eq!(line, "Delete /notes/foo.md in workspace 'default'");
+    }
+}
+
+#[cfg(test)]
+mod cli_parse_tests {
+    //! Pins clap routing for the two flags that move in this change:
+    //! the new global `--workspace <alias>` and the renamed
+    //! `init --workspace-name <name>`. A regression that silently
+    //! shadowed the global with the local would be invisible
+    //! otherwise.
+    use super::*;
+    use clap::Parser;
+
+    #[test]
+    fn global_workspace_flag_carries_alias_through_to_cli() {
+        let cli = Cli::try_parse_from([
+            "veda",
+            "--workspace",
+            "archive",
+            "ls",
+            "/docs",
+        ])
+        .unwrap();
+        assert_eq!(cli.workspace.as_deref(), Some("archive"));
+        match cli.command {
+            Commands::Ls { path } => assert_eq!(path, "/docs"),
+            _ => panic!("expected Ls subcommand"),
+        }
+    }
+
+    #[test]
+    fn init_subcommand_accepts_workspace_name_not_workspace() {
+        // The legacy `--workspace` on Init was renamed to
+        // `--workspace-name` so the global flag (profile alias)
+        // doesn't clash. A regression that re-added a local
+        // `--workspace` would either fail to parse this command line
+        // (because `--workspace` is now eaten by the global before
+        // Init sees it) or attach the value to the wrong field.
+        let cli = Cli::try_parse_from([
+            "veda",
+            "init",
+            "--workspace-name",
+            "scratch",
+            "--non-interactive",
+        ])
+        .unwrap();
+        match cli.command {
+            Commands::Init { workspace_name, .. } => {
+                assert_eq!(workspace_name.as_deref(), Some("scratch"));
+            }
+            _ => panic!("expected Init subcommand"),
+        }
+    }
+
+    #[test]
+    fn workspace_subcommand_is_unhidden_in_help() {
+        // `Workspace` must appear in the top-level help (no `hide=true`).
+        // Easiest check is to ask clap to render help and look for the
+        // subcommand name in the output.
+        use clap::CommandFactory;
+        let help = Cli::command().render_help().to_string();
+        assert!(help.contains("workspace"), "help: {help}");
+        // Account / Config should stay hidden (escape hatches only).
+        assert!(!help.contains("\n  account"), "account leaked: {help}");
+        assert!(!help.contains("\n  config"), "config leaked: {help}");
+    }
+
+    #[test]
+    fn workspace_override_rejected_when_combined_with_workspace_subcmd() {
+        // Critical regression from Codex review: `--workspace ghost
+        // workspace rm default` used to skip validation but still
+        // set ghost as active in memory, which let `rm` think
+        // `default` wasn't active and delete it (then save a dangling
+        // active pointer). This test pins the up-front rejection.
+        let cfg = config::CliConfig::default();
+        let cmd = Commands::Workspace {
+            action: WorkspaceCmd::List,
+        };
+        let err = resolve_workspace_override(&cfg, Some("ghost"), &cmd).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("cannot be combined"), "msg: {msg}");
+    }
+
+    #[test]
+    fn workspace_override_rejected_when_alias_missing() {
+        let cfg = config::CliConfig::default();
+        let cmd = Commands::Ls { path: "/".into() };
+        let err = resolve_workspace_override(&cfg, Some("ghost"), &cmd).unwrap_err();
+        // Error path must namespace under the flag name so users see
+        // exactly which CLI arg was wrong.
+        assert!(err.to_string().contains("--workspace ghost"), "msg: {err}");
+    }
+
+    #[test]
+    fn workspace_override_passes_when_alias_exists_and_not_workspace_subcmd() {
+        let mut cfg = config::CliConfig::default();
+        cfg.set_active_profile(
+            "default",
+            config::WorkspaceEntry {
+                id: Some("ws-1".into()),
+                key: "wk-1".into(),
+            },
+        );
+        cfg.workspaces.insert(
+            "archive".into(),
+            config::WorkspaceEntry {
+                id: Some("ws-2".into()),
+                key: "wk-2".into(),
+            },
+        );
+        let cmd = Commands::Ls { path: "/".into() };
+        let out = resolve_workspace_override(&cfg, Some("archive"), &cmd).unwrap();
+        assert_eq!(out.as_deref(), Some("archive"));
+    }
+
+    #[test]
+    fn workspace_override_returns_none_when_flag_absent() {
+        let cfg = config::CliConfig::default();
+        let cmd = Commands::Status;
+        let out = resolve_workspace_override(&cfg, None, &cmd).unwrap();
+        assert!(out.is_none());
+    }
+
+    #[test]
+    fn workspace_add_parses_alias_and_optional_id() {
+        let cli = Cli::try_parse_from([
+            "veda",
+            "workspace",
+            "add",
+            "scratch",
+            "--workspace-id",
+            "ws-uuid-1",
+        ])
+        .unwrap();
+        match cli.command {
+            Commands::Workspace {
+                action: WorkspaceCmd::Add { alias, workspace_id },
+            } => {
+                assert_eq!(alias, "scratch");
+                assert_eq!(workspace_id.as_deref(), Some("ws-uuid-1"));
+            }
+            _ => panic!("expected workspace add"),
+        }
+    }
 }
 
 async fn print_summary_layer(
@@ -483,6 +768,9 @@ async fn main() -> anyhow::Result<()> {
     if let Some(ref s) = cli.server {
         cfg.server_url = s.clone();
     }
+    if let Some(ws) = resolve_workspace_override(&cfg, cli.workspace.as_deref(), &cli.command)? {
+        cfg.active_workspace = Some(ws);
+    }
 
     let c = client::Client::new(&cfg.server_url);
 
@@ -506,7 +794,9 @@ async fn main() -> anyhow::Result<()> {
                 init::apply_login(&mut cfg, api_key);
                 cfg.save()?;
                 println!("API key saved to config.");
-                println!("Run `veda init` (or `veda workspace use <id>`) to pick a workspace.");
+                println!(
+                    "Run `veda init` (or `veda workspace add <alias>`) to pick a workspace."
+                );
             } else {
                 anyhow::bail!(
                     "api_key must start with 'vk_' (account key) or 'wk_' (workspace key); \
@@ -517,7 +807,7 @@ async fn main() -> anyhow::Result<()> {
         Commands::Status => {
             // Skip the ping when nothing is configured — there's no
             // server to talk to that the user opted into.
-            let reachable = if cfg.api_key.is_some() || cfg.workspace_key.is_some() {
+            let reachable = if cfg.api_key.is_some() || !cfg.workspaces.is_empty() {
                 Some(status::ping_server(&cfg.server_url).await)
             } else {
                 None
@@ -529,7 +819,7 @@ async fn main() -> anyhow::Result<()> {
             name,
             email,
             password,
-            workspace,
+            workspace_name,
             non_interactive,
         } => {
             // The global `--server` flag was already merged into cfg at the
@@ -539,7 +829,7 @@ async fn main() -> anyhow::Result<()> {
             // non-tty contexts (curl | sh, CI). Only prompt in named
             // mode when the user has signaled they want interaction.
             let is_anonymous =
-                email.is_none() && !login && name.is_none() && workspace.is_none();
+                email.is_none() && !login && name.is_none() && workspace_name.is_none();
             let server_url = if non_interactive || is_anonymous {
                 cfg.server_url.clone()
             } else {
@@ -559,7 +849,7 @@ async fn main() -> anyhow::Result<()> {
                 // throw away the previous account binding, which is
                 // hard to recover from. The user has to clear config
                 // (or pass --email / --login) on purpose.
-                if cfg.api_key.is_some() || cfg.workspace_key.is_some() {
+                if cfg.api_key.is_some() || !cfg.workspaces.is_empty() {
                     anyhow::bail!(
                         "this machine is already onboarded (see `veda status`). \
                          To attach a different account use `veda login --api-key <key>`, \
@@ -609,7 +899,7 @@ async fn main() -> anyhow::Result<()> {
             // rare power user, otherwise everyone gets `default`. No
             // prompt — knowing the workspace concept shouldn't be a
             // prerequisite for first-time onboarding.
-            let workspace = workspace
+            let workspace = workspace_name
                 .as_deref()
                 .map(str::trim)
                 .filter(|s| !s.is_empty())
@@ -696,59 +986,111 @@ async fn main() -> anyhow::Result<()> {
             }
         },
         Commands::Workspace { action } => match action {
-            WorkspaceCmd::Create { name } => {
-                let resp = c.create_workspace(cfg.api_key()?, &name).await?;
+            WorkspaceCmd::Add { alias, workspace_id } => {
+                // Save unconditionally — `run_workspace_add` may
+                // mutate cfg in the create-then-mint path (path 1,
+                // empty-key placeholder) before a mint failure
+                // returns Err. Persisting that placeholder is what
+                // lets the user retry with `veda workspace add
+                // <alias>` and hit the repair branch instead of
+                // leaving the server-side workspace as an orphan.
+                let result = workspace::run_workspace_add(&c, &mut cfg, alias, workspace_id).await;
+                cfg.save()?;
+                let out = result?;
+                let mut extras = Vec::new();
+                if out.repaired {
+                    extras.push("repaired existing alias");
+                }
+                if out.auto_switched {
+                    extras.push("switched to it");
+                }
+                let suffix = if extras.is_empty() {
+                    String::new()
+                } else {
+                    format!("; {}", extras.join("; "))
+                };
                 println!(
-                    "Workspace created: {}",
-                    resp["data"]["id"].as_str().unwrap_or("")
+                    "added workspace '{}' (id {}){suffix}",
+                    out.alias, out.workspace_id
                 );
             }
+            WorkspaceCmd::Switch { alias } => {
+                let prev = workspace::run_workspace_switch(&mut cfg, alias.clone())?;
+                cfg.save()?;
+                println!("switched: {prev} → {alias}");
+            }
             WorkspaceCmd::List => {
-                let resp = c.list_workspaces(cfg.api_key()?).await?;
-                if let Some(arr) = resp["data"].as_array() {
-                    for ws in arr {
+                if cfg.workspaces.is_empty() {
+                    println!("(no workspace profiles configured — run `veda init`)");
+                } else {
+                    let active = cfg.active_alias().unwrap_or("").to_string();
+                    let mut active_seen = false;
+                    for (alias, entry) in &cfg.workspaces {
+                        let marker = if alias == &active {
+                            active_seen = true;
+                            "★"
+                        } else {
+                            " "
+                        };
+                        let id = entry.id.as_deref().unwrap_or("?");
+                        let key_warn = if entry.key.is_empty() {
+                            "  ⚠ key missing"
+                        } else {
+                            ""
+                        };
+                        println!("{marker} {alias}\t{id}{key_warn}");
+                    }
+                    // Dangling active_workspace: the value points at a
+                    // profile that no longer exists. status renders a
+                    // similar nudge — print the same here so users
+                    // running `workspace list` to diagnose see it.
+                    if !active.is_empty() && !active_seen {
                         println!(
-                            "{}\t{}",
-                            ws["id"].as_str().unwrap_or(""),
-                            ws["name"].as_str().unwrap_or("")
+                            "⚠ active_workspace='{active}' is not in the list above; \
+                             run `veda workspace switch <alias>` to fix"
                         );
                     }
                 }
             }
-            WorkspaceCmd::Use { id } => {
-                let resp = c.create_workspace_key(cfg.api_key()?, &id).await?;
-                let wk = resp["data"]["key"].as_str().unwrap_or("");
-                cfg.workspace_key = Some(wk.to_string());
-                cfg.workspace_id = Some(id.clone());
+            WorkspaceCmd::Rm { alias } => {
+                workspace::run_workspace_rm(&mut cfg, &alias)?;
                 cfg.save()?;
-                println!("Workspace {id} selected. Key saved to config.");
+                println!(
+                    "removed workspace profile '{alias}' \
+                     (server-side wk_ key is not revoked — no endpoint yet)"
+                );
             }
         },
         Commands::Cp { src, dst } => {
+            // Non-destructive announcement: cp writes a new revision,
+            // so a wrong workspace is recoverable. Skip the blocking
+            // prompt but still print the workspace alias.
+            let active = cfg.active_alias().unwrap_or("?").to_string();
+            confirm_or_announce(&active, WriteAction::Verb("copy to"), &dst, false)?;
             if src == "-" {
                 use std::io::Read;
                 let mut buf = String::new();
                 std::io::stdin().read_to_string(&mut buf)?;
-                let resp = c.write_file(cfg.ws_key()?, &dst, &buf).await?;
+                let resp = c.write_file(cfg.active_wk()?, &dst, &buf).await?;
                 println!("Written: revision {}", resp["data"]["revision"]);
             } else {
                 let src_path = std::path::Path::new(&src);
                 if src_path.is_dir() {
-                    let n = cp_dir_recursive(&c, cfg.ws_key()?, src_path, &dst).await?;
+                    let n = cp_dir_recursive(&c, cfg.active_wk()?, src_path, &dst).await?;
                     println!("Uploaded {n} file(s) under {dst}");
                 } else {
                     let content = std::fs::read_to_string(&src)?;
-                    let resp = c.write_file(cfg.ws_key()?, &dst, &content).await?;
+                    let resp = c.write_file(cfg.active_wk()?, &dst, &content).await?;
                     println!("Written: revision {}", resp["data"]["revision"]);
                 }
             }
         }
         Commands::Cat { path, lines } => {
-            let content = c.read_file(cfg.ws_key()?, &path, lines.as_deref()).await?;
+            let content = c.read_file(cfg.active_wk()?, &path, lines.as_deref()).await?;
             print!("{content}");
         }
         Commands::Ls { path } => {
-            let resp = c.list_dir(cfg.ws_key()?, &path).await?;
+            let resp = c.list_dir(cfg.active_wk()?, &path).await?;
             if let Some(arr) = resp["data"].as_array() {
                 for entry in arr {
                     let name = entry["name"].as_str().unwrap_or("");
@@ -762,11 +1104,23 @@ async fn main() -> anyhow::Result<()> {
             }
         }
         Commands::Mv { src, dst } => {
-            c.rename_file(cfg.ws_key()?, &src, &dst).await?;
+            let active = cfg.active_alias().unwrap_or("?").to_string();
+            confirm_or_announce(
+                &active,
+                WriteAction::Verb("move into"),
+                &format!("{src} → {dst}"),
+                false,
+            )?;
+            c.rename_file(cfg.active_wk()?, &src, &dst).await?;
             println!("Moved {src} -> {dst}");
         }
         Commands::Rm { path } => {
-            c.delete_file(cfg.ws_key()?, &path).await?;
+            // rm is the only data-plane command that's irreversible
+            // against the wrong workspace, so this is the one we ask
+            // for explicit y/N confirmation on a TTY.
+            let active = cfg.active_alias().unwrap_or("?").to_string();
+            confirm_or_announce(&active, WriteAction::Verb("delete"), &path, true)?;
+            c.delete_file(cfg.active_wk()?, &path).await?;
             println!("Deleted {path}");
         }
         Commands::Append { path, content } => {
@@ -778,11 +1132,11 @@ async fn main() -> anyhow::Result<()> {
             } else {
                 content
             };
-            c.append_file(cfg.ws_key()?, &path, &data).await?;
+            c.append_file(cfg.active_wk()?, &path, &data).await?;
             println!("Appended {} bytes to {path}", data.len());
         }
         Commands::Mkdir { path } => {
-            c.mkdir(cfg.ws_key()?, &path).await?;
+            c.mkdir(cfg.active_wk()?, &path).await?;
             println!("Created directory {path}");
         }
         Commands::Search {
@@ -792,7 +1146,7 @@ async fn main() -> anyhow::Result<()> {
             detail_level,
         } => {
             let resp = c
-                .search(cfg.ws_key()?, &query, &mode, limit, detail_level.as_str())
+                .search(cfg.active_wk()?, &query, &mode, limit, detail_level.as_str())
                 .await?;
             if let Some(arr) = resp["data"].as_array() {
                 for hit in arr {
@@ -825,7 +1179,7 @@ async fn main() -> anyhow::Result<()> {
         } => {
             let resp = c
                 .grep(
-                    cfg.ws_key()?,
+                    cfg.active_wk()?,
                     &pattern,
                     path.as_deref(),
                     ignore_case,
@@ -842,11 +1196,11 @@ async fn main() -> anyhow::Result<()> {
             }
         }
         Commands::Abstract { path } => {
-            print_summary_layer(&c, cfg.ws_key()?, &path, "abstract", "L0 Abstract", "l0_abstract")
+            print_summary_layer(&c, cfg.active_wk()?, &path, "abstract", "L0 Abstract", "l0_abstract")
                 .await?;
         }
         Commands::Overview { path } => {
-            print_summary_layer(&c, cfg.ws_key()?, &path, "overview", "L1 Overview", "l1_overview")
+            print_summary_layer(&c, cfg.active_wk()?, &path, "overview", "L1 Overview", "l1_overview")
                 .await?;
         }
         Commands::Collection { action } => match action {
@@ -857,7 +1211,7 @@ async fn main() -> anyhow::Result<()> {
             } => {
                 let schema_val: serde_json::Value = serde_json::from_str(&schema)?;
                 let resp = c
-                    .create_collection(cfg.ws_key()?, &name, &schema_val, embed_source.as_deref())
+                    .create_collection(cfg.active_wk()?, &name, &schema_val, embed_source.as_deref())
                     .await?;
                 println!(
                     "Collection created: {}",
@@ -865,7 +1219,7 @@ async fn main() -> anyhow::Result<()> {
                 );
             }
             CollectionCmd::List => {
-                let resp = c.list_collections(cfg.ws_key()?).await?;
+                let resp = c.list_collections(cfg.active_wk()?).await?;
                 if let Some(arr) = resp["data"].as_array() {
                     for coll in arr {
                         println!(
@@ -877,7 +1231,7 @@ async fn main() -> anyhow::Result<()> {
                 }
             }
             CollectionCmd::Desc { name } => {
-                let resp = c.describe_collection(cfg.ws_key()?, &name).await?;
+                let resp = c.describe_collection(cfg.active_wk()?, &name).await?;
                 let data = &resp["data"];
                 println!("Name:       {}", data["name"].as_str().unwrap_or(""));
                 println!("ID:         {}", data["id"].as_str().unwrap_or(""));
@@ -920,17 +1274,17 @@ async fn main() -> anyhow::Result<()> {
                 }
             }
             CollectionCmd::Delete { name } => {
-                c.delete_collection(cfg.ws_key()?, &name).await?;
+                c.delete_collection(cfg.active_wk()?, &name).await?;
                 println!("Deleted collection {name}");
             }
             CollectionCmd::Insert { name, data } => {
                 let rows: serde_json::Value = serde_json::from_str(&data)?;
-                c.insert_rows(cfg.ws_key()?, &name, &rows).await?;
+                c.insert_rows(cfg.active_wk()?, &name, &rows).await?;
                 println!("Rows inserted into {name}");
             }
             CollectionCmd::Search { name, query, limit } => {
                 let resp = c
-                    .search_collection(cfg.ws_key()?, &name, &query, limit)
+                    .search_collection(cfg.active_wk()?, &name, &query, limit)
                     .await?;
                 if let Some(arr) = resp["data"].as_array() {
                     for row in arr {
@@ -940,7 +1294,7 @@ async fn main() -> anyhow::Result<()> {
             }
         },
         Commands::Sql { query } => {
-            let resp = c.execute_sql(cfg.ws_key()?, &query).await?;
+            let resp = c.execute_sql(cfg.active_wk()?, &query).await?;
             if let Some(arr) = resp["data"].as_array() {
                 for row in arr {
                     println!("{row}");
@@ -958,24 +1312,36 @@ async fn main() -> anyhow::Result<()> {
                         .unwrap_or_else(|| "<not set>".into())
                 );
                 println!(
-                    "workspace_id: {}",
-                    cfg.workspace_id.as_deref().unwrap_or("<not set>")
+                    "active_workspace: {}",
+                    cfg.active_alias().unwrap_or("<not set>")
                 );
-                println!(
-                    "workspace_key: {}",
-                    cfg.workspace_key
-                        .as_deref()
-                        .map(mask_secret)
-                        .unwrap_or_else(|| "<not set>".into())
-                );
+                if cfg.workspaces.is_empty() {
+                    println!("workspaces: (none)");
+                } else {
+                    println!("workspaces:");
+                    for (alias, entry) in &cfg.workspaces {
+                        println!(
+                            "  {alias}: id={} key={}",
+                            entry.id.as_deref().unwrap_or("(unknown)"),
+                            mask_secret(&entry.key)
+                        );
+                    }
+                }
             }
             ConfigCmd::Set { key, value } => {
+                // Only top-level scalars are settable here. Workspace
+                // entries are richer (id+key) and minted via the
+                // server — use `veda workspace add` for those.
                 match key.as_str() {
                     "server_url" => cfg.server_url = value,
                     "api_key" => cfg.api_key = Some(value),
-                    "workspace_id" => cfg.workspace_id = Some(value),
-                    "workspace_key" => cfg.workspace_key = Some(value),
-                    _ => anyhow::bail!("unknown config key: {key}"),
+                    "active_workspace" => {
+                        cfg.workspace_for(&value)?;
+                        cfg.active_workspace = Some(value);
+                    }
+                    _ => anyhow::bail!(
+                        "unknown config key: {key} (use `veda workspace add` for workspace entries)"
+                    ),
                 }
                 cfg.save()?;
                 println!("Config updated.");

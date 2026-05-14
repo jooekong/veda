@@ -84,13 +84,35 @@ API key configured"), the user hasn't onboarded yet. Single-command bootstrap:
 veda init                                  # zero-prompt anonymous onboard (default)
 veda init --email X --password Y           # register a named account (non-interactive)
 veda init --login --email X --password Y   # attach an existing account silently
-veda init --workspace dogfood              # named mode with custom workspace name
+veda init --workspace-name dogfood         # named mode with custom workspace name
 veda claim --email X                       # upgrade an existing anon account to named
 ```
 
-`veda status` shows current config + server reachability. `veda login --api-key K`
-swaps an existing `vk_*` (account) or `wk_*` (workspace) key without touching
-the rest of the config.
+`veda status` shows current config + server reachability (workspace line marks
+the active profile with ★). `veda login --api-key K` swaps an existing `vk_*`
+(account) or `wk_*` (workspace) key without touching the rest of the config.
+
+### Multiple workspace profiles
+
+`veda init` creates and selects a profile named `default`. Add more only when
+you need to juggle several workspaces from one machine:
+
+```sh
+veda workspace add scratch                  # new server workspace named "scratch"
+veda workspace add shared --workspace-id W  # mint a key for an existing workspace
+veda workspace list                         # ★ marks the active profile
+veda workspace switch scratch               # change the active profile (persisted)
+veda workspace rm scratch                   # alias-only local delete (server key not revoked)
+
+veda --workspace scratch ls /               # one-off override, active unchanged
+```
+
+**For agents / non-interactive scripts**: always pass `--workspace <alias>`
+explicitly when the script depends on which workspace it lands in. The active
+profile is shell-global state, so a stale `switch` from a previous session
+would otherwise silently redirect your writes. `veda rm /path` blocks for
+y/N confirmation on a TTY; in non-interactive mode it skips the prompt but
+prints the target workspace alias to stderr so the caller can audit logs.
 
 ## Core operations
 

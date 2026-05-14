@@ -7,30 +7,34 @@
 use anyhow::{anyhow, Context, Result};
 
 use crate::client::Client;
-use crate::config::CliConfig;
+use crate::config::{CliConfig, WorkspaceEntry, DEFAULT_WORKSPACE_ALIAS};
 
-/// Apply a paste-an-existing-key login. Sets `api_key`, clears any cached
-/// `workspace_id` / `workspace_key` so requests don't mix an old workspace
-/// selection (minted under the previous account) with a new identity.
+/// Apply a paste-an-existing-key login. Sets `api_key`, clears every
+/// stored workspace profile so requests don't mix an old workspace key
+/// (minted under the previous account) with a new identity.
 ///
 /// Caller persists the config after.
 pub fn apply_login(cfg: &mut CliConfig, api_key: String) {
     cfg.api_key = Some(api_key);
-    cfg.workspace_id = None;
-    cfg.workspace_key = None;
+    cfg.workspaces.clear();
+    cfg.active_workspace = None;
 }
 
-/// Apply a paste-an-existing workspace key (wk_*). Stores it into
-/// `workspace_key` and clears `api_key` + `workspace_id` — a workspace
-/// key alone cannot drive account-scope endpoints, and there is no
-/// server endpoint to look up which workspace it belongs to, so we
-/// leave the id field empty rather than make one up.
+/// Apply a paste-an-existing workspace key (wk_*). Drops every other
+/// profile and any account-scope key — a workspace key alone cannot
+/// drive account-scope endpoints, and there is no server endpoint to
+/// look up which workspace the wk_ belongs to, so the new entry has
+/// `id = None`. Lands under the default alias because there's no
+/// other useful name to pick.
 ///
 /// Caller persists the config after.
 pub fn apply_workspace_key(cfg: &mut CliConfig, wk: String) {
-    cfg.workspace_key = Some(wk);
-    cfg.workspace_id = None;
+    cfg.workspaces.clear();
     cfg.api_key = None;
+    cfg.set_active_profile(
+        DEFAULT_WORKSPACE_ALIAS,
+        WorkspaceEntry { id: None, key: wk },
+    );
 }
 
 /// Resolved params for `veda init`. Construction (prompting / flag merge)
@@ -67,8 +71,9 @@ pub struct InitOutcome {
 ///
 /// On any HTTP failure, the caller-visible cfg may be partially mutated
 /// — that's intentional. If step 1 succeeds but step 4 fails, the saved
-/// api_key is real and the user can retry `veda workspace use <id>`
-/// manually without redoing account creation.
+/// api_key is real and the user can retry `veda workspace add <alias>
+/// --workspace-id <id>` (or rerun `veda init`) without redoing account
+/// creation.
 pub async fn run_init(
     client: &Client,
     cfg: &mut CliConfig,
@@ -147,14 +152,30 @@ pub async fn run_init(
             (id, true)
         }
     };
-    cfg.workspace_id = Some(workspace_id.clone());
+    // Save id-only first: a workspace-key mint failure below should
+    // still leave the user with a recoverable account + workspace id
+    // they can retry against (documented in this function's header).
+    cfg.set_active_profile(
+        DEFAULT_WORKSPACE_ALIAS,
+        WorkspaceEntry {
+            id: Some(workspace_id.clone()),
+            key: String::new(),
+        },
+    );
 
     // ── 3. workspace key ────────────────────────────────────────────
     let resp = client
         .create_workspace_key(&api_key, &workspace_id)
         .await
         .context("workspace key mint failed")?;
-    cfg.workspace_key = Some(field_str(&resp, "key")?);
+    let wk = field_str(&resp, "key")?;
+    cfg.set_active_profile(
+        DEFAULT_WORKSPACE_ALIAS,
+        WorkspaceEntry {
+            id: Some(workspace_id.clone()),
+            key: wk,
+        },
+    );
 
     Ok(InitOutcome {
         account_id,
@@ -207,8 +228,13 @@ pub async fn run_anonymous(
     let workspace_key = field_str(&resp, "workspace_key")?;
 
     cfg.api_key = Some(api_key);
-    cfg.workspace_id = Some(workspace_id.clone());
-    cfg.workspace_key = Some(workspace_key);
+    cfg.set_active_profile(
+        DEFAULT_WORKSPACE_ALIAS,
+        WorkspaceEntry {
+            id: Some(workspace_id.clone()),
+            key: workspace_key,
+        },
+    );
 
     Ok(AnonymousOutcome {
         account_id,
@@ -256,13 +282,19 @@ mod tests {
         let mut cfg = CliConfig {
             server_url: "http://x".into(),
             api_key: Some("old-key".into()),
-            workspace_id: Some("ws-old".into()),
-            workspace_key: Some("wk-old".into()),
+            ..CliConfig::default()
         };
+        cfg.set_active_profile(
+            DEFAULT_WORKSPACE_ALIAS,
+            WorkspaceEntry {
+                id: Some("ws-old".into()),
+                key: "wk-old".into(),
+            },
+        );
         apply_login(&mut cfg, "new-key".into());
         assert_eq!(cfg.api_key.as_deref(), Some("new-key"));
-        assert!(cfg.workspace_id.is_none());
-        assert!(cfg.workspace_key.is_none());
+        assert!(cfg.workspaces.is_empty(), "workspaces should be cleared");
+        assert!(cfg.active_workspace.is_none());
     }
 
     #[test]
@@ -270,9 +302,8 @@ mod tests {
         let mut cfg = CliConfig::default();
         apply_login(&mut cfg, "k1".into());
         assert_eq!(cfg.api_key.as_deref(), Some("k1"));
-        assert!(cfg.workspace_id.is_none());
-        assert!(cfg.workspace_key.is_none());
-        assert!(!cfg.server_url.is_empty());
+        assert!(cfg.workspaces.is_empty());
+        assert!(cfg.active_workspace.is_none());
     }
 
     #[test]
@@ -291,19 +322,28 @@ mod tests {
     fn workspace_key_paste_sets_wk_and_clears_account_identity() {
         // Paste-a-wk_ semantics: replaces any existing account or
         // workspace identity. The account-scoped api_key is cleared
-        // because wk_ can't act as one; workspace_id is cleared because
-        // there's no server lookup for "which workspace does this wk_
-        // belong to".
+        // because wk_ can't act as one; the new profile gets id=None
+        // because there's no server lookup for "which workspace does
+        // this wk_ belong to". Lands under the default alias.
         let mut cfg = CliConfig {
             server_url: "http://x".into(),
             api_key: Some("vk_old".into()),
-            workspace_id: Some("ws-old".into()),
-            workspace_key: Some("wk_old".into()),
+            ..CliConfig::default()
         };
+        cfg.set_active_profile(
+            "other",
+            WorkspaceEntry {
+                id: Some("ws-old".into()),
+                key: "wk_old".into(),
+            },
+        );
         apply_workspace_key(&mut cfg, "wk_new".into());
-        assert_eq!(cfg.workspace_key.as_deref(), Some("wk_new"));
-        assert!(cfg.workspace_id.is_none(), "id should be cleared");
+        assert_eq!(cfg.active_alias(), Some(DEFAULT_WORKSPACE_ALIAS));
+        let def = cfg.workspace_for(DEFAULT_WORKSPACE_ALIAS).unwrap();
+        assert_eq!(def.key, "wk_new");
+        assert!(def.id.is_none(), "id should be cleared");
         assert!(cfg.api_key.is_none(), "api_key should be cleared");
+        assert_eq!(cfg.workspaces.len(), 1, "old profile must be wiped");
     }
 
     // ── run_init ───────────────────────────────────────────────────
@@ -371,8 +411,8 @@ mod tests {
         assert!(outcome.created_workspace);
         assert_eq!(cfg.server_url, server.uri());
         assert_eq!(cfg.api_key.as_deref(), Some("ak-1"));
-        assert_eq!(cfg.workspace_id.as_deref(), Some("ws-new"));
-        assert_eq!(cfg.workspace_key.as_deref(), Some("wk-1"));
+        assert_eq!(cfg.active_ws_id(), Some("ws-new"));
+        assert_eq!(cfg.active_wk().unwrap(), "wk-1");
     }
 
     #[tokio::test]
@@ -433,8 +473,8 @@ mod tests {
         assert!(!outcome.created_account);
         assert!(!outcome.created_workspace);
         assert_eq!(cfg.api_key.as_deref(), Some("ak-2"));
-        assert_eq!(cfg.workspace_id.as_deref(), Some("ws-existing"));
-        assert_eq!(cfg.workspace_key.as_deref(), Some("wk-2"));
+        assert_eq!(cfg.active_ws_id(), Some("ws-existing"));
+        assert_eq!(cfg.active_wk().unwrap(), "wk-2");
     }
 
     #[tokio::test]
@@ -506,7 +546,7 @@ mod tests {
         assert_eq!(outcome.account_id, "acct-fb");
         assert!(!outcome.created_account, "should NOT report account creation");
         assert_eq!(cfg.api_key.as_deref(), Some("ak-fb"));
-        assert_eq!(cfg.workspace_key.as_deref(), Some("wk-fb"));
+        assert_eq!(cfg.active_wk().unwrap(), "wk-fb");
     }
 
     #[tokio::test]
@@ -638,8 +678,9 @@ mod tests {
         assert_eq!(outcome.workspace_id, "ws-anon");
         assert_eq!(cfg.server_url, server.uri());
         assert_eq!(cfg.api_key.as_deref(), Some("vk_anon_xxx"));
-        assert_eq!(cfg.workspace_id.as_deref(), Some("ws-anon"));
-        assert_eq!(cfg.workspace_key.as_deref(), Some("wk_anon_xxx"));
+        assert_eq!(cfg.active_alias(), Some(DEFAULT_WORKSPACE_ALIAS));
+        assert_eq!(cfg.active_ws_id(), Some("ws-anon"));
+        assert_eq!(cfg.active_wk().unwrap(), "wk_anon_xxx");
     }
 
     #[tokio::test]
@@ -814,9 +855,11 @@ mod tests {
             .await
             .unwrap_err();
         assert!(err.to_string().contains("workspace key mint failed"));
-        // api_key + workspace_id persisted; ws_key is still absent.
+        // api_key + workspace_id persisted; ws_key is still empty
+        // (placeholder profile written before the mint call).
         assert_eq!(cfg.api_key.as_deref(), Some("ak-3"));
-        assert_eq!(cfg.workspace_id.as_deref(), Some("ws-ok"));
-        assert!(cfg.workspace_key.is_none());
+        assert_eq!(cfg.active_ws_id(), Some("ws-ok"));
+        let def = cfg.workspace_for(DEFAULT_WORKSPACE_ALIAS).unwrap();
+        assert!(def.key.is_empty(), "key should be empty placeholder, got {:?}", def.key);
     }
 }

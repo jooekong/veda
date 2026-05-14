@@ -50,42 +50,90 @@ pub fn render_status(cfg: &CliConfig, reachable: Option<bool>) -> String {
     } else {
         "✗ missing"
     };
-    let ws_state = match (&cfg.workspace_id, &cfg.workspace_key) {
-        (Some(id), Some(_)) => format!("✓ {id}"),
-        (Some(id), None) => format!("✗ {id} (no workspace key — re-run `veda workspace use {id}`)"),
-        // wk_*-only paste: the workspace key alone is enough to run
-        // data commands; the id is unknown because the server has no
-        // "what workspace does this key belong to" endpoint.
-        (None, Some(_)) => "✓ workspace key configured (id unknown)".to_string(),
-        (None, None) => "✗ none selected".to_string(),
-    };
+    let ws_state = render_workspace_line(cfg);
     format!(
         "{server_line}\nAPI key:   {api_key_state}\nWorkspace: {ws_state}\n"
     )
 }
 
-/// "Configured" = server_url is non-empty AND at least one of the
-/// auth fields is set. A bare `server_url = "http://localhost:3000"`
-/// (the default) with no api_key counts as unconfigured — that's
-/// what `CliConfig::default()` returns.
+/// "Workspace:" line content. ★ marks the active profile so users
+/// reading status alongside `workspace list` see the same marker.
+/// When more than one profile exists, also count them — alerts users
+/// who forgot they had a second profile sitting in the config.
+fn render_workspace_line(cfg: &CliConfig) -> String {
+    let active = match cfg.active_alias() {
+        Some(a) => a,
+        None => return "✗ none selected".to_string(),
+    };
+    let Some(entry) = cfg.workspaces.get(active) else {
+        // Dangling active_workspace: profile was removed but the
+        // active alias still points at it. Friendly nudge instead of
+        // a vague error from the next command.
+        return format!(
+            "✗ active alias '{active}' missing from config — run `veda workspace switch <alias>`"
+        );
+    };
+    let id_part = match entry.id.as_deref() {
+        Some(id) => format!("({})", short_id(id)),
+        None => "(id unknown)".into(),
+    };
+    let key_warning = if entry.key.is_empty() {
+        // Mint-key failure marker — see config::active_wk()'s comment
+        // about the placeholder profile written before the mint call.
+        " (key missing — rerun `veda init` or `veda workspace add`)"
+    } else {
+        ""
+    };
+    let extras = if cfg.workspaces.len() > 1 {
+        format!("   [{} profiles configured]", cfg.workspaces.len())
+    } else {
+        String::new()
+    };
+    format!("★ {active} {id_part}{key_warning}{extras}")
+}
+
+/// Truncate a UUID-shaped id to its first segment so the status line
+/// stays one terminal line wide. Full id is still in `config.toml` /
+/// `workspace list`.
+fn short_id(id: &str) -> &str {
+    id.split('-').next().unwrap_or(id)
+}
+
+/// "Configured" = server_url is non-empty AND there's some auth state
+/// to talk about: an account key, a workspace profile, or even a
+/// stale `active_workspace` alias (so dangling state still surfaces
+/// in the output rather than vanishing behind "No configuration").
 fn is_configured(cfg: &CliConfig) -> bool {
     !cfg.server_url.is_empty()
-        && (cfg.api_key.is_some() || cfg.workspace_key.is_some())
+        && (cfg.api_key.is_some()
+            || !cfg.workspaces.is_empty()
+            || cfg.active_workspace.is_some())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::{WorkspaceEntry, DEFAULT_WORKSPACE_ALIAS};
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     fn full_cfg() -> CliConfig {
-        CliConfig {
+        let mut cfg = CliConfig {
             server_url: "http://example.com:3000".into(),
             api_key: Some("ak-123".into()),
-            workspace_id: Some("ws-abc".into()),
-            workspace_key: Some("wk-xyz".into()),
-        }
+            ..CliConfig::default()
+        };
+        cfg.set_active_profile(
+            DEFAULT_WORKSPACE_ALIAS,
+            WorkspaceEntry {
+                // UUID shape — short_id() truncates to "0c022809" (first
+                // hyphen-separated segment) so the status line fits one
+                // terminal width even with a long UUID.
+                id: Some("0c022809-f4f5-43db-97e2-49de83256d6d".into()),
+                key: "wk-xyz".into(),
+            },
+        );
+        cfg
     }
 
     #[test]
@@ -101,7 +149,10 @@ mod tests {
         assert!(out.contains("http://example.com:3000"));
         assert!(out.contains("(reachable)"));
         assert!(out.contains("✓ configured"));
-        assert!(out.contains("ws-abc"));
+        // Active profile is marked with ★ and shows the short id
+        // (first hyphen-separated segment) so the line stays short.
+        assert!(out.contains("★ default"), "out: {out}");
+        assert!(out.contains("(0c022809)"), "expected short id, out: {out}");
         // Make sure we don't leak secrets.
         assert!(!out.contains("ak-123"), "API key leaked: {out}");
         assert!(!out.contains("wk-xyz"), "WS key leaked: {out}");
@@ -126,24 +177,24 @@ mod tests {
     }
 
     #[test]
-    fn render_workspace_id_without_key_warns() {
+    fn render_dangling_active_alias_nudges_user() {
+        // active_workspace points at a profile that's not in the map.
+        // Hand-edit / partial-rm recovery: tell the user how to fix
+        // it instead of just printing "(id unknown)".
         let cfg = CliConfig {
             api_key: Some("k".into()),
-            workspace_id: Some("ws-abc".into()),
-            workspace_key: None,
+            active_workspace: Some("ghost".into()),
             ..CliConfig::default()
         };
         let out = render_status(&cfg, None);
-        assert!(out.contains("ws-abc"));
-        assert!(out.contains("re-run"), "out: {out}");
+        assert!(out.contains("ghost"), "out: {out}");
+        assert!(out.contains("workspace switch"), "out: {out}");
     }
 
     #[test]
     fn render_api_key_only_no_workspace() {
         let cfg = CliConfig {
             api_key: Some("k".into()),
-            workspace_id: None,
-            workspace_key: None,
             ..CliConfig::default()
         };
         let out = render_status(&cfg, Some(true));
@@ -151,22 +202,71 @@ mod tests {
     }
 
     #[test]
-    fn render_workspace_key_only_renders_as_ready() {
-        // Paste-a-wk_ shape: `veda login --api-key wk_xxx` clears
-        // workspace_id (server has no lookup endpoint) and api_key.
-        // Data commands still work, so status must not call this
-        // "none selected" — that would mislead users into thinking
-        // onboarding failed.
-        let cfg = CliConfig {
+    fn render_paste_wk_profile_renders_as_ready() {
+        // Paste-a-wk_ flow lands in a [workspaces.default] entry with
+        // id=None — status must surface that ("id unknown") without
+        // calling it "none selected", which would imply the CLI is
+        // unusable.
+        let mut cfg = CliConfig {
             api_key: None,
-            workspace_id: None,
-            workspace_key: Some("wk-x".into()),
             ..CliConfig::default()
         };
+        cfg.set_active_profile(
+            DEFAULT_WORKSPACE_ALIAS,
+            WorkspaceEntry { id: None, key: "wk-x".into() },
+        );
         let out = render_status(&cfg, Some(true));
-        assert!(out.contains("workspace key configured"), "out: {out}");
-        assert!(out.contains("id unknown"), "out: {out}");
+        assert!(out.contains("★ default"), "out: {out}");
+        assert!(out.contains("(id unknown)"), "out: {out}");
         assert!(!out.contains("none selected"), "out: {out}");
+    }
+
+    #[test]
+    fn render_empty_key_placeholder_shows_warning() {
+        // run_init's mint-key failure path writes id+empty-key. status
+        // must call that out so the user notices the half-finished
+        // onboarding, instead of just showing "★ default (id)" as if
+        // everything worked.
+        let mut cfg = CliConfig {
+            api_key: Some("k".into()),
+            ..CliConfig::default()
+        };
+        cfg.set_active_profile(
+            DEFAULT_WORKSPACE_ALIAS,
+            WorkspaceEntry {
+                id: Some("ws-stuck".into()),
+                key: String::new(),
+            },
+        );
+        let out = render_status(&cfg, Some(true));
+        assert!(out.contains("key missing"), "out: {out}");
+    }
+
+    #[test]
+    fn render_multiple_profiles_shows_count() {
+        // Hint when more than one profile is configured so users don't
+        // forget about a stale `work` profile sitting in the config.
+        let mut cfg = CliConfig {
+            api_key: Some("k".into()),
+            ..CliConfig::default()
+        };
+        cfg.set_active_profile(
+            "default",
+            WorkspaceEntry {
+                id: Some("ws-a".into()),
+                key: "wk-a".into(),
+            },
+        );
+        cfg.workspaces.insert(
+            "work".into(),
+            WorkspaceEntry {
+                id: Some("ws-b".into()),
+                key: "wk-b".into(),
+            },
+        );
+        let out = render_status(&cfg, None);
+        assert!(out.contains("★ default"), "out: {out}");
+        assert!(out.contains("2 profiles"), "out: {out}");
     }
 
     #[tokio::test]
