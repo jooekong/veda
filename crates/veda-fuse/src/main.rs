@@ -80,11 +80,19 @@ fn main() -> anyhow::Result<()> {
 }
 
 fn cmd_mount(args: MountArgs) -> anyhow::Result<()> {
-    let client = client::VedaClient::new(&args.server, &args.key);
-
-    client.stat("/").map_err(|e| {
-        anyhow::anyhow!("server health check failed (stat '/' at {}): {e}", args.server)
-    })?;
+    // Pre-flight stat: confirm the server is reachable BEFORE we fork,
+    // so a typo in --server fails the user's command at exit-0 rather
+    // than orphaning a daemon that exits silently. Scoped so the
+    // throwaway client (and its tokio runtime + worker thread) drops
+    // before fork — `reqwest::blocking::Client` carries thread state
+    // that does not survive `fork()`, and any client used post-fork
+    // must be constructed in the child.
+    {
+        let preflight = client::VedaClient::new(&args.server, &args.key);
+        preflight.stat("/").map_err(|e| {
+            anyhow::anyhow!("server health check failed (stat '/' at {}): {e}", args.server)
+        })?;
+    }
 
     let config = fs::FuseConfig {
         attr_ttl: Duration::from_secs(args.attr_ttl),
@@ -101,10 +109,17 @@ fn cmd_mount(args: MountArgs) -> anyhow::Result<()> {
     if args.foreground {
         init_tracing(args.debug);
         info!(mount = %args.mountpoint, server = %args.server, "mounting (foreground)");
+        // Foreground is single-process — safe to build the client here.
+        let client = client::VedaClient::new(&args.server, &args.key);
         return mount_and_serve(client, &args.mountpoint, &args.server, &args.key, config, &mount_opts, None);
     }
 
     // Daemonize: parent waits for child to signal readiness via pipe.
+    // CRITICAL: the HTTP client must be constructed AFTER fork in the
+    // child. Building it before fork left the daemon with a tokio
+    // worker thread that lived only in the parent and a connection
+    // pool of fds that became stale in the child — every FUSE op then
+    // returned I/O error because no HTTP request could complete.
     let (read_fd, write_fd) = nix::unistd::pipe()?;
     let read_raw = read_fd.as_raw_fd();
     let write_raw = write_fd.as_raw_fd();
@@ -118,9 +133,18 @@ fn cmd_mount(args: MountArgs) -> anyhow::Result<()> {
             drop(read_fd);
             nix::unistd::setsid()?;
 
+            // Detach stdio from the parent terminal so the calling
+            // shell (and any ssh session above it) can return cleanly
+            // — without this, ssh hangs waiting for the inherited
+            // stdout/stderr to close. tracing output is sacrificed in
+            // daemon mode by design; use `--foreground` + nohup if you
+            // need logs.
+            redirect_stdio_to_devnull();
+
             init_tracing(args.debug);
             info!(mount = %args.mountpoint, server = %args.server, "mounting (background)");
 
+            let client = client::VedaClient::new(&args.server, &args.key);
             let result = mount_and_serve(client, &args.mountpoint, &args.server, &args.key, config, &mount_opts, Some(write_raw));
             if let Err(ref e) = result {
                 tracing::error!("mount failed: {e}");
@@ -173,6 +197,30 @@ fn mount_and_serve(
     let result = fuser::mount2(vedafs, mountpoint, &options);
     watcher.stop();
     result.map_err(Into::into)
+}
+
+/// Replace the daemon child's stdin/stdout/stderr with /dev/null so
+/// inherited fds don't keep the calling shell waiting. Failures are
+/// swallowed: there's no place to report them yet (tracing isn't
+/// initialized), and a daemon that runs without stdio is still
+/// preferable to one that won't start.
+fn redirect_stdio_to_devnull() {
+    use std::os::fd::AsRawFd;
+    if let Ok(f) = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open("/dev/null")
+    {
+        let null = f.as_raw_fd();
+        unsafe {
+            libc::dup2(null, 0);
+            libc::dup2(null, 1);
+            libc::dup2(null, 2);
+        }
+        // `f` drops here; the dup2'd fds 0/1/2 remain valid because
+        // each is its own descriptor pointing at the same open file
+        // description.
+    }
 }
 
 fn wait_for_child_ready(read_fd: RawFd, child: nix::unistd::Pid) -> anyhow::Result<()> {
