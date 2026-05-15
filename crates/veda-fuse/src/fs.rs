@@ -569,10 +569,27 @@ impl VedaFs {
     /// server-stat code path. Used by the per-file cap fallback in
     /// write(): when a file crosses 10 MB the writeback overlay
     /// quietly degrades to synchronous writes for that file.
+    ///
+    /// Drains the commit queue for this path before snapshotting so
+    /// a worker that's mid-PUT for the same path doesn't race the
+    /// sync write — without this, an older shadow PUT could land
+    /// AFTER our sync flush and clobber the fresh bytes.
     fn sync_flush_and_evict_shadow(
         &mut self,
         path: &str,
     ) -> std::result::Result<(), ClientError> {
+        // Drain pending commits for this path. cancel removes the
+        // canonical pending token; drain forces fire of anything
+        // already past the snapshot stage. After drain returns, the
+        // path is quiescent on the worker side.
+        let cancel_seq = {
+            let shadow = self.shadow.as_ref().unwrap();
+            let store = shadow.lock().unwrap();
+            store.get(path).map(|e| e.seq).unwrap_or(0)
+        };
+        let q = self.commit_queue.as_ref().unwrap();
+        q.cancel(path.to_string(), cancel_seq);
+        q.drain();
         let snap = {
             let shadow = self.shadow.as_ref().unwrap();
             let store = shadow.lock().unwrap();
@@ -1147,8 +1164,17 @@ impl Filesystem for VedaFs {
             // invalidate any other handle holding the existing ino).
             // Cap-busting existing files (>10 MB) fall back to the
             // legacy buf path; flush_handle handles their sync write.
+            //
+            // O_TRUNC: adopt an EMPTY buffer (existing was set to
+            // Vec::new() above when truncated=true). Without this,
+            // a subsequent shorter write would only overwrite the
+            // prefix of the stale buffer instead of replacing the
+            // full content, and the eventual PUT would carry the old
+            // tail concatenated to the new head.
+            let adopt_eligible = self.is_writeback()
+                && (truncated || !existing.is_empty());
             let mut adopted = false;
-            if self.is_writeback() && !existing.is_empty() {
+            if adopt_eligible {
                 let parent_ino = self
                     .inodes
                     .lock()
@@ -1683,34 +1709,21 @@ impl Filesystem for VedaFs {
         };
         let old_path = Self::resolve_child_path(&parent_path, name_str);
         let new_path = Self::resolve_child_path(&newparent_path, newname_str);
-        // Writeback rename: move the shadow entry under the new path,
-        // cancel any pending Touch for old_path, schedule a fresh one
-        // for new_path. Whether to touch the server depends on what
-        // kind of entry it was:
-        //   - LocalOnly  → server never saw old_path; no server call.
-        //                  (git commit's index.lock → index pattern.)
-        //   - Dirty/Clean → server has old_path; rename it server-side
-        //                   too so the user's view stays consistent.
-        //   - no shadow entry → assume it's a pre-existing server file
-        //                       and use the legacy server rename.
+        // Writeback rename: server first, then shadow. Doing it the
+        // other way around could leave the local overlay holding the
+        // new path while the server still has the old one if the
+        // server call errors. prior_kind decides whether the server
+        // needs to be touched at all:
+        //   - LocalOnly  → server never saw old_path; no server call
+        //                  (covers git's `.git/index.lock → .git/index`
+        //                  pattern: the .lock never reaches the server).
+        //   - Dirty/Clean / no shadow entry → server has the path,
+        //                                     rename it. ENOENT is OK.
         if self.is_writeback() {
-            let prior_kind;
-            let old_seq;
-            let new_seq;
-            {
+            let prior_kind = {
                 let shadow = self.shadow.as_ref().unwrap();
-                let mut store = shadow.lock().unwrap();
-                prior_kind = store.get(&old_path).map(|e| e.kind);
-                if let Some(seq) = store.rename(&old_path, &new_path, newparent) {
-                    // shadow rename bumped seq; the old-path commit
-                    // token is now stale.
-                    old_seq = store.get(&new_path).map(|e| e.seq).unwrap_or(seq);
-                    new_seq = seq;
-                } else {
-                    old_seq = 0;
-                    new_seq = 0;
-                }
-            }
+                shadow.lock().unwrap().get(&old_path).map(|e| e.kind)
+            };
             let server_rename = matches!(
                 prior_kind,
                 Some(EntryKind::Dirty) | Some(EntryKind::Clean) | None
@@ -1718,14 +1731,27 @@ impl Filesystem for VedaFs {
             if server_rename {
                 if let Err(ref e) = self.client.rename(&old_path, &new_path) {
                     if !matches!(e, ClientError::NotFound) {
+                        // Server rejected — leave the shadow unchanged
+                        // so local view stays consistent with server.
                         reply.error(Self::err_to_errno(e));
                         return;
                     }
                 }
             }
             if prior_kind.is_some() {
+                let new_seq = {
+                    let shadow = self.shadow.as_ref().unwrap();
+                    let mut store = shadow.lock().unwrap();
+                    store
+                        .rename(&old_path, &new_path, newparent)
+                        .unwrap_or(0)
+                };
                 let q = self.commit_queue.as_ref().unwrap();
-                q.cancel(old_path.clone(), old_seq);
+                // Cancel any prior Touch for the old path; if a PUT
+                // is already in flight, the tombstone shadow.rename
+                // installed at old_path will make commit_queue's
+                // post-PUT check chase it with a DELETE.
+                q.cancel(old_path.clone(), new_seq);
                 q.touch(new_path.clone(), new_seq);
             }
             self.invalidate_dir_cache(parent);

@@ -263,14 +263,17 @@ impl ShadowStore {
         self.tombstones.remove(path)
     }
 
-    /// Move a shadow entry from `old_path` to `new_path`, updating
-    /// pending_children for both parent inodes. Bumps seq so any
-    /// in-flight commit captured under the old path becomes stale.
-    /// Returns the bumped seq so the caller can issue
-    /// `Cancel{old_path, old_seq}` + `Touch{new_path, new_seq}`.
-    /// No-op if `old_path` doesn't exist; clears any tombstone at
-    /// `new_path` to make the rename idempotent against a recent
-    /// delete-then-rename pattern (`git mv` over an old file).
+    /// Move a shadow entry from `old_path` to `new_path`. Tombstones
+    /// `old_path` so an in-flight PUT for the prior path is followed
+    /// up by a DELETE — without that, a LocalOnly rename can leak
+    /// the old path onto the server (e.g. git's `.git/index.lock →
+    /// .git/index` would surface index.lock if a PUT was already
+    /// in flight when the rename arrived). Updates pending_children
+    /// for both parents, replaces any existing entry at `new_path`
+    /// (correctly adjusting total_bytes), clears any tombstone at
+    /// `new_path`, bumps the global seq, and returns the new seq for
+    /// the caller's `Cancel{old}+Touch{new}` protocol. Returns None
+    /// if `old_path` doesn't have a shadow entry.
     pub fn rename(
         &mut self,
         old_path: &str,
@@ -278,12 +281,27 @@ impl ShadowStore {
         new_parent_ino: u64,
     ) -> Option<u64> {
         let mut entry = self.entries.remove(old_path)?;
-        // Remove from old parent's pending set.
+        // Drain old parent's pending set.
         if let Some(old_name) = path_basename(old_path) {
             if let Some(set) = self.pending_children.get_mut(&entry.parent_ino) {
                 set.remove(old_name);
                 if set.is_empty() {
                     self.pending_children.remove(&entry.parent_ino);
+                }
+            }
+        }
+        // If `new_path` already had a shadow entry, drop it cleanly:
+        // remove its bytes from total_bytes, drain its pending_children
+        // slot, and clear any tombstone (otherwise readdir would still
+        // hide the destination).
+        if let Some(prior_dest) = self.entries.remove(new_path) {
+            self.total_bytes = self.total_bytes.saturating_sub(prior_dest.data.len());
+            if let Some(dest_name) = path_basename(new_path) {
+                if let Some(set) = self.pending_children.get_mut(&prior_dest.parent_ino) {
+                    set.remove(dest_name);
+                    if set.is_empty() {
+                        self.pending_children.remove(&prior_dest.parent_ino);
+                    }
                 }
             }
         }
@@ -294,6 +312,9 @@ impl ShadowStore {
                 .or_default()
                 .insert(new_name.to_string());
         }
+        // Tombstone the old path so a follow-up DELETE chases any
+        // in-flight PUT that committed under the old name.
+        self.tombstones.insert(old_path.to_string());
         entry.parent_ino = new_parent_ino;
         self.seq += 1;
         entry.seq = self.seq;
@@ -624,6 +645,11 @@ mod tests {
         assert_eq!(entry.parent_ino, 6);
         assert!(s.pending_children(5).is_none(), "old parent's set drained");
         assert!(s.pending_children(6).unwrap().contains("y.md"));
+        // Old path must be tombstoned so a worker that already
+        // snapshotted /a/x.md and is mid-PUT chases it with a
+        // DELETE — otherwise a LocalOnly rename can leak the old
+        // path onto the server.
+        assert!(s.is_tombstoned("/a/x.md"));
     }
 
     #[test]
@@ -636,6 +662,23 @@ mod tests {
         s.rename("/src", "/dest", 1).unwrap();
         assert!(!s.is_tombstoned("/dest"));
         assert!(s.get("/dest").is_some());
+    }
+
+    #[test]
+    fn rename_replaces_dest_entry_and_adjusts_total_bytes() {
+        // Renaming over an existing shadow entry must drop the old
+        // dest's bytes from total_bytes; otherwise a subsequent
+        // write_at on the new path falsely trips TotalCapExceeded.
+        let mut s = ShadowStore::with_caps(64, 32);
+        s.create_local("/src", 1);
+        s.write_at("/src", 0, b"abcdefghij").unwrap(); // 10 bytes
+        s.create_local("/dest", 1);
+        s.write_at("/dest", 0, b"0123456789").unwrap(); // 10 bytes
+        assert_eq!(s.total_bytes(), 20);
+        s.rename("/src", "/dest", 1).unwrap();
+        assert_eq!(s.total_bytes(), 10, "old dest bytes were reclaimed");
+        // New /dest entry holds the bytes from /src.
+        assert_eq!(s.get("/dest").unwrap().data, b"abcdefghij");
     }
 
     #[test]
