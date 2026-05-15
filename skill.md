@@ -56,18 +56,15 @@ keeps working, so no command line breaks.
 
 ### Existing user on a new machine
 
-After `veda init` writes a fresh anon account on the new machine, you don't
-want that — you want the claimed account. Two options:
+Skip `veda init` — it would mint a fresh anon account you don't want. Pick one:
 
 ```sh
-# Option A: paste the api_key from the old machine
-veda login --api-key vk_…   # account key → still need 'veda init' afterwards? no:
-                            # use the equivalent below for a one-shot flow
+# A. Paste the vk_ key from the old machine. Self-contained, no prompts.
+veda login --api-key vk_…
+veda workspace add default          # mint a fresh wk_ for the server's default workspace
 
-# Option B: log in with email/password
-rm ~/.config/veda/config.toml             # clear the anon state veda init wrote
-veda --server https://veda.dbpaas.dingdongxiaoqu.com init \
-    --login --email you@example.com      # prompts password
+# B. Email/password login (use when no vk_ on hand).
+veda init --login --email you@example.com    # prompts for password
 ```
 
 ## Path syntax
@@ -75,26 +72,25 @@ veda --server https://veda.dbpaas.dingdongxiaoqu.com init \
 Remote paths are plain absolute paths starting with `/`, scoped to the active workspace.
 The CLI **does not accept** `:/path` syntax — `:` is rejected as an invalid character.
 
-## Setup
+## Auth & workspace reference
 
-If `veda status` reports unconfigured (or any `veda <cmd>` errors with "no
-API key configured"), the user hasn't onboarded yet. Single-command bootstrap:
+Onboarding variants (see Bootstrap above for the default flow):
 
 ```sh
 veda init                                  # zero-prompt anonymous onboard (default)
-veda init --email X --password Y           # register a named account (non-interactive)
-veda init --login --email X --password Y   # attach an existing account silently
+veda init --email X --password Y           # register a named account
+veda init --login --email X --password Y   # attach an existing account
 veda init --workspace-name dogfood         # named mode with custom workspace name
+veda init --non-interactive --email X --password Y  # CI/script mode: fail instead of prompt
 veda claim --email X                       # upgrade an existing anon account to named
 ```
 
-`veda status` shows current config + server reachability (workspace line marks
-the active profile with ★). `veda login --api-key K` accepts both `vk_*`
-(account) and `wk_*` (workspace) keys; in either case it **clears all stored
-workspace profiles** along with the other auth slot — the old wk_ aliases
-were minted under the previous account/key and would 401 against the new
-identity. After pasting a `vk_`, run `veda workspace add <alias>` to mint a
-fresh wk_ for whichever server-side workspace you need.
+`veda login --api-key K` accepts both `vk_*` (account) and `wk_*` (workspace)
+keys; in either case it **clears all stored workspace profiles** along with
+the other auth slot — old wk_ aliases were minted under the previous
+account/key and would 401 against the new identity. After pasting a `vk_`,
+run `veda workspace add <alias>` to mint a fresh wk_ for whichever
+server-side workspace you need.
 
 ### Multiple workspace profiles
 
@@ -124,7 +120,7 @@ prints the target workspace alias to stderr so the caller can audit logs.
 
 ```sh
 veda cp ./README.md /docs/readme.md         # upload (UTF-8 text only)
-veda cp ./src /code -r                       # recursive directory upload
+veda cp ./src /code                          # directory upload — recursion is automatic on a dir src
 veda cp - /notes/scratch < some-input       # from stdin (use "-" as src)
 veda ls /docs                                # list dir
 veda cat /docs/readme.md                     # full content
@@ -244,13 +240,42 @@ Output is JSON-line (one row per line).
 
 ### FUSE mount (only if installed with --with-fuse)
 
+macOS needs `brew install macfuse` first. Linux uses libfuse3 (usually preinstalled).
+GitLab release stream doesn't ship `veda-fuse` for `aarch64-apple-darwin` (cross-link
+blocker, see `install.sh`); Apple Silicon users build from source or use the CLI only.
+
 ```sh
-veda-fuse mount /mnt/veda --server $SERVER --key $WORKSPACE_KEY
-# now use ripgrep, ls, $EDITOR, etc. on /mnt/veda
+veda-fuse mount --server $SERVER --key $WORKSPACE_KEY /mnt/veda
+# → prints "veda: daemon log → ~/.cache/veda-fuse/daemon.log"
+# → prints "veda: mounted (pid 12345)" and returns immediately
 veda-fuse umount /mnt/veda
 ```
 
-Every mounted directory exposes two read-only summary sidecars:
+Defaults to **daemon mode**: the command forks, detaches stdio, and the parent
+returns as soon as the FUSE mount handshake completes. Pass `--foreground` to
+keep the process attached to the terminal (logs go to stdout/stderr instead of
+the daemon log file).
+
+Mount flags / env vars:
+- `--server <URL>` / `VEDA_SERVER` — server URL (required)
+- `--key <KEY>` / `VEDA_KEY` — workspace key `wk_…` (required)
+- `--foreground` — block in terminal, no daemon log
+- `--cache-size <MB>` — read cache size (default 128)
+- `--attr-ttl <SEC>` — attr cache TTL (default 5)
+- `--allow-other` — share the mount with other UIDs (needs root in some envs)
+- `--read-only` — RO mount
+- `--debug` — verbose FUSE-layer logging
+
+Diagnostics on failure: the parent prints either the preflight error directly
+(e.g. `server health check failed (stat '/' at …)`) or `daemon exited before
+mount was ready (exit N; check ~/.cache/veda-fuse/daemon.log for tracing
+output)`. The daemon log captures the full startup trace — SSE connection,
+FUSE init, any panic — in append mode.
+
+#### Summary sidecars (`.abstract` / `.overview`)
+
+When the server has summary capability enabled (the default), every mounted
+directory exposes two read-only sidecar files:
 
 ```sh
 cat /mnt/veda/docs/.abstract     # L0 one-sentence summary
@@ -258,22 +283,16 @@ cat /mnt/veda/docs/.overview     # L1 ~2k-token detailed summary
 ls -a /mnt/veda/docs             # includes .abstract / .overview
 ```
 
-The sidecars are server-generated; you can't write them (EROFS). Each
-behaves like a regular file once `cat` returns — `head`, `wc`, etc.
-work normally. If the server hasn't finished generating a summary yet,
-`cat` returns `summary pending; retry after a few seconds`.
+Sidecars are server-generated and read-only (EROFS on write). Each acts like a
+regular file once `cat` returns — `head`, `wc`, etc. work normally. Not-yet-ready
+summaries return `summary pending; retry after a few seconds`. Servers built
+without summary support return HTTP 501 and the sidecars are hidden (ENOENT).
 
-**Legacy collision**: if a pre-existing workspace contains a real file
-literally named `.abstract` or `.overview` (created before the
-reserved-name guard landed), the FUSE sidecar shadows it on read.
-The real file is still accessible via the CLI (`veda cat`,
-`veda mv` to rename it out of the way) — new writes to those names
-are now rejected by the server.
-
-**Workspace-root sidecar**: `/mnt/veda/.abstract` and
-`/mnt/veda/.overview` are not implemented (server has no dentry for
-the root path). They return ENOENT; use a subdirectory's sidecar
-instead.
+`.abstract` / `.overview` directly at `/mnt/veda/` (workspace root) are not
+implemented — use a subdirectory. If the workspace pre-dates the reserved-name
+guard and contains real files named `.abstract` or `.overview`, the FUSE
+sidecar shadows them on read; the real file is still reachable via `veda cat` /
+`veda mv` to rename it out of the way.
 
 ## Decision rules — pick the right command
 
@@ -294,6 +313,8 @@ instead.
 
 ## Error handling
 
+### CLI
+
 | Error message                          | Meaning              | Fix                                              |
 |----------------------------------------|---------------------|--------------------------------------------------|
 | `invalid path: invalid character in segment: :` | Used `:/path` syntax | Drop the `:` — paths are plain `/path`     |
@@ -303,7 +324,17 @@ instead.
 | `connection refused` / `Empty reply from server` | Server unreachable / hung | `veda status` (checks reachability); verify `server_url` |
 | `401 unauthorized`                     | API key invalid      | If you have email/password: `veda init --login --email …`; else paste a fresh key with `veda login --api-key`                 |
 | `Summary not ready yet (summary pending)` (exit 2) | L0/L1 generation is async | Wait ~5s and retry, or `veda cat` for raw content |
+| `Summary unavailable on this server` (exit 3) | Server returned HTTP 501 — summary feature disabled | Use `veda cat` for raw content; abstract/overview won't work against this server |
 | 4xx with JSON error body               | API error            | Echo server's `error` field to user              |
+
+### FUSE (veda-fuse mount)
+
+| Symptom                                | Meaning              | Fix                                              |
+|----------------------------------------|---------------------|--------------------------------------------------|
+| `server health check failed (stat '/' at …)` (exit 1, immediate) | Preflight failed in daemon child — wrong URL, unreachable server, or bad key | Verify `--server` / `--key`; child writes this error through the readiness pipe so the parent prints it verbatim |
+| `daemon exited before mount was ready (exit N; check …)` | Daemon child crashed after preflight, before FUSE init | Read `~/.cache/veda-fuse/daemon.log` — full tracing output is there. `killed by signal SIGILL` indicates a fork/runtime corruption (file a bug) |
+| Mountpoint hangs / `Transport endpoint is not connected` | Daemon process died after a successful mount | `pgrep -af veda-fuse` to confirm; if no process, run `diskutil unmount force <path>` (macOS) or `fusermount -u <path>` (Linux) and re-mount |
+| `.abstract` / `.overview` return ENOENT in a mounted dir | Server is built without summary capability (HTTP 501) | Expected — sidecars are hidden when server doesn't support them |
 
 ## Don't do
 
