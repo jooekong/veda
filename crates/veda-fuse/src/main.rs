@@ -1,6 +1,6 @@
 use veda_fuse::{client, fs, sse};
 
-use std::os::fd::{AsRawFd, FromRawFd, RawFd};
+use std::os::fd::{AsRawFd, OwnedFd, RawFd};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -81,13 +81,17 @@ fn main() -> anyhow::Result<()> {
 }
 
 fn cmd_mount(args: MountArgs) -> anyhow::Result<()> {
-    // No pre-flight stat here — that has to happen after fork on
-    // daemon mode, otherwise macOS's libsystem_pthread (left in an
-    // inconsistent state by the throwaway tokio runtime that
-    // reqwest::blocking::Client spawns under the hood) kills the
-    // child with SIGILL before it can even start tracing. Foreground
-    // mode does its preflight inline below; daemon mode does it in
-    // the child and propagates failure back via the readiness pipe.
+    // No pre-flight stat here — observed behaviour on macOS
+    // (Darwin 24.6): building a reqwest::blocking::Client in the
+    // parent and running it before fork() makes the eventual fork
+    // child crash with SIGILL before tracing initialises. Removing
+    // the pre-fork client makes daemon mount succeed. The exact
+    // mechanism is unconfirmed (likely some post-fork state from
+    // the tokio runtime that reqwest spawns under the hood), but
+    // the operational rule is clear: do not touch reqwest in the
+    // parent. Foreground keeps its inline preflight (no fork at
+    // all); daemon mode runs preflight in the child and pipes the
+    // error back to the parent.
 
     let config = fs::FuseConfig {
         attr_ttl: Duration::from_secs(args.attr_ttl),
@@ -121,7 +125,6 @@ fn cmd_mount(args: MountArgs) -> anyhow::Result<()> {
     // pool of fds that became stale in the child — every FUSE op then
     // returned I/O error because no HTTP request could complete.
     let (read_fd, write_fd) = nix::unistd::pipe()?;
-    let read_raw = read_fd.as_raw_fd();
     let write_raw = write_fd.as_raw_fd();
 
     // Resolve the daemon log path in the parent so it can be reported
@@ -134,7 +137,10 @@ fn cmd_mount(args: MountArgs) -> anyhow::Result<()> {
             if let Some(ref p) = log_path {
                 eprintln!("veda: daemon log → {}", p.display());
             }
-            wait_for_child_ready(read_raw, child, log_path.as_deref())
+            // Hand the OwnedFd to wait_for_child_ready so it owns the
+            // close. Passing only the raw fd while keeping `read_fd`
+            // in scope would double-close on drop.
+            wait_for_child_ready(read_fd, child, log_path.as_deref())
         }
         nix::unistd::ForkResult::Child => {
             drop(read_fd);
@@ -154,15 +160,13 @@ fn cmd_mount(args: MountArgs) -> anyhow::Result<()> {
             info!(mount = %args.mountpoint, server = %args.server, "mounting (background)");
 
             let client = client::VedaClient::new(&args.server, &args.key);
-            // Preflight stat AFTER fork. Doing it in the parent would
-            // spawn a tokio worker thread inside the throwaway
-            // reqwest::blocking::Client; on macOS the libsystem_pthread
-            // state that leaves behind makes the eventual fork()
-            // child crash with SIGILL before tracing is initialized.
-            // Doing it here is safe (we're single-threaded post-fork
-            // until SSE/signal threads spawn inside mount_and_serve)
-            // and the readiness pipe carries the error back to the
-            // parent so the user still gets fail-fast UX.
+            // Preflight stat AFTER fork. The parent does NOT run any
+            // reqwest call before fork on macOS — see the long
+            // comment at the top of cmd_mount. Running it here is
+            // safe (single-threaded post-fork until SSE/signal
+            // threads spawn inside mount_and_serve), and the
+            // readiness pipe carries the error back to the parent
+            // so the user still gets fail-fast UX.
             if let Err(e) = client.stat("/") {
                 let msg = format!("server health check failed (stat '/' at {}): {e}", args.server);
                 tracing::error!("{msg}");
@@ -288,12 +292,14 @@ fn redirect_stdio_for_daemon(log_path: Option<&Path>) {
 }
 
 fn wait_for_child_ready(
-    read_fd: RawFd,
+    read_fd: OwnedFd,
     child: nix::unistd::Pid,
     log_path: Option<&Path>,
 ) -> anyhow::Result<()> {
     use std::io::Read;
-    let mut pipe_read = unsafe { std::fs::File::from_raw_fd(read_fd) };
+    // OwnedFd → File: File now owns the fd, drops at end of fn. The
+    // original `read_fd` is moved here so no double-close.
+    let mut pipe_read = std::fs::File::from(read_fd);
     let mut first = [0u8; 1];
 
     match pipe_read.read(&mut first) {
@@ -304,10 +310,12 @@ fn wait_for_child_ready(
         Ok(1) => {
             // Any non-'R' first byte signals a structured error
             // frame: the child sends the human-readable message
-            // through the pipe and then closes it. Read the rest and
-            // propagate as the user-facing error.
+            // through the pipe and then closes it. Read the rest,
+            // reap the child so it doesn't linger as a zombie, and
+            // propagate the message.
             let mut rest = Vec::with_capacity(256);
             let _ = pipe_read.read_to_end(&mut rest);
+            let _ = nix::sys::wait::waitpid(child, None);
             let mut full = Vec::with_capacity(1 + rest.len());
             full.push(first[0]);
             full.extend_from_slice(&rest);
