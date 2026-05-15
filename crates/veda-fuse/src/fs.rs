@@ -22,7 +22,7 @@ const BLOCK_SIZE: u32 = 512;
 /// Both are read-only — see [`is_magic_name`] and the lookup / write
 /// branches in `Filesystem` below. Order is fixed (.abstract before
 /// .overview) so behaviour is deterministic across runs.
-const MAGIC_NAMES: &[(&str, SummaryKind)] = &[
+pub(crate) const MAGIC_NAMES: &[(&str, SummaryKind)] = &[
     (".abstract", SummaryKind::Abstract),
     (".overview", SummaryKind::Overview),
 ];
@@ -108,7 +108,7 @@ pub type DirCacheMap = Arc<Mutex<HashMap<u64, DirCacheEntry>>>;
 /// directory path, magic basename)`. Entries fall out naturally on
 /// TTL expiry so a recently-arrived summary becomes visible again
 /// on the next lookup.
-type SidecarMissCache = Arc<Mutex<HashMap<(String, &'static str), Instant>>>;
+pub type SidecarMissCache = Arc<Mutex<HashMap<(String, &'static str), Instant>>>;
 
 pub struct VedaFs {
     client: Arc<VedaClient>,
@@ -123,7 +123,7 @@ pub struct VedaFs {
     /// Commit queue worker handle (held alongside shadow). Send Touch
     /// after every shadow write so the worker can debounce and PUT.
     commit_queue: Option<CommitQueue>,
-    /// Mount-life cache of `/v1/capabilities.summary_enabled`.
+    /// Mount-life cache of `/capabilities.summary_enabled`.
     /// Probed once at construction in `main.rs::mount_fs`; `readdir`
     /// skips advertising magic sidecars when this is `false`, so
     /// deployments without `[llm]` configured don't surface phantom
@@ -144,7 +144,7 @@ pub struct VedaFs {
 
 impl VedaFs {
     /// Build a FUSE filesystem. `summary_enabled` is the cached
-    /// answer from `/v1/capabilities` (see `mount_fs` in `main.rs`);
+    /// answer from `/capabilities` (see `mount_fs` in `main.rs`);
     /// when `false`, `readdir` won't advertise synthetic summary
     /// sidecars so deployments without `[llm]` configured don't
     /// surface phantom entries. Tests typically pass `true` (the
@@ -188,6 +188,7 @@ impl VedaFs {
     pub fn inodes(&self) -> Arc<Mutex<InodeTable>> { self.inodes.clone() }
     pub fn read_cache(&self) -> Arc<Mutex<ReadCache>> { self.read_cache.clone() }
     pub fn dir_cache(&self) -> DirCacheMap { self.dir_cache.clone() }
+    pub fn sidecar_miss(&self) -> SidecarMissCache { self.sidecar_miss.clone() }
 
     fn alloc_fh(&mut self) -> u64 {
         let fh = self.next_fh;

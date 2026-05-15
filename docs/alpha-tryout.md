@@ -357,6 +357,8 @@ Grafana 在 `http://localhost:3001`（默认 admin/admin）。Prometheus data so
 - 同一文件写入与删除若在 worker 同批次内并发处理（概率低），可能短期向 Milvus 留下孤儿向量
 - Reconciler 默认每 6 小时（`reconciler.interval_secs = 21600`）跑一次，会清理孤儿
 - `veda_fs_events` 默认保留 14 天（`retention.events_retention_days = 14`）；客户端如果离线超过 14 天，重连会收到 410 并 cursor 跳到 `current_max_id`
+- `veda_outbox` 中 `completed`/`dead` 行默认保留 1 天（`retention.outbox_retention_days = 1`）后被后台 sweep 清掉。`pending`/`processing` 行不论年龄都不动
+- **历史 timezone 数据未在地迁移**：alpha 把 MySQL 连接 `time_zone` 钉成 `+00:00`（commit `a74ed6c`），但既存行的时间戳没回填。如果你曾经用过更早版本，请直接 `docker compose down -v` 清库重部，不做 in-place migration
 
 ---
 

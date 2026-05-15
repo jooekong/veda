@@ -235,6 +235,18 @@ impl MetadataStore for MockMetadataStore {
         Ok((before - st.fs_events.len()) as u64)
     }
 
+    async fn insert_fs_event_direct(&self, event: &FsEvent) -> Result<()> {
+        let mut st = self.state.lock().unwrap();
+        let mut e = event.clone();
+        // Mirror the tx-flavored insert: id=0 means "assign one" so callers
+        // can leave the field defaulted.
+        if e.id == 0 {
+            e.id = st.fs_events.iter().map(|x| x.id).max().unwrap_or(0) + 1;
+        }
+        st.fs_events.push(e);
+        Ok(())
+    }
+
     async fn storage_stats(&self, workspace_id: &str) -> Result<StorageStats> {
         let st = self.state.lock().unwrap();
         let mut total_files: i64 = 0;

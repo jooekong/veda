@@ -76,6 +76,12 @@ pub enum FsEventType {
     Update,
     Delete,
     Move,
+    /// Background summary worker just finished a directory-level summary.
+    /// `path` is the parent directory whose `.abstract` / `.overview`
+    /// sidecars are now valid. Carries no `file_id`. FUSE consumers use
+    /// this to clear their per-dir sidecar-miss cache without disturbing
+    /// read/attr/dir caches (no actual file contents changed).
+    SummaryReady,
 }
 
 impl FsEventType {
@@ -85,6 +91,7 @@ impl FsEventType {
             Self::Update => "update",
             Self::Delete => "delete",
             Self::Move => "move",
+            Self::SummaryReady => "summary_ready",
         }
     }
 }

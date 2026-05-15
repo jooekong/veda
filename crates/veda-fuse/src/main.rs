@@ -290,6 +290,7 @@ fn mount_and_serve(
     let mut watcher = sse::SseWatcher::start(
         server, key,
         vedafs.inodes(), vedafs.read_cache(), vedafs.dir_cache(),
+        vedafs.sidecar_miss(),
         cursor_file,
     );
     let options = build_fuse_options(opts);

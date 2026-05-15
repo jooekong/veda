@@ -134,6 +134,15 @@ impl MetadataStore for MockMetaFull {
         st.retain(|e| e.created_at >= cutoff);
         Ok((before - st.len()) as u64)
     }
+    async fn insert_fs_event_direct(&self, event: &FsEvent) -> Result<()> {
+        let mut st = self.fs_events.lock().unwrap();
+        let mut e = event.clone();
+        if e.id == 0 {
+            e.id = st.iter().map(|x| x.id).max().unwrap_or(0) + 1;
+        }
+        st.push(e);
+        Ok(())
+    }
     async fn storage_stats(&self, ws: &str) -> Result<StorageStats> {
         let dentries = self.dentries.lock().unwrap();
         let files = self.files.lock().unwrap();
@@ -548,6 +557,9 @@ impl MetadataStore for MockMeta {
         _cutoff: chrono::DateTime<chrono::Utc>,
     ) -> Result<u64> {
         Ok(0)
+    }
+    async fn insert_fs_event_direct(&self, _event: &FsEvent) -> Result<()> {
+        Ok(())
     }
     async fn storage_stats(&self, _ws: &str) -> Result<StorageStats> {
         Ok(StorageStats {

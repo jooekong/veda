@@ -145,6 +145,13 @@ pub struct RetentionConfig {
     /// must resync via `list_dir` then resubscribe.
     #[serde(default = "default_retention_days")]
     pub events_retention_days: i64,
+    /// `veda_outbox` rows in terminal status (`completed`/`dead`) older
+    /// than this many days are deleted on each sweep. Default: 1 day —
+    /// completed tasks have no downstream consumer once the worker logs
+    /// success, so the only reason to keep them is short-window debugging.
+    /// Set higher if you want longer post-mortem visibility.
+    #[serde(default = "default_outbox_retention_days")]
+    pub outbox_retention_days: i64,
 }
 
 impl Default for RetentionConfig {
@@ -153,6 +160,7 @@ impl Default for RetentionConfig {
             enabled: default_retention_enabled(),
             interval_secs: default_retention_interval_secs(),
             events_retention_days: default_retention_days(),
+            outbox_retention_days: default_outbox_retention_days(),
         }
     }
 }
@@ -167,6 +175,10 @@ fn default_retention_interval_secs() -> u64 {
 
 fn default_retention_days() -> i64 {
     14
+}
+
+fn default_outbox_retention_days() -> i64 {
+    1
 }
 
 #[derive(Debug, Deserialize)]
@@ -268,6 +280,7 @@ impl ServerConfig {
         env_parse("VEDA_RETENTION_ENABLED", &mut self.retention.enabled);
         env_parse("VEDA_RETENTION_INTERVAL_SECS", &mut self.retention.interval_secs);
         env_parse("VEDA_RETENTION_EVENTS_DAYS", &mut self.retention.events_retention_days);
+        env_parse("VEDA_RETENTION_OUTBOX_DAYS", &mut self.retention.outbox_retention_days);
         env_parse("VEDA_DEV_MODE", &mut self.dev_mode);
 
         if let Ok(v) = std::env::var("VEDA_METRICS_TOKEN") {

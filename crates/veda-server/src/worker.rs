@@ -533,6 +533,23 @@ impl Worker {
         };
         self.meta.upsert_summary(&dir_summary).await?;
 
+        // Broadcast a SummaryReady fs_event so FUSE clients can drop their
+        // `(dir, .abstract/.overview)` miss-cache entry immediately instead
+        // of waiting the full attr_ttl (~5s) for the next probe. Failure
+        // here is non-fatal — clients still recover via TTL expiry, so we
+        // log and continue rather than rolling back the summary write.
+        let summary_event = FsEvent {
+            id: 0,
+            workspace_id: workspace_id.to_string(),
+            event_type: FsEventType::SummaryReady,
+            path: dir_path.to_string(),
+            file_id: None,
+            created_at: now,
+        };
+        if let Err(e) = self.meta.insert_fs_event_direct(&summary_event).await {
+            warn!(dir_path, err = %e, "summary_ready event emit failed (sidecar miss cache will fall back to TTL)");
+        }
+
         let embeddings = self.embedding.embed(&[l0.clone()]).await?;
         if let Some(vector) = embeddings.into_iter().next() {
             let summary_emb = SummaryWithEmbedding {

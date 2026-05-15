@@ -1067,3 +1067,91 @@ async fn query_events_filtered_does_not_leak_into_sibling_dirs() {
         .unwrap();
     assert_eq!(events_with_slash.len(), 2);
 }
+
+/// Reserved-name sweep: every mutating call site that creates or moves
+/// content into a path MUST reject the reserved sidecar basenames
+/// (`.abstract`, `.overview`). The path-layer helper is unit-tested in
+/// `crates/veda-core/src/path.rs`, but the *wiring* — that each public
+/// FsService entry point actually calls it — only shows up here.
+///
+/// Drives both reserved names against all five mutating entry points so
+/// a future contributor can't silently miss a call site by adding a new
+/// reserved name (just extend `RESERVED` below) or adding a new mutator
+/// (add it to the sweep here).
+#[tokio::test]
+async fn reserved_basename_rejected_at_every_mutating_call_site() {
+    const RESERVED: &[&str] = &[".abstract", ".overview"];
+
+    fn is_reserved_err(e: &VedaError, reserved: &str) -> bool {
+        // The contract is `VedaError::InvalidPath` whose message names the
+        // basename and the word "reserved". Asserting both keeps the test
+        // honest if someone refactors the error variant.
+        match e {
+            VedaError::InvalidPath(msg) => msg.contains(reserved) && msg.contains("reserved"),
+            _ => false,
+        }
+    }
+
+    for reserved in RESERVED {
+        let (svc, _state) = make_service();
+
+        // ── write_file ──────────────────────────────────────────────
+        let err = svc
+            .write_file("ws1", &format!("/docs/{reserved}"), "x", None, None)
+            .await
+            .expect_err(&format!("write_file must reject /docs/{reserved}"));
+        assert!(
+            is_reserved_err(&err, reserved),
+            "write_file: expected InvalidPath reserved error, got {err:?}"
+        );
+
+        // ── append_file ─────────────────────────────────────────────
+        let err = svc
+            .append_file("ws1", &format!("/docs/{reserved}"), "x")
+            .await
+            .expect_err(&format!("append_file must reject /docs/{reserved}"));
+        assert!(
+            is_reserved_err(&err, reserved),
+            "append_file: expected InvalidPath reserved error, got {err:?}"
+        );
+
+        // ── mkdir ───────────────────────────────────────────────────
+        let err = svc
+            .mkdir("ws1", &format!("/docs/{reserved}"))
+            .await
+            .expect_err(&format!("mkdir must reject /docs/{reserved}"));
+        assert!(
+            is_reserved_err(&err, reserved),
+            "mkdir: expected InvalidPath reserved error, got {err:?}"
+        );
+
+        // Setup a source for the copy/rename cases. The source name is
+        // intentionally NOT reserved — copy_file / rename only reject the
+        // *destination* (see fs.rs:919-923, fs.rs:1199-1200), matching
+        // the documented rationale ("moving a legacy file out of a
+        // reserved slot is allowed; moving into one is not").
+        svc.write_file("ws1", "/docs/src.md", "src", None, None)
+            .await
+            .unwrap();
+
+        // ── copy_file (dst) ─────────────────────────────────────────
+        let err = svc
+            .copy_file("ws1", "/docs/src.md", &format!("/docs/{reserved}"))
+            .await
+            .expect_err(&format!("copy_file must reject dst /docs/{reserved}"));
+        assert!(
+            is_reserved_err(&err, reserved),
+            "copy_file dst: expected InvalidPath reserved error, got {err:?}"
+        );
+
+        // ── rename (dst) ────────────────────────────────────────────
+        let err = svc
+            .rename("ws1", "/docs/src.md", &format!("/docs/{reserved}"))
+            .await
+            .expect_err(&format!("rename must reject dst /docs/{reserved}"));
+        assert!(
+            is_reserved_err(&err, reserved),
+            "rename dst: expected InvalidPath reserved error, got {err:?}"
+        );
+    }
+}

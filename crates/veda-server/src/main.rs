@@ -11,7 +11,7 @@ use tracing::info;
 use veda_core::service::collection::CollectionService;
 use veda_core::service::fs::FsService;
 use veda_core::service::search::SearchService;
-use veda_core::store::{LlmService, VectorStore};
+use veda_core::store::{LlmService, TaskQueue, VectorStore};
 use veda_pipeline::embedding::EmbeddingProvider;
 use veda_pipeline::llm::LlmProvider;
 use veda_store::{MilvusStore, MysqlStore, PoolConfig};
@@ -165,13 +165,16 @@ async fn main() -> anyhow::Result<()> {
 
     let retention_handle = if cfg.retention.enabled {
         let interval = std::time::Duration::from_secs(cfg.retention.interval_secs.max(60));
-        let days = cfg.retention.events_retention_days.max(1);
+        let events_days = cfg.retention.events_retention_days.max(1);
+        let outbox_days = cfg.retention.outbox_retention_days.max(1);
         let svc = app_state.fs_service.clone();
+        let outbox = mysql.clone();
         let mut rx = shutdown_rx.clone();
         info!(
             interval_secs = cfg.retention.interval_secs,
-            events_retention_days = days,
-            "fs_events retention sweep enabled"
+            events_retention_days = events_days,
+            outbox_retention_days = outbox_days,
+            "retention sweep enabled (fs_events + outbox)"
         );
         Some(tokio::spawn(async move {
             // Drift the first sweep by `interval` so a fresh boot doesn't
@@ -186,16 +189,31 @@ async fn main() -> anyhow::Result<()> {
                         if *rx.borrow() { return; }
                     }
                 }
-                let cutoff = chrono::Utc::now() - chrono::Duration::days(days);
-                match svc.prune_events_older_than(cutoff).await {
-                    Ok(n) if n > 0 => info!(deleted = n, cutoff = %cutoff, "fs_events retention swept"),
-                    Ok(_) => {}
+                let now = chrono::Utc::now();
+                let events_cutoff = now - chrono::Duration::days(events_days);
+                match svc.prune_events_older_than(events_cutoff).await {
+                    Ok(n) => {
+                        ::metrics::counter!("veda_fs_events_retention_swept_total").increment(n);
+                        if n > 0 {
+                            info!(deleted = n, cutoff = %events_cutoff, "fs_events retention swept");
+                        }
+                    }
                     Err(e) => tracing::warn!(err = %e, "fs_events retention sweep failed"),
+                }
+                let outbox_cutoff = now - chrono::Duration::days(outbox_days);
+                match outbox.prune_outbox_older_than(outbox_cutoff).await {
+                    Ok(n) => {
+                        ::metrics::counter!("veda_outbox_retention_swept_total").increment(n);
+                        if n > 0 {
+                            info!(deleted = n, cutoff = %outbox_cutoff, "outbox retention swept");
+                        }
+                    }
+                    Err(e) => tracing::warn!(err = %e, "outbox retention sweep failed"),
                 }
             }
         }))
     } else {
-        info!("fs_events retention sweep disabled");
+        info!("retention sweep disabled (fs_events + outbox)");
         None
     };
 

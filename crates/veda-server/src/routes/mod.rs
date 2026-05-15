@@ -27,8 +27,8 @@ pub fn build_router(state: Arc<AppState>) -> Router {
     Router::new()
         .route("/healthz", get(healthz))
         .route("/install.sh", get(install_script))
+        .route("/capabilities", get(capabilities))
         .route("/v1/ready", get(ready))
-        .route("/v1/capabilities", get(capabilities))
         .route("/v1/metrics", get(metrics_endpoint))
         .merge(account::routes())
         .merge(fs::routes())
@@ -132,6 +132,12 @@ async fn healthz() -> &'static str {
 /// `AppState::summary_enabled`. Extend with additional flags
 /// when new optional features ship — keep the shape backwards-
 /// compatible so old clients ignore unknown keys.
+///
+/// Mounted at `/capabilities` (NOT `/v1/capabilities`) so a hardened
+/// reverse proxy that enforces auth on the entire `/v1/*` namespace
+/// still lets the probe through — same reasoning as `/healthz`. Without
+/// this, a 401 from the proxy would let FUSE silently fall back to
+/// "assume summary_enabled=true" and surface phantom sidecars.
 async fn capabilities(State(state): State<Arc<AppState>>) -> Response {
     Json(capabilities_payload(state.summary_enabled)).into_response()
 }

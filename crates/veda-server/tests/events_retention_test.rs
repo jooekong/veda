@@ -10,7 +10,7 @@ use std::sync::Arc;
 use serde::Deserialize;
 use uuid::Uuid;
 use veda_core::service::fs::FsService;
-use veda_core::store::{AuthStore, MetadataStore};
+use veda_core::store::{AuthStore, TaskQueue};
 use veda_store::MysqlStore;
 use veda_types::{Workspace, WorkspaceStatus};
 
@@ -146,6 +146,77 @@ async fn events_path_prefix_filters_at_query_layer() {
         2,
         "/docs/ prefix must not match /docs_alt/* — got {} events",
         docs_only.len()
+    );
+
+    cleanup(&mysql, &ws).await;
+}
+
+/// Outbox retention sweep: terminal-status rows (`completed`, `dead`) past
+/// the cutoff are deleted, while `pending`/`processing` rows survive
+/// regardless of age. This is the alpha-soft S8 contract — the worker still
+/// processes everything that landed before the sweep ran, we just don't
+/// retain its tombstones forever.
+#[tokio::test]
+#[ignore]
+async fn outbox_retention_prunes_terminal_rows_only() {
+    let cfg = load_config();
+    let mysql = Arc::new(MysqlStore::new(&cfg.mysql.database_url).await.unwrap());
+    mysql.migrate().await.unwrap();
+    let ws = make_workspace(&mysql).await;
+    let pool = mysql.pool();
+
+    // Insert one row per status. Backdate everything so the sweep would
+    // eat all rows if it didn't filter by status — that lets a missing
+    // status filter fail the test loudly rather than silently passing.
+    let backdated = (chrono::Utc::now() - chrono::Duration::days(30)).naive_utc();
+    let payload = serde_json::json!({"workspace_id": ws, "marker": "outbox-retention-it"});
+    for status in ["completed", "dead", "pending", "processing"] {
+        sqlx::query(
+            r#"INSERT INTO veda_outbox
+               (workspace_id, event_type, payload, status, retry_count, max_retries, available_at, created_at)
+               VALUES (?, 'chunk_sync', CAST(? AS JSON), ?, 0, 5, ?, ?)"#,
+        )
+        .bind(&ws)
+        .bind(payload.to_string())
+        .bind(status)
+        .bind(backdated)
+        .bind(backdated)
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
+    let cutoff = chrono::Utc::now() - chrono::Duration::days(1);
+    let pruned = mysql.prune_outbox_older_than(cutoff).await.unwrap();
+    assert!(
+        pruned >= 2,
+        "expected at least 2 terminal rows pruned in this workspace, got {pruned}"
+    );
+
+    let surviving_terminal: i64 = sqlx::query_scalar(
+        r#"SELECT COUNT(*) FROM veda_outbox
+           WHERE workspace_id = ? AND status IN ('completed','dead')"#,
+    )
+    .bind(&ws)
+    .fetch_one(pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        surviving_terminal, 0,
+        "completed/dead rows must be gone after sweep"
+    );
+
+    let surviving_live: i64 = sqlx::query_scalar(
+        r#"SELECT COUNT(*) FROM veda_outbox
+           WHERE workspace_id = ? AND status IN ('pending','processing')"#,
+    )
+    .bind(&ws)
+    .fetch_one(pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        surviving_live, 2,
+        "pending/processing rows must survive regardless of age"
     );
 
     cleanup(&mysql, &ws).await;

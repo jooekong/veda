@@ -554,21 +554,25 @@ async fn fs_events_retention_cleans_old_rows() {
 
 > **已交付**（提前于本计划）：真 hybrid search（BM25 + Milvus 2.5 FTS + jieba）已在 0.1.4 上线，对应原 §6.5。
 
-### FUSE write-back + debounce + cancel-on-unlink (2026-05-15)
+### FUSE write-back + debounce + cancel-on-unlink (2026-05-15) ✅ 已交付
 
-触发：vim 在挂载点编辑文件报 `E72: Close error on swap file`，根因是 swap binary 同步打 server 被拒。详细设计、模块拆分、里程碑见 [fuse-writeback-plan.md](./fuse-writeback-plan.md)。Server 不动，工作集中在 `veda-fuse`，5 天。
+触发：vim 在挂载点编辑文件报 `E72: Close error on swap file`，根因是 swap binary 同步打 server 被拒。详细设计、模块拆分、里程碑见 [fuse-writeback-plan.md](./fuse-writeback-plan.md)。Server 不动，工作集中在 `veda-fuse`，5 天。**已落地 commits `d15d3f6` → `13edb01`**（含 destroy() drain、setattr-truncate writeback 修复、LocalOnly 跨 mark_dirty/truncate_to 保留）；87 unit tests pass，真挂载 vim/git/IDE 写零 server 误调。
+
+### S8 — outbox retention sweep (2026-05-15) ✅ 已交付
+
+`veda_outbox` terminal-status (`completed`/`dead`) 行 daily 扫描清理，镜像 `fs_events_retention_sweep` 模式。默认 `outbox_retention_days = 1`，可经 `VEDA_RETENTION_OUTBOX_DAYS` 覆盖。新增 metrics `veda_outbox_retention_swept_total` + `veda_fs_events_retention_swept_total`（对称补齐）。`crates/veda-server/tests/events_retention_test.rs::outbox_retention_prunes_terminal_rows_only` 是 ignored IT。
 
 ### CI / 部署流程跟进 (2026-05-15)
 
 - **CI publish veda-server binary**: 当前 `.gitlab-ci.yml` 只 build/publish `veda` (CLI) 和 `veda-fuse`，server 不在 release artifacts 里。所以远端 server 升级流程是"box 上 `cd /data/rust/veda && git checkout <tag> && cargo build -p veda-server` → install → systemctl restart"，跑一次 cargo 要 60s 起步。给 `build:linux-x86_64` job 加 `cargo build --release -p veda-server --bin veda-server` 步骤，加进 `artifacts.paths`，再补一个 `--assets-link` 给 GitLab release。改完后远端升级就能"curl 下载 → install → restart"，免 build。Linux-only 即可（server 只在 Linux 部署）。
 
-### Sidecar / capabilities 跟进（2026-05-15 交叉 review 留下）
+### Sidecar / capabilities 跟进（2026-05-15 交叉 review 留下） ✅ 已交付
 
-来自 commits `867cbdc` + `bcd209e` + `40eb738`,交叉 review verdict GO + 3 个 should-fix / nit 留作 post-alpha：
+来自 commits `867cbdc` + `bcd209e` + `40eb738`,交叉 review verdict GO + 3 个 should-fix / nit。三项全部在 alpha-closeout 一起做掉：
 
-- **SSE 主动清 sidecar miss cache**: summary worker 完成 `/docs` 时发 `summary_ready` SSE event,FUSE `invalidate_caches` 在 `sse.rs:289-327` 同步清 `sidecar_miss` cache 对应条目。当前用户最多等 `attr_ttl=5s` 才看见新 sidecar — 反应式 TTL 兜底,但 alpha+ 体验上值得做。
-- **`/v1/capabilities` 鉴权**: 当前路由 unauthenticated。`mod.rs:31`. 硬化部署 (反向代理对 `/v1/*` 强制 auth) 会让 probe fail-closed → fail-open 上去,FUSE 自动假设 enabled,可能误导。改成 `/healthz`-style 独立路径,或者 wire bearer 进 probe call.
-- **`FsService` reserved-name integration test**: `path.rs` 单元 test 覆盖 helper 自身,但 `crates/veda-core/tests/fs_service_test.rs` 没逐个 mutating 调用点 (write_file/append/mkdir/copy/rename) 验证 reject。helper 已 unit-tested + 调用点机械,low-risk,但加一个 per-entry sweep 可固化契约。
+- **SSE 主动清 sidecar miss cache** ✅: 新增 `FsEventType::SummaryReady`；summary worker 在 `handle_dir_summary_sync` 完成 upsert 后非事务写 fs_event；FUSE `SseWatcher` thread `sidecar_miss` 进 `invalidate_caches`，匹配到 `summary_ready` 早返回只清 `(path, .abstract|.overview)` 两条，read/dir/attr 缓存不动。410 也清整张 miss 表。
+- **`/v1/capabilities` 鉴权** ✅: 路由从 `/v1/capabilities` 迁到 `/capabilities`，与 `/healthz` 并列，反代对 `/v1/*` 强 auth 时不再误伤；FUSE `client.rs` URL 同步。
+- **`FsService` reserved-name integration test** ✅: `crates/veda-core/tests/fs_service_test.rs::reserved_basename_rejected_at_every_mutating_call_site` 跨 5 个 mutating 入口（write/append/mkdir/copy 目标/rename 目标）× 2 个保留名扫一遍。
 
 ---
 

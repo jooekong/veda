@@ -365,7 +365,8 @@ impl MysqlStore {
     available_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     lease_until TIMESTAMP NULL,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    INDEX idx_claim (status, available_at)
+    INDEX idx_claim (status, available_at),
+    INDEX idx_retention (status, created_at)
 )"#,
             r#"CREATE TABLE IF NOT EXISTS veda_fs_events (
     id BIGINT AUTO_INCREMENT PRIMARY KEY,
@@ -1020,6 +1021,11 @@ impl MetadataStore for MysqlStore {
             tokio::task::yield_now().await;
         }
         Ok(total)
+    }
+
+    async fn insert_fs_event_direct(&self, event: &FsEvent) -> Result<()> {
+        let mut conn = self.pool.acquire().await.map_err(storage_err)?;
+        insert_fs_event_conn(&mut conn, event).await
     }
 
     async fn storage_stats(&self, workspace_id: &str) -> Result<StorageStats> {
@@ -1858,6 +1864,51 @@ impl TaskQueue for MysqlStore {
                 .map_err(storage_err)?;
         }
         Ok(())
+    }
+
+    async fn prune_outbox_older_than(
+        &self,
+        cutoff: chrono::DateTime<chrono::Utc>,
+    ) -> Result<u64> {
+        // Mirror `prune_fs_events_older_than`: chunked DELETE so a single
+        // unbounded statement can't grab a large lock-list and stall live
+        // writers. Only terminal-status rows are eligible — never touch
+        // `pending`/`processing`, those are real work.
+        //
+        // `ORDER BY created_at, id` is required so the optimiser pins the
+        // delete to `idx_retention (status, created_at)` and each 5000-row
+        // chunk walks the index head-first instead of scanning the table.
+        //
+        // Cutoff is on `created_at`, NOT a real "finished_at" column —
+        // schema has no such field. Implication: tasks that sit pending
+        // for >N days and then transition to terminal in one batch (e.g.
+        // a server restart that processes a long backlog) get pruned on
+        // the very next sweep, losing post-mortem visibility. For alpha
+        // single-user this is acceptable; if/when this bites, the fix is
+        // a `finished_at TIMESTAMP NULL` column updated in complete/fail
+        // — a forward-only schema change under alpha's fresh-redeploy
+        // policy.
+        const CHUNK: u64 = 5000;
+        let mut total = 0u64;
+        loop {
+            let r = sqlx::query(
+                r#"DELETE FROM veda_outbox
+                   WHERE status IN ('completed','dead') AND created_at < ?
+                   ORDER BY created_at, id
+                   LIMIT 5000"#,
+            )
+            .bind(cutoff.naive_utc())
+            .execute(&self.pool)
+            .await
+            .map_err(storage_err)?;
+            let n = r.rows_affected();
+            total += n;
+            if n < CHUNK {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        Ok(total)
     }
 
     async fn has_pending_event(

@@ -78,7 +78,7 @@ struct SummaryResponseRaw {
     l1_overview: Option<String>,
 }
 
-/// Subset of `/v1/capabilities` we currently care about. Forward-
+/// Subset of `/capabilities` we currently care about. Forward-
 /// compatible: unknown fields are ignored, so a server that grows
 /// the response can ship before the client catches up.
 #[derive(Debug, Default, Clone, Copy, Deserialize)]
@@ -274,15 +274,18 @@ impl VedaClient {
         Self::check_status(status, &body)
     }
 
-    /// Probe the server's `/v1/capabilities` endpoint. Used at FUSE
+    /// Probe the server's `/capabilities` endpoint. Used at FUSE
     /// mount-init time to decide whether to advertise summary
     /// sidecars in `readdir`. Unauthenticated — the endpoint
-    /// reports only public bits about server config. On any error
-    /// the FUSE layer defaults to "assume the feature is on" and
-    /// relies on the per-directory ENOENT cache to suppress
-    /// phantom entries — see `fs.rs` `sidecar_recently_missing`.
+    /// reports only public bits about server config. Lives outside
+    /// the `/v1/*` namespace on purpose so a hardened reverse proxy
+    /// that gates `/v1/*` on auth still lets the probe through (same
+    /// reasoning as `/healthz`). On any error the FUSE layer defaults
+    /// to "assume the feature is on" and relies on the per-directory
+    /// ENOENT cache to suppress phantom entries — see `fs.rs`
+    /// `sidecar_recently_missing`.
     pub fn get_capabilities(&self) -> Result<Capabilities> {
-        let url = format!("{}/v1/capabilities", self.base);
+        let url = format!("{}/capabilities", self.base);
         let (status, body) = Self::send_text(self.http.get(&url))?;
         Self::check_status(status, &body)?;
         let api: ApiResponse<Capabilities> =
@@ -558,7 +561,7 @@ mod summary_tests {
         let caps = client.get_capabilities().unwrap();
         assert!(caps.summary_enabled);
         let captured = path_rx.recv_timeout(Duration::from_secs(2)).unwrap();
-        assert_eq!(captured, "/v1/capabilities");
+        assert_eq!(captured, "/capabilities");
     }
 
     #[test]

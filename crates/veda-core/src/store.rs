@@ -175,6 +175,12 @@ pub trait MetadataStore: Send + Sync {
         &self,
         cutoff: chrono::DateTime<chrono::Utc>,
     ) -> Result<u64>;
+    /// Insert a single `FsEvent` row outside of a transaction. Convenience
+    /// for callers that don't need to bundle event emission into a larger
+    /// metadata change (e.g. the summary worker emitting `summary_ready`
+    /// after a self-contained `upsert_summary`). Transactional inserts
+    /// still go through [`MetadataTx::insert_fs_event`].
+    async fn insert_fs_event_direct(&self, event: &FsEvent) -> Result<()>;
     async fn storage_stats(&self, workspace_id: &str) -> Result<StorageStats>;
     /// Update the `last_embedded_content_hash` watermark after a successful
     /// Milvus upsert. Worker uses this on the next claim to skip redundant
@@ -421,6 +427,14 @@ pub trait TaskQueue: Send + Sync {
         payload_key: &str,
         payload_value: &str,
     ) -> Result<bool>;
+    /// Delete `veda_outbox` rows in a terminal status (`completed` / `dead`)
+    /// whose `created_at < cutoff`, across all workspaces. Returns the number
+    /// of rows removed. Pending and processing rows are never touched. Called
+    /// periodically by the outbox retention task in `veda-server`.
+    async fn prune_outbox_older_than(
+        &self,
+        cutoff: chrono::DateTime<chrono::Utc>,
+    ) -> Result<u64>;
 }
 
 // ── Collection Meta Store ──────────────────────────────

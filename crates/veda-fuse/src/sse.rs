@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 use tracing::{debug, info, warn};
 
 use crate::cache::ReadCache;
-use crate::fs::{parent_path, DirCacheMap};
+use crate::fs::{parent_path, DirCacheMap, SidecarMissCache, MAGIC_NAMES};
 use crate::inode::InodeTable;
 
 const RECONNECT_MIN: Duration = Duration::from_secs(1);
@@ -37,6 +37,7 @@ impl SseWatcher {
         inodes: Arc<Mutex<InodeTable>>,
         read_cache: Arc<Mutex<ReadCache>>,
         dir_cache: DirCacheMap,
+        sidecar_miss: SidecarMissCache,
         cursor_file: PathBuf,
     ) -> Self {
         let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -81,7 +82,7 @@ impl SseWatcher {
                             new = new_cursor,
                             "SSE 410: cursor expired, resyncing"
                         );
-                        handle_cursor_expired(&inodes, &read_cache, &dir_cache);
+                        handle_cursor_expired(&inodes, &read_cache, &dir_cache, &sidecar_miss);
                         cursor = new_cursor;
                         // Only mark in-memory persisted state when the on-disk
                         // write actually succeeded — otherwise a process crash
@@ -137,6 +138,7 @@ impl SseWatcher {
                                         &inodes,
                                         &read_cache,
                                         &dir_cache,
+                                        &sidecar_miss,
                                     );
                                 }
                             }
@@ -274,6 +276,7 @@ fn handle_cursor_expired(
     inodes: &Arc<Mutex<InodeTable>>,
     read_cache: &Arc<Mutex<ReadCache>>,
     dir_cache: &DirCacheMap,
+    sidecar_miss: &SidecarMissCache,
 ) {
     if let Ok(mut t) = inodes.lock() {
         t.invalidate_all_attrs();
@@ -284,6 +287,9 @@ fn handle_cursor_expired(
     if let Ok(mut d) = dir_cache.lock() {
         d.clear();
     }
+    if let Ok(mut s) = sidecar_miss.lock() {
+        s.clear();
+    }
 }
 
 fn invalidate_caches(
@@ -292,7 +298,45 @@ fn invalidate_caches(
     inodes: &Arc<Mutex<InodeTable>>,
     read_cache: &Arc<Mutex<ReadCache>>,
     dir_cache: &DirCacheMap,
+    sidecar_miss: &SidecarMissCache,
 ) {
+    // SummaryReady: the sidecar listing at `path` is now valid. Three
+    // pieces of stale state may exist for the magic sidecars under
+    // this dir; each must drop so the next read/stat re-probes the
+    // server instead of serving cached placeholder data:
+    //   1. per-dir miss cache (the obvious one — caller never saw a
+    //      sidecar because we cached the ENOENT);
+    //   2. read cache for the sidecar path itself (caller had hit the
+    //      pending sidecar earlier and got the `SIDECAR_PENDING_BODY`
+    //      placeholder bytes cached);
+    //   3. synthetic attr for that path (size attribute reflected the
+    //      placeholder body, not the real summary).
+    // dir_cache stays untouched — the directory's real contents didn't
+    // change, only the synthetic sidecar entries inside it did.
+    if event_type == "summary_ready" {
+        if let Ok(mut guard) = sidecar_miss.lock() {
+            for (magic, _) in MAGIC_NAMES {
+                guard.remove(&(path.to_string(), *magic));
+            }
+        }
+        for (magic, _) in MAGIC_NAMES {
+            let sidecar_path = if path == "/" {
+                format!("/{magic}")
+            } else {
+                format!("{path}/{magic}")
+            };
+            if let Ok(mut cache) = read_cache.lock() {
+                cache.invalidate(&sidecar_path);
+            }
+            if let Ok(mut table) = inodes.lock() {
+                if let Some(ino) = table.get_ino(&sidecar_path) {
+                    table.invalidate(ino);
+                }
+            }
+        }
+        return;
+    }
+
     if let Ok(mut cache) = read_cache.lock() {
         cache.invalidate(path);
     }
@@ -368,11 +412,16 @@ mod tests {
     use crate::fs::DirCacheMap;
     use std::collections::HashMap;
 
+    fn empty_sidecar_miss() -> SidecarMissCache {
+        Arc::new(Mutex::new(HashMap::new()))
+    }
+
     #[test]
     fn invalidate_caches_removes_parent_dir_cache_entry() {
         let inodes = Arc::new(Mutex::new(InodeTable::new()));
         let read_cache = Arc::new(Mutex::new(ReadCache::new(1, Duration::from_secs(30))));
         let dir_cache: DirCacheMap = Arc::new(Mutex::new(HashMap::new()));
+        let sm = empty_sidecar_miss();
 
         let foo_ino = {
             let mut t = inodes.lock().unwrap();
@@ -383,7 +432,7 @@ mod tests {
             dc.insert(foo_ino, crate::fs::DirCacheEntry::empty_for_test());
         }
 
-        invalidate_caches("update", "/foo/new.txt", &inodes, &read_cache, &dir_cache);
+        invalidate_caches("update", "/foo/new.txt", &inodes, &read_cache, &dir_cache, &sm);
 
         assert!(dir_cache.lock().unwrap().get(&foo_ino).is_none());
     }
@@ -416,7 +465,7 @@ mod tests {
             read_cache.lock().unwrap().put("/foo/bar.txt", b"hello".to_vec(), gen);
         }
 
-        invalidate_caches("update", "/foo/bar.txt", &inodes, &read_cache, &dir_cache);
+        invalidate_caches("update", "/foo/bar.txt", &inodes, &read_cache, &dir_cache, &empty_sidecar_miss());
 
         assert!(inodes.lock().unwrap().get_cached_attr(file_ino).is_none());
         assert!(read_cache.lock().unwrap().get("/foo/bar.txt").is_none());
@@ -434,7 +483,7 @@ mod tests {
             t.get_or_create_ino(file_path)
         };
 
-        invalidate_caches("delete", file_path, &inodes, &read_cache, &dir_cache);
+        invalidate_caches("delete", file_path, &inodes, &read_cache, &dir_cache, &empty_sidecar_miss());
 
         let table = inodes.lock().unwrap();
         assert!(
@@ -498,7 +547,14 @@ mod tests {
             dc.insert(foo_ino, crate::fs::DirCacheEntry::empty_for_test());
         }
 
-        handle_cursor_expired(&inodes, &read_cache, &dir_cache);
+        let sm = empty_sidecar_miss();
+        sm.lock().unwrap().insert(("/foo".to_string(), ".abstract"), Instant::now());
+        handle_cursor_expired(&inodes, &read_cache, &dir_cache, &sm);
+
+        assert!(
+            sm.lock().unwrap().is_empty(),
+            "cursor-expired must drop sidecar_miss too — we don't know which dirs gained sidecars during the gap"
+        );
 
         // Attr cache wiped, but path↔ino mappings preserved (kernel still
         // holds inode refs and would explode if we yanked them).
@@ -524,10 +580,106 @@ mod tests {
             t.get_or_create_ino(file_path)
         };
 
-        invalidate_caches("update", file_path, &inodes, &read_cache, &dir_cache);
+        invalidate_caches("update", file_path, &inodes, &read_cache, &dir_cache, &empty_sidecar_miss());
 
         let table = inodes.lock().unwrap();
         assert_eq!(table.get_ino(file_path), Some(file_ino));
+    }
+
+    #[test]
+    fn invalidate_caches_summary_ready_drops_sidecar_state_only() {
+        // SummaryReady fires after the dir-summary worker upserts a row.
+        // Three pieces of state must drop for both magic sidecars under
+        // the event dir:
+        //   1. miss cache (so the next lookup probes the server)
+        //   2. read cache (so a cached `SIDECAR_PENDING_BODY` doesn't
+        //      keep being served as if it were the real summary)
+        //   3. synthetic attr in the inode table
+        // Everything else — unrelated dirs, non-sidecar read entries,
+        // dir_cache — must stay untouched.
+        let inodes = Arc::new(Mutex::new(InodeTable::new()));
+        let read_cache = Arc::new(Mutex::new(ReadCache::new(1, Duration::from_secs(30))));
+        let dir_cache: DirCacheMap = Arc::new(Mutex::new(HashMap::new()));
+        let sm = empty_sidecar_miss();
+
+        // Seed the miss cache for /docs and an unrelated /notes path. Only
+        // /docs entries should disappear after the event fires; /notes is
+        // the canary that confirms we don't clear the whole map.
+        let now = Instant::now();
+        {
+            let mut g = sm.lock().unwrap();
+            g.insert(("/docs".to_string(), ".abstract"), now);
+            g.insert(("/docs".to_string(), ".overview"), now);
+            g.insert(("/notes".to_string(), ".abstract"), now);
+        }
+
+        // Seed inode attr + read_cache for the sidecar paths (the
+        // "pending placeholder" state we want flushed) and for an
+        // unrelated regular file (the canary that proves we scope
+        // invalidation to the magic sidecars only).
+        let (dir_ino, abstract_ino, overview_ino) = {
+            let mut t = inodes.lock().unwrap();
+            let dir = t.get_or_create_ino("/docs");
+            let a = t.get_or_create_ino("/docs/.abstract");
+            let o = t.get_or_create_ino("/docs/.overview");
+            let dummy_attr = |ino| fuser::FileAttr {
+                ino, size: 44, blocks: 1,
+                atime: std::time::SystemTime::UNIX_EPOCH,
+                mtime: std::time::SystemTime::UNIX_EPOCH,
+                ctime: std::time::SystemTime::UNIX_EPOCH,
+                crtime: std::time::SystemTime::UNIX_EPOCH,
+                kind: fuser::FileType::RegularFile, perm: 0o644, nlink: 1,
+                uid: 0, gid: 0, rdev: 0, blksize: 512, flags: 0,
+            };
+            t.set_cached_attr(a, dummy_attr(a));
+            t.set_cached_attr(o, dummy_attr(o));
+            (dir, a, o)
+        };
+        {
+            let mut dc = dir_cache.lock().unwrap();
+            dc.insert(dir_ino, crate::fs::DirCacheEntry::empty_for_test());
+        }
+        {
+            let mut c = read_cache.lock().unwrap();
+            let gen = c.generation();
+            c.put("/docs/.abstract", b"pending\n".to_vec(), gen);
+            c.put("/docs/.overview", b"pending\n".to_vec(), gen);
+            c.put("/docs/file.md", b"x".to_vec(), gen);
+        }
+
+        invalidate_caches("summary_ready", "/docs", &inodes, &read_cache, &dir_cache, &sm);
+
+        // 1. miss cache: scoped to /docs.
+        let g = sm.lock().unwrap();
+        assert!(g.get(&("/docs".to_string(), ".abstract")).is_none());
+        assert!(g.get(&("/docs".to_string(), ".overview")).is_none());
+        assert!(
+            g.get(&("/notes".to_string(), ".abstract")).is_some(),
+            "summary_ready must scope to the event path; unrelated dirs untouched"
+        );
+        drop(g);
+
+        // 2. read cache: only sidecar paths flushed.
+        let mut c = read_cache.lock().unwrap();
+        assert!(c.get("/docs/.abstract").is_none(), "stale .abstract body must drop");
+        assert!(c.get("/docs/.overview").is_none(), "stale .overview body must drop");
+        assert!(
+            c.get("/docs/file.md").is_some(),
+            "non-sidecar read entries must NOT be invalidated"
+        );
+        drop(c);
+
+        // 3. inode attr: only sidecar attrs flushed.
+        let t = inodes.lock().unwrap();
+        assert!(t.get_cached_attr(abstract_ino).is_none());
+        assert!(t.get_cached_attr(overview_ino).is_none());
+        drop(t);
+
+        // 4. dir_cache untouched — the directory itself didn't change.
+        assert!(
+            dir_cache.lock().unwrap().get(&dir_ino).is_some(),
+            "dir_cache must not be invalidated on summary_ready"
+        );
     }
 
     #[test]
