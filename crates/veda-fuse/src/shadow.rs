@@ -365,16 +365,18 @@ impl ShadowStore {
         self.entries.get(path)
     }
 
-    /// Flip an entry from Clean to Dirty without touching its data
-    /// buffer, bumping seq + mtime. Used right after
-    /// `adopt_server_file` to signal "we want the commit queue to
-    /// push this even though we just told it server matches" —
-    /// e.g. on a setattr-truncate where the local view is now empty
-    /// but the server still has the pre-truncate bytes. Returns the
-    /// new seq; None if the path has no shadow entry.
+    /// Promote a Clean entry to Dirty (no-op on LocalOnly: it already
+    /// implies "needs to be PUT"). Bumps seq + mtime regardless so
+    /// the commit queue notices a state change. Used right after
+    /// `adopt_server_file` to signal "push this anyway" — e.g. on a
+    /// setattr-truncate where the local view diverges from the
+    /// server bytes we just adopted. Returns the new seq; None if
+    /// the path has no shadow entry.
     pub fn mark_dirty(&mut self, path: &str) -> Option<u64> {
         let entry = self.entries.get_mut(path)?;
-        entry.kind = EntryKind::Dirty;
+        if entry.kind == EntryKind::Clean {
+            entry.kind = EntryKind::Dirty;
+        }
         entry.mtime = SystemTime::now();
         self.seq += 1;
         entry.seq = self.seq;
@@ -383,9 +385,10 @@ impl ShadowStore {
 
     /// Resize an entry's data buffer to exactly `new_len` bytes
     /// (truncating or zero-extending), enforcing the per-file and
-    /// total caps. Promotes Clean → Dirty and bumps seq. Returns
-    /// the new seq, `InsertError` on cap breach, or panics if the
-    /// path has no entry (callers always check existence first).
+    /// total caps. Promotes Clean → Dirty (leaves LocalOnly alone —
+    /// it's already "needs PUT") and bumps seq. Returns the new
+    /// seq, `InsertError` on cap breach, or panics if the path has
+    /// no entry (callers always check existence first).
     pub fn truncate_to(
         &mut self,
         path: &str,
@@ -408,7 +411,9 @@ impl ShadowStore {
         }
         entry.data.resize(new_len, 0);
         self.total_bytes = after_total;
-        entry.kind = EntryKind::Dirty;
+        if entry.kind == EntryKind::Clean {
+            entry.kind = EntryKind::Dirty;
+        }
         entry.mtime = SystemTime::now();
         self.seq += 1;
         entry.seq = self.seq;
@@ -686,6 +691,32 @@ mod tests {
         assert!(names.contains("x.md"));
         assert!(names.contains("y.md"));
         assert_eq!(names.len(), 2);
+    }
+
+    #[test]
+    fn truncate_to_preserves_local_only_kind() {
+        // A LocalOnly entry being resized via setattr should NOT
+        // become Dirty — that's the "server has it" state, but the
+        // server has never seen this file. Keep it LocalOnly so the
+        // eventual fire() PUT carries base_rev=None and the server
+        // treats it as a create.
+        let mut s = ShadowStore::new();
+        s.create_local("/new.md", 1);
+        s.write_at("/new.md", 0, b"hello world").unwrap();
+        assert_eq!(s.get("/new.md").unwrap().kind, EntryKind::LocalOnly);
+        let _ = s.truncate_to("/new.md", 4).unwrap();
+        assert_eq!(s.get("/new.md").unwrap().kind, EntryKind::LocalOnly);
+        assert_eq!(s.get("/new.md").unwrap().data, b"hell");
+    }
+
+    #[test]
+    fn mark_dirty_preserves_local_only_kind() {
+        let mut s = ShadowStore::new();
+        s.create_local("/new.md", 1);
+        let pre = s.get("/new.md").unwrap().seq;
+        let seq = s.mark_dirty("/new.md").unwrap();
+        assert!(seq > pre, "seq still bumps");
+        assert_eq!(s.get("/new.md").unwrap().kind, EntryKind::LocalOnly);
     }
 
     #[test]
