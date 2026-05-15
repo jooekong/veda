@@ -365,12 +365,54 @@ impl ShadowStore {
         self.entries.get(path)
     }
 
-    /// Mutable accessor used by callers that need to nudge an entry
-    /// from Clean → Dirty (e.g. an in-place truncate via setattr).
-    /// Doesn't enforce caps — caller is expected not to grow the
-    /// buffer through this handle.
-    pub fn get_dirty_mut(&mut self, path: &str) -> Option<&mut ShadowEntry> {
-        self.entries.get_mut(path)
+    /// Flip an entry from Clean to Dirty without touching its data
+    /// buffer, bumping seq + mtime. Used right after
+    /// `adopt_server_file` to signal "we want the commit queue to
+    /// push this even though we just told it server matches" —
+    /// e.g. on a setattr-truncate where the local view is now empty
+    /// but the server still has the pre-truncate bytes. Returns the
+    /// new seq; None if the path has no shadow entry.
+    pub fn mark_dirty(&mut self, path: &str) -> Option<u64> {
+        let entry = self.entries.get_mut(path)?;
+        entry.kind = EntryKind::Dirty;
+        entry.mtime = SystemTime::now();
+        self.seq += 1;
+        entry.seq = self.seq;
+        Some(self.seq)
+    }
+
+    /// Resize an entry's data buffer to exactly `new_len` bytes
+    /// (truncating or zero-extending), enforcing the per-file and
+    /// total caps. Promotes Clean → Dirty and bumps seq. Returns
+    /// the new seq, `InsertError` on cap breach, or panics if the
+    /// path has no entry (callers always check existence first).
+    pub fn truncate_to(
+        &mut self,
+        path: &str,
+        new_len: usize,
+    ) -> Result<u64, InsertError> {
+        if new_len > self.max_per_file {
+            return Err(InsertError::PerFileCapExceeded);
+        }
+        let entry = self
+            .entries
+            .get_mut(path)
+            .expect("truncate_to requires an existing entry");
+        let old_len = entry.data.len();
+        let after_total = self
+            .total_bytes
+            .saturating_sub(old_len)
+            .saturating_add(new_len);
+        if after_total > self.max_total {
+            return Err(InsertError::TotalCapExceeded);
+        }
+        entry.data.resize(new_len, 0);
+        self.total_bytes = after_total;
+        entry.kind = EntryKind::Dirty;
+        entry.mtime = SystemTime::now();
+        self.seq += 1;
+        entry.seq = self.seq;
+        Ok(self.seq)
     }
 
     pub fn pending_children(&self, parent_ino: u64) -> Option<&HashSet<String>> {

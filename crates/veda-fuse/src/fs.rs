@@ -239,6 +239,29 @@ impl VedaFs {
         if parent_path == "/" { format!("/{name}") } else { format!("{parent_path}/{name}") }
     }
 
+    /// Truncate or zero-extend a Vec to exactly `target` bytes. Used
+    /// in both setattr-truncate paths (sync legacy + writeback
+    /// no-shadow adopt) for symmetric semantics with POSIX truncate.
+    fn resize_bytes(buf: &mut Vec<u8>, target: usize) {
+        if target < buf.len() {
+            buf.truncate(target);
+        } else if target > buf.len() {
+            buf.resize(target, 0);
+        }
+    }
+
+    /// Resolve the parent inode for `path` via the InodeTable,
+    /// falling back to the root inode if the parent isn't mapped.
+    /// Centralises the repeated `inodes.lock().get_ino(parent_path())`
+    /// dance used by every writeback adopt/evict path.
+    fn parent_ino_for(&self, path: &str) -> u64 {
+        self.inodes
+            .lock()
+            .unwrap()
+            .get_ino(parent_path(path))
+            .unwrap_or(crate::inode::ROOT_INO)
+    }
+
     /// Build a synthetic FileAttr for a shadow-tracked entry. Size
     /// comes from the buffer, mtime from the entry's recorded write
     /// time; mode/uid/gid/links match the server-attr defaults so
@@ -896,93 +919,63 @@ impl Filesystem for VedaFs {
             // 412. Reproducer: `>file` on an open writeback handle
             // ate every subsequent edit because of this exact race.
             if self.is_writeback() {
+                // Writeback: truncate in the shadow so a later flush
+                // carries the correct (truncated) bytes with the
+                // correct base_rev. A legacy sync-PUT here would
+                // race the commit queue: server gets the empty body
+                // but shadow still holds Dirty data tagged with the
+                // pre-truncate revision, and every later commit
+                // returns 412. Reproducer: `>file` ate every
+                // subsequent edit because of this exact race.
                 let shadow = self.shadow.as_ref().unwrap();
-                // Two cases: shadow has the entry (already
-                // adopted/created locally) → resize in place; or it
-                // doesn't → pull server bytes, truncate locally,
-                // adopt as Dirty so the commit queue can push.
-                let entry_fields = {
-                    let store = shadow.lock().unwrap();
-                    store
-                        .get(&path)
-                        .map(|e| (e.parent_ino, e.local_ino, e.base_rev.unwrap_or(0)))
-                };
-                let entry_seq = match entry_fields {
-                    Some((parent_ino, local_ino, base_rev)) => {
-                        let mut store = shadow.lock().unwrap();
-                        if new_size == 0 {
-                            // Drop the buffer cleanly: re-adopt empty
-                            // so total_bytes is recomputed, then bump
-                            // to Dirty so commit_queue pushes.
-                            let _ = store.adopt_server_file(
-                                &path, parent_ino, local_ino, base_rev, Vec::new(),
-                            );
-                            if let Some(e) = store.get_dirty_mut(&path) {
-                                e.kind = EntryKind::Dirty;
+                // If no shadow entry exists yet, fetch the server
+                // bytes (resized locally) BEFORE locking the shadow.
+                // Two HTTP calls under the lock would block the
+                // commit queue worker for the duration.
+                let adopt_payload = if shadow.lock().unwrap().get(&path).is_none() {
+                    let server_rev = match self.client.stat(&path) {
+                        Ok(info) => info.revision,
+                        Err(ref e) => { reply.error(Self::err_to_errno(e)); return; }
+                    };
+                    let bytes = if new_size == 0 {
+                        Vec::new()
+                    } else {
+                        match self.client.read_file(&path) {
+                            Ok(mut b) => {
+                                Self::resize_bytes(&mut b, new_size as usize);
+                                b
                             }
-                        } else {
-                            // Resize the existing buffer.
-                            if let Some(e) = store.get_dirty_mut(&path) {
-                                e.data.resize(new_size as usize, 0);
-                                e.kind = EntryKind::Dirty;
-                            }
-                            // Bump seq via a 0-byte write_at so the
-                            // commit queue notices a state change.
-                            let _ = store.write_at(&path, 0, &[]);
+                            Err(ref e) => { reply.error(Self::err_to_errno(e)); return; }
                         }
-                        store.get(&path).map(|e| e.seq)
-                    }
-                    None => {
-                        // No shadow entry yet — adopt from server,
-                        // resized locally to new_size.
-                        let server_rev = match self.client.stat(&path) {
-                            Ok(info) => info.revision,
-                            Err(ref e) => {
-                                reply.error(Self::err_to_errno(e));
-                                return;
-                            }
-                        };
-                        let bytes = if new_size == 0 {
-                            Vec::new()
-                        } else {
-                            match self.client.read_file(&path) {
-                                Ok(mut b) => {
-                                    let target = new_size as usize;
-                                    if target < b.len() {
-                                        b.truncate(target);
-                                    } else if target > b.len() {
-                                        b.resize(target, 0);
-                                    }
-                                    b
-                                }
-                                Err(ref e) => {
-                                    reply.error(Self::err_to_errno(e));
-                                    return;
-                                }
-                            }
-                        };
-                        let parent_ino = self
-                            .inodes
-                            .lock()
-                            .unwrap()
-                            .get_ino(parent_path(&path))
-                            .unwrap_or(crate::inode::ROOT_INO);
-                        let mut store = shadow.lock().unwrap();
-                        let _ = store.adopt_server_file(
-                            &path,
-                            parent_ino,
-                            ino,
-                            server_rev.unwrap_or(0),
-                            bytes,
-                        );
-                        if let Some(e) = store.get_dirty_mut(&path) {
-                            e.kind = EntryKind::Dirty;
-                        }
-                        store.get(&path).map(|e| e.seq)
-                    }
+                    };
+                    Some((server_rev.unwrap_or(0), bytes))
+                } else {
+                    None
                 };
-                if let Some(seq) = entry_seq {
-                    self.commit_queue.as_ref().unwrap().touch(path.clone(), seq);
+                let parent_ino_if_adopt = adopt_payload
+                    .as_ref()
+                    .map(|_| self.parent_ino_for(&path));
+                let mut store = shadow.lock().unwrap();
+                let seq_result = match adopt_payload {
+                    Some((server_rev, bytes)) => {
+                        let parent_ino = parent_ino_if_adopt.unwrap();
+                        store
+                            .adopt_server_file(&path, parent_ino, ino, server_rev, bytes)
+                            .and_then(|_| {
+                                store.mark_dirty(&path).ok_or(InsertError::PerFileCapExceeded)
+                            })
+                    }
+                    None => store.truncate_to(&path, new_size as usize),
+                };
+                drop(store);
+                match seq_result {
+                    Ok(seq) => self.commit_queue.as_ref().unwrap().touch(path.clone(), seq),
+                    Err(InsertError::PerFileCapExceeded) => {
+                        reply.error(libc::EFBIG); return;
+                    }
+                    Err(InsertError::TotalCapExceeded) => {
+                        reply.error(libc::ENOSPC); return;
+                    }
                 }
             } else {
                 // Sync legacy path — server hit immediately.
@@ -997,9 +990,7 @@ impl Filesystem for VedaFs {
                 } else {
                     match self.client.read_file(&path) {
                         Ok(mut bytes) => {
-                            let target = new_size as usize;
-                            if target < bytes.len() { bytes.truncate(target); }
-                            else if target > bytes.len() { bytes.resize(target, 0); }
+                            Self::resize_bytes(&mut bytes, new_size as usize);
                             if let Err(ref e) = self.client.write_file(&path, &bytes, rev) {
                                 reply.error(Self::err_to_errno(e)); return;
                             }
@@ -1275,12 +1266,7 @@ impl Filesystem for VedaFs {
                 && (truncated || !existing.is_empty());
             let mut adopted = false;
             if adopt_eligible {
-                let parent_ino = self
-                    .inodes
-                    .lock()
-                    .unwrap()
-                    .get_ino(parent_path(&path))
-                    .unwrap_or(crate::inode::ROOT_INO);
+                let parent_ino = self.parent_ino_for(&path);
                 let shadow = self.shadow.as_ref().unwrap();
                 let mut store = shadow.lock().unwrap();
                 if store
