@@ -532,6 +532,40 @@ impl VedaFs {
         }
     }
 
+    /// writeback path for flush/fsync/release: if the file is
+    /// shadow-tracked, send a Touch and return success immediately
+    /// (the commit queue handles the eventual server PUT). If it's
+    /// not (open-existing legacy fallback in write()), call
+    /// flush_handle to drain the legacy buf synchronously so
+    /// :w doesn't silently lose data. Day 3 closes the
+    /// open-existing-fallback hole entirely.
+    fn writeback_touch_or_fallback_flush(
+        &mut self,
+        fh: u64,
+        ino: u64,
+        reply: ReplyEmpty,
+    ) {
+        let path = match self.inode_get_path(ino) {
+            Some(p) => p,
+            None => { reply.error(libc::ENOENT); return; }
+        };
+        let shadow = self.shadow.as_ref().unwrap();
+        let store = shadow.lock().unwrap();
+        let entry_seq = store.get(&path).map(|e| e.seq);
+        drop(store);
+        if let Some(seq) = entry_seq {
+            self.commit_queue.as_ref().unwrap().touch(path, seq);
+            reply.ok();
+            return;
+        }
+        // No shadow entry — fall back to the legacy sync flush so
+        // open-existing-then-write paths don't drop their buffer.
+        match self.flush_handle(fh, ino) {
+            Ok(()) => reply.ok(),
+            Err(errno) => reply.error(errno),
+        }
+    }
+
     fn flush_handle(&mut self, fh: u64, ino: u64) -> Result<(), i32> {
         let is_dirty = self.write_handles.get(&fh).map_or(false, |h| h.dirty);
         if !is_dirty {
@@ -904,6 +938,32 @@ impl Filesystem for VedaFs {
         // overflows on 32-bit platforms and silently wraps on 64-bit when off is
         // near usize::MAX. saturating_add caps at usize::MAX, then min() with
         // the actual buffer length yields the correct slice end.
+        //
+        // In writeback mode the user's writes land in the shadow, not in
+        // `handle.buf`. Check shadow before the legacy write_handle short-
+        // circuit so a write-then-read on the same fh sees the bytes that
+        // were just written (otherwise: empty buf → returns []). Falls
+        // through to the legacy path when the path isn't shadow-tracked
+        // (open-existing legacy fallback — Day 3 closes that hole).
+        if self.is_writeback() {
+            if let Some(path) = self.inode_get_path(ino) {
+                let shadow = self.shadow.as_ref().unwrap();
+                let store = shadow.lock().unwrap();
+                if let Some(entry) = store.get(&path) {
+                    let off = offset as usize;
+                    if off >= entry.data.len() {
+                        reply.data(&[]);
+                    } else {
+                        let end = std::cmp::min(
+                            off.saturating_add(size as usize),
+                            entry.data.len(),
+                        );
+                        reply.data(&entry.data[off..end]);
+                    }
+                    return;
+                }
+            }
+        }
         if let Some(handle) = self.write_handles.get(&fh) {
             let off = offset as usize;
             if off >= handle.buf.len() { reply.data(&[]); }
@@ -1069,18 +1129,13 @@ impl Filesystem for VedaFs {
             // Writeback: an explicit touch keeps the path in the
             // queue without forcing a synchronous PUT. The actual
             // server write happens after the debounce window elapses.
-            if let Some(path) = self.inode_get_path(ino) {
-                let shadow = self.shadow.as_ref().unwrap();
-                let store = shadow.lock().unwrap();
-                if let Some(entry) = store.get(&path) {
-                    let seq = entry.seq;
-                    drop(store);
-                    self.commit_queue.as_ref().unwrap().touch(path, seq);
-                }
-            }
-            // Always reply OK in writeback flush; the legacy
-            // synchronous write_file no longer gates the user's :w.
-            reply.ok();
+            //
+            // BUT: open-existing-then-write paths that aren't yet in
+            // shadow (Day 3 closes this) fall back to the legacy buf
+            // in `write()`. In that case `handle.dirty` is true with
+            // no shadow entry, and we still need to flush_handle so
+            // the user's :w doesn't silently drop the buffer.
+            self.writeback_touch_or_fallback_flush(fh, ino, reply);
             return;
         }
         match self.flush_handle(fh, ino) {
@@ -1091,16 +1146,7 @@ impl Filesystem for VedaFs {
 
     fn fsync(&mut self, _req: &Request, ino: u64, fh: u64, _datasync: bool, reply: ReplyEmpty) {
         if self.is_writeback() {
-            if let Some(path) = self.inode_get_path(ino) {
-                let shadow = self.shadow.as_ref().unwrap();
-                let store = shadow.lock().unwrap();
-                if let Some(entry) = store.get(&path) {
-                    let seq = entry.seq;
-                    drop(store);
-                    self.commit_queue.as_ref().unwrap().touch(path, seq);
-                }
-            }
-            reply.ok();
+            self.writeback_touch_or_fallback_flush(fh, ino, reply);
             return;
         }
         match self.flush_handle(fh, ino) {
@@ -1115,20 +1161,10 @@ impl Filesystem for VedaFs {
         reply: ReplyEmpty,
     ) {
         if self.is_writeback() {
-            // Writeback release: send a final touch so the queue
-            // schedules the commit, drop the handle, and reply OK.
-            // The real PUT happens after the debounce window.
-            if let Some(path) = self.inode_get_path(ino) {
-                let shadow = self.shadow.as_ref().unwrap();
-                let store = shadow.lock().unwrap();
-                if let Some(entry) = store.get(&path) {
-                    let seq = entry.seq;
-                    drop(store);
-                    self.commit_queue.as_ref().unwrap().touch(path, seq);
-                }
-            }
+            // Same shadow-vs-legacy split as flush(), then drop the
+            // handle and return.
+            self.writeback_touch_or_fallback_flush(fh, ino, reply);
             self.write_handles.remove(&fh);
-            reply.ok();
             return;
         }
         let result = self.flush_handle(fh, ino);
