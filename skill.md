@@ -65,9 +65,9 @@ veda login --api-key vk_…   # account key → still need 'veda init' afterward
                             # use the equivalent below for a one-shot flow
 
 # Option B: log in with email/password
-rm ~/.config/veda/config.toml         # clear the anon state veda init wrote
-veda config set server_url https://veda.dbpaas.dingdongxiaoqu.com
-veda init --login --email you@example.com   # prompts password
+rm ~/.config/veda/config.toml             # clear the anon state veda init wrote
+veda --server https://veda.dbpaas.dingdongxiaoqu.com init \
+    --login --email you@example.com      # prompts password
 ```
 
 ## Path syntax
@@ -89,8 +89,12 @@ veda claim --email X                       # upgrade an existing anon account to
 ```
 
 `veda status` shows current config + server reachability (workspace line marks
-the active profile with ★). `veda login --api-key K` swaps an existing `vk_*`
-(account) or `wk_*` (workspace) key without touching the rest of the config.
+the active profile with ★). `veda login --api-key K` accepts both `vk_*`
+(account) and `wk_*` (workspace) keys; in either case it **clears all stored
+workspace profiles** along with the other auth slot — the old wk_ aliases
+were minted under the previous account/key and would 401 against the new
+identity. After pasting a `vk_`, run `veda workspace add <alias>` to mint a
+fresh wk_ for whichever server-side workspace you need.
 
 ### Multiple workspace profiles
 

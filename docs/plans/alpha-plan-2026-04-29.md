@@ -490,6 +490,9 @@ async fn fs_events_retention_cleans_old_rows() {
 ### FUSE 客户端
 - 改 chmod / chown 静默忽略
 - 文件稀疏写（如 seek 到 1GB 写 1 字节）会把空洞按零字节加载到内存
+- `.abstract` / `.overview` 隐藏 sidecar 首次目录 `ls -a` 时,若 server `[llm]` 已配但该目录尚未生成 summary,会显示 phantom entry,`stat` 时才 ENOENT。第二次起 (≤5s TTL) miss cache 命中,不再显示。
+- Sidecar miss cache 是反应式 (per-dir TTL,默认 `attr_ttl = 5s`)。Summary 生成后用户最多等 5s 才能在 FUSE 看见新 sidecar — 没有 SSE 事件主动 invalidate。
+- Workspace 根目录的 `.abstract` / `.overview` 不可用 (server 端无 root dentry row)。CLI `veda abstract /` 同样 404。用子目录的 sidecar 代替。
 
 ### CLI
 - `veda cp` 把文件全量读入内存，不要用于 >10MB 文件，用 HTTP API 直接 PUT
@@ -550,6 +553,14 @@ async fn fs_events_retention_cleans_old_rows() {
 6. **Connector / OpenAPI / SDK**
 
 > **已交付**（提前于本计划）：真 hybrid search（BM25 + Milvus 2.5 FTS + jieba）已在 0.1.4 上线，对应原 §6.5。
+
+### Sidecar / capabilities 跟进（2026-05-15 交叉 review 留下）
+
+来自 commits `867cbdc` + `bcd209e` + `40eb738`,交叉 review verdict GO + 3 个 should-fix / nit 留作 post-alpha：
+
+- **SSE 主动清 sidecar miss cache**: summary worker 完成 `/docs` 时发 `summary_ready` SSE event,FUSE `invalidate_caches` 在 `sse.rs:289-327` 同步清 `sidecar_miss` cache 对应条目。当前用户最多等 `attr_ttl=5s` 才看见新 sidecar — 反应式 TTL 兜底,但 alpha+ 体验上值得做。
+- **`/v1/capabilities` 鉴权**: 当前路由 unauthenticated。`mod.rs:31`. 硬化部署 (反向代理对 `/v1/*` 强制 auth) 会让 probe fail-closed → fail-open 上去,FUSE 自动假设 enabled,可能误导。改成 `/healthz`-style 独立路径,或者 wire bearer 进 probe call.
+- **`FsService` reserved-name integration test**: `path.rs` 单元 test 覆盖 helper 自身,但 `crates/veda-core/tests/fs_service_test.rs` 没逐个 mutating 调用点 (write_file/append/mkdir/copy/rename) 验证 reject。helper 已 unit-tested + 调用点机械,low-risk,但加一个 per-entry sweep 可固化契约。
 
 ---
 
