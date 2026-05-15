@@ -554,6 +554,10 @@ async fn fs_events_retention_cleans_old_rows() {
 
 > **已交付**（提前于本计划）：真 hybrid search（BM25 + Milvus 2.5 FTS + jieba）已在 0.1.4 上线，对应原 §6.5。
 
+### CI / 部署流程跟进 (2026-05-15)
+
+- **CI publish veda-server binary**: 当前 `.gitlab-ci.yml` 只 build/publish `veda` (CLI) 和 `veda-fuse`，server 不在 release artifacts 里。所以远端 server 升级流程是"box 上 `cd /data/rust/veda && git checkout <tag> && cargo build -p veda-server` → install → systemctl restart"，跑一次 cargo 要 60s 起步。给 `build:linux-x86_64` job 加 `cargo build --release -p veda-server --bin veda-server` 步骤，加进 `artifacts.paths`，再补一个 `--assets-link` 给 GitLab release。改完后远端升级就能"curl 下载 → install → restart"，免 build。Linux-only 即可（server 只在 Linux 部署）。
+
 ### Sidecar / capabilities 跟进（2026-05-15 交叉 review 留下）
 
 来自 commits `867cbdc` + `bcd209e` + `40eb738`,交叉 review verdict GO + 3 个 should-fix / nit 留作 post-alpha：
