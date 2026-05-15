@@ -16,28 +16,6 @@ use crate::state::AppState;
 
 const MAX_BODY_MB: usize = 50;
 
-/// Basenames that the FUSE layer synthesises as read-only summary
-/// sidecars (`crates/veda-fuse/src/fs.rs`). Reject them at the server
-/// edge so a real file or directory with that name can't collide with
-/// the magic entry — the alternative is a per-lookup `stat` on every
-/// FUSE call to disambiguate, which would tax every workspace.
-const RESERVED_SIDECAR_BASENAMES: &[&str] = &[".abstract", ".overview"];
-
-fn reject_reserved_basename(path: &str) -> Result<(), AppError> {
-    let basename = path.rsplit('/').next().unwrap_or("");
-    if RESERVED_SIDECAR_BASENAMES
-        .iter()
-        .any(|reserved| *reserved == basename)
-    {
-        return Err(VedaError::InvalidPath(format!(
-            "'{basename}' is reserved for the FUSE summary sidecar and \
-             cannot be used as a real file or directory name"
-        ))
-        .into());
-    }
-    Ok(())
-}
-
 pub fn routes() -> Router<Arc<AppState>> {
     let upload_routes = Router::new()
         .route("/v1/fs/{*path}", put(write_file).post(append_file))
@@ -124,7 +102,6 @@ async fn write_file(
         ))
     })?;
     let path = format!("/{path}");
-    reject_reserved_basename(&path)?;
     let expected_rev = parse_if_match(&headers)?;
     let if_none_match = parse_if_none_match_sha256(&headers);
     let resp = state
@@ -185,7 +162,6 @@ async fn append_file(
         ))
     })?;
     let path = format!("/{path}");
-    reject_reserved_basename(&path)?;
     let resp = state
         .fs_service
         .append_file(&auth.workspace_id, &path, body)
@@ -322,10 +298,6 @@ async fn copy_file(
     Json(body): Json<CopyRenameBody>,
 ) -> Result<Json<ApiResponse<()>>, AppError> {
     auth.require_write()?;
-    // Reserved-name check on the destination only — `from` is real
-    // existing data the user is allowed to read; we just block
-    // writing into a sidecar slot.
-    reject_reserved_basename(&body.to)?;
     state
         .fs_service
         .copy_file(&auth.workspace_id, &body.from, &body.to)
@@ -339,7 +311,6 @@ async fn rename_file(
     Json(body): Json<CopyRenameBody>,
 ) -> Result<Json<ApiResponse<()>>, AppError> {
     auth.require_write()?;
-    reject_reserved_basename(&body.to)?;
     state
         .fs_service
         .rename(&auth.workspace_id, &body.from, &body.to)
@@ -358,7 +329,6 @@ async fn mkdir(
     Json(body): Json<MkdirBody>,
 ) -> Result<Json<ApiResponse<()>>, AppError> {
     auth.require_write()?;
-    reject_reserved_basename(&body.path)?;
     state
         .fs_service
         .mkdir(&auth.workspace_id, &body.path)
@@ -369,53 +339,6 @@ async fn mkdir(
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn expect_reserved_err(path: &str) -> String {
-        match reject_reserved_basename(path) {
-            Err(e) => e.0.to_string(),
-            Ok(()) => panic!("expected reserved-name rejection for {path}"),
-        }
-    }
-
-    fn expect_ok(path: &str) {
-        if reject_reserved_basename(path).is_err() {
-            panic!("path {path} was unexpectedly rejected");
-        }
-    }
-
-    #[test]
-    fn reject_reserved_basename_blocks_dot_abstract() {
-        // Reserved-name check pins the sidecar contract: a real
-        // file or directory called .abstract / .overview would
-        // collide with the FUSE-injected magic entries.
-        let msg = expect_reserved_err("/docs/.abstract");
-        assert!(msg.contains(".abstract"), "msg: {msg}");
-        let msg = expect_reserved_err("/notes/.overview");
-        assert!(msg.contains("reserved"), "msg: {msg}");
-    }
-
-    #[test]
-    fn reject_reserved_basename_allows_substring_matches() {
-        // Only the basename matters — a path that happens to
-        // contain ".abstract" elsewhere (a directory called that,
-        // a real file with that substring in its name) shouldn't
-        // be blocked. Pinned because an over-eager match would
-        // break unrelated workflows.
-        expect_ok("/abstracts/jan.md");
-        expect_ok("/notes/.abstracts"); // trailing s
-        expect_ok("/notes/something.abstract.md");
-    }
-
-    #[test]
-    fn reject_reserved_basename_handles_root_and_empty() {
-        // `/.abstract` (a file named .abstract directly under the
-        // workspace root) should be rejected the same way as deeper
-        // paths. Empty / weird inputs shouldn't panic.
-        let msg = expect_reserved_err("/.abstract");
-        assert!(msg.contains(".abstract"), "msg: {msg}");
-        expect_ok("");
-        expect_ok("/");
-    }
 
     #[test]
     fn parse_range_basic() {

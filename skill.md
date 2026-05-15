@@ -175,9 +175,12 @@ structured prose) when the abstract is too thin to act on.
 
 ```sh
 veda abstract /path/to/file.md     # L0 — one sentence, cheap
-veda abstract /                     # workspace-level abstract
 veda overview /path/to/file.md     # L1 — detailed prose, on demand
 ```
+
+(Workspace-root summaries `veda abstract /` / `veda overview /` aren't
+implemented yet — the server has no dentry for `/`, so the request 404s.
+Use a top-level subdirectory instead, e.g. `veda abstract /notes`.)
 
 Both layers are generated **asynchronously**. If you ask right after uploading,
 the CLI prints `Summary not ready yet (summary pending)` and exits with code
@@ -262,6 +265,11 @@ reserved-name guard landed), the FUSE sidecar shadows it on read.
 The real file is still accessible via the CLI (`veda cat`,
 `veda mv` to rename it out of the way) — new writes to those names
 are now rejected by the server.
+
+**Workspace-root sidecar**: `/mnt/veda/.abstract` and
+`/mnt/veda/.overview` are not implemented (server has no dentry for
+the root path). They return ENOENT; use a subdirectory's sidecar
+instead.
 
 ## Decision rules — pick the right command
 

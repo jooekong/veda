@@ -78,6 +78,15 @@ struct SummaryResponseRaw {
     l1_overview: Option<String>,
 }
 
+/// Subset of `/v1/capabilities` we currently care about. Forward-
+/// compatible: unknown fields are ignored, so a server that grows
+/// the response can ship before the client catches up.
+#[derive(Debug, Default, Clone, Copy, Deserialize)]
+pub struct Capabilities {
+    #[serde(default)]
+    pub summary_enabled: bool,
+}
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct DirEntry {
     pub name: String,
@@ -265,6 +274,23 @@ impl VedaClient {
         Self::check_status(status, &body)
     }
 
+    /// Probe the server's `/v1/capabilities` endpoint. Used at FUSE
+    /// mount-init time to decide whether to advertise summary
+    /// sidecars in `readdir`. Unauthenticated — the endpoint
+    /// reports only public bits about server config. On any error
+    /// the FUSE layer defaults to "assume the feature is on" and
+    /// relies on the per-directory ENOENT cache to suppress
+    /// phantom entries — see `fs.rs` `sidecar_recently_missing`.
+    pub fn get_capabilities(&self) -> Result<Capabilities> {
+        let url = format!("{}/v1/capabilities", self.base);
+        let (status, body) = Self::send_text(self.http.get(&url))?;
+        Self::check_status(status, &body)?;
+        let api: ApiResponse<Capabilities> =
+            serde_json::from_str(&body).map_err(|e| ClientError::Parse(e.to_string()))?;
+        api.data
+            .ok_or_else(|| ClientError::Parse("capabilities response missing data".into()))
+    }
+
     /// Fetch the L0 or L1 summary for `path` from the server.
     ///
     /// Returns a [`SidecarOutcome`] rather than `Result<Vec<u8>>`
@@ -276,18 +302,18 @@ impl VedaClient {
     ///
     /// Edge case: the server's wildcard path matcher
     /// (`/v1/{endpoint}/{*path}`) refuses to match an empty
-    /// segment, so the workspace-root summary lives on a separate
-    /// no-path route (`/v1/abstract`, `/v1/overview`). The caller
-    /// hands us POSIX path `"/"`; we re-route to the root endpoint
-    /// here so the same call site works for both root and nested
-    /// sidecars.
+    /// segment, and there is no separate root-summary route yet
+    /// (the workspace root has no dentry to anchor a summary row
+    /// against). Return `NotFound` early so the FUSE mount-root
+    /// sidecar lookup becomes ENOENT without an HTTP round-trip
+    /// and without depending on the server's 404 behaviour. Lift
+    /// when workspace-level summaries become a first-class feature.
     pub fn get_summary(&self, path: &str, kind: SummaryKind) -> Result<SidecarOutcome> {
         let path = path.trim_start_matches('/');
-        let url = if path.is_empty() {
-            format!("{}/v1/{}", self.base, kind.endpoint())
-        } else {
-            format!("{}/v1/{}/{path}", self.base, kind.endpoint())
-        };
+        if path.is_empty() {
+            return Ok(SidecarOutcome::NotFound);
+        }
+        let url = format!("{}/v1/{}/{path}", self.base, kind.endpoint());
         let (status, body) = Self::send_text(self.http.get(&url).bearer_auth(&self.key))?;
         match status.as_u16() {
             200 => {
@@ -489,31 +515,84 @@ mod summary_tests {
     }
 
     #[test]
-    fn get_summary_root_uses_no_path_endpoint() {
-        // Workspace-root sidecar (path = "/") MUST hit the
-        // dedicated `/v1/abstract` route — the wildcard `{*path}`
-        // server-side refuses empty segments, so re-routing through
-        // `/v1/abstract/` would 404. Verified via the captured
-        // request path.
+    fn get_summary_root_short_circuits_to_not_found_without_http() {
+        // Workspace root has no dentry, so the server has no
+        // summary row to return. Asking would always 404 — but
+        // the previous implementation routed root to a separate
+        // no-path endpoint that itself returned 404, masquerading
+        // as a valid feature. Now the client refuses to make the
+        // request at all. A mock that would otherwise serve 200
+        // is mounted with expect(0)-style assertion: if any HTTP
+        // call goes out, `path_rx.recv_timeout` succeeds and the
+        // test fails.
+        let resp_body = serde_json::json!({ "ok": true }).to_string();
+        let (base, path_rx) =
+            spawn_status_mock(200, "OK", resp_body, "application/json");
+        let client = VedaClient::new(&base, "wk-test");
+        let outcome = client.get_summary("/", SummaryKind::Abstract).unwrap();
+        assert!(
+            matches!(outcome, SidecarOutcome::NotFound),
+            "root must map to NotFound, got {outcome:?}"
+        );
+        // No HTTP call should have happened — the mock's path
+        // channel must be empty. recv_timeout returns err on
+        // timeout, which is what we want.
+        assert!(
+            path_rx.recv_timeout(Duration::from_millis(200)).is_err(),
+            "root summary lookup must not hit the server"
+        );
+    }
+
+    // ── capabilities ───────────────────────────────────────────────
+
+    #[test]
+    fn get_capabilities_parses_summary_enabled_true() {
         let resp_body = serde_json::json!({
             "success": true,
-            "data": { "path": "/", "l0_abstract": "workspace L0" },
+            "data": { "summary_enabled": true },
         })
         .to_string();
         let (base, path_rx) =
             spawn_status_mock(200, "OK", resp_body, "application/json");
         let client = VedaClient::new(&base, "wk-test");
-        let outcome = client.get_summary("/", SummaryKind::Abstract).unwrap();
+        let caps = client.get_capabilities().unwrap();
+        assert!(caps.summary_enabled);
         let captured = path_rx.recv_timeout(Duration::from_secs(2)).unwrap();
-        assert_eq!(
-            captured, "/v1/abstract",
-            "root sidecar must hit the no-path endpoint, got {captured}"
-        );
-        if let SidecarOutcome::Body(b) = outcome {
-            assert_eq!(String::from_utf8(b).unwrap(), "workspace L0");
-        } else {
-            panic!("expected Body");
-        }
+        assert_eq!(captured, "/v1/capabilities");
+    }
+
+    #[test]
+    fn get_capabilities_parses_summary_enabled_false() {
+        let resp_body = serde_json::json!({
+            "success": true,
+            "data": { "summary_enabled": false },
+        })
+        .to_string();
+        let (base, _rx) = spawn_status_mock(200, "OK", resp_body, "application/json");
+        let client = VedaClient::new(&base, "wk-test");
+        let caps = client.get_capabilities().unwrap();
+        assert!(!caps.summary_enabled);
+    }
+
+    #[test]
+    fn get_capabilities_unknown_fields_ignored() {
+        // Forward-compat: server may grow new capability bits; the
+        // client must keep parsing successfully so an old fuse binary
+        // talking to a newer server doesn't disable sidecars by
+        // accident.
+        let resp_body = serde_json::json!({
+            "success": true,
+            "data": {
+                "summary_enabled": true,
+                "future_feature_x": "yes",
+                "version": 7,
+            },
+        })
+        .to_string();
+        let (base, _rx) = spawn_status_mock(200, "OK", resp_body, "application/json");
+        let client = VedaClient::new(&base, "wk-test");
+        let caps = client.get_capabilities().unwrap();
+        assert!(caps.summary_enabled);
     }
 
     #[test]

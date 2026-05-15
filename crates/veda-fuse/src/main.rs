@@ -185,7 +185,20 @@ fn mount_and_serve(
     opts: &MountOpts,
     notify_fd: Option<RawFd>,
 ) -> anyhow::Result<()> {
-    let vedafs = fs::VedaFs::new(client, config, notify_fd);
+    // Probe the server's summary capability before mounting so
+    // readdir can decide whether to advertise `.abstract` /
+    // `.overview` sidecars. Fail-open: any error (network glitch,
+    // older server without the endpoint) defaults to advertising —
+    // the per-directory miss cache mops up phantoms reactively. See
+    // crates/veda-fuse/src/fs.rs `sidecar_recently_missing`.
+    let summary_enabled = match client.get_capabilities() {
+        Ok(caps) => caps.summary_enabled,
+        Err(e) => {
+            tracing::warn!(err = %e, "capability probe failed; defaulting summary_enabled=true");
+            true
+        }
+    };
+    let vedafs = fs::VedaFs::new(client, config, summary_enabled, notify_fd);
     let cursor_file = sse::cursor_file_path(server);
     let mut watcher = sse::SseWatcher::start(
         server, key,

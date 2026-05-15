@@ -91,6 +91,30 @@ pub fn filename(path: &str) -> &str {
     }
 }
 
+/// Basenames the FUSE layer synthesises as read-only summary
+/// sidecars. New writes to these names must be rejected at every
+/// surface (HTTP routes, SQL UDFs, internal callers) so a real file
+/// can never collide with the synthetic entry. Enforced via
+/// [`reject_reserved_basename`] which is called from `FsService`
+/// after `normalize`, so trailing slashes / `/.` / SQL UDF call
+/// sites all flow through the same gate.
+pub const RESERVED_SIDECAR_BASENAMES: &[&str] = &[".abstract", ".overview"];
+
+/// Reject paths whose normalized basename matches a reserved sidecar
+/// name. Caller is responsible for normalizing first — passing a raw
+/// path with a trailing slash would otherwise produce a basename of
+/// `""` and silently let the write through.
+pub fn reject_reserved_basename(normalized_path: &str) -> Result<()> {
+    let basename = filename(normalized_path);
+    if RESERVED_SIDECAR_BASENAMES.contains(&basename) {
+        return Err(VedaError::InvalidPath(format!(
+            "'{basename}' is reserved for the FUSE summary sidecar and \
+             cannot be used as a real file or directory name"
+        )));
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -134,6 +158,60 @@ mod tests {
         assert!(normalize("/foo\rbar").is_err());
         assert!(normalize("/foo\u{202E}bar").is_err()); // RLO
         assert!(normalize("/foo\u{200F}bar").is_err()); // RLM
+    }
+
+    // ── reject_reserved_basename ──────────────────────────────────
+
+    #[test]
+    fn reserved_basename_rejects_exact_match() {
+        // Documented sidecar names must be unconditionally rejected
+        // — the FUSE layer synthesises them and a real entry would
+        // be permanently shadowed.
+        let err = reject_reserved_basename("/docs/.abstract").unwrap_err();
+        assert!(err.to_string().contains(".abstract"), "msg: {err}");
+        let err = reject_reserved_basename("/notes/.overview").unwrap_err();
+        assert!(err.to_string().contains("reserved"), "msg: {err}");
+    }
+
+    #[test]
+    fn reserved_basename_rejects_root_basename() {
+        // `/.abstract` (top-level reserved name) must also fail —
+        // FUSE root would shadow it just the same as a nested one.
+        let err = reject_reserved_basename("/.abstract").unwrap_err();
+        assert!(err.to_string().contains(".abstract"), "msg: {err}");
+    }
+
+    #[test]
+    fn reserved_basename_allows_substring_matches() {
+        // Only the exact basename matters. Substring hits or
+        // shadow-prefixes (.abstracts trailing s, foo.abstract.md
+        // suffix) are unrelated user data and must pass.
+        reject_reserved_basename("/abstracts/jan.md").unwrap();
+        reject_reserved_basename("/notes/.abstracts").unwrap();
+        reject_reserved_basename("/notes/something.abstract.md").unwrap();
+    }
+
+    #[test]
+    fn reserved_basename_assumes_normalized_input() {
+        // Helper is meant to run *after* normalize. The contract
+        // pins that caller-provided raw forms (trailing slash, `/.`,
+        // double slashes) MUST be passed through `normalize` first
+        // — otherwise the basename derived here would be empty / a
+        // dot, sneaking the write through. This test demonstrates
+        // both: with a raw path the basename helper returns the
+        // wrong basename, but `normalize` first then check works.
+        // (Catches the surface-level bypass codex flagged in the
+        // route-layer-only check.)
+        assert!(reject_reserved_basename("/docs/.abstract/").is_ok(),
+            "raw path with trailing slash should slip through this helper");
+        // After normalize, the bypass is closed:
+        let n = normalize("/docs/.abstract/").unwrap();
+        assert_eq!(n, "/docs/.abstract");
+        assert!(reject_reserved_basename(&n).is_err());
+        // Same for the /. form.
+        let n = normalize("/docs/.abstract/.").unwrap();
+        assert_eq!(n, "/docs/.abstract");
+        assert!(reject_reserved_basename(&n).is_err());
     }
 
     #[test]

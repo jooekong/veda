@@ -14,6 +14,7 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use axum::{Json, Router};
 use serde::Serialize;
+use veda_types::ApiResponse;
 
 const READY_TIMEOUT: Duration = Duration::from_secs(3);
 
@@ -27,6 +28,7 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/healthz", get(healthz))
         .route("/install.sh", get(install_script))
         .route("/v1/ready", get(ready))
+        .route("/v1/capabilities", get(capabilities))
         .route("/v1/metrics", get(metrics_endpoint))
         .merge(account::routes())
         .merge(fs::routes())
@@ -123,6 +125,28 @@ async fn healthz() -> &'static str {
     "ok"
 }
 
+/// Public, unauthenticated capability probe so clients (FUSE in
+/// particular) can decide whether to advertise summary sidecars
+/// without paying for a per-directory 501 round-trip. Currently
+/// reports a single bit (`summary_enabled`) that mirrors
+/// `AppState::summary_enabled`. Extend with additional flags
+/// when new optional features ship — keep the shape backwards-
+/// compatible so old clients ignore unknown keys.
+async fn capabilities(State(state): State<Arc<AppState>>) -> Response {
+    Json(capabilities_payload(state.summary_enabled)).into_response()
+}
+
+/// Wire-shape payload for [`capabilities`]. Split out so a unit
+/// test can pin `data.summary_enabled` without standing up
+/// `AppState` — the FUSE client deserialises this exact shape, so
+/// a silent rename or wrapper change here would break the probe
+/// path with no compile-time signal.
+fn capabilities_payload(summary_enabled: bool) -> ApiResponse<serde_json::Value> {
+    ApiResponse::ok(serde_json::json!({
+        "summary_enabled": summary_enabled,
+    }))
+}
+
 async fn install_script() -> impl IntoResponse {
     (
         StatusCode::OK,
@@ -187,6 +211,30 @@ mod tests {
         assert_eq!(json["components"][0]["name"], "mysql");
         assert_eq!(json["components"][0]["ok"], true);
         assert_eq!(json["components"][1]["name"], "milvus");
+    }
+
+    #[test]
+    fn capabilities_payload_reports_summary_enabled_true() {
+        // The FUSE client (`crates/veda-fuse/src/client.rs::get_capabilities`)
+        // mocks this exact shape in its unit tests. Pin it here so
+        // an accidental rename ("summaries_enabled") or envelope
+        // change (ApiResponse::err) fails CI on the server side
+        // before it can quietly break the FUSE probe.
+        let resp = capabilities_payload(true);
+        let json = serde_json::to_value(&resp).unwrap();
+        assert_eq!(json["success"], true);
+        assert_eq!(json["data"]["summary_enabled"], true);
+        // Documented field name — the FUSE Capabilities struct
+        // uses serde(default) so a typo would deserialise as false.
+        assert!(json["data"].get("summary_enabled").is_some());
+    }
+
+    #[test]
+    fn capabilities_payload_reports_summary_enabled_false() {
+        let resp = capabilities_payload(false);
+        let json = serde_json::to_value(&resp).unwrap();
+        assert_eq!(json["success"], true);
+        assert_eq!(json["data"]["summary_enabled"], false);
     }
 
     #[test]

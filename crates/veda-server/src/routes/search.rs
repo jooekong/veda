@@ -13,32 +13,17 @@ use crate::error::AppError;
 use crate::state::AppState;
 
 pub fn routes() -> Router<Arc<AppState>> {
+    // NOTE: there is intentionally no bare `/v1/abstract` /
+    // `/v1/overview` route for the workspace root. The summary
+    // service resolves a row by dentry, and the root path has no
+    // dentry — adding the route just produced misleading 404s
+    // (caught by the 2026-05-14 adversarial review). When root-level
+    // summaries land as a real feature (worker + store), wire them
+    // here.
     Router::new()
         .route("/v1/search", post(search))
-        // Workspace-root summaries: `{*path}` is a greedy wildcard
-        // and Axum refuses to match it against an empty segment, so
-        // a bare `/v1/abstract` is impossible under the same handler.
-        // Pair the wildcard with a no-path variant that hands the
-        // service a literal `"/"`. Used by `veda abstract /` and by
-        // the FUSE sidecar at the mount root.
-        .route("/v1/abstract", get(get_abstract_root))
         .route("/v1/abstract/{*path}", get(get_abstract))
-        .route("/v1/overview", get(get_overview_root))
         .route("/v1/overview/{*path}", get(get_overview))
-}
-
-async fn get_abstract_root(
-    State(state): State<Arc<AppState>>,
-    auth: AuthWorkspace,
-) -> Result<Response, AppError> {
-    serve_abstract(state, auth, "/".to_string()).await
-}
-
-async fn get_overview_root(
-    State(state): State<Arc<AppState>>,
-    auth: AuthWorkspace,
-) -> Result<Response, AppError> {
-    serve_overview(state, auth, "/".to_string()).await
 }
 
 async fn search(

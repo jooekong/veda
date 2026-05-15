@@ -92,11 +92,34 @@ impl DirCacheEntry {
 
 pub type DirCacheMap = Arc<Mutex<HashMap<u64, DirCacheEntry>>>;
 
+/// Short-TTL "we just got ENOENT for this sidecar" cache. Prevents
+/// `readdir` from advertising magic entries that the very next
+/// `lookup` would 404 on (server-side `[llm]` disabled, or no
+/// summary generated for this directory yet — a routine state when
+/// the summary worker backlog is non-trivial). Keyed by `(parent
+/// directory path, magic basename)`. Entries fall out naturally on
+/// TTL expiry so a recently-arrived summary becomes visible again
+/// on the next lookup.
+type SidecarMissCache = Arc<Mutex<HashMap<(String, &'static str), Instant>>>;
+
 pub struct VedaFs {
     client: VedaClient,
     inodes: Arc<Mutex<InodeTable>>,
     config: FuseConfig,
     read_cache: Arc<Mutex<ReadCache>>,
+    sidecar_miss: SidecarMissCache,
+    /// Mount-life cache of `/v1/capabilities.summary_enabled`.
+    /// Probed once at construction in `main.rs::mount_fs`; `readdir`
+    /// skips advertising magic sidecars when this is `false`, so
+    /// deployments without `[llm]` configured don't surface phantom
+    /// entries even on the very first directory listing. Defaults
+    /// to `true` if the probe fails (Codex review trade-off: prefer
+    /// false positives later cleaned up by the per-dir miss cache
+    /// over silently hiding a feature that's actually available).
+    /// Plain `bool` (no atomic): set once at construction, never
+    /// mutated; FUSE op handlers all take `&mut self`, so each
+    /// read is single-threaded by design.
+    summary_enabled: bool,
     next_fh: u64,
     write_handles: HashMap<u64, WriteHandle>,
     dir_cache: DirCacheMap,
@@ -105,11 +128,35 @@ pub struct VedaFs {
 }
 
 impl VedaFs {
-    pub fn new(client: VedaClient, config: FuseConfig, notify_fd: Option<RawFd>) -> Self {
+    /// Build a FUSE filesystem. `summary_enabled` is the cached
+    /// answer from `/v1/capabilities` (see `mount_fs` in `main.rs`);
+    /// when `false`, `readdir` won't advertise synthetic summary
+    /// sidecars so deployments without `[llm]` configured don't
+    /// surface phantom entries. Tests typically pass `true` (the
+    /// default-on alpha config) because they don't care about the
+    /// sidecar discovery path.
+    pub fn new(
+        client: VedaClient,
+        config: FuseConfig,
+        summary_enabled: bool,
+        notify_fd: Option<RawFd>,
+    ) -> Self {
         let read_cache = Arc::new(Mutex::new(ReadCache::new(config.cache_size_mb, config.attr_ttl)));
         let inodes = Arc::new(Mutex::new(InodeTable::new_with_ttl(config.attr_ttl)));
         let dir_cache: DirCacheMap = Arc::new(Mutex::new(HashMap::new()));
-        Self { client, inodes, config, read_cache, next_fh: 1, write_handles: HashMap::new(), dir_cache, notify_fd }
+        let sidecar_miss = Arc::new(Mutex::new(HashMap::new()));
+        Self {
+            client,
+            inodes,
+            config,
+            read_cache,
+            sidecar_miss,
+            summary_enabled,
+            next_fh: 1,
+            write_handles: HashMap::new(),
+            dir_cache,
+            notify_fd,
+        }
     }
 
     pub fn inodes(&self) -> Arc<Mutex<InodeTable>> { self.inodes.clone() }
@@ -349,6 +396,51 @@ impl VedaFs {
         }
     }
 
+    /// Look up the canonical literal for a magic basename (so the
+    /// cache key uses `'static &str` from the table instead of an
+    /// owned String). Caller already verified the name is magic.
+    fn magic_name_literal(name: &str) -> Option<&'static str> {
+        MAGIC_NAMES
+            .iter()
+            .find(|(n, _)| *n == name)
+            .map(|(n, _)| *n)
+    }
+
+    /// Effective TTL for the sidecar miss cache. Floored at 1s so a
+    /// user-configured `attr_ttl = 0` doesn't accidentally turn the
+    /// cache off (which would re-introduce the phantom-entry
+    /// problem the cache exists to suppress).
+    fn miss_cache_ttl(&self) -> Duration {
+        std::cmp::max(self.config.attr_ttl, Duration::from_secs(1))
+    }
+
+    /// Has this sidecar slot returned ENOENT recently enough that we
+    /// should keep treating it as absent? Used by `readdir` to skip
+    /// injecting phantom entries that the immediate `lookup` would
+    /// then 404 on (server with `[llm]` disabled, or a directory the
+    /// summary worker hasn't reached yet).
+    fn sidecar_recently_missing(&self, parent_path: &str, magic_name: &'static str) -> bool {
+        let guard = self.sidecar_miss.lock().unwrap();
+        match guard.get(&(parent_path.to_string(), magic_name)) {
+            Some(t) => t.elapsed() < self.miss_cache_ttl(),
+            None => false,
+        }
+    }
+
+    fn note_sidecar_missing(&self, parent_path: &str, magic_name: &'static str) {
+        let mut guard = self.sidecar_miss.lock().unwrap();
+        // Light eviction: drop entries that are already past TTL so
+        // the map doesn't grow without bound under heavy listings.
+        let ttl = self.miss_cache_ttl();
+        guard.retain(|_, t| t.elapsed() < ttl);
+        guard.insert((parent_path.to_string(), magic_name), Instant::now());
+    }
+
+    fn clear_sidecar_missing(&self, parent_path: &str, magic_name: &'static str) {
+        let mut guard = self.sidecar_miss.lock().unwrap();
+        guard.remove(&(parent_path.to_string(), magic_name));
+    }
+
     /// Fetch the magic sidecar body, drive cache, return the attr
     /// FUSE should publish for the entry. The mapping:
     ///   200 Body(b)   → attr.size = b.len(); body cached at the
@@ -372,10 +464,28 @@ impl VedaFs {
             .client
             .get_summary(target_path, kind)
             .map_err(|ref e| Self::err_to_errno(e))?;
+        let magic_name = match kind {
+            SummaryKind::Abstract => ".abstract",
+            SummaryKind::Overview => ".overview",
+        };
         let body = match outcome {
-            SidecarOutcome::Body(b) => b,
-            SidecarOutcome::Pending => SIDECAR_PENDING_BODY.as_bytes().to_vec(),
-            SidecarOutcome::Disabled | SidecarOutcome::NotFound => return Err(libc::ENOENT),
+            SidecarOutcome::Body(b) => {
+                // Body present → clear any prior miss note so the
+                // entry shows up in subsequent readdir calls without
+                // waiting for TTL.
+                self.clear_sidecar_missing(target_path, magic_name);
+                b
+            }
+            SidecarOutcome::Pending => {
+                self.clear_sidecar_missing(target_path, magic_name);
+                SIDECAR_PENDING_BODY.as_bytes().to_vec()
+            }
+            SidecarOutcome::Disabled | SidecarOutcome::NotFound => {
+                // Remember the miss so the next readdir doesn't list
+                // a phantom entry the immediate lookup will ENOENT.
+                self.note_sidecar_missing(target_path, magic_name);
+                return Err(libc::ENOENT);
+            }
         };
         let size = body.len() as u64;
         // Stash the body in the regular read cache so the
@@ -383,10 +493,7 @@ impl VedaFs {
         // call. The key is the synthetic sidecar path (e.g.
         // `/docs/.abstract`); the server-side reserved-name check
         // prevents a real file from sharing the key.
-        let sidecar_path = match kind {
-            SummaryKind::Abstract => format!("{}/.abstract", target_path.trim_end_matches('/')),
-            SummaryKind::Overview => format!("{}/.overview", target_path.trim_end_matches('/')),
-        };
+        let sidecar_path = format!("{}/{magic_name}", target_path.trim_end_matches('/'));
         let (_, gen) = self.cache_get_with_gen(&sidecar_path);
         self.cache_put(&sidecar_path, body, gen);
         Ok(Self::magic_attr(ino, size))
@@ -474,6 +581,16 @@ impl Filesystem for VedaFs {
         // via the CLI (`veda cat`), and `veda mv` can rename it out
         // of the way. See skill.md "Legacy sidecar collision".
         if let Some(kind) = is_magic_name(name_str) {
+            // Short-TTL miss-cache from a recent magic_lookup ENOENT.
+            // Skips the HTTP round-trip for `cat /docs/.abstract`
+            // when the previous attempt already 404'd; falls out on
+            // attr_ttl so newly generated summaries become visible.
+            if let Some(magic) = Self::magic_name_literal(name_str) {
+                if self.sidecar_recently_missing(&parent_path, magic) {
+                    reply.error(libc::ENOENT);
+                    return;
+                }
+            }
             let ino = self.inode_get_or_create_with_nlookup(&child_path);
             match self.magic_lookup(&parent_path, ino, kind) {
                 Ok(attr) => {
@@ -625,17 +742,27 @@ impl Filesystem for VedaFs {
             let kind = if de.is_dir { FileType::Directory } else { FileType::RegularFile };
             full_entries.push((child_ino, kind, de.name.clone()));
         }
-        // Append the synthetic summary sidecars at the end of every
-        // directory listing. A legacy file with the same name would
-        // appear twice in `ls -a` (real file + synthetic entry) but
-        // FUSE lookup/read still take the magic branch (see lookup
-        // for the documented shadowing trade-off). New writes can't
-        // create the collision — server-side reserved-name guard at
-        // veda-server/src/routes/fs.rs blocks them.
-        for (magic_name, _) in MAGIC_NAMES {
-            let magic_path = Self::resolve_child_path(&path, magic_name);
-            let magic_ino = self.inode_get_or_create(&magic_path);
-            full_entries.push((magic_ino, FileType::RegularFile, magic_name.to_string()));
+        // Three reasons not to advertise a sidecar in the listing:
+        //   - the server reported `summary_enabled = false` at mount
+        //     time, so no directory will ever have a summary (no
+        //     point inviting `cat` to discover ENOENT 1 round-trip
+        //     at a time).
+        //   - this slot in this dir returned ENOENT recently — the
+        //     per-dir miss cache cleans up phantoms reactively for
+        //     dirs the worker hasn't reached yet.
+        //   - a legacy real file already owns the name (server-side
+        //     reserved-name guard blocks new writes, but pre-existing
+        //     rows are still around); FUSE lookup/read take the
+        //     magic branch (documented shadowing trade-off in skill.md).
+        if self.summary_enabled {
+            for (magic_name, _) in MAGIC_NAMES {
+                if self.sidecar_recently_missing(&path, magic_name) {
+                    continue;
+                }
+                let magic_path = Self::resolve_child_path(&path, magic_name);
+                let magic_ino = self.inode_get_or_create(&magic_path);
+                full_entries.push((magic_ino, FileType::RegularFile, magic_name.to_string()));
+            }
         }
         for (i, (child_ino, kind, name)) in full_entries.iter().enumerate().skip(offset as usize) {
             if reply.add(*child_ino, (i + 1) as i64, *kind, name) { break; }
@@ -676,13 +803,18 @@ impl Filesystem for VedaFs {
         // shouldn't itself touch the LLM — the next `cat` will hit
         // `lookup`, which fills in the real size. cache_ok=false
         // tells the loop below to publish them with a zero TTL so
-        // the stub attr doesn't outlive the next lookup. See
-        // readdir for the legacy-collision shadowing note.
-        for (magic_name, _) in MAGIC_NAMES {
-            let magic_path = Self::resolve_child_path(&path, magic_name);
-            let magic_ino = self.inode_get_or_create(&magic_path);
-            let stub_attr = Self::magic_attr(magic_ino, 0);
-            full.push((magic_ino, magic_name.to_string(), stub_attr, false));
+        // the stub attr doesn't outlive the next lookup. Same
+        // summary_enabled / per-dir miss-cache gating as readdir.
+        if self.summary_enabled {
+            for (magic_name, _) in MAGIC_NAMES {
+                if self.sidecar_recently_missing(&path, magic_name) {
+                    continue;
+                }
+                let magic_path = Self::resolve_child_path(&path, magic_name);
+                let magic_ino = self.inode_get_or_create(&magic_path);
+                let stub_attr = Self::magic_attr(magic_ino, 0);
+                full.push((magic_ino, magic_name.to_string(), stub_attr, false));
+            }
         }
         let zero_ttl = Duration::ZERO;
         let mut table = self.inodes.lock().unwrap();
@@ -1237,6 +1369,70 @@ mod tests {
         assert!(matches!(attr.kind, FileType::RegularFile));
         assert_eq!(attr.nlink, 1);
         assert_eq!(attr.ino, 99);
+    }
+
+    #[test]
+    fn magic_name_literal_returns_canonical_static_for_known_names() {
+        // The miss-cache key requires `&'static str`, so the helper
+        // can't just return the input slice. It has to map back to
+        // the constant table entry.
+        assert_eq!(VedaFs::magic_name_literal(".abstract"), Some(".abstract"));
+        assert_eq!(VedaFs::magic_name_literal(".overview"), Some(".overview"));
+        assert!(VedaFs::magic_name_literal(".other").is_none());
+        assert!(VedaFs::magic_name_literal("").is_none());
+    }
+
+    #[test]
+    fn sidecar_miss_cache_floors_attr_ttl_zero_at_one_second() {
+        // attr_ttl=0 is nonsensical for the miss cache (would
+        // reintroduce phantom entries the cache exists to
+        // suppress). The 1s floor at `miss_cache_ttl` makes the
+        // cache still work in this corner.
+        let config = FuseConfig {
+            attr_ttl: std::time::Duration::ZERO,
+            read_only: false,
+            cache_size_mb: 1,
+        };
+        let client = VedaClient::new("http://127.0.0.1:1", "k");
+        let fs = VedaFs::new(client, config, true, None);
+        fs.note_sidecar_missing("/docs", ".abstract");
+        assert!(
+            fs.sidecar_recently_missing("/docs", ".abstract"),
+            "miss must persist under the 1s floor even when attr_ttl=0"
+        );
+    }
+
+    #[test]
+    fn sidecar_miss_cache_remembers_within_ttl_and_clears_on_hit() {
+        // End-to-end behaviour of the three cache helpers without
+        // spinning up a real FUSE mount. Pins the TTL semantics:
+        //   - note_sidecar_missing → recently_missing returns true
+        //   - clear_sidecar_missing → recently_missing returns false
+        // Past-TTL behaviour is exercised indirectly by setting a
+        // tiny attr_ttl and sleeping; we avoid that here because
+        // CI clock jitter makes sub-second sleeps flaky.
+        let config = FuseConfig {
+            attr_ttl: std::time::Duration::from_secs(5),
+            read_only: false,
+            cache_size_mb: 1,
+        };
+        // VedaFs::new needs a real VedaClient. We can construct one
+        // pointing at a bogus URL — none of the cache helpers call
+        // out to it, and we never invoke any method that does.
+        let client = VedaClient::new("http://127.0.0.1:1", "k");
+        let fs = VedaFs::new(client, config, true, None);
+
+        assert!(!fs.sidecar_recently_missing("/docs", ".abstract"));
+        fs.note_sidecar_missing("/docs", ".abstract");
+        assert!(fs.sidecar_recently_missing("/docs", ".abstract"));
+        // Different basename in same dir: independent.
+        assert!(!fs.sidecar_recently_missing("/docs", ".overview"));
+        // Different dir, same basename: independent.
+        assert!(!fs.sidecar_recently_missing("/notes", ".abstract"));
+        // Clear restores availability so a freshly-generated summary
+        // shows up on the next readdir without TTL wait.
+        fs.clear_sidecar_missing("/docs", ".abstract");
+        assert!(!fs.sidecar_recently_missing("/docs", ".abstract"));
     }
 
     #[test]

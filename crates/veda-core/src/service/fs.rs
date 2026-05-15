@@ -237,6 +237,7 @@ impl FsService {
         // the whole DB write altogether.
         if let Some(client_hash) = if_none_match_sha256 {
             let norm = path::normalize(raw_path)?;
+            path::reject_reserved_basename(&norm)?;
             if let Some(existing) = self.meta.get_dentry(workspace_id, &norm).await? {
                 if !existing.is_dir {
                     if let Some(fid) = existing.file_id.as_deref() {
@@ -281,6 +282,7 @@ impl FsService {
         expected_revision: Option<i32>,
     ) -> Result<api::WriteFileResponse> {
         let norm = path::normalize(raw_path)?;
+        path::reject_reserved_basename(&norm)?;
 
         ensure_parents(&*self.meta, workspace_id, &norm).await?;
 
@@ -876,6 +878,7 @@ impl FsService {
 
     pub async fn mkdir(&self, workspace_id: &str, raw_path: &str) -> Result<()> {
         let norm = path::normalize(raw_path)?;
+        path::reject_reserved_basename(&norm)?;
         if norm == "/" {
             return Ok(());
         }
@@ -913,6 +916,11 @@ impl FsService {
     ) -> Result<api::WriteFileResponse> {
         let src = path::normalize(src_path)?;
         let dst = path::normalize(dst_path)?;
+        // Only the destination is rejected — the source can be a
+        // pre-existing legacy file at a reserved name (user might
+        // be moving it out of the way), but writes into a reserved
+        // slot must still fail.
+        path::reject_reserved_basename(&dst)?;
 
         if src == dst {
             return Err(VedaError::InvalidInput(
@@ -1036,6 +1044,7 @@ impl FsService {
         content: &str,
     ) -> Result<api::WriteFileResponse> {
         let norm = path::normalize(raw_path)?;
+        path::reject_reserved_basename(&norm)?;
         let mut tx = self.meta.begin_tx().await?;
         let existing = tx.get_dentry(workspace_id, &norm).await?;
 
@@ -1187,6 +1196,8 @@ impl FsService {
     pub async fn rename(&self, workspace_id: &str, src_path: &str, dst_path: &str) -> Result<()> {
         let src = path::normalize(src_path)?;
         let dst = path::normalize(dst_path)?;
+        // Only the destination is rejected — same rationale as copy_file.
+        path::reject_reserved_basename(&dst)?;
 
         if src == dst {
             return Ok(());
