@@ -70,10 +70,15 @@ pub const DEFAULT_WORKSPACE_ALIAS: &str = "default";
 
 impl CliConfig {
     /// Default config file path: `${XDG_CONFIG_HOME:-~/.config}/veda/config.toml`
-    /// (or the platform equivalent). Creates the parent directory if missing.
+    /// on every platform. Deliberately ignore macOS's
+    /// `~/Library/Application Support` convention so docs/SOPs that hard-code
+    /// `~/.config/veda` work the same on Mac and Linux. Creates the parent
+    /// directory if missing.
     pub fn default_path() -> Result<PathBuf> {
-        let dir = dirs::config_dir()
-            .context("cannot find config directory")?
+        let dir = std::env::var_os("XDG_CONFIG_HOME")
+            .map(PathBuf::from)
+            .or_else(|| dirs::home_dir().map(|h| h.join(".config")))
+            .context("cannot determine home directory")?
             .join("veda");
         std::fs::create_dir_all(&dir)?;
         Ok(dir.join("config.toml"))
