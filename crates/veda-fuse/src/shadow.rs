@@ -15,6 +15,15 @@ use std::time::SystemTime;
 /// Start of the local-only inode range. Server-issued inodes count up
 /// from 2 (`InodeTable::next_ino`); reserving the high half avoids
 /// collisions without coordinating between the two allocators.
+///
+/// macFUSE/libfuse3 acceptance of inodes >= 1<<63 isn't formally
+/// verified yet — the FUSE protocol treats `ino` as opaque u64 except
+/// for 0 (`FUSE_UNKNOWN_INO`) and 1 (root), so this should work, but
+/// Day 3 (the first commit that actually returns these to the kernel
+/// via `lookup`/`getattr`) is the live test. If the kernel rejects
+/// them, fall back to a non-conflicting low range (e.g. start above
+/// `InodeTable::next_ino`'s ceiling and have the two allocators
+/// coordinate) — see docs/plans/fuse-writeback-plan.md.
 pub const LOCAL_INO_BASE: u64 = 1u64 << 63;
 
 /// Total in-memory cap across all entries. Soft policy: writes that
@@ -42,6 +51,11 @@ pub struct ShadowEntry {
     pub mtime: SystemTime,
     pub seq: u64,
     pub local_ino: u64,
+    /// Parent inode the entry was created/adopted under. Needed by
+    /// `mark_committed` to evict the entry's basename from
+    /// `pending_children` once a LocalOnly upload lands on the server.
+    /// rename() (Day 4) updates this field when reparenting.
+    pub parent_ino: u64,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -100,6 +114,13 @@ impl ShadowStore {
     /// pending_children. Returns (local_ino, seq).
     pub fn create_local(&mut self, path: &str, parent_ino: u64) -> (u64, u64) {
         self.tombstones.remove(path);
+        // Reclaim the prior entry's bytes if we're replacing one
+        // (e.g. unlink-then-create within a session leaves no entry,
+        // but a defensive remove keeps total_bytes correct against
+        // any future caller that calls create_local twice).
+        if let Some(prior) = self.entries.remove(path) {
+            self.total_bytes = self.total_bytes.saturating_sub(prior.data.len());
+        }
         let local_ino = self.alloc_local_ino();
         self.seq += 1;
         let seq = self.seq;
@@ -118,26 +139,45 @@ impl ShadowStore {
                 mtime: SystemTime::now(),
                 seq,
                 local_ino,
+                parent_ino,
             },
         );
         (local_ino, seq)
     }
 
-    /// Materialise an existing server-side file as a `Dirty` entry —
+    /// Materialise an existing server-side file as a `Clean` entry —
     /// called the first time FUSE opens a non-new file for writing.
-    /// Caller supplies the current server revision and (optionally)
-    /// the existing bytes. Returns the seq.
+    /// Caller supplies the current server revision and the existing
+    /// bytes. Enforces caps just like `write_at`; if a cap would be
+    /// breached the store is left untouched and `InsertError` is
+    /// returned (caller should fall through to a sync flush of any
+    /// prior entry, then write directly against the server).
     pub fn adopt_server_file(
         &mut self,
         path: &str,
+        parent_ino: u64,
         local_ino: u64,
         base_rev: i32,
         initial_bytes: Vec<u8>,
-    ) -> u64 {
+    ) -> Result<u64, InsertError> {
+        let new_len = initial_bytes.len();
+        if new_len > self.max_per_file {
+            return Err(InsertError::PerFileCapExceeded);
+        }
+        // Account for a possible replacement of an existing entry:
+        // count only the delta against the prior data length, so
+        // re-adopt of the same path doesn't double-count.
+        let prior_len = self.entries.get(path).map(|e| e.data.len()).unwrap_or(0);
+        let after_total = self
+            .total_bytes
+            .saturating_sub(prior_len)
+            .saturating_add(new_len);
+        if after_total > self.max_total {
+            return Err(InsertError::TotalCapExceeded);
+        }
         self.tombstones.remove(path);
+        self.total_bytes = after_total;
         self.seq += 1;
-        let len = initial_bytes.len();
-        self.total_bytes = self.total_bytes.saturating_add(len);
         self.entries.insert(
             path.to_string(),
             ShadowEntry {
@@ -147,9 +187,10 @@ impl ShadowStore {
                 mtime: SystemTime::now(),
                 seq: self.seq,
                 local_ino,
+                parent_ino,
             },
         );
-        self.seq
+        Ok(self.seq)
     }
 
     /// Apply a write at `offset` to the entry's data buffer, growing
@@ -193,8 +234,11 @@ impl ShadowStore {
     /// Drop the local entry, remember the path as tombstoned, remove
     /// its name from the parent's pending_children. Bumps seq so any
     /// in-flight commit for this path becomes stale on return. Returns
-    /// the prior EntryKind, if any.
-    pub fn tombstone(&mut self, path: &str, parent_ino: u64) -> Option<EntryKind> {
+    /// `(prior_kind, new_seq)`: the kind the entry held before tombstone
+    /// (None if no entry existed) and the seq value the global counter
+    /// reached after the bump — used by the commit queue to send a
+    /// precise `Cancel { path, seq }` token to its worker.
+    pub fn tombstone(&mut self, path: &str, parent_ino: u64) -> (Option<EntryKind>, u64) {
         let prior = self.entries.remove(path).map(|e| {
             self.total_bytes = self.total_bytes.saturating_sub(e.data.len());
             e.kind
@@ -209,7 +253,7 @@ impl ShadowStore {
             }
         }
         self.seq += 1;
-        prior
+        (prior, self.seq)
     }
 
     /// Clear a tombstone — used when re-creating a path that was
@@ -222,12 +266,29 @@ impl ShadowStore {
     /// Mark an entry's commit as successful at the given server
     /// revision. Silently no-op when entry was canceled / superseded
     /// (seq mismatch); the worker recognises that and falls back to
-    /// the stale-seq cleanup path.
+    /// the stale-seq cleanup path. When a `LocalOnly` entry is
+    /// promoted to `Clean`, also evict its basename from
+    /// `pending_children[parent_ino]` — the server now owns the file
+    /// and a future readdir() will see it through the server listing,
+    /// so leaving the overlay would surface the name twice.
     pub fn mark_committed(&mut self, path: &str, snapshot_seq: u64, new_rev: i32) {
-        if let Some(entry) = self.entries.get_mut(path) {
-            if entry.seq == snapshot_seq {
+        let (was_local_only, parent_ino) = match self.entries.get_mut(path) {
+            Some(entry) if entry.seq == snapshot_seq => {
+                let was_local_only = entry.kind == EntryKind::LocalOnly;
                 entry.kind = EntryKind::Clean;
                 entry.base_rev = Some(new_rev);
+                (was_local_only, entry.parent_ino)
+            }
+            _ => return,
+        };
+        if was_local_only {
+            if let Some(name) = path_basename(path) {
+                if let Some(set) = self.pending_children.get_mut(&parent_ino) {
+                    set.remove(name);
+                    if set.is_empty() {
+                        self.pending_children.remove(&parent_ino);
+                    }
+                }
             }
         }
     }
@@ -364,13 +425,14 @@ mod tests {
     }
 
     #[test]
-    fn tombstone_drops_entry_and_bumps_seq() {
+    fn tombstone_drops_entry_returns_kind_and_seq() {
         let mut s = ShadowStore::new();
         s.create_local("/foo.md", 1);
         s.write_at("/foo.md", 0, b"data").unwrap();
         let pre_seq = s.get("/foo.md").unwrap().seq;
-        let kind = s.tombstone("/foo.md", 1).unwrap();
-        assert_eq!(kind, EntryKind::LocalOnly);
+        let (kind, ts_seq) = s.tombstone("/foo.md", 1);
+        assert_eq!(kind, Some(EntryKind::LocalOnly));
+        assert!(ts_seq > pre_seq);
         assert!(s.is_tombstoned("/foo.md"));
         assert!(s.get("/foo.md").is_none());
         assert!(s.pending_children(1).is_none()); // last child removed
@@ -395,7 +457,7 @@ mod tests {
     #[test]
     fn mark_committed_promotes_dirty_to_clean_on_matching_seq() {
         let mut s = ShadowStore::new();
-        s.adopt_server_file("/foo.md", 100, 1, b"old".to_vec());
+        s.adopt_server_file("/foo.md", 1, 100, 1, b"old".to_vec()).unwrap();
         let seq_after_write = s.write_at("/foo.md", 0, b"new").unwrap();
         assert_eq!(s.get("/foo.md").unwrap().kind, EntryKind::Dirty);
         s.mark_committed("/foo.md", seq_after_write, 2);
@@ -407,7 +469,7 @@ mod tests {
     #[test]
     fn mark_committed_ignores_stale_seq() {
         let mut s = ShadowStore::new();
-        s.adopt_server_file("/foo.md", 100, 1, b"v1".to_vec());
+        s.adopt_server_file("/foo.md", 1, 100, 1, b"v1".to_vec()).unwrap();
         let snapshot = s.write_at("/foo.md", 0, b"v2").unwrap();
         // Concurrent write while a commit is in flight bumps seq again.
         s.write_at("/foo.md", 0, b"v3").unwrap();
@@ -415,6 +477,22 @@ mod tests {
         // Still Dirty — the v2 commit is stale; v3 has yet to commit.
         assert_eq!(s.get("/foo.md").unwrap().kind, EntryKind::Dirty);
         assert_eq!(s.get("/foo.md").unwrap().base_rev, Some(1));
+    }
+
+    #[test]
+    fn mark_committed_evicts_pending_child_on_local_only_promotion() {
+        let mut s = ShadowStore::new();
+        let parent = 1;
+        let (_, seq0) = s.create_local("/foo.md", parent);
+        let seq1 = s.write_at("/foo.md", 0, b"hi").unwrap();
+        assert!(s.pending_children(parent).unwrap().contains("foo.md"));
+        // First commit lands while still LocalOnly → must remove
+        // the basename from pending_children so a server-side
+        // readdir doesn't surface it twice.
+        s.mark_committed("/foo.md", seq1, 5);
+        assert_eq!(s.get("/foo.md").unwrap().kind, EntryKind::Clean);
+        assert!(s.pending_children(parent).is_none());
+        assert!(seq1 > seq0); // sanity
     }
 
     #[test]
@@ -434,6 +512,41 @@ mod tests {
         let snap = s.write_at("/x", 0, b"a").unwrap();
         s.tombstone("/x", 1);
         assert!(!s.is_current("/x", snap));
+    }
+
+    #[test]
+    fn adopt_server_file_rejects_initial_buffer_over_per_file_cap() {
+        let mut s = ShadowStore::with_caps(1024, 8);
+        let err = s
+            .adopt_server_file("/big", 1, 100, 1, vec![0u8; 9])
+            .unwrap_err();
+        assert_eq!(err, InsertError::PerFileCapExceeded);
+        assert!(s.get("/big").is_none());
+        assert_eq!(s.total_bytes(), 0);
+    }
+
+    #[test]
+    fn adopt_server_file_re_adopt_does_not_double_count_total_bytes() {
+        let mut s = ShadowStore::with_caps(20, 16);
+        s.adopt_server_file("/a", 1, 100, 1, vec![0u8; 10]).unwrap();
+        assert_eq!(s.total_bytes(), 10);
+        // Re-adopt same path — total should reflect the new buffer,
+        // not the sum of old and new.
+        s.adopt_server_file("/a", 1, 100, 2, vec![0u8; 8]).unwrap();
+        assert_eq!(s.total_bytes(), 8);
+    }
+
+    #[test]
+    fn adopt_server_file_rejects_when_total_cap_breached() {
+        let mut s = ShadowStore::with_caps(15, 16);
+        s.adopt_server_file("/a", 1, 100, 1, vec![0u8; 10]).unwrap();
+        // Adding another 10-byte adopt would push total to 20 > 15.
+        let err = s
+            .adopt_server_file("/b", 1, 101, 1, vec![0u8; 10])
+            .unwrap_err();
+        assert_eq!(err, InsertError::TotalCapExceeded);
+        assert!(s.get("/b").is_none());
+        assert_eq!(s.total_bytes(), 10);
     }
 
     #[test]
