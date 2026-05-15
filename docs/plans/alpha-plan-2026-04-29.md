@@ -556,7 +556,7 @@ async fn fs_events_retention_cleans_old_rows() {
 
 ### FUSE write-back + debounce + cancel-on-unlink (2026-05-15) ✅ 已交付
 
-触发：vim 在挂载点编辑文件报 `E72: Close error on swap file`，根因是 swap binary 同步打 server 被拒。详细设计、模块拆分、里程碑见 [fuse-writeback-plan.md](./fuse-writeback-plan.md)。Server 不动，工作集中在 `veda-fuse`，5 天。**已落地 commits `d15d3f6` → `13edb01`**（含 destroy() drain、setattr-truncate writeback 修复、LocalOnly 跨 mark_dirty/truncate_to 保留）；87 unit tests pass，真挂载 vim/git/IDE 写零 server 误调。
+触发：vim 在挂载点编辑文件报 `E72: Close error on swap file`，根因是 swap binary 同步打 server 被拒。详细设计、模块拆分、里程碑见归档的 [fuse-writeback-plan.md](../archive/plans/fuse-writeback-plan.md)。Server 不动，工作集中在 `veda-fuse`，5 天。**已落地 commits `d15d3f6` → `13edb01`**（含 destroy() drain、setattr-truncate writeback 修复、LocalOnly 跨 mark_dirty/truncate_to 保留）；87 unit tests pass，真挂载 vim/git/IDE 写零 server 误调。
 
 ### S8 — outbox retention sweep (2026-05-15) ✅ 已交付
 
