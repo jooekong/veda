@@ -365,6 +365,14 @@ impl ShadowStore {
         self.entries.get(path)
     }
 
+    /// Mutable accessor used by callers that need to nudge an entry
+    /// from Clean → Dirty (e.g. an in-place truncate via setattr).
+    /// Doesn't enforce caps — caller is expected not to grow the
+    /// buffer through this handle.
+    pub fn get_dirty_mut(&mut self, path: &str) -> Option<&mut ShadowEntry> {
+        self.entries.get_mut(path)
+    }
+
     pub fn pending_children(&self, parent_ino: u64) -> Option<&HashSet<String>> {
         self.pending_children.get(&parent_ino)
     }

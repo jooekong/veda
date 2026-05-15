@@ -887,25 +887,125 @@ impl Filesystem for VedaFs {
                 Some(p) => p,
                 None => { reply.error(libc::ENOENT); return; }
             };
-            let rev = match self.client.stat(&path) {
-                Ok(info) => info.revision,
-                Err(ref e) => { reply.error(Self::err_to_errno(e)); return; }
-            };
-            if new_size == 0 {
-                if let Err(ref e) = self.client.write_file(&path, b"", rev) {
-                    reply.error(Self::err_to_errno(e)); return;
+            // Writeback path: truncate via the shadow buffer so a
+            // subsequent flush carries the correct (truncated) bytes
+            // with the correct base_rev. The legacy sync-PUT below
+            // would race the commit queue: server gets the empty
+            // body but shadow still holds Dirty data tagged with the
+            // pre-truncate revision, and every later commit returns
+            // 412. Reproducer: `>file` on an open writeback handle
+            // ate every subsequent edit because of this exact race.
+            if self.is_writeback() {
+                let shadow = self.shadow.as_ref().unwrap();
+                // Two cases: shadow has the entry (already
+                // adopted/created locally) → resize in place; or it
+                // doesn't → pull server bytes, truncate locally,
+                // adopt as Dirty so the commit queue can push.
+                let entry_fields = {
+                    let store = shadow.lock().unwrap();
+                    store
+                        .get(&path)
+                        .map(|e| (e.parent_ino, e.local_ino, e.base_rev.unwrap_or(0)))
+                };
+                let entry_seq = match entry_fields {
+                    Some((parent_ino, local_ino, base_rev)) => {
+                        let mut store = shadow.lock().unwrap();
+                        if new_size == 0 {
+                            // Drop the buffer cleanly: re-adopt empty
+                            // so total_bytes is recomputed, then bump
+                            // to Dirty so commit_queue pushes.
+                            let _ = store.adopt_server_file(
+                                &path, parent_ino, local_ino, base_rev, Vec::new(),
+                            );
+                            if let Some(e) = store.get_dirty_mut(&path) {
+                                e.kind = EntryKind::Dirty;
+                            }
+                        } else {
+                            // Resize the existing buffer.
+                            if let Some(e) = store.get_dirty_mut(&path) {
+                                e.data.resize(new_size as usize, 0);
+                                e.kind = EntryKind::Dirty;
+                            }
+                            // Bump seq via a 0-byte write_at so the
+                            // commit queue notices a state change.
+                            let _ = store.write_at(&path, 0, &[]);
+                        }
+                        store.get(&path).map(|e| e.seq)
+                    }
+                    None => {
+                        // No shadow entry yet — adopt from server,
+                        // resized locally to new_size.
+                        let server_rev = match self.client.stat(&path) {
+                            Ok(info) => info.revision,
+                            Err(ref e) => {
+                                reply.error(Self::err_to_errno(e));
+                                return;
+                            }
+                        };
+                        let bytes = if new_size == 0 {
+                            Vec::new()
+                        } else {
+                            match self.client.read_file(&path) {
+                                Ok(mut b) => {
+                                    let target = new_size as usize;
+                                    if target < b.len() {
+                                        b.truncate(target);
+                                    } else if target > b.len() {
+                                        b.resize(target, 0);
+                                    }
+                                    b
+                                }
+                                Err(ref e) => {
+                                    reply.error(Self::err_to_errno(e));
+                                    return;
+                                }
+                            }
+                        };
+                        let parent_ino = self
+                            .inodes
+                            .lock()
+                            .unwrap()
+                            .get_ino(parent_path(&path))
+                            .unwrap_or(crate::inode::ROOT_INO);
+                        let mut store = shadow.lock().unwrap();
+                        let _ = store.adopt_server_file(
+                            &path,
+                            parent_ino,
+                            ino,
+                            server_rev.unwrap_or(0),
+                            bytes,
+                        );
+                        if let Some(e) = store.get_dirty_mut(&path) {
+                            e.kind = EntryKind::Dirty;
+                        }
+                        store.get(&path).map(|e| e.seq)
+                    }
+                };
+                if let Some(seq) = entry_seq {
+                    self.commit_queue.as_ref().unwrap().touch(path.clone(), seq);
                 }
             } else {
-                match self.client.read_file(&path) {
-                    Ok(mut bytes) => {
-                        let target = new_size as usize;
-                        if target < bytes.len() { bytes.truncate(target); }
-                        else if target > bytes.len() { bytes.resize(target, 0); }
-                        if let Err(ref e) = self.client.write_file(&path, &bytes, rev) {
-                            reply.error(Self::err_to_errno(e)); return;
-                        }
-                    }
+                // Sync legacy path — server hit immediately.
+                let rev = match self.client.stat(&path) {
+                    Ok(info) => info.revision,
                     Err(ref e) => { reply.error(Self::err_to_errno(e)); return; }
+                };
+                if new_size == 0 {
+                    if let Err(ref e) = self.client.write_file(&path, b"", rev) {
+                        reply.error(Self::err_to_errno(e)); return;
+                    }
+                } else {
+                    match self.client.read_file(&path) {
+                        Ok(mut bytes) => {
+                            let target = new_size as usize;
+                            if target < bytes.len() { bytes.truncate(target); }
+                            else if target > bytes.len() { bytes.resize(target, 0); }
+                            if let Err(ref e) = self.client.write_file(&path, &bytes, rev) {
+                                reply.error(Self::err_to_errno(e)); return;
+                            }
+                        }
+                        Err(ref e) => { reply.error(Self::err_to_errno(e)); return; }
+                    }
                 }
             }
             self.inode_invalidate(ino);
