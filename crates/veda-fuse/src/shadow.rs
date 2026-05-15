@@ -263,6 +263,45 @@ impl ShadowStore {
         self.tombstones.remove(path)
     }
 
+    /// Move a shadow entry from `old_path` to `new_path`, updating
+    /// pending_children for both parent inodes. Bumps seq so any
+    /// in-flight commit captured under the old path becomes stale.
+    /// Returns the bumped seq so the caller can issue
+    /// `Cancel{old_path, old_seq}` + `Touch{new_path, new_seq}`.
+    /// No-op if `old_path` doesn't exist; clears any tombstone at
+    /// `new_path` to make the rename idempotent against a recent
+    /// delete-then-rename pattern (`git mv` over an old file).
+    pub fn rename(
+        &mut self,
+        old_path: &str,
+        new_path: &str,
+        new_parent_ino: u64,
+    ) -> Option<u64> {
+        let mut entry = self.entries.remove(old_path)?;
+        // Remove from old parent's pending set.
+        if let Some(old_name) = path_basename(old_path) {
+            if let Some(set) = self.pending_children.get_mut(&entry.parent_ino) {
+                set.remove(old_name);
+                if set.is_empty() {
+                    self.pending_children.remove(&entry.parent_ino);
+                }
+            }
+        }
+        self.tombstones.remove(new_path);
+        if let Some(new_name) = path_basename(new_path) {
+            self.pending_children
+                .entry(new_parent_ino)
+                .or_default()
+                .insert(new_name.to_string());
+        }
+        entry.parent_ino = new_parent_ino;
+        self.seq += 1;
+        entry.seq = self.seq;
+        entry.mtime = SystemTime::now();
+        self.entries.insert(new_path.to_string(), entry);
+        Some(self.seq)
+    }
+
     /// Mark an entry's commit as successful at the given server
     /// revision. Silently no-op when entry was canceled / superseded
     /// (seq mismatch); the worker recognises that and falls back to
@@ -570,6 +609,39 @@ mod tests {
         assert!(names.contains("x.md"));
         assert!(names.contains("y.md"));
         assert_eq!(names.len(), 2);
+    }
+
+    #[test]
+    fn rename_moves_entry_and_pending_children() {
+        let mut s = ShadowStore::new();
+        let (_, seq0) = s.create_local("/a/x.md", 5);
+        assert!(s.pending_children(5).unwrap().contains("x.md"));
+        let new_seq = s.rename("/a/x.md", "/b/y.md", 6).expect("entry existed");
+        assert!(new_seq > seq0);
+        assert!(s.get("/a/x.md").is_none(), "old path gone");
+        let entry = s.get("/b/y.md").expect("new path present");
+        assert_eq!(entry.kind, EntryKind::LocalOnly);
+        assert_eq!(entry.parent_ino, 6);
+        assert!(s.pending_children(5).is_none(), "old parent's set drained");
+        assert!(s.pending_children(6).unwrap().contains("y.md"));
+    }
+
+    #[test]
+    fn rename_clears_tombstone_at_destination() {
+        let mut s = ShadowStore::new();
+        s.create_local("/dest", 1);
+        s.tombstone("/dest", 1);
+        assert!(s.is_tombstoned("/dest"));
+        s.create_local("/src", 1);
+        s.rename("/src", "/dest", 1).unwrap();
+        assert!(!s.is_tombstoned("/dest"));
+        assert!(s.get("/dest").is_some());
+    }
+
+    #[test]
+    fn rename_nonexistent_path_returns_none() {
+        let mut s = ShadowStore::new();
+        assert!(s.rename("/nope", "/wherever", 1).is_none());
     }
 
     #[test]

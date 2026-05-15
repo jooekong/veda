@@ -563,6 +563,40 @@ impl VedaFs {
         }
     }
 
+    /// Force a synchronous PUT of a shadow entry's current bytes to
+    /// the server, then drop the entry from the shadow so subsequent
+    /// FUSE ops on the same path fall through to the legacy buf /
+    /// server-stat code path. Used by the per-file cap fallback in
+    /// write(): when a file crosses 10 MB the writeback overlay
+    /// quietly degrades to synchronous writes for that file.
+    fn sync_flush_and_evict_shadow(
+        &mut self,
+        path: &str,
+    ) -> std::result::Result<(), ClientError> {
+        let snap = {
+            let shadow = self.shadow.as_ref().unwrap();
+            let store = shadow.lock().unwrap();
+            store.snapshot(path)
+        };
+        let Some((data, _seq, base_rev)) = snap else {
+            return Ok(());
+        };
+        self.client.write_file(path, &data, base_rev)?;
+        // Evict shadow entry. tombstone + clear_tombstone removes
+        // it from the entries / pending_children maps without
+        // leaving a negative cache that would suppress the server-
+        // side stat path on the next lookup.
+        let shadow = self.shadow.as_ref().unwrap();
+        let mut store = shadow.lock().unwrap();
+        let parent_ino = store
+            .get(path)
+            .map(|e| e.parent_ino)
+            .unwrap_or(crate::inode::ROOT_INO);
+        let _ = store.tombstone(path, parent_ino);
+        store.clear_tombstone(path);
+        Ok(())
+    }
+
     /// writeback path for flush/fsync/release: if the file is
     /// shadow-tracked, send a Touch and return success immediately
     /// (the commit queue handles the eventual server PUT). If the
@@ -1105,7 +1139,39 @@ impl Filesystem for VedaFs {
                 Err(ClientError::NotFound) => (Vec::new(), None),
                 Err(ref e) => { reply.error(Self::err_to_errno(e)); return; }
             };
-            self.write_handles.insert(fh, WriteHandle { ino, path: path.clone(), buf: existing, dirty: truncated, base_rev });
+            // Writeback adopt-on-open: pull the existing server bytes
+            // into the shadow so subsequent write/read on this fh
+            // route through the same overlay as a fresh create()'s
+            // file. Reuses the inode that's already in the table —
+            // we do NOT alloc a new local_ino here (that would
+            // invalidate any other handle holding the existing ino).
+            // Cap-busting existing files (>10 MB) fall back to the
+            // legacy buf path; flush_handle handles their sync write.
+            let mut adopted = false;
+            if self.is_writeback() && !existing.is_empty() {
+                let parent_ino = self
+                    .inodes
+                    .lock()
+                    .unwrap()
+                    .get_ino(parent_path(&path))
+                    .unwrap_or(crate::inode::ROOT_INO);
+                let shadow = self.shadow.as_ref().unwrap();
+                let mut store = shadow.lock().unwrap();
+                if store
+                    .adopt_server_file(
+                        &path,
+                        parent_ino,
+                        ino,
+                        base_rev.unwrap_or(0),
+                        existing.clone(),
+                    )
+                    .is_ok()
+                {
+                    adopted = true;
+                }
+            }
+            let buf = if adopted { Vec::new() } else { existing };
+            self.write_handles.insert(fh, WriteHandle { ino, path: path.clone(), buf, dirty: truncated, base_rev });
         }
         reply.opened(fh, 0);
     }
@@ -1271,12 +1337,18 @@ impl Filesystem for VedaFs {
                 Some(p) => p,
                 None => { reply.error(libc::ENOENT); return; }
             };
-            let shadow = self.shadow.as_ref().unwrap();
-            let mut store = shadow.lock().unwrap();
-            if store.get(&path).is_some() {
-                let result = store.write_at(&path, offset as u64, data);
-                drop(store);
-                match result {
+            let (had_entry, write_result) = {
+                let shadow = self.shadow.as_ref().unwrap();
+                let mut store = shadow.lock().unwrap();
+                if store.get(&path).is_some() {
+                    let r = store.write_at(&path, offset as u64, data);
+                    (true, Some(r))
+                } else {
+                    (false, None)
+                }
+            };
+            if had_entry {
+                match write_result.unwrap() {
                     Ok(seq) => {
                         self.commit_queue.as_ref().unwrap().touch(path, seq);
                         // Track dirty so legacy flush_handle (still
@@ -1288,9 +1360,19 @@ impl Filesystem for VedaFs {
                         return;
                     }
                     Err(InsertError::PerFileCapExceeded) => {
-                        // Day 4 will degrade to sync flush; for now reject.
-                        reply.error(libc::EFBIG);
-                        return;
+                        // Size cap fallback: sync-flush the existing
+                        // shadow entry to the server, evict it, then
+                        // continue with this write going through the
+                        // legacy buf path. Net effect: files smaller
+                        // than 10 MB enjoy the debounce; files that
+                        // grow past it degrade silently to sync
+                        // writes (current behaviour). The user
+                        // doesn't see EFBIG.
+                        if let Err(e) = self.sync_flush_and_evict_shadow(&path) {
+                            reply.error(Self::err_to_errno(&e));
+                            return;
+                        }
+                        // Fall through to the legacy buf write below.
                     }
                     Err(InsertError::TotalCapExceeded) => {
                         reply.error(libc::ENOSPC);
@@ -1298,9 +1380,8 @@ impl Filesystem for VedaFs {
                     }
                 }
             }
-            drop(store);
             // Fall through to legacy buf path for paths not yet
-            // shadow-tracked. Day 3 closes this hole.
+            // shadow-tracked.
         }
         let handle = self.write_handles.get_mut(&fh).unwrap();
         let offset = offset as usize;
@@ -1602,6 +1683,62 @@ impl Filesystem for VedaFs {
         };
         let old_path = Self::resolve_child_path(&parent_path, name_str);
         let new_path = Self::resolve_child_path(&newparent_path, newname_str);
+        // Writeback rename: move the shadow entry under the new path,
+        // cancel any pending Touch for old_path, schedule a fresh one
+        // for new_path. Whether to touch the server depends on what
+        // kind of entry it was:
+        //   - LocalOnly  → server never saw old_path; no server call.
+        //                  (git commit's index.lock → index pattern.)
+        //   - Dirty/Clean → server has old_path; rename it server-side
+        //                   too so the user's view stays consistent.
+        //   - no shadow entry → assume it's a pre-existing server file
+        //                       and use the legacy server rename.
+        if self.is_writeback() {
+            let prior_kind;
+            let old_seq;
+            let new_seq;
+            {
+                let shadow = self.shadow.as_ref().unwrap();
+                let mut store = shadow.lock().unwrap();
+                prior_kind = store.get(&old_path).map(|e| e.kind);
+                if let Some(seq) = store.rename(&old_path, &new_path, newparent) {
+                    // shadow rename bumped seq; the old-path commit
+                    // token is now stale.
+                    old_seq = store.get(&new_path).map(|e| e.seq).unwrap_or(seq);
+                    new_seq = seq;
+                } else {
+                    old_seq = 0;
+                    new_seq = 0;
+                }
+            }
+            let server_rename = matches!(
+                prior_kind,
+                Some(EntryKind::Dirty) | Some(EntryKind::Clean) | None
+            );
+            if server_rename {
+                if let Err(ref e) = self.client.rename(&old_path, &new_path) {
+                    if !matches!(e, ClientError::NotFound) {
+                        reply.error(Self::err_to_errno(e));
+                        return;
+                    }
+                }
+            }
+            if prior_kind.is_some() {
+                let q = self.commit_queue.as_ref().unwrap();
+                q.cancel(old_path.clone(), old_seq);
+                q.touch(new_path.clone(), new_seq);
+            }
+            self.invalidate_dir_cache(parent);
+            self.invalidate_dir_cache(newparent);
+            self.inode_rename(&old_path, &new_path);
+            self.cache_invalidate(&old_path);
+            self.cache_invalidate(&new_path);
+            // inode_rename preserves the (ino, path) mapping under
+            // the new path; no extra register_local needed because
+            // the local_ino was already in the table at create time.
+            reply.ok();
+            return;
+        }
         match self.client.rename(&old_path, &new_path) {
             Ok(()) => {
                 self.invalidate_dir_cache(parent);
