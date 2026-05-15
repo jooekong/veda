@@ -1,6 +1,7 @@
 use veda_fuse::{client, fs, sse};
 
 use std::os::fd::{AsRawFd, FromRawFd, RawFd};
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use clap::{Parser, Subcommand};
@@ -80,19 +81,13 @@ fn main() -> anyhow::Result<()> {
 }
 
 fn cmd_mount(args: MountArgs) -> anyhow::Result<()> {
-    // Pre-flight stat: confirm the server is reachable BEFORE we fork,
-    // so a typo in --server fails the user's command at exit-0 rather
-    // than orphaning a daemon that exits silently. Scoped so the
-    // throwaway client (and its tokio runtime + worker thread) drops
-    // before fork — `reqwest::blocking::Client` carries thread state
-    // that does not survive `fork()`, and any client used post-fork
-    // must be constructed in the child.
-    {
-        let preflight = client::VedaClient::new(&args.server, &args.key);
-        preflight.stat("/").map_err(|e| {
-            anyhow::anyhow!("server health check failed (stat '/' at {}): {e}", args.server)
-        })?;
-    }
+    // No pre-flight stat here — that has to happen after fork on
+    // daemon mode, otherwise macOS's libsystem_pthread (left in an
+    // inconsistent state by the throwaway tokio runtime that
+    // reqwest::blocking::Client spawns under the hood) kills the
+    // child with SIGILL before it can even start tracing. Foreground
+    // mode does its preflight inline below; daemon mode does it in
+    // the child and propagates failure back via the readiness pipe.
 
     let config = fs::FuseConfig {
         attr_ttl: Duration::from_secs(args.attr_ttl),
@@ -111,6 +106,11 @@ fn cmd_mount(args: MountArgs) -> anyhow::Result<()> {
         info!(mount = %args.mountpoint, server = %args.server, "mounting (foreground)");
         // Foreground is single-process — safe to build the client here.
         let client = client::VedaClient::new(&args.server, &args.key);
+        // Preflight inline: typos in --server fail at exit-1 before
+        // fuser::mount2 ties up the mountpoint.
+        client.stat("/").map_err(|e| {
+            anyhow::anyhow!("server health check failed (stat '/' at {}): {e}", args.server)
+        })?;
         return mount_and_serve(client, &args.mountpoint, &args.server, &args.key, config, &mount_opts, None);
     }
 
@@ -124,27 +124,60 @@ fn cmd_mount(args: MountArgs) -> anyhow::Result<()> {
     let read_raw = read_fd.as_raw_fd();
     let write_raw = write_fd.as_raw_fd();
 
+    // Resolve the daemon log path in the parent so it can be reported
+    // up front (parent prints location; child writes its stderr there).
+    let log_path = daemon_log_path();
+
     match unsafe { nix::unistd::fork() }? {
         nix::unistd::ForkResult::Parent { child } => {
             drop(write_fd);
-            wait_for_child_ready(read_raw, child)
+            if let Some(ref p) = log_path {
+                eprintln!("veda: daemon log → {}", p.display());
+            }
+            wait_for_child_ready(read_raw, child, log_path.as_deref())
         }
         nix::unistd::ForkResult::Child => {
             drop(read_fd);
             nix::unistd::setsid()?;
 
-            // Detach stdio from the parent terminal so the calling
-            // shell (and any ssh session above it) can return cleanly
-            // — without this, ssh hangs waiting for the inherited
-            // stdout/stderr to close. tracing output is sacrificed in
-            // daemon mode by design; use `--foreground` + nohup if you
-            // need logs.
-            redirect_stdio_to_devnull();
+            // Detach stdin/stdout from the parent terminal so the
+            // calling shell (and any ssh session above it) can return
+            // cleanly — without this, ssh hangs waiting for the
+            // inherited fds to close. stderr goes to a daemon log
+            // file (append) instead of /dev/null so tracing output
+            // survives mount failures; otherwise the daemon would
+            // exit silently and the parent's "exited before ready"
+            // error gives no clue what went wrong.
+            redirect_stdio_for_daemon(log_path.as_deref());
 
             init_tracing(args.debug);
             info!(mount = %args.mountpoint, server = %args.server, "mounting (background)");
 
             let client = client::VedaClient::new(&args.server, &args.key);
+            // Preflight stat AFTER fork. Doing it in the parent would
+            // spawn a tokio worker thread inside the throwaway
+            // reqwest::blocking::Client; on macOS the libsystem_pthread
+            // state that leaves behind makes the eventual fork()
+            // child crash with SIGILL before tracing is initialized.
+            // Doing it here is safe (we're single-threaded post-fork
+            // until SSE/signal threads spawn inside mount_and_serve)
+            // and the readiness pipe carries the error back to the
+            // parent so the user still gets fail-fast UX.
+            if let Err(e) = client.stat("/") {
+                let msg = format!("server health check failed (stat '/' at {}): {e}", args.server);
+                tracing::error!("{msg}");
+                // Write the message to the readiness pipe so the
+                // parent prints it instead of "exit 1, check log".
+                // First byte must be != 'R' so the parent knows this
+                // is an error frame, not a successful mount.
+                let _ = nix::unistd::write(
+                    unsafe { std::os::fd::BorrowedFd::borrow_raw(write_raw) },
+                    msg.as_bytes(),
+                );
+                drop(write_fd);
+                std::process::exit(1);
+            }
+
             let result = mount_and_serve(client, &args.mountpoint, &args.server, &args.key, config, &mount_opts, Some(write_raw));
             if let Err(ref e) = result {
                 tracing::error!("mount failed: {e}");
@@ -212,42 +245,90 @@ fn mount_and_serve(
     result.map_err(Into::into)
 }
 
-/// Replace the daemon child's stdin/stdout/stderr with /dev/null so
-/// inherited fds don't keep the calling shell waiting. Failures are
-/// swallowed: there's no place to report them yet (tracing isn't
-/// initialized), and a daemon that runs without stdio is still
-/// preferable to one that won't start.
-fn redirect_stdio_to_devnull() {
+/// Standard log file path for the daemon's stderr stream:
+/// `${XDG_CACHE_HOME:-$HOME/.cache}/veda-fuse/daemon.log`, same XDG
+/// convention as veda-cli's config. Returns None if HOME is unset or
+/// the directory cannot be created — in that case the daemon falls
+/// back to /dev/null.
+fn daemon_log_path() -> Option<PathBuf> {
+    let cache = std::env::var_os("XDG_CACHE_HOME")
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".cache")))?;
+    let dir = cache.join("veda-fuse");
+    std::fs::create_dir_all(&dir).ok()?;
+    Some(dir.join("daemon.log"))
+}
+
+/// Detach the daemon child from the parent terminal. stdin goes to
+/// /dev/null. stdout AND stderr both go to `log_path` in append mode
+/// if provided — tracing-subscriber's default writer is stdout, so
+/// covering both means tracing output lands in the log regardless of
+/// subscriber config. Falling back to /dev/null keeps the daemon
+/// starting even if the log file can't be opened.
+fn redirect_stdio_for_daemon(log_path: Option<&Path>) {
     use std::os::fd::AsRawFd;
+
     if let Ok(f) = std::fs::OpenOptions::new()
         .read(true)
-        .write(true)
         .open("/dev/null")
     {
-        let null = f.as_raw_fd();
+        unsafe { libc::dup2(f.as_raw_fd(), 0); }
+    }
+
+    let out_fd = log_path
+        .and_then(|p| std::fs::OpenOptions::new().create(true).append(true).open(p).ok())
+        .or_else(|| std::fs::OpenOptions::new().write(true).open("/dev/null").ok());
+    if let Some(f) = out_fd {
         unsafe {
-            libc::dup2(null, 0);
-            libc::dup2(null, 1);
-            libc::dup2(null, 2);
+            libc::dup2(f.as_raw_fd(), 1);
+            libc::dup2(f.as_raw_fd(), 2);
         }
-        // `f` drops here; the dup2'd fds 0/1/2 remain valid because
-        // each is its own descriptor pointing at the same open file
-        // description.
+        // f drops here; fds 1/2 point at independent dup entries.
     }
 }
 
-fn wait_for_child_ready(read_fd: RawFd, child: nix::unistd::Pid) -> anyhow::Result<()> {
+fn wait_for_child_ready(
+    read_fd: RawFd,
+    child: nix::unistd::Pid,
+    log_path: Option<&Path>,
+) -> anyhow::Result<()> {
     use std::io::Read;
     let mut pipe_read = unsafe { std::fs::File::from_raw_fd(read_fd) };
-    let mut buf = [0u8; 1];
+    let mut first = [0u8; 1];
 
-    match pipe_read.read(&mut buf) {
-        Ok(1) if buf[0] == b'R' => {
+    match pipe_read.read(&mut first) {
+        Ok(1) if first[0] == b'R' => {
             eprintln!("veda: mounted (pid {})", child);
             Ok(())
         }
+        Ok(1) => {
+            // Any non-'R' first byte signals a structured error
+            // frame: the child sends the human-readable message
+            // through the pipe and then closes it. Read the rest and
+            // propagate as the user-facing error.
+            let mut rest = Vec::with_capacity(256);
+            let _ = pipe_read.read_to_end(&mut rest);
+            let mut full = Vec::with_capacity(1 + rest.len());
+            full.push(first[0]);
+            full.extend_from_slice(&rest);
+            anyhow::bail!("{}", String::from_utf8_lossy(&full));
+        }
         Ok(_) => {
-            anyhow::bail!("daemon exited before mount was ready");
+            // EOF before any byte: child died silently. Capture exit
+            // status so the message distinguishes panic vs. exit code
+            // vs. signal kill (SIGILL etc.). Hint at the log file.
+            let exit_info = match nix::sys::wait::waitpid(child, None) {
+                Ok(nix::sys::wait::WaitStatus::Exited(_, code)) => format!("exit {code}"),
+                Ok(nix::sys::wait::WaitStatus::Signaled(_, sig, _)) => {
+                    format!("killed by signal {sig:?}")
+                }
+                Ok(other) => format!("{other:?}"),
+                Err(e) => format!("waitpid: {e}"),
+            };
+            let log_hint = log_path
+                .map(|p| format!("; check {} for tracing output", p.display()))
+                .unwrap_or_default();
+            anyhow::bail!("daemon exited before mount was ready ({exit_info}){log_hint}");
         }
         Err(e) => {
             anyhow::bail!("waiting for daemon: {e}");
