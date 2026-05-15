@@ -14,7 +14,7 @@ use crate::cache::ReadCache;
 use crate::client::{ClientError, DirEntry, FileInfo, SidecarOutcome, SummaryKind, VedaClient};
 use crate::commit_queue::CommitQueue;
 use crate::inode::InodeTable;
-use crate::shadow::{InsertError, ShadowStore};
+use crate::shadow::{EntryKind, InsertError, ShadowEntry, ShadowStore};
 
 const BLOCK_SIZE: u32 = 512;
 
@@ -231,6 +231,31 @@ impl VedaFs {
 
     fn resolve_child_path(parent_path: &str, name: &str) -> String {
         if parent_path == "/" { format!("/{name}") } else { format!("{parent_path}/{name}") }
+    }
+
+    /// Build a synthetic FileAttr for a shadow-tracked entry. Size
+    /// comes from the buffer, mtime from the entry's recorded write
+    /// time; mode/uid/gid/links match the server-attr defaults so
+    /// `stat` output looks the same as for a real file.
+    fn make_shadow_attr(entry: &ShadowEntry) -> FileAttr {
+        let size = entry.data.len() as u64;
+        FileAttr {
+            ino: entry.local_ino,
+            size,
+            blocks: (size + BLOCK_SIZE as u64 - 1) / BLOCK_SIZE as u64,
+            atime: entry.mtime,
+            mtime: entry.mtime,
+            ctime: entry.mtime,
+            crtime: entry.mtime,
+            kind: FileType::RegularFile,
+            perm: 0o644,
+            nlink: 1,
+            uid: unsafe { libc::getuid() },
+            gid: unsafe { libc::getgid() },
+            rdev: 0,
+            blksize: BLOCK_SIZE,
+            flags: 0,
+        }
     }
 
     fn attr_from_dir_entry(de: &DirEntry, ino: u64) -> FileAttr {
@@ -615,6 +640,31 @@ impl Filesystem for VedaFs {
         };
         let child_path = Self::resolve_child_path(&parent_path, name_str);
 
+        // Writeback shadow overlay: a tombstoned path means the
+        // user just unlinked but the server may not know yet — must
+        // return ENOENT instead of letting client.stat resurrect it.
+        // A LocalOnly/Dirty/Clean entry hands back a synthetic attr
+        // from the in-memory buffer; this is what makes a just-created
+        // file visible via `ls`/`stat` before any commit has fired.
+        if self.is_writeback() {
+            let shadow = self.shadow.as_ref().unwrap();
+            let store = shadow.lock().unwrap();
+            if store.is_tombstoned(&child_path) {
+                reply.error(libc::ENOENT);
+                return;
+            }
+            if let Some(entry) = store.get(&child_path) {
+                let attr = Self::make_shadow_attr(entry);
+                let local_ino = entry.local_ino;
+                drop(store);
+                self.inodes.lock().unwrap().register_local(local_ino, &child_path);
+                self.inodes.lock().unwrap().inc_nlookup(local_ino);
+                self.inode_set_attr(local_ino, attr);
+                reply.entry(&self.config.attr_ttl, &attr, 0);
+                return;
+            }
+        }
+
         if let Some((_, attr)) = self.inode_lookup_cached(&child_path) {
             reply.entry(&self.config.attr_ttl, &attr, 0);
             return;
@@ -680,6 +730,28 @@ impl Filesystem for VedaFs {
     }
 
     fn getattr(&mut self, _req: &Request, ino: u64, reply: ReplyAttr) {
+        // Writeback shadow overlay: serve directly from the in-
+        // memory entry whenever the path is shadow-tracked, so size
+        // and mtime reflect the latest write rather than stale
+        // server state. Check before the attr cache because the
+        // attr cache could hold a frozen snapshot.
+        if self.is_writeback() {
+            if let Some(path) = self.inode_get_path(ino) {
+                let shadow = self.shadow.as_ref().unwrap();
+                let store = shadow.lock().unwrap();
+                if store.is_tombstoned(&path) {
+                    reply.error(libc::ENOENT);
+                    return;
+                }
+                if let Some(entry) = store.get(&path) {
+                    let attr = Self::make_shadow_attr(entry);
+                    drop(store);
+                    self.inode_set_attr(ino, attr);
+                    reply.attr(&self.config.attr_ttl, &attr);
+                    return;
+                }
+            }
+        }
         if let Some(attr) = self.inode_get_attr(ino) {
             reply.attr(&self.config.attr_ttl, &attr);
             return;
@@ -783,6 +855,33 @@ impl Filesystem for VedaFs {
             (ino, FileType::Directory, ".".to_string()),
             (parent_ino, FileType::Directory, "..".to_string()),
         ];
+        // Writeback overlay: drop tombstoned names from the server
+        // listing (the user just unlinked them) and append the
+        // local-only names from pending_children so just-created
+        // files show up in `ls` before any commit has fired.
+        let (tombstoned, pending) = if self.is_writeback() {
+            let shadow = self.shadow.as_ref().unwrap().lock().unwrap();
+            let toms: HashSet<String> = entries
+                .iter()
+                .filter(|de| shadow.is_tombstoned(&de.path))
+                .map(|de| de.path.clone())
+                .collect();
+            let pending: Vec<(u64, String)> = shadow
+                .pending_children(ino)
+                .map(|names| {
+                    names
+                        .iter()
+                        .filter_map(|name| {
+                            let cp = Self::resolve_child_path(&path, name);
+                            shadow.get(&cp).map(|e| (e.local_ino, name.clone()))
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+            (toms, pending)
+        } else {
+            (HashSet::new(), Vec::new())
+        };
         // Pre-create inodes for every entry. Earlier this used a 0-ino
         // hint ("kernel will lookup if it wants to use the entry"),
         // which Linux FUSE accepts but macFUSE silently drops, so `ls`
@@ -792,9 +891,15 @@ impl Filesystem for VedaFs {
         // platform consistency, and matches what readdirplus already
         // does.
         for de in entries.iter() {
+            if tombstoned.contains(&de.path) {
+                continue;
+            }
             let child_ino = self.inode_get_or_create(&de.path);
             let kind = if de.is_dir { FileType::Directory } else { FileType::RegularFile };
             full_entries.push((child_ino, kind, de.name.clone()));
+        }
+        for (child_ino, name) in pending {
+            full_entries.push((child_ino, FileType::RegularFile, name));
         }
         // Three reasons not to advertise a sidecar in the listing:
         //   - the server reported `summary_enabled = false` at mount
@@ -1196,6 +1301,36 @@ impl Filesystem for VedaFs {
             Some(p) => p, None => { reply.error(libc::ENOENT); return; }
         };
         let child_path = Self::resolve_child_path(&parent_path, name_str);
+        // Writeback path: defer the server PUT entirely. Allocate a
+        // local-only inode, register it in the InodeTable so lookup
+        // can resolve it, seed a LocalOnly shadow entry, return.
+        // The commit queue will push the file (with whatever bytes
+        // arrive via subsequent write()s) after the debounce window;
+        // a vim swap that gets unlinked first never produces a PUT.
+        if self.is_writeback() {
+            self.invalidate_dir_cache(parent);
+            let local_ino;
+            let attr;
+            {
+                let shadow = self.shadow.as_ref().unwrap();
+                let mut store = shadow.lock().unwrap();
+                let (l, _seq) = store.create_local(&child_path, parent);
+                local_ino = l;
+                let entry = store.get(&child_path).expect("just inserted");
+                attr = Self::make_shadow_attr(entry);
+            }
+            self.inodes.lock().unwrap().register_local(local_ino, &child_path);
+            self.inodes.lock().unwrap().inc_nlookup(local_ino);
+            self.inode_set_attr(local_ino, attr);
+            let fh = self.alloc_fh();
+            self.write_handles.insert(
+                fh,
+                WriteHandle { ino: local_ino, buf: Vec::new(), dirty: false, base_rev: None },
+            );
+            reply.created(&self.config.attr_ttl, &attr, 0, fh, 0);
+            return;
+        }
+        // Sync legacy path: hit the server immediately.
         let base_rev = match self.client.write_file(&child_path, b"", None) {
             Ok(rev) => rev,
             Err(ref e) => { reply.error(Self::err_to_errno(e)); return; }
@@ -1205,7 +1340,7 @@ impl Filesystem for VedaFs {
         let ino = self.inode_get_or_create_with_nlookup(&child_path);
         let now = chrono::Utc::now();
         let info = FileInfo {
-            path: child_path.clone(),
+            path: child_path,
             is_dir: false,
             size_bytes: Some(0),
             revision: base_rev,
@@ -1215,26 +1350,6 @@ impl Filesystem for VedaFs {
         let attr = Self::make_attr(&info, ino);
         self.inode_set_attr(ino, attr);
         self.write_handles.insert(fh, WriteHandle { ino, buf: Vec::new(), dirty: false, base_rev });
-        // Writeback: seed an empty shadow entry so the upcoming
-        // write() can route through it. We still hit the server in
-        // create() — Day 3 will defer this PUT entirely, but for now
-        // we just register the file with the shadow so the write
-        // path has a target. base_rev is whatever the server gave us
-        // (may be None if it didn't echo a revision).
-        if self.is_writeback() {
-            let shadow = self.shadow.as_ref().unwrap();
-            let mut store = shadow.lock().unwrap();
-            // adopt_server_file enforces caps; on the empty buffer
-            // it never trips them. Ignore the InsertError result for
-            // the same reason.
-            let _ = store.adopt_server_file(
-                &child_path,
-                parent,
-                ino,
-                base_rev.unwrap_or(0),
-                Vec::new(),
-            );
-        }
         reply.created(&self.config.attr_ttl, &attr, 0, fh, 0);
     }
 
@@ -1286,6 +1401,48 @@ impl Filesystem for VedaFs {
             Some(p) => p, None => { reply.error(libc::ENOENT); return; }
         };
         let child_path = Self::resolve_child_path(&parent_path, name_str);
+        // Writeback path: tombstone the shadow entry + cancel any
+        // pending commit. Only hit the server with DELETE if the
+        // entry has reached the server at least once (Dirty/Clean).
+        // A LocalOnly entry was never PUT — vim swap files take this
+        // branch and produce zero server calls end-to-end. A path
+        // not in shadow at all is assumed to be a real server file
+        // and gets a regular DELETE (consistent with sync mode).
+        if self.is_writeback() {
+            let server_had_it;
+            let cancel_seq;
+            {
+                let shadow = self.shadow.as_ref().unwrap();
+                let mut store = shadow.lock().unwrap();
+                let (prior_kind, new_seq) = store.tombstone(&child_path, parent);
+                cancel_seq = new_seq;
+                server_had_it = match prior_kind {
+                    Some(EntryKind::Dirty) | Some(EntryKind::Clean) => true,
+                    Some(EntryKind::LocalOnly) => false,
+                    // No shadow entry: a pre-existing server file
+                    // the user opened/looked up via the server side.
+                    None => true,
+                };
+            }
+            self.commit_queue.as_ref().unwrap().cancel(child_path.clone(), cancel_seq);
+            if server_had_it {
+                if let Err(ref e) = self.client.delete(&child_path) {
+                    // ENOENT is fine — the server may have GC'd the
+                    // file already, or our `server_had_it` heuristic
+                    // misjudged a no-shadow path that was actually
+                    // local-only. Other errors leak back to caller.
+                    if !matches!(e, ClientError::NotFound) {
+                        reply.error(Self::err_to_errno(e));
+                        return;
+                    }
+                }
+            }
+            self.invalidate_dir_cache(parent);
+            self.inode_remove(&child_path);
+            self.cache_invalidate(&child_path);
+            reply.ok();
+            return;
+        }
         match self.client.delete(&child_path) {
             Ok(()) => {
                 self.invalidate_dir_cache(parent);

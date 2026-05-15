@@ -44,6 +44,22 @@ impl InodeTable {
         ino
     }
 
+    /// Register an externally-allocated inode (used by the writeback
+    /// shadow's local_ino range, 1<<63+counter). Idempotent on
+    /// matching (path, ino); overwrites the mapping if either side
+    /// already exists. Lets `lookup`/`getattr` resolve local-only
+    /// entries that never went through `get_or_create_ino`.
+    pub fn register_local(&mut self, ino: u64, path: &str) {
+        if let Some(prior) = self.path_to_ino.get(path).copied() {
+            self.ino_to_path.remove(&prior);
+        }
+        if let Some(prior_path) = self.ino_to_path.get(&ino).cloned() {
+            self.path_to_ino.remove(&prior_path);
+        }
+        self.path_to_ino.insert(path.to_string(), ino);
+        self.ino_to_path.insert(ino, path.to_string());
+    }
+
     pub fn get_path(&self, ino: u64) -> Option<&str> {
         self.ino_to_path.get(&ino).map(|s| s.as_str())
     }
@@ -173,5 +189,31 @@ mod tests {
         // Path mapping already gone, forget just cleans up nlookup
         t.forget(ino, 1);
         assert_eq!(t.nlookup_count(ino), 0);
+    }
+
+    #[test]
+    fn register_local_creates_high_range_mapping() {
+        let mut t = InodeTable::new();
+        let local_ino = 1u64 << 63;
+        t.register_local(local_ino, "/notes.md");
+        assert_eq!(t.get_path(local_ino), Some("/notes.md"));
+        assert_eq!(t.get_ino("/notes.md"), Some(local_ino));
+        // Re-registering the same (ino, path) is idempotent.
+        t.register_local(local_ino, "/notes.md");
+        assert_eq!(t.get_path(local_ino), Some("/notes.md"));
+    }
+
+    #[test]
+    fn register_local_overwrites_stale_mapping() {
+        let mut t = InodeTable::new();
+        // First a server-allocated ino takes the path.
+        let server_ino = t.get_or_create_ino("/x.md");
+        // Then a local-only entry needs to claim it for writeback.
+        let local_ino = (1u64 << 63) + 7;
+        t.register_local(local_ino, "/x.md");
+        assert_eq!(t.get_ino("/x.md"), Some(local_ino));
+        // The old server ino → path link is gone so subsequent
+        // forget/lookup against it correctly fail.
+        assert_eq!(t.get_path(server_ino), None);
     }
 }

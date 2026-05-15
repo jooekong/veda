@@ -433,6 +433,37 @@ mod tests {
     }
 
     #[test]
+    fn vim_swap_full_lifecycle_produces_zero_server_calls() {
+        // create("/notes/.notes.md.swp") → write(swap_binary) ×N →
+        // tombstone before window. The deferred-create + shadow-only
+        // path means the server should see zero HTTP calls across
+        // the whole lifecycle.
+        let (mock, shadow) = fresh();
+        let q = CommitQueue::start(mock.clone(), shadow.clone(), Duration::from_millis(80));
+        let parent_ino = 1;
+        let path = "/notes/.notes.md.swp".to_string();
+        // Step 1: writeback create() → LocalOnly entry.
+        let (local_ino, _seq) = shadow.lock().unwrap().create_local(&path, parent_ino);
+        assert!(local_ino >= (1u64 << 63));
+        // Step 2: vim writes binary swap chunks. Each write touches.
+        for chunk in [b"\xff\xfe header".as_slice(), b"\x00\x01 body".as_slice(), b"\x00\x02 more".as_slice()] {
+            let seq = shadow.lock().unwrap().write_at(&path, 0, chunk).unwrap();
+            q.touch(path.clone(), seq);
+        }
+        // Step 3: vim :wq → swap unlinked before the debounce window
+        // expires.
+        let (prior, cancel_seq) = shadow.lock().unwrap().tombstone(&path, parent_ino);
+        assert_eq!(prior, Some(crate::shadow::EntryKind::LocalOnly));
+        q.cancel(path.clone(), cancel_seq);
+        // Step 4: drain to force the worker through any leftover
+        // heap entries; with token-based debouncing they should all
+        // self-skip.
+        q.drain();
+        assert_eq!(mock.write_count(), 0, "swap file must never reach the server");
+        assert_eq!(mock.delete_count(), 0, "LocalOnly tombstone needs no server delete");
+    }
+
+    #[test]
     fn stale_put_against_tombstoned_entry_triggers_delete() {
         // fire() snapshots, drops lock, PUT succeeds, re-locks and
         // finds the entry tombstoned (user unlinked mid-PUT). The
