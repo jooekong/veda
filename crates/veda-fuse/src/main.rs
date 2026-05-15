@@ -1,11 +1,24 @@
-use veda_fuse::{client, fs, sse};
+use veda_fuse::{client, commit_queue, fs, shadow, sse};
 
 use std::os::fd::{AsRawFd, OwnedFd, RawFd};
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::{Arc, Mutex};
 
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 use tracing::info;
+
+#[derive(Clone, Copy, ValueEnum, Debug, PartialEq, Eq)]
+enum WriteMode {
+    /// Every flush/fsync/release blocks on a server PUT. Day-0
+    /// behaviour; keep as default until writeback bakes in.
+    Sync,
+    /// Writes land in a local in-memory shadow buffer. The commit
+    /// queue debounces and pushes them server-side after
+    /// `--write-debounce-ms` of quiet. vim swap / git lockfile / IDE
+    /// temp files don't pollute the server.
+    Writeback,
+}
 
 #[derive(Parser)]
 #[command(name = "veda-fuse", about = "Mount a Veda workspace as a local filesystem")]
@@ -56,6 +69,16 @@ struct MountArgs {
     /// Enable FUSE debug logging
     #[arg(long, default_value = "false")]
     debug: bool,
+
+    /// Write mode: `sync` (default) or `writeback` (debounced commits
+    /// via local shadow buffer). `VEDA_FUSE_WRITE_MODE` overrides.
+    #[arg(long, env = "VEDA_FUSE_WRITE_MODE", value_enum, default_value_t = WriteMode::Sync)]
+    write_mode: WriteMode,
+
+    /// Debounce window for writeback commits (only relevant in
+    /// writeback mode). `VEDA_FUSE_WRITE_DEBOUNCE_MS` overrides.
+    #[arg(long, env = "VEDA_FUSE_WRITE_DEBOUNCE_MS", default_value = "5000")]
+    write_debounce_ms: u64,
 }
 
 #[derive(Parser)]
@@ -70,6 +93,8 @@ struct MountOpts {
     foreground: bool,
     allow_other: bool,
     read_only: bool,
+    write_mode: WriteMode,
+    write_debounce_ms: u64,
 }
 
 fn main() -> anyhow::Result<()> {
@@ -103,13 +128,15 @@ fn cmd_mount(args: MountArgs) -> anyhow::Result<()> {
         foreground: args.foreground,
         allow_other: args.allow_other,
         read_only: args.read_only,
+        write_mode: args.write_mode,
+        write_debounce_ms: args.write_debounce_ms,
     };
 
     if args.foreground {
         init_tracing(args.debug);
         info!(mount = %args.mountpoint, server = %args.server, "mounting (foreground)");
         // Foreground is single-process — safe to build the client here.
-        let client = client::VedaClient::new(&args.server, &args.key);
+        let client = Arc::new(client::VedaClient::new(&args.server, &args.key));
         // Preflight inline: typos in --server fail at exit-1 before
         // fuser::mount2 ties up the mountpoint.
         client.stat("/").map_err(|e| {
@@ -159,7 +186,7 @@ fn cmd_mount(args: MountArgs) -> anyhow::Result<()> {
             init_tracing(args.debug);
             info!(mount = %args.mountpoint, server = %args.server, "mounting (background)");
 
-            let client = client::VedaClient::new(&args.server, &args.key);
+            let client = Arc::new(client::VedaClient::new(&args.server, &args.key));
             // Preflight stat AFTER fork. The parent does NOT run any
             // reqwest call before fork on macOS — see the long
             // comment at the top of cmd_mount. Running it here is
@@ -214,7 +241,7 @@ fn build_fuse_options(opts: &MountOpts) -> Vec<fuser::MountOption> {
 }
 
 fn mount_and_serve(
-    client: client::VedaClient,
+    client: Arc<client::VedaClient>,
     mountpoint: &str,
     server: &str,
     key: &str,
@@ -235,7 +262,30 @@ fn mount_and_serve(
             true
         }
     };
-    let vedafs = fs::VedaFs::new(client, config, summary_enabled, notify_fd);
+    // Build the shadow store + commit queue only in writeback mode.
+    // sync mode passes None for both → fs.rs falls through to the
+    // pre-existing legacy path on every write/flush/release.
+    let (shadow_opt, commit_queue_opt) = if opts.write_mode == WriteMode::Writeback {
+        let shadow = Arc::new(Mutex::new(shadow::ShadowStore::new()));
+        let cq_client: Arc<dyn commit_queue::CommitClient> = client.clone();
+        let queue = commit_queue::CommitQueue::start(
+            cq_client,
+            shadow.clone(),
+            std::time::Duration::from_millis(opts.write_debounce_ms),
+        );
+        info!(window_ms = opts.write_debounce_ms, "writeback mode enabled");
+        (Some(shadow), Some(queue))
+    } else {
+        (None, None)
+    };
+    let vedafs = fs::VedaFs::new(
+        client,
+        config,
+        summary_enabled,
+        notify_fd,
+        shadow_opt,
+        commit_queue_opt,
+    );
     let cursor_file = sse::cursor_file_path(server);
     let mut watcher = sse::SseWatcher::start(
         server, key,

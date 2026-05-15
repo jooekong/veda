@@ -12,7 +12,9 @@ use tracing::{debug, warn};
 
 use crate::cache::ReadCache;
 use crate::client::{ClientError, DirEntry, FileInfo, SidecarOutcome, SummaryKind, VedaClient};
+use crate::commit_queue::CommitQueue;
 use crate::inode::InodeTable;
+use crate::shadow::{InsertError, ShadowStore};
 
 const BLOCK_SIZE: u32 = 512;
 
@@ -103,11 +105,18 @@ pub type DirCacheMap = Arc<Mutex<HashMap<u64, DirCacheEntry>>>;
 type SidecarMissCache = Arc<Mutex<HashMap<(String, &'static str), Instant>>>;
 
 pub struct VedaFs {
-    client: VedaClient,
+    client: Arc<VedaClient>,
     inodes: Arc<Mutex<InodeTable>>,
     config: FuseConfig,
     read_cache: Arc<Mutex<ReadCache>>,
     sidecar_miss: SidecarMissCache,
+    /// Writeback shadow store, shared with the commit queue worker.
+    /// `Some` ↔ writeback mode; `None` ↔ legacy sync mode (handlers
+    /// fall through to the pre-shadow code path).
+    shadow: Option<Arc<Mutex<ShadowStore>>>,
+    /// Commit queue worker handle (held alongside shadow). Send Touch
+    /// after every shadow write so the worker can debounce and PUT.
+    commit_queue: Option<CommitQueue>,
     /// Mount-life cache of `/v1/capabilities.summary_enabled`.
     /// Probed once at construction in `main.rs::mount_fs`; `readdir`
     /// skips advertising magic sidecars when this is `false`, so
@@ -136,10 +145,12 @@ impl VedaFs {
     /// default-on alpha config) because they don't care about the
     /// sidecar discovery path.
     pub fn new(
-        client: VedaClient,
+        client: Arc<VedaClient>,
         config: FuseConfig,
         summary_enabled: bool,
         notify_fd: Option<RawFd>,
+        shadow: Option<Arc<Mutex<ShadowStore>>>,
+        commit_queue: Option<CommitQueue>,
     ) -> Self {
         let read_cache = Arc::new(Mutex::new(ReadCache::new(config.cache_size_mb, config.attr_ttl)));
         let inodes = Arc::new(Mutex::new(InodeTable::new_with_ttl(config.attr_ttl)));
@@ -156,7 +167,16 @@ impl VedaFs {
             write_handles: HashMap::new(),
             dir_cache,
             notify_fd,
+            shadow,
+            commit_queue,
         }
+    }
+
+    /// Helper: true when the FS is running in writeback mode (shadow
+    /// + commit queue both configured). Sync mode handlers branch on
+    /// this and keep the legacy in-memory-buf code path.
+    fn is_writeback(&self) -> bool {
+        self.shadow.is_some() && self.commit_queue.is_some()
     }
 
     pub fn inodes(&self) -> Arc<Mutex<InodeTable>> { self.inodes.clone() }
@@ -994,6 +1014,46 @@ impl Filesystem for VedaFs {
                 ino, buf: Vec::new(), dirty: false, base_rev: None,
             });
         }
+        // Writeback path: route into the shadow store and schedule a
+        // debounced commit. Falls through to the legacy in-memory buf
+        // when the path isn't shadow-tracked (Day 2 only covers the
+        // create-then-write flow; open-existing-then-write is Day 3).
+        if self.is_writeback() {
+            let path = match self.inode_get_path(ino) {
+                Some(p) => p,
+                None => { reply.error(libc::ENOENT); return; }
+            };
+            let shadow = self.shadow.as_ref().unwrap();
+            let mut store = shadow.lock().unwrap();
+            if store.get(&path).is_some() {
+                let result = store.write_at(&path, offset as u64, data);
+                drop(store);
+                match result {
+                    Ok(seq) => {
+                        self.commit_queue.as_ref().unwrap().touch(path, seq);
+                        // Track dirty so legacy flush_handle (still
+                        // called during release in case shadow isn't
+                        // tracking) doesn't claim there's no work.
+                        let handle = self.write_handles.get_mut(&fh).unwrap();
+                        handle.dirty = true;
+                        reply.written(data.len() as u32);
+                        return;
+                    }
+                    Err(InsertError::PerFileCapExceeded) => {
+                        // Day 4 will degrade to sync flush; for now reject.
+                        reply.error(libc::EFBIG);
+                        return;
+                    }
+                    Err(InsertError::TotalCapExceeded) => {
+                        reply.error(libc::ENOSPC);
+                        return;
+                    }
+                }
+            }
+            drop(store);
+            // Fall through to legacy buf path for paths not yet
+            // shadow-tracked. Day 3 closes this hole.
+        }
         let handle = self.write_handles.get_mut(&fh).unwrap();
         let offset = offset as usize;
         if offset > handle.buf.len() { handle.buf.resize(offset, 0); }
@@ -1005,6 +1065,24 @@ impl Filesystem for VedaFs {
     }
 
     fn flush(&mut self, _req: &Request, ino: u64, fh: u64, _lock_owner: u64, reply: ReplyEmpty) {
+        if self.is_writeback() {
+            // Writeback: an explicit touch keeps the path in the
+            // queue without forcing a synchronous PUT. The actual
+            // server write happens after the debounce window elapses.
+            if let Some(path) = self.inode_get_path(ino) {
+                let shadow = self.shadow.as_ref().unwrap();
+                let store = shadow.lock().unwrap();
+                if let Some(entry) = store.get(&path) {
+                    let seq = entry.seq;
+                    drop(store);
+                    self.commit_queue.as_ref().unwrap().touch(path, seq);
+                }
+            }
+            // Always reply OK in writeback flush; the legacy
+            // synchronous write_file no longer gates the user's :w.
+            reply.ok();
+            return;
+        }
         match self.flush_handle(fh, ino) {
             Ok(()) => reply.ok(),
             Err(errno) => reply.error(errno),
@@ -1012,6 +1090,19 @@ impl Filesystem for VedaFs {
     }
 
     fn fsync(&mut self, _req: &Request, ino: u64, fh: u64, _datasync: bool, reply: ReplyEmpty) {
+        if self.is_writeback() {
+            if let Some(path) = self.inode_get_path(ino) {
+                let shadow = self.shadow.as_ref().unwrap();
+                let store = shadow.lock().unwrap();
+                if let Some(entry) = store.get(&path) {
+                    let seq = entry.seq;
+                    drop(store);
+                    self.commit_queue.as_ref().unwrap().touch(path, seq);
+                }
+            }
+            reply.ok();
+            return;
+        }
         match self.flush_handle(fh, ino) {
             Ok(()) => reply.ok(),
             Err(errno) => reply.error(errno),
@@ -1023,6 +1114,23 @@ impl Filesystem for VedaFs {
         _flags: i32, _lock_owner: Option<u64>, _flush: bool,
         reply: ReplyEmpty,
     ) {
+        if self.is_writeback() {
+            // Writeback release: send a final touch so the queue
+            // schedules the commit, drop the handle, and reply OK.
+            // The real PUT happens after the debounce window.
+            if let Some(path) = self.inode_get_path(ino) {
+                let shadow = self.shadow.as_ref().unwrap();
+                let store = shadow.lock().unwrap();
+                if let Some(entry) = store.get(&path) {
+                    let seq = entry.seq;
+                    drop(store);
+                    self.commit_queue.as_ref().unwrap().touch(path, seq);
+                }
+            }
+            self.write_handles.remove(&fh);
+            reply.ok();
+            return;
+        }
         let result = self.flush_handle(fh, ino);
         self.write_handles.remove(&fh);
         match result {
@@ -1061,7 +1169,7 @@ impl Filesystem for VedaFs {
         let ino = self.inode_get_or_create_with_nlookup(&child_path);
         let now = chrono::Utc::now();
         let info = FileInfo {
-            path: child_path,
+            path: child_path.clone(),
             is_dir: false,
             size_bytes: Some(0),
             revision: base_rev,
@@ -1071,6 +1179,26 @@ impl Filesystem for VedaFs {
         let attr = Self::make_attr(&info, ino);
         self.inode_set_attr(ino, attr);
         self.write_handles.insert(fh, WriteHandle { ino, buf: Vec::new(), dirty: false, base_rev });
+        // Writeback: seed an empty shadow entry so the upcoming
+        // write() can route through it. We still hit the server in
+        // create() — Day 3 will defer this PUT entirely, but for now
+        // we just register the file with the shadow so the write
+        // path has a target. base_rev is whatever the server gave us
+        // (may be None if it didn't echo a revision).
+        if self.is_writeback() {
+            let shadow = self.shadow.as_ref().unwrap();
+            let mut store = shadow.lock().unwrap();
+            // adopt_server_file enforces caps; on the empty buffer
+            // it never trips them. Ignore the InsertError result for
+            // the same reason.
+            let _ = store.adopt_server_file(
+                &child_path,
+                parent,
+                ino,
+                base_rev.unwrap_or(0),
+                Vec::new(),
+            );
+        }
         reply.created(&self.config.attr_ttl, &attr, 0, fh, 0);
     }
 
@@ -1393,8 +1521,8 @@ mod tests {
             read_only: false,
             cache_size_mb: 1,
         };
-        let client = VedaClient::new("http://127.0.0.1:1", "k");
-        let fs = VedaFs::new(client, config, true, None);
+        let client = Arc::new(VedaClient::new("http://127.0.0.1:1", "k"));
+        let fs = VedaFs::new(client, config, true, None, None, None);
         fs.note_sidecar_missing("/docs", ".abstract");
         assert!(
             fs.sidecar_recently_missing("/docs", ".abstract"),
@@ -1419,8 +1547,8 @@ mod tests {
         // VedaFs::new needs a real VedaClient. We can construct one
         // pointing at a bogus URL — none of the cache helpers call
         // out to it, and we never invoke any method that does.
-        let client = VedaClient::new("http://127.0.0.1:1", "k");
-        let fs = VedaFs::new(client, config, true, None);
+        let client = Arc::new(VedaClient::new("http://127.0.0.1:1", "k"));
+        let fs = VedaFs::new(client, config, true, None, None, None);
 
         assert!(!fs.sidecar_recently_missing("/docs", ".abstract"));
         fs.note_sidecar_missing("/docs", ".abstract");
