@@ -266,29 +266,22 @@ impl ShadowStore {
     /// Mark an entry's commit as successful at the given server
     /// revision. Silently no-op when entry was canceled / superseded
     /// (seq mismatch); the worker recognises that and falls back to
-    /// the stale-seq cleanup path. When a `LocalOnly` entry is
-    /// promoted to `Clean`, also evict its basename from
-    /// `pending_children[parent_ino]` — the server now owns the file
-    /// and a future readdir() will see it through the server listing,
-    /// so leaving the overlay would surface the name twice.
+    /// the stale-seq cleanup path.
+    ///
+    /// The entry stays in `pending_children` after promotion. That
+    /// keeps the shadow as the up-to-date authority for `readdir` /
+    /// `lookup` until the dir cache naturally refreshes — otherwise
+    /// a file would briefly disappear from `ls` between
+    /// `mark_committed` (drops it from the overlay) and the next
+    /// server listing TTL expiry (server side now has it). Readdir
+    /// dedups against the server listing so Clean entries don't
+    /// surface twice. tombstone() is what evicts pending_children;
+    /// commit alone is not.
     pub fn mark_committed(&mut self, path: &str, snapshot_seq: u64, new_rev: i32) {
-        let (was_local_only, parent_ino) = match self.entries.get_mut(path) {
-            Some(entry) if entry.seq == snapshot_seq => {
-                let was_local_only = entry.kind == EntryKind::LocalOnly;
+        if let Some(entry) = self.entries.get_mut(path) {
+            if entry.seq == snapshot_seq {
                 entry.kind = EntryKind::Clean;
                 entry.base_rev = Some(new_rev);
-                (was_local_only, entry.parent_ino)
-            }
-            _ => return,
-        };
-        if was_local_only {
-            if let Some(name) = path_basename(path) {
-                if let Some(set) = self.pending_children.get_mut(&parent_ino) {
-                    set.remove(name);
-                    if set.is_empty() {
-                        self.pending_children.remove(&parent_ino);
-                    }
-                }
             }
         }
     }
@@ -480,19 +473,27 @@ mod tests {
     }
 
     #[test]
-    fn mark_committed_evicts_pending_child_on_local_only_promotion() {
+    fn mark_committed_keeps_pending_child_for_overlay_continuity() {
+        // Day 3 review fix: keeping the basename in pending_children
+        // after promotion lets readdir/lookup serve the file from
+        // shadow until the server-listing dir cache refreshes.
+        // Without this, `ls` would briefly miss the file between
+        // commit and the next dir cache TTL. readdir dedups Clean
+        // entries against the server listing so they don't double-
+        // surface. tombstone() is what evicts the overlay; commit
+        // does not.
         let mut s = ShadowStore::new();
         let parent = 1;
         let (_, seq0) = s.create_local("/foo.md", parent);
         let seq1 = s.write_at("/foo.md", 0, b"hi").unwrap();
         assert!(s.pending_children(parent).unwrap().contains("foo.md"));
-        // First commit lands while still LocalOnly → must remove
-        // the basename from pending_children so a server-side
-        // readdir doesn't surface it twice.
         s.mark_committed("/foo.md", seq1, 5);
         assert_eq!(s.get("/foo.md").unwrap().kind, EntryKind::Clean);
-        assert!(s.pending_children(parent).is_none());
-        assert!(seq1 > seq0); // sanity
+        assert!(
+            s.pending_children(parent).unwrap().contains("foo.md"),
+            "Clean entry stays in pending_children until tombstone"
+        );
+        assert!(seq1 > seq0);
     }
 
     #[test]

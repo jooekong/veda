@@ -70,6 +70,12 @@ impl Default for FuseConfig {
 
 struct WriteHandle {
     ino: u64,
+    /// Path pinned at handle creation. Survives an unlink of the
+    /// inode mapping so POSIX open-unlink-close (e.g. vim writing
+    /// a swap file and then deleting it before exit) still resolves
+    /// in flush/release. inode_get_path(ino) returns None after
+    /// unlink → would break release otherwise.
+    path: String,
     buf: Vec<u8>,
     dirty: bool,
     base_rev: Option<i32>,
@@ -559,23 +565,46 @@ impl VedaFs {
 
     /// writeback path for flush/fsync/release: if the file is
     /// shadow-tracked, send a Touch and return success immediately
-    /// (the commit queue handles the eventual server PUT). If it's
-    /// not (open-existing legacy fallback in write()), call
-    /// flush_handle to drain the legacy buf synchronously so
-    /// :w doesn't silently lose data. Day 3 closes the
-    /// open-existing-fallback hole entirely.
+    /// (the commit queue handles the eventual server PUT). If the
+    /// path was tombstoned (open-unlink-close: vim writes a swap
+    /// then deletes it before closing), just reply OK — the shadow
+    /// already dropped the entry and the queue's seq tracking
+    /// prevents any in-flight PUT. If it's not in shadow at all
+    /// (open-existing legacy fallback in write()), call flush_handle
+    /// to drain the legacy buf synchronously so :w doesn't silently
+    /// lose data.
+    ///
+    /// Resolves the path via the WriteHandle, not via inode_get_path,
+    /// so an unlink that already cleared the inode mapping can't
+    /// turn this into a spurious ENOENT.
     fn writeback_touch_or_fallback_flush(
         &mut self,
         fh: u64,
         ino: u64,
         reply: ReplyEmpty,
     ) {
-        let path = match self.inode_get_path(ino) {
-            Some(p) => p,
-            None => { reply.error(libc::ENOENT); return; }
+        let path = match self.write_handles.get(&fh).map(|h| h.path.clone()) {
+            Some(p) if !p.is_empty() => p,
+            _ => {
+                // No handle (or unresolved path) — fall back to the
+                // legacy sync path, which itself no-ops on a missing
+                // handle/dirty flag.
+                match self.flush_handle(fh, ino) {
+                    Ok(()) => reply.ok(),
+                    Err(errno) => reply.error(errno),
+                }
+                return;
+            }
         };
         let shadow = self.shadow.as_ref().unwrap();
         let store = shadow.lock().unwrap();
+        if store.is_tombstoned(&path) {
+            // Unlinked before close. The shadow + queue already
+            // handled cancellation; nothing left to do.
+            drop(store);
+            reply.ok();
+            return;
+        }
         let entry_seq = store.get(&path).map(|e| e.seq);
         drop(store);
         if let Some(seq) = entry_seq {
@@ -856,9 +885,13 @@ impl Filesystem for VedaFs {
             (parent_ino, FileType::Directory, "..".to_string()),
         ];
         // Writeback overlay: drop tombstoned names from the server
-        // listing (the user just unlinked them) and append the
-        // local-only names from pending_children so just-created
-        // files show up in `ls` before any commit has fired.
+        // listing, then merge the shadow's per-parent entries.
+        // Dedup is by basename — a Clean shadow entry whose server
+        // listing already includes it would otherwise double-surface
+        // (Clean stays in pending_children so the file doesn't blink
+        // out between commit and the next dir-cache TTL).
+        let server_names: HashSet<&str> =
+            entries.iter().map(|de| de.name.as_str()).collect();
         let (tombstoned, pending) = if self.is_writeback() {
             let shadow = self.shadow.as_ref().unwrap().lock().unwrap();
             let toms: HashSet<String> = entries
@@ -871,6 +904,7 @@ impl Filesystem for VedaFs {
                 .map(|names| {
                     names
                         .iter()
+                        .filter(|name| !server_names.contains(name.as_str()))
                         .filter_map(|name| {
                             let cp = Self::resolve_child_path(&path, name);
                             shadow.get(&cp).map(|e| (e.local_ino, name.clone()))
@@ -948,7 +982,43 @@ impl Filesystem for VedaFs {
         let mut full: Vec<(u64, String, FileAttr, bool)> = Vec::with_capacity(entries.len() + 2);
         full.push((ino, ".".to_string(), self_attr, true));
         full.push((parent_ino, "..".to_string(), parent_attr, true));
+        // Writeback overlay (same logic as readdir): drop tombstoned
+        // server entries, append non-tombstoned shadow entries.
+        // Dedups on basename so a Clean shadow entry already in the
+        // server listing doesn't double-surface.
+        let server_names: HashSet<&str> =
+            entries.iter().map(|de| de.name.as_str()).collect();
+        let (tombstoned, shadow_entries): (HashSet<String>, Vec<(u64, String, FileAttr)>) =
+            if self.is_writeback() {
+                let shadow = self.shadow.as_ref().unwrap().lock().unwrap();
+                let toms: HashSet<String> = entries
+                    .iter()
+                    .filter(|de| shadow.is_tombstoned(&de.path))
+                    .map(|de| de.path.clone())
+                    .collect();
+                let shadow_entries: Vec<(u64, String, FileAttr)> = shadow
+                    .pending_children(ino)
+                    .map(|names| {
+                        names
+                            .iter()
+                            .filter(|name| !server_names.contains(name.as_str()))
+                            .filter_map(|name| {
+                                let cp = Self::resolve_child_path(&path, name);
+                                shadow.get(&cp).map(|e| {
+                                    (e.local_ino, name.clone(), Self::make_shadow_attr(e))
+                                })
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                (toms, shadow_entries)
+            } else {
+                (HashSet::new(), Vec::new())
+            };
         for de in entries.iter() {
+            if tombstoned.contains(&de.path) {
+                continue;
+            }
             let child_ino = self.inode_get_or_create(&de.path);
             let attr = Self::attr_from_dir_entry(de, child_ino);
             let cache_ok = Self::should_cache_attr(de);
@@ -956,6 +1026,13 @@ impl Filesystem for VedaFs {
                 self.inode_set_attr(child_ino, attr);
             }
             full.push((child_ino, de.name.clone(), attr, cache_ok));
+        }
+        for (local_ino, name, attr) in shadow_entries {
+            // Shadow entries don't carry the same "cache_ok" signal
+            // as server entries; their attrs are computed fresh from
+            // the in-memory buffer so caching is safe. nlookup
+            // increment is centralised in the publish loop below.
+            full.push((local_ino, name, attr, true));
         }
         // Synthetic sidecar entries. attr is a size-0 stub because
         // we haven't fetched the body yet and a readdirplus call
@@ -1028,7 +1105,7 @@ impl Filesystem for VedaFs {
                 Err(ClientError::NotFound) => (Vec::new(), None),
                 Err(ref e) => { reply.error(Self::err_to_errno(e)); return; }
             };
-            self.write_handles.insert(fh, WriteHandle { ino, buf: existing, dirty: truncated, base_rev });
+            self.write_handles.insert(fh, WriteHandle { ino, path: path.clone(), buf: existing, dirty: truncated, base_rev });
         }
         reply.opened(fh, 0);
     }
@@ -1175,8 +1252,14 @@ impl Filesystem for VedaFs {
             if self.write_handles.values().any(|h| h.ino == ino && h.dirty) {
                 warn!(ino, "concurrent dirty write handles for same inode");
             }
+            // Resolve the path while the mapping is still alive (an
+            // unlink between create and write would otherwise leave
+            // the synthetic handle pathless). Empty string is OK as
+            // a sentinel for "couldn't resolve": flush_handle and
+            // the writeback fallback both no-op on empty path.
+            let path = self.inode_get_path(ino).unwrap_or_default();
             self.write_handles.insert(fh, WriteHandle {
-                ino, buf: Vec::new(), dirty: false, base_rev: None,
+                ino, path, buf: Vec::new(), dirty: false, base_rev: None,
             });
         }
         // Writeback path: route into the shadow store and schedule a
@@ -1325,7 +1408,13 @@ impl Filesystem for VedaFs {
             let fh = self.alloc_fh();
             self.write_handles.insert(
                 fh,
-                WriteHandle { ino: local_ino, buf: Vec::new(), dirty: false, base_rev: None },
+                WriteHandle {
+                    ino: local_ino,
+                    path: child_path.clone(),
+                    buf: Vec::new(),
+                    dirty: false,
+                    base_rev: None,
+                },
             );
             reply.created(&self.config.attr_ttl, &attr, 0, fh, 0);
             return;
@@ -1340,7 +1429,7 @@ impl Filesystem for VedaFs {
         let ino = self.inode_get_or_create_with_nlookup(&child_path);
         let now = chrono::Utc::now();
         let info = FileInfo {
-            path: child_path,
+            path: child_path.clone(),
             is_dir: false,
             size_bytes: Some(0),
             revision: base_rev,
@@ -1349,7 +1438,7 @@ impl Filesystem for VedaFs {
         };
         let attr = Self::make_attr(&info, ino);
         self.inode_set_attr(ino, attr);
-        self.write_handles.insert(fh, WriteHandle { ino, buf: Vec::new(), dirty: false, base_rev });
+        self.write_handles.insert(fh, WriteHandle { ino, path: child_path, buf: Vec::new(), dirty: false, base_rev });
         reply.created(&self.config.attr_ttl, &attr, 0, fh, 0);
     }
 
