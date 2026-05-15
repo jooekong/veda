@@ -1804,22 +1804,28 @@ impl Filesystem for VedaFs {
 
     fn destroy(&mut self) {
         debug!("FUSE destroy");
-        // Writeback: before the legacy buf flush sweep, push every
-        // pending shadow entry through the commit queue and block
-        // until they've landed (or failed). Without this, an unmount
-        // during the debounce window silently loses up to N seconds
-        // of writes.
+        // Writeback: push every Dirty/LocalOnly shadow entry through
+        // the commit queue and block until they've landed (or failed).
+        // Without this, an unmount during the debounce window silently
+        // loses up to N seconds of writes.
+        //
+        // Skip Clean entries — they're already on the server with
+        // their latest bytes; touching them again would burn an
+        // unnecessary PUT and bump the server-side revision for no
+        // gain.
         if self.is_writeback() {
-            // For every shadow-tracked entry that isn't already
-            // committed, send a Touch so it ends up in the queue's
-            // pending set (idempotent if already scheduled). Then
-            // drain.
             let pending_paths: Vec<(String, u64)> = {
                 let shadow = self.shadow.as_ref().unwrap();
                 let store = shadow.lock().unwrap();
                 store
                     .pending_children_iter()
-                    .filter_map(|path| store.get(&path).map(|e| (path, e.seq)))
+                    .filter_map(|path| {
+                        let entry = store.get(&path)?;
+                        if entry.kind == EntryKind::Clean {
+                            return None;
+                        }
+                        Some((path, entry.seq))
+                    })
                     .collect()
             };
             let q = self.commit_queue.as_ref().unwrap();
@@ -1828,14 +1834,32 @@ impl Filesystem for VedaFs {
             }
             q.drain();
         }
+        // Legacy buf sweep for paths NOT under shadow control. In
+        // writeback mode the shadow drain above already pushed every
+        // shadow-tracked entry; the WriteHandle.buf for those is
+        // always empty (writeback writes go to the shadow, not the
+        // buf). Running flush_handle on them would PUT an empty body
+        // and clobber the server-side bytes we just successfully
+        // committed — classic data-loss. Filter handles by whether
+        // their path lives in the shadow.
         let fhs: Vec<u64> = self.write_handles.keys().copied().collect();
         for fh in fhs {
-            if let Some(handle) = self.write_handles.get(&fh) {
-                if handle.dirty {
-                    let ino = handle.ino;
-                    let _ = self.flush_handle(fh, ino);
+            let (ino, dirty, path) = match self.write_handles.get(&fh) {
+                Some(h) => (h.ino, h.dirty, h.path.clone()),
+                None => continue,
+            };
+            if !dirty {
+                continue;
+            }
+            if self.is_writeback() {
+                let shadow = self.shadow.as_ref().unwrap().lock().unwrap();
+                if shadow.get(&path).is_some() {
+                    // Shadow already drained this path; the buf is
+                    // either empty or stale. Skip the legacy flush.
+                    continue;
                 }
             }
+            let _ = self.flush_handle(fh, ino);
         }
         self.write_handles.clear();
     }

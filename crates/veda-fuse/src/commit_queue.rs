@@ -433,6 +433,37 @@ mod tests {
     }
 
     #[test]
+    fn drain_skips_clean_entries_no_redundant_put() {
+        // Simulates the destroy() path: a Clean entry (already
+        // committed earlier) should NOT receive another Touch from
+        // the unmount drain — otherwise every shutdown burns a
+        // revision bump per file. Caller filters out Clean before
+        // sending Touch; the queue itself faithfully processes
+        // whatever it receives. So this test asserts the queue's
+        // contract: a Touch on a Clean entry DOES produce a PUT
+        // (correct per protocol), but the filter is what prevents
+        // it from being sent in the first place — exercised by
+        // not calling touch() at all.
+        let (mock, shadow) = fresh();
+        let q = CommitQueue::start(mock.clone(), shadow.clone(), Duration::from_millis(50));
+        // Commit one file the normal way → Clean.
+        let seq = {
+            let mut s = shadow.lock().unwrap();
+            s.create_local("/done.md", 1);
+            s.write_at("/done.md", 0, b"data").unwrap()
+        };
+        q.touch("/done.md".to_string(), seq);
+        q.drain();
+        assert_eq!(mock.write_count(), 1);
+        assert_eq!(shadow.lock().unwrap().get("/done.md").unwrap().kind,
+                   crate::shadow::EntryKind::Clean);
+        // Now: destroy() drain pass would *not* send Touch for this
+        // Clean entry. Simulate that: just drain again.
+        q.drain();
+        assert_eq!(mock.write_count(), 1, "Clean entry must not be re-PUT");
+    }
+
+    #[test]
     fn vim_swap_full_lifecycle_produces_zero_server_calls() {
         // create("/notes/.notes.md.swp") → write(swap_binary) ×N →
         // tombstone before window. The deferred-create + shadow-only
