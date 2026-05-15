@@ -554,6 +554,38 @@ async fn fs_events_retention_cleans_old_rows() {
 
 > **已交付**（提前于本计划）：真 hybrid search（BM25 + Milvus 2.5 FTS + jieba）已在 0.1.4 上线，对应原 §6.5。
 
+### FUSE write-back + debounce + cancel-on-unlink (2026-05-15)
+
+**触发**: Joe 在挂载的 `/Users/konglingqiao/veda-mnt` 上用 vim 编辑 `.md` 文件遇到 `E72: Close error on swap file`。Daemon log 实锤：vim 创建 `.<name>.md.swp` 时 FUSE flush 直接同步打 server，server 拒绝非 UTF-8 (HTTP 400 "file content must be valid UTF-8")，errno -EIO 回到 vim → E72。
+
+**为什么不能只放开 server 的 UTF-8 限制**：单放 binary 会让每个 swap 文件、`.git/index.lock`、IDE 临时文件全飞上 server，污染向量索引（embedding 一坨 vim binary）+ 浪费上传带宽 + 暴露临时编辑状态。
+
+**对照 drive9 (Go, https://github.com/mem9-ai/drive9) 的做法** —— 不靠文件名黑名单，靠三件套架构：
+
+| 组件 | 作用 | 现成代码位置 |
+|---|---|---|
+| **ShadowStore** | 本地磁盘缓存。所有 FUSE 写先落本地，不直接打 server | `pkg/fuse/shadow.go` |
+| **flushDebouncer** | 默认 2s 静默期；同路径连续写就 reset 定时器；只有 2s 没新写才真上传 | `pkg/fuse/debounce.go` |
+| **CommitQueue.CancelPath** | unlink 触发取消所有 pending uploads（含 in-flight） | `pkg/fuse/commit_queue.go` |
+
+vim swap 在这套机制下的轨迹：create → ShadowStore 缓存（server 0 调用） → 持续写 reset debouncer → `:wq` 触发 unlink → CancelPath 取消 debounce → server 永远没见过这个文件。git 的 `.lock → rename .index` 同理。
+
+**Veda 当前现状**（`crates/veda-fuse/src/fs.rs`）：
+- `WriteHandle` 有 in-memory `buf: Vec<u8>`，但 `flush()` / `fsync()` / `release()` 都同步打 server
+- `create()` 直接 `client.write_file(path, b"", None)` 在 server 立刻建空文件 —— **vim 一开 swap，server 就已经被污染**
+- 无 debounce、无本地持久化、无 unlink-cancel 联动
+
+**改造方向**：
+- 引入轻量 ShadowStore（per-mount 本地 tmpdir 或纯 in-memory，看文件 size 阈值）
+- 引入 `flushDebouncer`（2-5s window 待调）；keyed by path
+- `create()` 延迟到第一次真 flush 才打 server（避免空文件污染）
+- `unlink()` / `rename()` 取消对应 debounce entry
+- 异常路径：mount unmount 时 drain 所有 pending；进程被杀时本地 buffer 丢失（可接受 alpha 语义）
+
+**与 server 端的关系**：做了这套以后，server 端可以继续强制 UTF-8 —— swap/lock 这些 binary ephemeral 永远到不了 server。真正的 binary 支持（PDF/图片/工件）是独立后续需求，到时再做。
+
+**工作量估算**：3-5 天，主要在 FUSE 层；server 不动；需要补 unit test + manual vim/git/IDE 工作流测试。
+
 ### CI / 部署流程跟进 (2026-05-15)
 
 - **CI publish veda-server binary**: 当前 `.gitlab-ci.yml` 只 build/publish `veda` (CLI) 和 `veda-fuse`，server 不在 release artifacts 里。所以远端 server 升级流程是"box 上 `cd /data/rust/veda && git checkout <tag> && cargo build -p veda-server` → install → systemctl restart"，跑一次 cargo 要 60s 起步。给 `build:linux-x86_64` job 加 `cargo build --release -p veda-server --bin veda-server` 步骤，加进 `artifacts.paths`，再补一个 `--assets-link` 给 GitLab release。改完后远端升级就能"curl 下载 → install → restart"，免 build。Linux-only 即可（server 只在 Linux 部署）。
