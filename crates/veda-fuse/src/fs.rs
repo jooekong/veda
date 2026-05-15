@@ -1804,6 +1804,30 @@ impl Filesystem for VedaFs {
 
     fn destroy(&mut self) {
         debug!("FUSE destroy");
+        // Writeback: before the legacy buf flush sweep, push every
+        // pending shadow entry through the commit queue and block
+        // until they've landed (or failed). Without this, an unmount
+        // during the debounce window silently loses up to N seconds
+        // of writes.
+        if self.is_writeback() {
+            // For every shadow-tracked entry that isn't already
+            // committed, send a Touch so it ends up in the queue's
+            // pending set (idempotent if already scheduled). Then
+            // drain.
+            let pending_paths: Vec<(String, u64)> = {
+                let shadow = self.shadow.as_ref().unwrap();
+                let store = shadow.lock().unwrap();
+                store
+                    .pending_children_iter()
+                    .filter_map(|path| store.get(&path).map(|e| (path, e.seq)))
+                    .collect()
+            };
+            let q = self.commit_queue.as_ref().unwrap();
+            for (path, seq) in pending_paths {
+                q.touch(path, seq);
+            }
+            q.drain();
+        }
         let fhs: Vec<u64> = self.write_handles.keys().copied().collect();
         for fh in fhs {
             if let Some(handle) = self.write_handles.get(&fh) {

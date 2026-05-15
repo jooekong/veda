@@ -369,6 +369,12 @@ impl ShadowStore {
         self.pending_children.get(&parent_ino)
     }
 
+    /// All shadow-tracked paths across every parent. Used by FUSE
+    /// destroy() to drain every dirty entry before unmount.
+    pub fn pending_children_iter(&self) -> impl Iterator<Item = String> + '_ {
+        self.entries.keys().cloned()
+    }
+
     pub fn total_bytes(&self) -> usize {
         self.total_bytes
     }

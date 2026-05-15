@@ -265,6 +265,10 @@ Mount flags / env vars:
 - `--allow-other` — share the mount with other UIDs (needs root in some envs)
 - `--read-only` — RO mount
 - `--debug` — verbose FUSE-layer logging
+- `--write-mode {sync,writeback}` / `VEDA_FUSE_WRITE_MODE` — `sync` (default) writes through every flush; `writeback` buffers writes in an in-memory shadow and debounces commits, so vim swap / git lockfile / IDE temp files never reach the server.
+- `--write-debounce-ms <N>` / `VEDA_FUSE_WRITE_DEBOUNCE_MS` — writeback debounce window (default 5000). Same-path writes inside the window coalesce to a single PUT.
+
+**Writeback caveats**: in-memory only (a crash within the debounce window loses pending bytes — single-user alpha trade-off); per-file cap 10 MB / total cap 50 MB. Files that grow past the per-file cap silently degrade to synchronous writes for that file. `unmount` drains pending commits before exit so a normal shutdown loses nothing.
 
 Diagnostics on failure: the parent prints either the preflight error directly
 (e.g. `server health check failed (stat '/' at …)`) or `daemon exited before

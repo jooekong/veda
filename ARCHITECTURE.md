@@ -34,12 +34,13 @@ veda-fuse       FUSE 挂载                           (已实现)
 - `veda-server`：新增 `POST /v1/fs/{path}` append 路由
 - `veda-cli`：clap 命令行解析；account create/login；workspace create/list/use；cp/cat/ls/mv/rm/mkdir/append；search（支持 --detail-level abstract/overview/full）；summary（查看文件/目录摘要）；collection CRUD；sql；config 管理；$HOME/.config/veda/config.toml 持久化；HTTP client 带 connect 10s / request 60s 超时
 - `veda-fuse`：FUSE 文件系统挂载（fuser 0.14），需要 macFUSE（macOS）或 libfuse（Linux）
-  - 基础：子命令 mount/umount；daemon 化（fork+setsid，pipe 通知 parent）；mount 选项（--cache-size/--attr-ttl/--allow-other/--read-only/--debug）
+  - 基础：子命令 mount/umount；daemon 化（fork+setsid，pipe 通知 parent）；mount 选项（--cache-size/--attr-ttl/--allow-other/--read-only/--debug/--write-mode/--write-debounce-ms）
   - HTTP：blocking client（stat/read/write/list/delete/mkdir/rename/read_range），30s connect+request timeout，ClientError 区分 Network/Server/Parse
-  - Inode：inode ↔ path 双向映射 + 可配置 attr TTL + nlookup 计数 + forget 回收
-  - 写入：WriteHandle dirty 标记消除 flush+release 双写；O_TRUNC 正确标记 dirty；setattr 截断走 If-Match CAS；fsync 实现；多 fh 同 ino 写入告警
+  - Inode：inode ↔ path 双向映射 + 可配置 attr TTL + nlookup 计数 + forget 回收；`register_local()` 支持 writeback shadow 的高位 ino（`1<<63+counter`）
+  - 写入：WriteHandle dirty 标记消除 flush+release 双写；O_TRUNC 正确标记 dirty；setattr 截断走 If-Match CAS；fsync 实现；多 fh 同 ino 写入告警；WriteHandle 持 path 字段，open-unlink-close 不报 ENOENT
   - 缓存：LRU ReadCache（小文件全量缓存，大文件 Range read），generation 计数器防止 invalidate→put 竞态，TTL 与 attr_ttl 统一；dir_cache 使用 Arc 零拷贝共享
   - SSE：后台线程连接 /v1/events，远程变更时失效 attr+read+dir cache；cursor 原子落盘持久化（debounce 1s）
+  - Writeback 模式（`--write-mode=writeback`）：`ShadowStore` 缓冲 FUSE 写入到内存（per-file 10MB / total 50MB cap，超 per-file 自动降级到 sync flush，超 total 返 ENOSPC）；`CommitQueue` 单线程 worker（std::thread + mpsc + min-heap deadline，token-based 合并同 path 的 Touch），默认 5s 静默期；create() defer 不打 server，蛋黄到第一次真正的 Touch 才上传；lookup/getattr/readdir/readdirplus 在 writeback 下走 shadow overlay（tombstone 隐藏，pending_children 追加，dedup by basename）；unlink 把 LocalOnly 直接干掉不打 server，Dirty/Clean 才下 DELETE；rename 先打 server 后改 shadow，old_path 自动 tombstone 防止 in-flight PUT 漏到 server；destroy() unmount 时 drain 所有 pending commit
   - 其他：statfs 返回合理值
 - `veda-server`：新增 `GET /v1/events` SSE 端点（轮询 veda_fs_events 表，cursor-based）；`GET /v1/fs/{path}` 支持 `Range` header 返回 206 Partial Content
 - v0.1.5 批：
