@@ -26,8 +26,8 @@ GITLAB_PROJECT_ID="9462"
 # already read by signing in to GitLab."
 GITLAB_DEPLOY_TOKEN="j4s2baP6aEybzSrsxq76"
 
-DEFAULT_VERSION_GITLAB="0.0.11-test"
-DEFAULT_VERSION_GITHUB="0.1.4"
+DEFAULT_VERSION_GITLAB="0.0.12-test"
+DEFAULT_VERSION_GITHUB="0.1.6"
 DEFAULT_SERVER="https://veda.dbpaas.dingdongxiaoqu.com"
 
 # ====== state ======
