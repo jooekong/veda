@@ -48,7 +48,7 @@ single machine, but you can't recover the account from another box. When the
 user wants to attach an email/password (e.g. before moving to a new laptop):
 
 ```sh
-veda claim --email you@example.com
+veda init --upgrade --email you@example.com
 ```
 
 `--password` is prompted (or read from `VEDA_PASSWORD`); the existing `vk_` key
@@ -56,16 +56,18 @@ keeps working, so no command line breaks.
 
 ### Existing user on a new machine
 
-Skip `veda init` — it would mint a fresh anon account you don't want. Pick one:
+Paste the key copied from the old machine. Works for both `vk_…` (account)
+and `wk_…` (workspace) keys — prefix is auto-detected. Existing
+`config.toml` (if any) is renamed to `config.toml.bak.<unix-ts>` before
+writing, so you can always roll back:
 
 ```sh
-# A. Paste the vk_ key from the old machine. Self-contained, no prompts.
-veda login --api-key vk_…
-veda workspace add default          # mint a fresh wk_ for the server's default workspace
-
-# B. Email/password login (use when no vk_ on hand).
-veda init --login --email you@example.com    # prompts for password
+veda init --import-key vk_…       # account key → also mints a fresh wk_ for "default"
+veda init --import-key wk_…       # workspace key → data commands work immediately
 ```
+
+No additional `veda workspace add` step is needed; `vk_` import auto-mints
+a `default` profile in the same flow.
 
 ## Path syntax
 
@@ -74,23 +76,23 @@ The CLI **does not accept** `:/path` syntax — `:` is rejected as an invalid ch
 
 ## Auth & workspace reference
 
-Onboarding variants (see Bootstrap above for the default flow):
+All identity flows go through `veda init`, selected by mutually-exclusive mode
+flags:
 
 ```sh
-veda init                                  # zero-prompt anonymous onboard (default)
-veda init --email X --password Y           # register a named account
-veda init --login --email X --password Y   # attach an existing account
-veda init --workspace-name dogfood         # named mode with custom workspace name
+veda init                                       # zero-prompt anonymous onboard (default)
+veda init --email X --password Y                # register a named account
+veda init --login --email X --password Y        # attach an existing account
+veda init --upgrade --email X                   # upgrade current anon to named (--password prompted)
+veda init --import-key vk_…                     # paste a key copied from another machine
+veda init --workspace-name dogfood              # named mode with custom workspace name
 veda init --non-interactive --email X --password Y  # CI/script mode: fail instead of prompt
-veda claim --email X                       # upgrade an existing anon account to named
 ```
 
-`veda login --api-key K` accepts both `vk_*` (account) and `wk_*` (workspace)
-keys; in either case it **clears all stored workspace profiles** along with
-the other auth slot — old wk_ aliases were minted under the previous
-account/key and would 401 against the new identity. After pasting a `vk_`,
-run `veda workspace add <alias>` to mint a fresh wk_ for whichever
-server-side workspace you need.
+The `--login` / `--upgrade` / `--import-key` flags are mutually exclusive; clap
+rejects any combination up front. `--import-key` accepts both `vk_*` (account)
+and `wk_*` (workspace) keys; prefix decides the slot and existing config is
+moved to `config.toml.bak.<unix-ts>` before overwrite.
 
 ### Multiple workspace profiles
 
@@ -322,11 +324,11 @@ sidecar shadows them on read; the real file is still reachable via `veda cat` /
 | Error message                          | Meaning              | Fix                                              |
 |----------------------------------------|---------------------|--------------------------------------------------|
 | `invalid path: invalid character in segment: :` | Used `:/path` syntax | Drop the `:` — paths are plain `/path`     |
-| `no API key configured`                | Not authenticated    | Run `veda init` (anon) or `veda login --api-key <key>` |
-| `no workspace selected`                | No active workspace  | Run `veda init` (anon onboard sets one) or `veda login --api-key wk_…` |
-| `already onboarded`                    | `veda init` blocked from overwriting | Either `veda status` is what you want, or delete `~/.config/veda/config.toml` first |
+| `no API key configured`                | Not authenticated    | Run `veda init` (anon) or `veda init --import-key vk_…` |
+| `no workspace selected`                | No active workspace  | Run `veda init` (anon onboard sets one) or `veda init --import-key wk_…` |
+| `already onboarded`                    | `veda init` blocked from overwriting | Run `veda init --import-key <key>` to swap identity (auto-backs up old config), or delete `~/.config/veda/config.toml` first |
 | `connection refused` / `Empty reply from server` | Server unreachable / hung | `veda status` (checks reachability); verify `server_url` |
-| `401 unauthorized`                     | API key invalid      | If you have email/password: `veda init --login --email …`; else paste a fresh key with `veda login --api-key`                 |
+| `401 unauthorized`                     | API key invalid      | If you have email/password: `veda init --login --email …`; else paste a fresh key with `veda init --import-key`                 |
 | `Summary not ready yet (summary pending)` (exit 2) | L0/L1 generation is async | Wait ~5s and retry, or `veda cat` for raw content |
 | `Summary unavailable on this server` (exit 3) | Server returned HTTP 501 — summary feature disabled | Use `veda cat` for raw content; abstract/overview won't work against this server |
 | 4xx with JSON error body               | API error            | Echo server's `error` field to user              |

@@ -1,13 +1,110 @@
-//! Initialization helpers: `veda login --api-key`, `veda init`.
+//! Initialization helpers for `veda init` (anonymous / named / login /
+//! upgrade / import-key modes).
 //!
 //! Pure mutation logic lives here so the binary's `match` arms stay thin
 //! and tests can exercise the state transitions without spinning up
 //! clap or HTTP.
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{anyhow, bail, Context, Result};
+use std::path::{Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::client::Client;
 use crate::config::{CliConfig, WorkspaceEntry, DEFAULT_WORKSPACE_ALIAS};
+
+/// Which auth slot an imported key landed in. Lets the caller decide
+/// whether a follow-up workspace-key mint is needed (account keys
+/// require it; workspace keys are self-sufficient).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ImportedKeyKind {
+    /// `vk_…` — account key. Caller should mint a default `wk_` next.
+    Account,
+    /// `wk_…` — workspace key, ready to use as-is.
+    Workspace,
+}
+
+/// `veda init --import-key K` core: classify the key by prefix and
+/// install it into the right config slot. `vk_` clears stored workspace
+/// profiles and lands in `api_key`; `wk_` clears `api_key` and lands as
+/// the active workspace profile under DEFAULT_WORKSPACE_ALIAS with
+/// `id = None`. Anything else is rejected.
+///
+/// `server_url` is overwritten so a fresh-machine import can pin the
+/// server without a separate `config set` step.
+///
+/// Pure: caller persists with `cfg.save()` and (for Account kind) calls
+/// `workspace::run_workspace_add` to finish the wk_ mint.
+pub fn apply_import_key(
+    cfg: &mut CliConfig,
+    key: String,
+    server_url: String,
+) -> Result<ImportedKeyKind> {
+    cfg.server_url = server_url;
+    if key.starts_with("vk_") {
+        apply_login(cfg, key);
+        Ok(ImportedKeyKind::Account)
+    } else if key.starts_with("wk_") {
+        apply_workspace_key(cfg, key);
+        Ok(ImportedKeyKind::Workspace)
+    } else {
+        bail!(
+            "--import-key must start with 'vk_' (account key) or 'wk_' (workspace key); \
+             got a key with neither prefix"
+        )
+    }
+}
+
+/// Ask the server which workspaces the current account owns, return
+/// `Some(id)` for the workspace whose `name` equals `name`, else
+/// `None`. Network failure bubbles up: a connection error should not
+/// silently degrade to "create a new workspace" — that masks
+/// connectivity issues behind a misleading 500.
+///
+/// Used by `veda init --import-key vk_…` to short-circuit the
+/// duplicate-name 500 that POST /v1/workspaces produces when the
+/// server already has a default workspace for the imported account.
+pub async fn find_workspace_id_by_name(
+    client: &Client,
+    api_key: &str,
+    name: &str,
+) -> Result<Option<String>> {
+    let list = client
+        .list_workspaces(api_key)
+        .await
+        .context("list workspaces failed")?;
+    Ok(list["data"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .find(|w| w["name"].as_str() == Some(name))
+        .and_then(|w| w["id"].as_str().map(String::from)))
+}
+
+/// Move an existing config file aside before an import-key overwrite.
+/// Returns the backup path on Some, or None if no file existed.
+///
+/// Uses `rename` (not copy + truncate) so the operation is atomic on
+/// the same filesystem — either the backup exists or the original
+/// does, never both half-written. Backup name is
+/// `config.toml.bak.<unix-secs>` so multiple imports in the same
+/// session don't collide (until you hit the same second, which on a
+/// CLI is "never" in practice).
+pub fn backup_config(path: &Path) -> Result<Option<PathBuf>> {
+    if !path.exists() {
+        return Ok(None);
+    }
+    let ts = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    // path.with_extension replaces the trailing component after the
+    // last '.' — for "config.toml" that's "toml", which we extend to
+    // "toml.bak.<ts>" giving "config.toml.bak.<ts>".
+    let bak = path.with_extension(format!("toml.bak.{ts}"));
+    std::fs::rename(path, &bak)
+        .with_context(|| format!("rename {} → {}", path.display(), bak.display()))?;
+    Ok(Some(bak))
+}
 
 /// Apply a paste-an-existing-key login. Sets `api_key`, clears every
 /// stored workspace profile so requests don't mix an old workspace key
@@ -272,6 +369,7 @@ pub async fn run_claim(
 mod tests {
     use super::*;
     use serde_json::json;
+    use tempfile::tempdir;
     use wiremock::matchers::{body_partial_json, method, path, path_regex};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -344,6 +442,163 @@ mod tests {
         assert!(def.id.is_none(), "id should be cleared");
         assert!(cfg.api_key.is_none(), "api_key should be cleared");
         assert_eq!(cfg.workspaces.len(), 1, "old profile must be wiped");
+    }
+
+    // ── apply_import_key ───────────────────────────────────────────
+
+    #[test]
+    fn import_vk_routes_to_account_slot_and_clears_workspaces() {
+        let mut cfg = CliConfig {
+            api_key: Some("old".into()),
+            ..CliConfig::default()
+        };
+        cfg.set_active_profile(
+            DEFAULT_WORKSPACE_ALIAS,
+            WorkspaceEntry { id: Some("ws-old".into()), key: "wk-old".into() },
+        );
+        let kind =
+            apply_import_key(&mut cfg, "vk_new".into(), "http://srv".into()).unwrap();
+        assert_eq!(kind, ImportedKeyKind::Account);
+        assert_eq!(cfg.server_url, "http://srv");
+        assert_eq!(cfg.api_key.as_deref(), Some("vk_new"));
+        assert!(cfg.workspaces.is_empty(), "wk profiles must be wiped");
+        assert!(cfg.active_workspace.is_none());
+    }
+
+    #[test]
+    fn import_wk_routes_to_workspace_slot_and_clears_account_key() {
+        let mut cfg = CliConfig {
+            api_key: Some("vk_old".into()),
+            ..CliConfig::default()
+        };
+        let kind =
+            apply_import_key(&mut cfg, "wk_new".into(), "http://srv".into()).unwrap();
+        assert_eq!(kind, ImportedKeyKind::Workspace);
+        assert_eq!(cfg.server_url, "http://srv");
+        assert!(cfg.api_key.is_none(), "account key must be cleared");
+        let def = cfg.workspace_for(DEFAULT_WORKSPACE_ALIAS).unwrap();
+        assert_eq!(def.key, "wk_new");
+        assert!(def.id.is_none(), "id is None for paste-wk_ (no server lookup)");
+    }
+
+    #[test]
+    fn import_unknown_prefix_is_rejected() {
+        let mut cfg = CliConfig::default();
+        let err = apply_import_key(&mut cfg, "abcdef".into(), "http://srv".into())
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("vk_"), "msg: {err}");
+        assert!(err.contains("wk_"), "msg: {err}");
+        // Cfg untouched on rejection.
+        assert!(cfg.api_key.is_none());
+        assert!(cfg.workspaces.is_empty());
+    }
+
+    // ── find_workspace_id_by_name ──────────────────────────────────
+    //
+    // The `--import-key vk_` flow uses this to short-circuit the
+    // duplicate-name 500 from POST /v1/workspaces. The three
+    // branches matter: hit (return id), miss (return None, caller
+    // falls through to create), error (bubble up — must NOT silently
+    // become None or we mask network issues as missing default).
+
+    #[tokio::test]
+    async fn find_workspace_returns_id_when_name_matches() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/v1/workspaces"))
+            .respond_with(ok(json!([
+                { "id": "ws-other", "name": "scratch" },
+                { "id": "ws-default", "name": "default" }
+            ])))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let client = Client::new(&server.uri());
+        let id = find_workspace_id_by_name(&client, "vk_x", "default")
+            .await
+            .unwrap();
+        assert_eq!(id.as_deref(), Some("ws-default"));
+    }
+
+    #[tokio::test]
+    async fn find_workspace_returns_none_when_no_match() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/v1/workspaces"))
+            .respond_with(ok(json!([
+                { "id": "ws-other", "name": "scratch" }
+            ])))
+            .mount(&server)
+            .await;
+        let client = Client::new(&server.uri());
+        let id = find_workspace_id_by_name(&client, "vk_x", "default")
+            .await
+            .unwrap();
+        assert!(id.is_none());
+    }
+
+    #[tokio::test]
+    async fn find_workspace_returns_none_when_data_array_empty() {
+        // No workspaces yet: a freshly-imported vk_ from a server
+        // that hadn't auto-created the default goes through path 1
+        // (create new) — None is the correct signal for that.
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/v1/workspaces"))
+            .respond_with(ok(json!([])))
+            .mount(&server)
+            .await;
+        let client = Client::new(&server.uri());
+        let id = find_workspace_id_by_name(&client, "vk_x", "default")
+            .await
+            .unwrap();
+        assert!(id.is_none());
+    }
+
+    #[tokio::test]
+    async fn find_workspace_propagates_500_instead_of_treating_as_none() {
+        // Contract: network/server failure must NOT silently degrade
+        // to None — that would cascade into a spurious "create"
+        // attempt which itself fails with a misleading 500. Surface
+        // the original error so the user sees the reachability
+        // problem.
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/v1/workspaces"))
+            .respond_with(ResponseTemplate::new(500).set_body_string("db down"))
+            .mount(&server)
+            .await;
+        let client = Client::new(&server.uri());
+        let err = find_workspace_id_by_name(&client, "vk_x", "default")
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("list workspaces failed"));
+    }
+
+    // ── backup_config ──────────────────────────────────────────────
+
+    #[test]
+    fn backup_missing_returns_none() {
+        let dir = tempdir().unwrap();
+        let p = dir.path().join("config.toml");
+        let out = backup_config(&p).unwrap();
+        assert!(out.is_none());
+    }
+
+    #[test]
+    fn backup_existing_renames_with_timestamp_suffix() {
+        let dir = tempdir().unwrap();
+        let p = dir.path().join("config.toml");
+        std::fs::write(&p, "server_url = \"x\"\n").unwrap();
+        let bak = backup_config(&p).unwrap().expect("backup path");
+        assert!(bak.exists(), "backup file must exist");
+        assert!(!p.exists(), "original must be moved, not copied");
+        let name = bak.file_name().unwrap().to_string_lossy().into_owned();
+        assert!(name.starts_with("config.toml.bak."), "name: {name}");
+        // Trailing component is a unix timestamp, all digits.
+        let ts_part = name.rsplit('.').next().unwrap();
+        assert!(ts_part.chars().all(|c| c.is_ascii_digit()), "ts: {ts_part}");
     }
 
     // ── run_init ───────────────────────────────────────────────────

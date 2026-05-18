@@ -157,25 +157,26 @@ sudo install -m 0755 target/release/veda /usr/local/bin/
 
 下面假设 `veda` 在 PATH 里；否则写完整路径 `./target/release/veda`。
 
-### 4.2 注册账号 → 建 workspace → 取 workspace key
+### 4.2 注册账号 + 建 workspace + 取 workspace key
 
 CLI 默认 `--server http://localhost:3000`；override 用 `--server` 全局参数。
+一条 `veda init` 走完账号 → workspace → key 全程：
 
 ```bash
-# 1. 注册一个账号。CLI 会把返回的 api_key 写入 ~/.config/veda/config.toml
-veda account create \
-    --name joe \
-    --email joe@example.com \
-    --password 'something-strong'
+# 匿名快通道：零输入，账号 + default workspace + 双 key 一次返回
+veda init
 
-# 2. 在账号下建 workspace
-veda workspace create --name demo
-# → 返回 { "id": "<ws-uuid>", "name": "demo", ... }
+# 或显式命名账号（同步建 default workspace）
+veda init --email joe@example.com --password 'something-strong'
 
-# 3. 选用 workspace。这一步会调 POST /v1/workspaces/{id}/keys，
-#    返回 workspace key 并写入本地 config（之后所有 fs 操作都用它）。
-veda workspace use <ws-uuid>
+# 换机器：从老机器把 vk_ 粘过来，自动 mint default 的 wk_
+veda init --import-key vk_…
+
+# 把匿名账号升级成命名账号（vk_ 不变）
+veda init --upgrade --email joe@example.com
 ```
+
+需要管多个 workspace 时再走 `veda workspace add <alias>`。
 
 ### 4.3 用 CLI 写第一个文件
 

@@ -181,7 +181,7 @@ impl CliConfig {
     pub fn api_key(&self) -> Result<&str> {
         match &self.api_key {
             Some(k) if !k.is_empty() => Ok(k),
-            _ => bail!("no API key configured. Run `veda init` (or `veda login --api-key vk_…`) first."),
+            _ => bail!("no API key configured. Run `veda init` (or `veda init --import-key vk_…`) first."),
         }
     }
 

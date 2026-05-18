@@ -494,7 +494,7 @@ pub trait AuthStore: Send + Sync {
     async fn get_account_by_email(&self, email: &str) -> Result<Option<Account>>;
     /// Attach an email + password hash to an existing anonymous
     /// account (rows with `email IS NULL`), optionally renaming it.
-    /// Used by `veda claim` to upgrade anon identities to recoverable
+    /// Used by `veda init --upgrade` to turn anon identities into recoverable
     /// ones. The implementation guards `WHERE email IS NULL`, so a
     /// concurrent claim that already won the race surfaces as
     /// `Unauthorized` (zero rows affected), and a stale email collision

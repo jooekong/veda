@@ -103,15 +103,15 @@ cargo build --release
 ### 4. Create account and workspace
 
 ```bash
-# Register account, get API key
-veda account create --email joe@example.com
+# Zero-input anonymous onboard: server mints account + default workspace + keys
+veda init
 
-# Create a workspace
-veda workspace create my-project
-
-# Connect CLI to workspace
-veda use my-project
+# Or register a named account in the same command
+veda init --email joe@example.com --password 'something-strong'
 ```
+
+Need an extra workspace? `veda workspace add <alias>`. Importing a key from
+another machine? `veda init --import-key vk_…` (auto-backs up old config).
 
 ## Usage
 

@@ -210,7 +210,7 @@ print_next_steps() {
     esac
     log ""
     log "Next: run 'veda init' — zero-input anonymous onboard, instantly usable."
-    log "      Add --email for a named account, or upgrade later via 'veda claim'."
+    log "      Add --email for a named account, or upgrade later via 'veda init --upgrade --email …'."
     log ""
     if [ -d "$HOME/.claude" ]; then
         log "Claude Code: skill auto-installed; just ask Claude to use veda."
