@@ -1,27 +1,23 @@
 #!/bin/bash
 # release.sh — bump workspace version, tag both remotes, push.
 # Usage: ./scripts/release.sh <github-version> <gitlab-version>
-#   e.g. ./scripts/release.sh 0.1.6 0.0.12-test
-# Cargo.toml + binary version follow <github-version>; <gitlab-version>
-# is just an external label on the GitLab "test" stream (it stamps
-# DEFAULT_VERSION_GITLAB in install.sh and tags the same commit).
+#   e.g. ./scripts/release.sh 0.1.7 0.0.13-test
+# Cargo.toml + binary version follows <github-version>; <gitlab-version>
+# is the GitLab "test stream" tag — same commit, different tag name.
+# CI differentiates by tag name: .gitlab-ci.yml's LATEST_VERSION step
+# skips `*-test`, so internal CI builds don't bump the install.sh
+# default. install.sh resolves its own latest now (no literal version
+# constants), so this script no longer touches install.sh.
 
 set -euo pipefail
 
-GH_VERSION="${1:?usage: $0 <github-version> <gitlab-version>  (e.g. 0.1.6 0.0.12-test)}"
-GL_VERSION="${2:?usage: $0 <github-version> <gitlab-version>  (e.g. 0.1.6 0.0.12-test)}"
+GH_VERSION="${1:?usage: $0 <github-version> <gitlab-version>  (e.g. 0.1.7 0.0.13-test)}"
+GL_VERSION="${2:?usage: $0 <github-version> <gitlab-version>  (e.g. 0.1.7 0.0.13-test)}"
 
 # Match strictly the top-level workspace.package version line so dep
 # version = "1" lines don't get rewritten. -i.bak for BSD/GNU sed compat.
 sed -i.bak -E "s/^version = \"[0-9]+\\.[0-9]+\\.[0-9]+\"\$/version = \"$GH_VERSION\"/" Cargo.toml
 rm -f Cargo.toml.bak
-
-# install.sh DEFAULT_VERSION_{GITHUB,GITLAB} must track each release stream's
-# tag — anyone curling the script without VEDA_VERSION otherwise gets
-# whatever was hardcoded at the time of the last manual edit.
-sed -i.bak -E "s/^DEFAULT_VERSION_GITHUB=\"[^\"]+\"\$/DEFAULT_VERSION_GITHUB=\"$GH_VERSION\"/" install.sh
-sed -i.bak -E "s/^DEFAULT_VERSION_GITLAB=\"[^\"]+\"\$/DEFAULT_VERSION_GITLAB=\"$GL_VERSION\"/" install.sh
-rm -f install.sh.bak
 
 # Refresh Cargo.lock with the new version pinned.
 cargo update --workspace >/dev/null 2>&1 || true
@@ -40,7 +36,7 @@ if ! git merge-base --is-ancestor ddxq/main HEAD; then
     exit 1
 fi
 
-git add Cargo.toml Cargo.lock install.sh
+git add Cargo.toml Cargo.lock
 git commit -m "chore: bump version to $GH_VERSION ($GL_VERSION on gitlab)"
 git tag "$GH_VERSION"
 git tag "$GL_VERSION"
