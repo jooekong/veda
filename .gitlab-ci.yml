@@ -179,6 +179,26 @@ publish:all:
              --upload-file "$f" \
              "${REGISTRY}/$f"
       done
+    # Update the "latest" pointer at packages/generic/veda/latest/LATEST_VERSION
+    # so install.sh can resolve the newest version without hardcoding it.
+    # Skip prerelease tags: `*-test` (internal CI builds against the GitLab
+    # runner matrix, e.g. 0.0.12-test) and `*-rc*/-alpha*/-beta*` must
+    # never shadow a real release like 0.1.6. The pointer is a tiny text
+    # file containing only the tag — install.sh fetches and trims.
+    - |
+      case "$CI_COMMIT_TAG" in
+        *-test|*-rc*|*-alpha*|*-beta*)
+          echo "skipping LATEST_VERSION update for prerelease tag: $CI_COMMIT_TAG"
+          ;;
+        *)
+          echo "updating LATEST_VERSION pointer to $CI_COMMIT_TAG..."
+          printf '%s' "$CI_COMMIT_TAG" > LATEST_VERSION
+          curl --fail --show-error --silent \
+               --header "JOB-TOKEN: $CI_JOB_TOKEN" \
+               --upload-file LATEST_VERSION \
+               "${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/packages/generic/veda/latest/LATEST_VERSION"
+          ;;
+      esac
 
 release:create:
   stage: release

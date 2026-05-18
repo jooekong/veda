@@ -2,14 +2,13 @@
 # install.sh — Veda CLI installer
 #
 # Usage:
-#   curl -fL <install-url> | sh                       # default: install from internal GitLab
+#   curl -fL <install-url> | sh                       # install latest (auto-resolved)
 #   curl -fL ... | sh -s -- --with-fuse               # also install veda-fuse
-#   curl -fL ... | sh -s -- --from-github             # install from public GitHub releases
 #
 # Env overrides:
-#   VEDA_VERSION       Version to install
+#   VEDA_VERSION       Pin a specific version (default: auto — fetched from source)
 #   VEDA_INSTALL_DIR   Where to put binaries (default: $HOME/.local/bin)
-#   VEDA_SOURCE        gitlab (default) | github
+#   VEDA_SOURCE        gitlab (default) | github — pick artifact host
 
 set -eu
 
@@ -26,14 +25,12 @@ GITLAB_PROJECT_ID="9462"
 # already read by signing in to GitLab."
 GITLAB_DEPLOY_TOKEN="j4s2baP6aEybzSrsxq76"
 
-DEFAULT_VERSION_GITLAB="0.0.12-test"
-DEFAULT_VERSION_GITHUB="0.1.6"
 DEFAULT_SERVER="https://veda.dbpaas.dingdongxiaoqu.com"
 
 # ====== state ======
 WITH_FUSE=0
 SOURCE="${VEDA_SOURCE:-gitlab}"
-VERSION="${VEDA_VERSION:-}"
+VERSION="${VEDA_VERSION:-}"   # empty → fetch_latest_version() resolves it
 DEST="${VEDA_INSTALL_DIR:-$HOME/.local/bin}"
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT INT TERM
@@ -85,6 +82,49 @@ download_asset() {
     curl_with_auth --fail --show-error --silent --location \
          "$url" -o "$TMP/$name" \
         || err "download failed: $name (check version $VERSION exists on $SOURCE)"
+}
+
+# Resolve the latest non-prerelease version from the chosen source.
+# Output goes to stdout (a single version string); failures call err()
+# and exit, so callers can capture without worrying about empty values.
+#
+# Why each source has its own path:
+#   - GitLab: deploy-token's read_package_registry scope cannot
+#     enumerate (no /repository/tags, no /packages list). CI uploads
+#     a `latest/LATEST_VERSION` text file in publish:all (.gitlab-ci.yml)
+#     which we fetch as a single artifact.
+#   - GitHub: public `/releases/latest` returns the most recent
+#     non-prerelease tag. Unauthed; rate-limited to 60 req/h per IP
+#     which is fine for installs.
+fetch_latest_version() {
+    case "$SOURCE" in
+        gitlab)
+            url="https://${GITLAB_HOST}/api/v4/projects/${GITLAB_PROJECT_ID}/packages/generic/veda/latest/LATEST_VERSION"
+            body=$(curl_with_auth --fail --silent --location "$url" 2>/dev/null) \
+                || err "fetch failed: $url
+       (latest pointer not yet published, or token expired)
+       Workaround: VEDA_VERSION=<x.y.z> curl … | sh"
+            # Strip whitespace — the upload could end with a trailing
+            # newline depending on how the CI step printed it.
+            v=$(printf '%s' "$body" | tr -d '[:space:]')
+            ;;
+        github)
+            url="https://api.github.com/repos/${GITHUB_REPO}/releases/latest"
+            body=$(curl --fail --silent --location "$url" 2>/dev/null) \
+                || err "fetch failed: $url (network? rate-limited?)"
+            # Pull "tag_name":"x.y.z" from the JSON without jq.
+            v=$(printf '%s' "$body" \
+                | grep -m1 '"tag_name"' \
+                | sed -E 's/.*"tag_name"[[:space:]]*:[[:space:]]*"([^"]+)".*/\1/')
+            ;;
+        *)
+            err "unknown VEDA_SOURCE: $SOURCE (expected gitlab or github)"
+            ;;
+    esac
+    if [ -z "$v" ]; then
+        err "fetched version from $SOURCE but parsed empty value (server returned unexpected format?)"
+    fi
+    printf '%s' "$v"
 }
 
 verify_sha256() {
@@ -155,8 +195,33 @@ preflight_fuse() {
                 log ""
                 log "veda CLI is installed."
                 log "veda-fuse needs libfuse3. Recommended: $cmd"
-                printf "Run it now? [y/N] " >&2
-                read -r ans
+                # `curl | sh` makes stdin the script body itself —
+                # `read` there consumes a script line instead of user
+                # input, which silently runs the next branch with a
+                # garbage answer. Route the prompt + read through
+                # /dev/tty.
+                #
+                # `[ -r /dev/tty ]` is a false-positive trap: it
+                # checks device-node readability (the device file
+                # always exists with read perms on the user), not
+                # whether *this* process has a controlling terminal.
+                # In the no-tty case (systemd, container without
+                # `-T`, detached daemon) the open still fails with
+                # ENXIO. Probe by actually trying to open in a
+                # subshell — if that fd-3 dance succeeds, the real
+                # open below will too; the subshell-scoped fd is
+                # discarded so we don't leak an extra descriptor.
+                # `2>/dev/null` on the subshell swallows the
+                # `Device not configured` message the shell would
+                # otherwise print to stderr.
+                if (exec 3</dev/tty) 2>/dev/null; then
+                    printf "Run it now? [y/N] " >/dev/tty
+                    read -r ans </dev/tty
+                else
+                    log "Non-interactive shell (no controlling tty): skipping FUSE deps install."
+                    log "Run '$cmd' manually if you want veda-fuse."
+                    exit 0
+                fi
                 case "$ans" in
                     y|Y|yes|YES)
                         eval "$cmd" || { warn "FUSE install failed; CLI is ready"; exit 0; }
@@ -188,7 +253,26 @@ install_skill() {
 # user (or agent) doesn't have to `veda config set` as step zero. Uses
 # the absolute path because `curl | sh` runs in a shell whose PATH has
 # not been re-evaluated since we dropped the binary into $DEST.
+#
+# Skip when the user has already pointed `server_url` at something
+# non-default — re-running install.sh to upgrade the CLI shouldn't
+# clobber a custom server URL. `http://localhost:3000` is the
+# CliConfig::default and we treat it as "unset"; anything else,
+# including DEFAULT_SERVER itself, is the user's choice.
 configure_server_url() {
+    cfg_path="${XDG_CONFIG_HOME:-$HOME/.config}/veda/config.toml"
+    if [ -r "$cfg_path" ]; then
+        existing_url=$(grep -E '^server_url' "$cfg_path" 2>/dev/null \
+            | sed -E 's/^server_url[[:space:]]*=[[:space:]]*"([^"]*)".*/\1/' \
+            | head -1)
+        case "$existing_url" in
+            ""|http://localhost:3000) ;;
+            *)
+                log "✓ server URL kept as $existing_url (config already set)"
+                return
+                ;;
+        esac
+    fi
     if "$DEST/veda" config set server_url "$DEFAULT_SERVER" >/dev/null 2>&1; then
         log "✓ server URL set to $DEFAULT_SERVER"
     else
@@ -227,20 +311,18 @@ main() {
     while [ $# -gt 0 ]; do
         case "$1" in
             --with-fuse)   WITH_FUSE=1 ;;
-            --from-github) SOURCE=github ;;
-            --from-gitlab) SOURCE=gitlab ;;
             -h|--help)
                 cat >&2 <<EOF
-Usage: install.sh [--with-fuse] [--from-github|--from-gitlab]
+Usage: install.sh [--with-fuse]
 
-Default source: gitlab (internal $GITLAB_HOST). Use --from-github to
-install from public GitHub releases.
+Source: gitlab (internal $GITLAB_HOST) by default; set
+VEDA_SOURCE=github to install from public GitHub releases.
+The script auto-resolves the latest version from the chosen source.
 
 Supported platforms: macOS Intel, macOS Apple Silicon, Linux x86_64.
 
 Env overrides:
-  VEDA_VERSION       Version to install
-                     (default: $DEFAULT_VERSION_GITLAB on gitlab, $DEFAULT_VERSION_GITHUB on github)
+  VEDA_VERSION       Pin a specific version (default: auto-resolved)
   VEDA_INSTALL_DIR   Where to put binaries (default: \$HOME/.local/bin)
   VEDA_SOURCE        gitlab (default) | github
 EOF
@@ -252,10 +334,15 @@ EOF
     done
 
     case "$SOURCE" in
-        gitlab) : "${VERSION:=$DEFAULT_VERSION_GITLAB}" ;;
-        github) : "${VERSION:=$DEFAULT_VERSION_GITHUB}" ;;
+        gitlab|github) ;;
         *) err "VEDA_SOURCE must be gitlab or github, got: $SOURCE" ;;
     esac
+
+    if [ -z "$VERSION" ]; then
+        log "resolving latest version from $SOURCE..."
+        VERSION=$(fetch_latest_version)
+        log "→ $VERSION"
+    fi
 
     target=$(detect_platform)
     install_binary "veda" "$target"
