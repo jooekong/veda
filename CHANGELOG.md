@@ -9,6 +9,8 @@ that matters.
 
 ## [Unreleased]
 
+## [0.1.7] — 2026-05-18
+
 ### Changed
 - `veda init` is now the only auth entry point. The `login`, `claim`, and
   `account` top-level subcommands have been removed; their behavior moved
@@ -29,15 +31,28 @@ that matters.
 - `install.sh` no longer overwrites `server_url` in an existing
   `config.toml` — only sets it when unset or at the `CliConfig::default`
   value.
+- `veda cat` slice flags: `--lines A:B` removed; replaced by
+  mutually-exclusive `--range A:B` / `--head N` / `--tail N` (clap
+  enforces the exclusion at parse).
+- `veda workspace` has a short alias: `veda ws <action>`.
+- `veda cp` rejects non-UTF-8 input client-side with a path-aware
+  "looks binary" / "not valid UTF-8" message (NUL-byte sniff + UTF-8
+  validation) before any HTTP call.
+- `skill.md` rewritten 372 → 243 lines; FUSE-specific guidance moved
+  to a new `skill-fuse.md` companion (only installed by `install.sh
+  --with-fuse`).
+
+### Added
+- Global `--json` flag: `veda --json ls/search/grep` emits one compact
+  JSON object per line instead of the human-formatted table.
+- `LATEST_VERSION` pointer file uploaded by GitLab CI's `publish:all` job
+  for any non-prerelease tag (`*-test`/`*-rc*/-alpha*/-beta*` are skipped).
+- `CHANGELOG.md`.
+- `skill-fuse.md` — FUSE companion skill doc.
 
 ### Fixed
 - `install.sh` Linux FUSE preflight reads y/N from `/dev/tty` rather than
   stdin (which is the piped script body under `curl … | sh`).
-
-### Added
-- `LATEST_VERSION` pointer file uploaded by GitLab CI's `publish:all` job
-  for any non-prerelease tag (`*-test`/`*-rc*/-alpha*/-beta*` are skipped).
-- `CHANGELOG.md`.
 
 ## [0.1.6] — 2026-05-15
 
@@ -130,7 +145,8 @@ First public alpha. CI pipeline shipped, releases published to GitHub.
 - GitHub Actions release matrix: `x86_64-unknown-linux-gnu`,
   `x86_64-apple-darwin` (cross-compiled on macos-14 / M1).
 
-[Unreleased]: https://github.com/jooekong/veda/compare/0.1.6...HEAD
+[Unreleased]: https://github.com/jooekong/veda/compare/0.1.7...HEAD
+[0.1.7]: https://github.com/jooekong/veda/compare/0.1.6...0.1.7
 [0.1.6]: https://github.com/jooekong/veda/compare/0.1.5...0.1.6
 [0.1.5]: https://github.com/jooekong/veda/compare/0.1.4...0.1.5
 [0.1.4]: https://github.com/jooekong/veda/compare/0.1.3...0.1.4
