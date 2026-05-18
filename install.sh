@@ -237,14 +237,31 @@ preflight_fuse() {
 }
 
 install_skill() {
-    if [ -d "$HOME/.claude" ]; then
-        mkdir -p "$HOME/.claude/skills/veda"
-        url=$(asset_url "skill.md")
+    if [ ! -d "$HOME/.claude" ]; then
+        return
+    fi
+    mkdir -p "$HOME/.claude/skills/veda"
+    # Primary skill — always install (mirrors `skill.md` from the
+    # repo as `SKILL.md` so Claude Code picks it up by the
+    # capitalised convention the loader expects).
+    url=$(asset_url "skill.md")
+    if curl_with_auth --fail --silent --location \
+            "$url" -o "$HOME/.claude/skills/veda/SKILL.md"; then
+        log "skill installed → ~/.claude/skills/veda/SKILL.md"
+    else
+        warn "could not fetch skill.md; skipping (CLI is fine)"
+        return
+    fi
+    # FUSE companion — only useful when veda-fuse is also installed.
+    # Best-effort: missing artifact is fine (older releases predate
+    # the split); the main skill.md links to it but degrades cleanly.
+    if [ "$WITH_FUSE" -eq 1 ]; then
+        url=$(asset_url "skill-fuse.md")
         if curl_with_auth --fail --silent --location \
-                "$url" -o "$HOME/.claude/skills/veda/SKILL.md"; then
-            log "skill installed → ~/.claude/skills/veda/SKILL.md"
+                "$url" -o "$HOME/.claude/skills/veda/skill-fuse.md"; then
+            log "fuse skill installed → ~/.claude/skills/veda/skill-fuse.md"
         else
-            warn "could not fetch skill.md; skipping (CLI is fine)"
+            warn "could not fetch skill-fuse.md (older release?); CLI is still fine"
         fi
     fi
 }
