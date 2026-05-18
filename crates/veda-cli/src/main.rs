@@ -38,6 +38,14 @@ struct Cli {
     /// config — add it first with `veda workspace add <alias>`.
     #[arg(long, global = true)]
     workspace: Option<String>,
+
+    /// Emit machine-readable JSON instead of the human-friendly
+    /// default. Currently affects `ls`, `search`, `grep`,
+    /// `collection search`, and `sql`. Other commands either
+    /// already emit JSON (`sql` payload rows) or only print
+    /// status messages — they ignore the flag.
+    #[arg(long, global = true)]
+    json: bool,
 }
 
 #[derive(Subcommand)]
@@ -103,7 +111,8 @@ enum Commands {
     /// Workspace profile management — add / switch / list / rm local
     /// aliases for server-side workspaces. `veda init` already creates
     /// and selects "default"; only needed when juggling multiple
-    /// workspaces from one machine.
+    /// workspaces from one machine. Short alias: `veda ws`.
+    #[command(alias = "ws")]
     Workspace {
         #[command(subcommand)]
         action: WorkspaceCmd,
@@ -115,13 +124,23 @@ enum Commands {
         /// Remote path on server
         dst: String,
     },
-    /// Read file from server
+    /// Read file from server. Three mutually-exclusive slice flags
+    /// pick a subset; default streams the whole file.
     Cat {
         /// Remote path
         path: String,
-        /// Line range (e.g. "1:10")
-        #[arg(long)]
-        lines: Option<String>,
+        /// 1-indexed inclusive line range, e.g. `1:20` for lines 1
+        /// through 20, or `42:` for line 42 to end-of-file.
+        #[arg(long, conflicts_with_all = ["head", "tail"])]
+        range: Option<String>,
+        /// Show the first N lines (server-side range, equivalent
+        /// to `--range 1:N`).
+        #[arg(long, conflicts_with_all = ["range", "tail"])]
+        head: Option<usize>,
+        /// Show the last N lines (fetches whole file then slices
+        /// locally — there's no server endpoint for tail offsets).
+        #[arg(long, conflicts_with_all = ["range", "head"])]
+        tail: Option<usize>,
     },
     /// List directory
     Ls {
@@ -872,6 +891,97 @@ mod cli_parse_tests {
             "expected clap to reject 'veda claim', got: {msg}"
         );
     }
+
+    // ── PR3a: --json / cat slice flags / ws alias ──────────────────
+
+    #[test]
+    fn global_json_flag_routes_through_to_cli() {
+        let cli = Cli::try_parse_from(["veda", "--json", "ls", "/"]).unwrap();
+        assert!(cli.json);
+        match cli.command {
+            Commands::Ls { path } => assert_eq!(path, "/"),
+            _ => panic!("expected Ls"),
+        }
+    }
+
+    #[test]
+    fn global_json_flag_default_false() {
+        let cli = Cli::try_parse_from(["veda", "ls", "/"]).unwrap();
+        assert!(!cli.json);
+    }
+
+    #[test]
+    fn cat_range_head_tail_are_mutually_exclusive() {
+        let err = expect_clap_err(&["veda", "cat", "/x", "--range", "1:5", "--head", "10"]);
+        let msg = err.to_string();
+        assert!(
+            msg.contains("--range") || msg.contains("--head") || msg.contains("cannot be used"),
+            "expected exclusion error, got: {msg}"
+        );
+        let err = expect_clap_err(&["veda", "cat", "/x", "--head", "10", "--tail", "5"]);
+        assert!(
+            err.to_string().contains("--head")
+                || err.to_string().contains("--tail")
+                || err.to_string().contains("cannot be used"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn cat_parses_each_slice_flag_individually() {
+        let cli = Cli::try_parse_from(["veda", "cat", "/x", "--range", "1:20"]).unwrap();
+        match cli.command {
+            Commands::Cat { range, head, tail, .. } => {
+                assert_eq!(range.as_deref(), Some("1:20"));
+                assert!(head.is_none());
+                assert!(tail.is_none());
+            }
+            _ => panic!("expected Cat"),
+        }
+        let cli = Cli::try_parse_from(["veda", "cat", "/x", "--head", "10"]).unwrap();
+        match cli.command {
+            Commands::Cat { head, .. } => assert_eq!(head, Some(10)),
+            _ => panic!("expected Cat"),
+        }
+        let cli = Cli::try_parse_from(["veda", "cat", "/x", "--tail", "3"]).unwrap();
+        match cli.command {
+            Commands::Cat { tail, .. } => assert_eq!(tail, Some(3)),
+            _ => panic!("expected Cat"),
+        }
+    }
+
+    #[test]
+    fn removed_cat_lines_flag_is_gone() {
+        // `--lines` was renamed to `--range` (codex review of plan
+        // flagged the name as ambiguous with "limit line count").
+        // A regression that re-added it should fail at parse.
+        let err = expect_clap_err(&["veda", "cat", "/x", "--lines", "1:5"]);
+        let msg = err.to_string();
+        assert!(
+            msg.contains("--lines") || msg.contains("unexpected"),
+            "expected clap to reject --lines, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn workspace_ws_alias_works() {
+        // The `ws` alias is a typing-saver for `veda workspace …`.
+        // Pins that `veda ws list` parses to the same `Workspace`
+        // subcommand as the long form.
+        let cli = Cli::try_parse_from(["veda", "ws", "list"]).unwrap();
+        match cli.command {
+            Commands::Workspace { action: WorkspaceCmd::List } => {}
+            _ => panic!("expected Workspace::List via ws alias"),
+        }
+        let cli =
+            Cli::try_parse_from(["veda", "ws", "add", "scratch"]).unwrap();
+        match cli.command {
+            Commands::Workspace { action: WorkspaceCmd::Add { alias, .. } } => {
+                assert_eq!(alias, "scratch");
+            }
+            _ => panic!("expected Workspace::Add via ws alias"),
+        }
+    }
 }
 
 async fn print_summary_layer(
@@ -1120,6 +1230,10 @@ async fn main() -> anyhow::Result<()> {
     }
 
     let c = client::Client::new(&cfg.server_url);
+    // Capture before the match consumes `cli.command`. Most handlers
+    // ignore it; ls/search/grep/collection-search/sql flip output
+    // formats on it.
+    let json_output = cli.json;
 
     match cli.command {
         Commands::Status => {
@@ -1251,19 +1365,48 @@ async fn main() -> anyhow::Result<()> {
                     let n = cp_dir_recursive(&c, cfg.active_wk()?, src_path, &dst).await?;
                     println!("Uploaded {n} file(s) under {dst}");
                 } else {
-                    let content = std::fs::read_to_string(&src)?;
+                    let content = read_utf8_text_or_bail(&src)?;
                     let resp = c.write_file(cfg.active_wk()?, &dst, &content).await?;
                     println!("Written: revision {}", resp["data"]["revision"]);
                 }
             }
         }
-        Commands::Cat { path, lines } => {
-            let content = c.read_file(cfg.active_wk()?, &path, lines.as_deref()).await?;
-            print!("{content}");
+        Commands::Cat { path, range, head, tail } => {
+            // clap's conflicts_with_all already rejects > 1 of these;
+            // here we just translate to the server-side `lines`
+            // parameter shape (1-indexed inclusive A:B, with B empty
+            // = to EOF). `--tail` is the only one we can't express
+            // server-side, so it goes through the slice-after-fetch
+            // path.
+            if let Some(n) = tail {
+                let content = c.read_file(cfg.active_wk()?, &path, None).await?;
+                let lines: Vec<&str> = content.lines().collect();
+                let start = lines.len().saturating_sub(n);
+                // Print in original order, preserving a trailing
+                // newline only when the source had one.
+                let trailing = if content.ends_with('\n') { "\n" } else { "" };
+                print!("{}{trailing}", lines[start..].join("\n"));
+            } else {
+                let line_spec = match (range.as_deref(), head) {
+                    (Some(r), _) => Some(r.to_string()),
+                    (None, Some(n)) => Some(format!("1:{n}")),
+                    (None, None) => None,
+                };
+                let content = c
+                    .read_file(cfg.active_wk()?, &path, line_spec.as_deref())
+                    .await?;
+                print!("{content}");
+            }
         }
         Commands::Ls { path } => {
             let resp = c.list_dir(cfg.active_wk()?, &path).await?;
-            if let Some(arr) = resp["data"].as_array() {
+            if json_output {
+                if let Some(arr) = resp["data"].as_array() {
+                    for entry in arr {
+                        println!("{entry}");
+                    }
+                }
+            } else if let Some(arr) = resp["data"].as_array() {
                 for entry in arr {
                     let name = entry["name"].as_str().unwrap_or("");
                     let is_dir = entry["is_dir"].as_bool().unwrap_or(false);
@@ -1320,7 +1463,13 @@ async fn main() -> anyhow::Result<()> {
             let resp = c
                 .search(cfg.active_wk()?, &query, &mode, limit, detail_level.as_str())
                 .await?;
-            if let Some(arr) = resp["data"].as_array() {
+            if json_output {
+                if let Some(arr) = resp["data"].as_array() {
+                    for hit in arr {
+                        println!("{hit}");
+                    }
+                }
+            } else if let Some(arr) = resp["data"].as_array() {
                 for hit in arr {
                     let path = hit["path"].as_str().unwrap_or("?");
                     let score = hit["score"].as_f64().unwrap_or(0.0);
@@ -1358,7 +1507,13 @@ async fn main() -> anyhow::Result<()> {
                     limit,
                 )
                 .await?;
-            if let Some(arr) = resp["data"].as_array() {
+            if json_output {
+                if let Some(arr) = resp["data"].as_array() {
+                    for hit in arr {
+                        println!("{hit}");
+                    }
+                }
+            } else if let Some(arr) = resp["data"].as_array() {
                 for hit in arr {
                     let path = hit["path"].as_str().unwrap_or("?");
                     let line_no = hit["line_no"].as_u64().unwrap_or(0);
@@ -1458,6 +1613,11 @@ async fn main() -> anyhow::Result<()> {
                 let resp = c
                     .search_collection(cfg.active_wk()?, &name, &query, limit)
                     .await?;
+                // collection-search and sql already print one JSON
+                // object per line — the same shape as --json mode.
+                // The flag is accepted for consistency but doesn't
+                // change behavior here.
+                let _ = json_output;
                 if let Some(arr) = resp["data"].as_array() {
                     for row in arr {
                         println!("{row}");
@@ -1467,6 +1627,7 @@ async fn main() -> anyhow::Result<()> {
         },
         Commands::Sql { query } => {
             let resp = c.execute_sql(cfg.active_wk()?, &query).await?;
+            let _ = json_output;
             if let Some(arr) = resp["data"].as_array() {
                 for row in arr {
                     println!("{row}");
@@ -1524,6 +1685,41 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Read a local file as UTF-8 text, failing fast on binary input with a
+/// clear "not a text file" message before any bytes leave the client.
+///
+/// Two checks layered:
+///   1. **NUL byte sniff** over the full content. Catches binaries
+///      (PDFs, JPEGs, ELF executables, etc.) whose first chunk happens
+///      to look like valid UTF-8 — most have at least one NUL.
+///   2. **`String::from_utf8` validation**. Catches non-NUL but
+///      non-UTF-8 inputs (UTF-16 with BOM, ISO-8859-1 with high-bit
+///      bytes, mojibake from a wrong save).
+///
+/// `std::fs::read_to_string` already does (2) implicitly but returns
+/// the generic `std::io::ErrorKind::InvalidData` with no path or
+/// remediation hint; the explicit path here gives the user something
+/// they can act on.
+fn read_utf8_text_or_bail(src: impl AsRef<std::path::Path>) -> anyhow::Result<String> {
+    let src = src.as_ref();
+    let bytes = std::fs::read(src)
+        .map_err(|e| anyhow::anyhow!("read {} failed: {e}", src.display()))?;
+    if bytes.contains(&0) {
+        anyhow::bail!(
+            "'{}' looks binary (contains NUL bytes); veda only accepts UTF-8 text \
+             (PDFs / images / executables aren't supported)",
+            src.display()
+        );
+    }
+    String::from_utf8(bytes).map_err(|e| {
+        anyhow::anyhow!(
+            "'{}' is not valid UTF-8 ({}); veda only accepts UTF-8 text",
+            src.display(),
+            e.utf8_error()
+        )
+    })
+}
+
 /// Recursively upload every file under `src_root` to `dst_root` on the server.
 /// Remote path = dst_root + path-relative-to-src_root. Skips empty directories.
 /// Returns the number of files uploaded.
@@ -1546,9 +1742,7 @@ async fn cp_dir_recursive(
             .collect::<Vec<_>>()
             .join("/");
         let remote = format!("{dst_root}/{rel_str}");
-        let content = std::fs::read_to_string(f).map_err(|e| {
-            anyhow::anyhow!("read {} failed: {e} (binary files are not supported)", f.display())
-        })?;
+        let content = read_utf8_text_or_bail(f)?;
         client.write_file(ws_key, &remote, &content).await?;
         println!("  {} -> {remote}", f.display());
         count += 1;
@@ -1575,4 +1769,75 @@ fn collect_files(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) -> st
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod cp_utf8_tests {
+    //! `veda cp` rejects binary input before any HTTP call. The
+    //! previous behavior — `std::fs::read_to_string` returning a
+    //! generic `InvalidData` — gave users an opaque "stream did not
+    //! contain valid UTF-8" with no path or remediation hint.
+    use super::read_utf8_text_or_bail;
+    use std::io::Write;
+    use tempfile::NamedTempFile;
+
+    #[test]
+    fn plain_ascii_text_passes() {
+        let mut f = NamedTempFile::new().unwrap();
+        f.write_all(b"hello, world\n").unwrap();
+        let out = read_utf8_text_or_bail(f.path()).unwrap();
+        assert_eq!(out, "hello, world\n");
+    }
+
+    #[test]
+    fn utf8_with_multibyte_passes() {
+        let mut f = NamedTempFile::new().unwrap();
+        f.write_all("中文 ✓ 🎉".as_bytes()).unwrap();
+        let out = read_utf8_text_or_bail(f.path()).unwrap();
+        assert_eq!(out, "中文 ✓ 🎉");
+    }
+
+    #[test]
+    fn nul_byte_in_middle_is_rejected_as_binary() {
+        // PDF / PNG / ELF all contain NUL bytes; this is the
+        // fast-fail signal even when the prefix happens to be ASCII.
+        let mut f = NamedTempFile::new().unwrap();
+        f.write_all(b"text\0more text").unwrap();
+        let err = read_utf8_text_or_bail(f.path()).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("looks binary"), "msg: {msg}");
+        assert!(msg.contains("NUL"), "msg: {msg}");
+        // Error must mention the path so a `for f in *.bin; do veda cp` loop
+        // doesn't leave the user guessing which file tripped it.
+        assert!(msg.contains(&f.path().display().to_string()), "msg: {msg}");
+    }
+
+    #[test]
+    fn invalid_utf8_without_nul_is_rejected() {
+        // ISO-8859-1 / Windows-1252 / a stray UTF-16 BOM: bytes with
+        // the high bit set that don't form valid UTF-8 sequences.
+        // 0xFF 0xFE is the UTF-16-LE BOM; 0xC3 alone is a UTF-8
+        // continuation prefix without its trailing byte.
+        let mut f = NamedTempFile::new().unwrap();
+        f.write_all(&[0xFF, 0xFE, b'a', b'b', 0xC3]).unwrap();
+        let err = read_utf8_text_or_bail(f.path()).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("not valid UTF-8"), "msg: {msg}");
+    }
+
+    #[test]
+    fn empty_file_passes() {
+        let f = NamedTempFile::new().unwrap();
+        let out = read_utf8_text_or_bail(f.path()).unwrap();
+        assert_eq!(out, "");
+    }
+
+    #[test]
+    fn missing_path_yields_read_error() {
+        // Should fail at the read step with a clear "read … failed"
+        // message, not a panic or a UTF-8-shaped error.
+        let err = read_utf8_text_or_bail("/nonexistent/path/abc.txt").unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("read") && msg.contains("/nonexistent"), "msg: {msg}");
+    }
 }

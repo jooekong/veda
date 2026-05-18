@@ -109,6 +109,9 @@ veda workspace rm scratch                   # alias-only local delete (server ke
 veda --workspace scratch ls /               # one-off override, active unchanged
 ```
 
+Short alias: `veda ws <action>` is equivalent to `veda workspace <action>`
+(e.g. `veda ws list`).
+
 **For agents / non-interactive scripts**: always pass `--workspace <alias>`
 explicitly when the script depends on which workspace it lands in. The active
 profile is shell-global state, so a stale `switch` from a previous session
@@ -121,12 +124,15 @@ prints the target workspace alias to stderr so the caller can audit logs.
 ### File operations
 
 ```sh
-veda cp ./README.md /docs/readme.md         # upload (UTF-8 text only)
+veda cp ./README.md /docs/readme.md         # upload (UTF-8 text only — binary files are rejected client-side)
 veda cp ./src /code                          # directory upload — recursion is automatic on a dir src
 veda cp - /notes/scratch < some-input       # from stdin (use "-" as src)
 veda ls /docs                                # list dir
+veda ls /docs --json                         # JSON-line output (one entry per line)
 veda cat /docs/readme.md                     # full content
-veda cat /docs/readme.md --lines 1:20       # line range (1-indexed, inclusive)
+veda cat /docs/readme.md --range 1:20       # 1-indexed inclusive line range
+veda cat /docs/readme.md --head 10          # first 10 lines
+veda cat /docs/readme.md --tail 5           # last 5 lines (fetches full file then slices)
 veda mv /old-name /new-name                  # rename
 veda rm /path                                # delete (recursive by default — no -r flag)
 veda mkdir /new-dir                          # create directory
@@ -146,6 +152,10 @@ veda search "summary" --detail-level abstract                 # save tokens — 
 
 Flags: `--mode {hybrid,semantic,fulltext}`, `--limit N` (default 10),
 `--detail-level {abstract,overview,full}` (default `full`).
+
+Pass `--json` (global, e.g. `veda --json search "…"`) to emit one
+JSON object per line instead of the human-formatted table — useful
+when piping into `jq` or feeding the result back to an agent.
 
 **Embedding is async**: a file uploaded just now may not appear in semantic results
 for a few seconds. If a search misses an obviously-present file, retry after 5s.
@@ -344,8 +354,10 @@ sidecar shadows them on read; the real file is still reachable via `veda cat` /
 
 ## Don't do
 
-- Don't upload binaries — `veda cp` rejects non-UTF-8 input; PDFs/images
-  aren't supported (no extraction backend wired up).
+- Don't upload binaries — `veda cp` rejects non-UTF-8 input client-side
+  with a clear path-aware error (NUL-byte sniff + UTF-8 validation
+  before any HTTP call). PDFs/images aren't supported (no extraction
+  backend wired up).
 - Don't use `veda search` for exact path lookups — use `ls` / `cat` instead.
 - Don't write to `/` root — pick a semantic prefix like `/notes/`, `/code/`, `/docs/`.
 - Don't repeat the user's password / API key in chat — they live in
