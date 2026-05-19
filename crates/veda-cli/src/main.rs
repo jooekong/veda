@@ -171,6 +171,9 @@ enum Commands {
         /// Detail level
         #[arg(long, value_enum, default_value_t = SearchDetail::Full)]
         detail_level: SearchDetail,
+        /// Restrict the search to a subtree (e.g. `/docs`). Omit to search the whole workspace.
+        #[arg(long)]
+        path: Option<String>,
     },
     /// Grep file contents (substring match, returns file:line:content)
     Grep {
@@ -1459,9 +1462,17 @@ async fn main() -> anyhow::Result<()> {
             mode,
             limit,
             detail_level,
+            path,
         } => {
             let resp = c
-                .search(cfg.active_wk()?, &query, &mode, limit, detail_level.as_str())
+                .search(
+                    cfg.active_wk()?,
+                    &query,
+                    &mode,
+                    limit,
+                    detail_level.as_str(),
+                    path.as_deref(),
+                )
                 .await?;
             if json_output {
                 if let Some(arr) = resp["data"].as_array() {

@@ -270,17 +270,22 @@ impl Client {
         mode: &str,
         limit: usize,
         detail_level: &str,
+        path_prefix: Option<&str>,
     ) -> Result<serde_json::Value> {
+        let mut body = serde_json::json!({
+            "query": query,
+            "mode": mode,
+            "limit": limit,
+            "detail_level": detail_level,
+        });
+        if let Some(p) = path_prefix {
+            body["path_prefix"] = serde_json::Value::String(p.to_string());
+        }
         let resp = self
             .http
             .post(format!("{}/v1/search", self.base))
             .bearer_auth(ws_key)
-            .json(&serde_json::json!({
-                "query": query,
-                "mode": mode,
-                "limit": limit,
-                "detail_level": detail_level,
-            }))
+            .json(&body)
             .send()
             .await?;
         Self::check(resp).await
