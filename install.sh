@@ -7,7 +7,8 @@
 #
 # Env overrides:
 #   VEDA_VERSION       Pin a specific version (default: auto — fetched from source)
-#   VEDA_INSTALL_DIR   Where to put binaries (default: $HOME/.local/bin)
+#   VEDA_INSTALL_DIR   Where to put binaries (default: /usr/local/bin for
+#                      root, $HOME/.local/bin for non-root)
 #   VEDA_SOURCE        gitlab (default) | github — pick artifact host
 
 set -eu
@@ -31,7 +32,25 @@ DEFAULT_SERVER="https://veda.dbpaas.dingdongxiaoqu.com"
 WITH_FUSE=0
 SOURCE="${VEDA_SOURCE:-gitlab}"
 VERSION="${VEDA_VERSION:-}"   # empty → fetch_latest_version() resolves it
-DEST="${VEDA_INSTALL_DIR:-$HOME/.local/bin}"
+# Pick a default DEST that's actually in the current user's PATH so a
+# fresh `curl | sh` install yields a runnable `veda` command without
+# a manual `export PATH` step.
+#
+# - root → /usr/local/bin (in PATH for every user on RHEL/Debian/macOS).
+#   This is the convention curl-pipe-sh installers use (gh-cli, k3s,
+#   fly.io, rustup root-mode, helm).
+# - non-root → $HOME/.local/bin (XDG idiom; may need PATH tweak which
+#   the trailing banner walks the user through).
+#
+# `VEDA_INSTALL_DIR` env always wins so power users / packagers can
+# override either default.
+if [ -n "${VEDA_INSTALL_DIR:-}" ]; then
+    DEST="$VEDA_INSTALL_DIR"
+elif [ "$(id -u)" = "0" ]; then
+    DEST="/usr/local/bin"
+else
+    DEST="$HOME/.local/bin"
+fi
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT INT TERM
 
@@ -403,7 +422,8 @@ Supported platforms: macOS Intel, macOS Apple Silicon, Linux x86_64.
 
 Env overrides (lower priority than the matching CLI flag):
   VEDA_VERSION       Pin a specific version (default: auto-resolved)
-  VEDA_INSTALL_DIR   Where to put binaries (default: \$HOME/.local/bin)
+  VEDA_INSTALL_DIR   Where to put binaries (default: /usr/local/bin for
+                     root, \$HOME/.local/bin for non-root)
   VEDA_SOURCE        gitlab (default) | github
 
 Examples:
