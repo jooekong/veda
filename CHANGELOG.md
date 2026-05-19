@@ -9,6 +9,51 @@ that matters.
 
 ## [Unreleased]
 
+## [0.1.8] — 2026-05-19
+
+### Changed
+- `install.sh`: default install location now follows the
+  curl-pipe-sh convention used by gh-cli / k3s / fly.io —
+  `/usr/local/bin` for root (already in everyone's PATH),
+  `$HOME/.local/bin` for non-root (XDG idiom, banner walks
+  through the PATH tweak when needed). `VEDA_INSTALL_DIR`
+  still overrides either default.
+- `install.sh`: new `--source github|gitlab` flag (PR2's
+  env-only approach bit on `VEDA_SOURCE=… curl … | sh`, where
+  the env doesn't cross the pipe to `sh`). `--from-github` /
+  `--from-gitlab` kept as aliases. CLI flag takes precedence
+  over the `VEDA_SOURCE` env var.
+- `install.sh`: PATH-missing warning is now an end-of-output
+  ASCII-box banner with both immediate (`export PATH=…`) and
+  persistent (`echo … >> ~/.bashrc`) remediation. Still
+  doesn't auto-edit shell rc files.
+- **Reverted the PR3b skill split.** `skill-fuse.md` merged
+  back into `skill.md` (now 331 lines, was 369 across two
+  files). The split was over-engineering: Claude Code's skill
+  loader only auto-registers `~/.claude/skills/<dir>/SKILL.md`
+  — additional .md files in the same directory don't trigger
+  on their own keywords. PR3b's net token saving was 3 lines
+  while introducing skill-discovery edge cases, conditional
+  `install.sh` fetch, two CI artifacts, and cross-link
+  maintenance.
+
+### Added
+- `install.sh` `preflight_fuse` recognizes more RHEL-family
+  forks common on internal Chinese clouds: `hce` (Huawei
+  Cloud EulerOS), `openeuler`, `kylin`, `anolis`,
+  `tencentos`. All use `sudo yum install -y fuse3` (single
+  `fuse3` package provides `libfuse3.so.3` on RHEL 9 family;
+  the previous `fuse3-libs` companion was a RHEL 8 leftover).
+
+### Fixed
+- `install.sh` `preflight_fuse` previously sourced
+  `/etc/os-release` in the current shell, which clobbered
+  `$VERSION` (the veda binary version) on distros that
+  define their own `VERSION` field. HCE ships
+  `VERSION="3.0 (x86_64)"` → next download_asset built a URL
+  with a literal space → curl "URL using bad/illegal format".
+  Source in a subshell, only echo `$ID` back.
+
 ## [0.1.7] — 2026-05-18
 
 ### Changed
@@ -145,7 +190,8 @@ First public alpha. CI pipeline shipped, releases published to GitHub.
 - GitHub Actions release matrix: `x86_64-unknown-linux-gnu`,
   `x86_64-apple-darwin` (cross-compiled on macos-14 / M1).
 
-[Unreleased]: https://github.com/jooekong/veda/compare/0.1.7...HEAD
+[Unreleased]: https://github.com/jooekong/veda/compare/0.1.8...HEAD
+[0.1.8]: https://github.com/jooekong/veda/compare/0.1.7...0.1.8
 [0.1.7]: https://github.com/jooekong/veda/compare/0.1.6...0.1.7
 [0.1.6]: https://github.com/jooekong/veda/compare/0.1.5...0.1.6
 [0.1.5]: https://github.com/jooekong/veda/compare/0.1.4...0.1.5

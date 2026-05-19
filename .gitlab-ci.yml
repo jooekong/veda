@@ -76,7 +76,6 @@ build:linux:
       - veda-fuse-x86_64-unknown-linux-gnu
       - veda-fuse-x86_64-unknown-linux-gnu.sha256
       - skill.md
-      - skill-fuse.md
     expire_in: 1 week
 
 build:darwin-x86_64:
@@ -173,7 +172,7 @@ publish:all:
     # but a `curl --fail` away from breaking if that setting flips.
     # Codex review caught this on the 24h batch.
     - |
-      for f in veda-* skill.md skill-fuse.md; do
+      for f in veda-* skill.md; do
         echo "uploading $f..."
         curl --fail --show-error --silent \
              --header "JOB-TOKEN: $CI_JOB_TOKEN" \
@@ -218,5 +217,4 @@ release:create:
         --assets-link "{\"name\":\"veda-x86_64-darwin\",\"url\":\"${REGISTRY}/veda-x86_64-apple-darwin\",\"link_type\":\"package\"}" \
         --assets-link "{\"name\":\"veda-fuse-x86_64-darwin\",\"url\":\"${REGISTRY}/veda-fuse-x86_64-apple-darwin\",\"link_type\":\"package\"}" \
         --assets-link "{\"name\":\"veda-aarch64-darwin\",\"url\":\"${REGISTRY}/veda-aarch64-apple-darwin\",\"link_type\":\"package\"}" \
-        --assets-link "{\"name\":\"skill.md\",\"url\":\"${REGISTRY}/skill.md\",\"link_type\":\"other\"}" \
-        --assets-link "{\"name\":\"skill-fuse.md\",\"url\":\"${REGISTRY}/skill-fuse.md\",\"link_type\":\"other\"}"
+        --assets-link "{\"name\":\"skill.md\",\"url\":\"${REGISTRY}/skill.md\",\"link_type\":\"other\"}"

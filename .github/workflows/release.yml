@@ -140,4 +140,4 @@ jobs:
             --repo "${{ github.repository }}" \
             --title "Veda ${{ github.ref_name }}" \
             --generate-notes \
-            dist/* skill.md skill-fuse.md
+            dist/* skill.md
