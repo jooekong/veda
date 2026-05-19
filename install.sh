@@ -173,9 +173,18 @@ preflight_fuse() {
             if ! ldconfig -p 2>/dev/null | grep -q libfuse3; then
                 distro_id="unknown"
                 if [ -r /etc/os-release ]; then
+                    # Source in a subshell so /etc/os-release's own
+                    # `VERSION=…` (and any other vars) can't clobber
+                    # this script's `$VERSION` (the veda binary
+                    # version resolved earlier). HCE for instance
+                    # ships `VERSION="3.0 (x86_64)"` which then made
+                    # the next download_asset call build a URL with
+                    # a literal space → curl "URL using bad/illegal
+                    # format" → install_binary "veda-fuse" failed
+                    # despite veda CLI just having installed fine.
                     # shellcheck disable=SC1091
-                    . /etc/os-release
-                    distro_id="${ID:-unknown}"
+                    distro_id=$(. /etc/os-release 2>/dev/null && \
+                        printf '%s' "${ID:-unknown}")
                 fi
                 case "$distro_id" in
                     debian|ubuntu)
