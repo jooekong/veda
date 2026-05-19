@@ -182,13 +182,27 @@ preflight_fuse() {
                         cmd="sudo apt-get install -y libfuse3-3 fuse3" ;;
                     fedora|rhel|centos|rocky|alma)
                         cmd="sudo dnf install -y fuse3" ;;
+                    # RHEL-family forks common on internal Chinese
+                    # clouds: HCE = Huawei Cloud EulerOS, openEuler =
+                    # Huawei upstream, Kylin = Galaxylink/麒麟 V10,
+                    # Anolis = Alibaba Cloud Linux, TencentOS = TencentOS
+                    # Server. All ship `fuse3` (provides libfuse3.so.3)
+                    # in the default yum repo. yum is invoked rather
+                    # than dnf because HCE 2.x and Kylin V10 still
+                    # default to yum.
+                    hce|openeuler|kylin|anolis|tencentos)
+                        cmd="sudo yum install -y fuse3" ;;
                     arch|manjaro)
                         cmd="sudo pacman -S --noconfirm fuse3" ;;
                     *)
                         log ""
                         log "veda CLI is installed."
-                        log "veda-fuse needs libfuse3 but distro $distro_id has no auto-install recipe."
-                        log "Install libfuse3 manually, then re-run install.sh --with-fuse."
+                        log "veda-fuse needs the libfuse3 runtime shared library, but distro"
+                        log "'$distro_id' has no auto-install recipe in this script."
+                        log "Install it manually (package name varies):"
+                        log "  RHEL family:  sudo yum install -y fuse3"
+                        log "  Debian/Ubuntu: sudo apt-get install -y libfuse3-3 fuse3"
+                        log "Then re-run install.sh --with-fuse."
                         exit 0
                         ;;
                 esac
@@ -301,14 +315,6 @@ print_next_steps() {
     log ""
     log "✓ veda is installed at $DEST/veda"
     configure_server_url
-    case ":$PATH:" in
-        *":$DEST:"*) ;;
-        *)
-            log ""
-            log "⚠ $DEST is not in your PATH. Add this to your shell rc:"
-            log "    export PATH=\"$DEST:\$PATH\""
-            ;;
-    esac
     log ""
     log "Next: run 'veda init' — zero-input anonymous onboard, instantly usable."
     log "      Add --email for a named account, or upgrade later via 'veda init --upgrade --email …'."
@@ -322,26 +328,79 @@ print_next_steps() {
         esac
         log "Other agents: have them read $skill_doc"
     fi
+    # PATH check goes LAST and gets banner treatment so the user can't
+    # miss it. Many distros (HCE / RHEL family) ship a root profile
+    # that doesn't include ~/.local/bin, leaving a fresh install
+    # invisible to the shell — the first `veda init` then fails with
+    # "command not found" and the user blames the installer, not PATH.
+    # Banner uses ASCII box drawing so it's visible in any terminal.
+    # ${PATH:-} guards against `set -u` crashing if PATH is somehow
+    # unset (theoretical — even sh init scripts set PATH — but
+    # cheap insurance).
+    case ":${PATH:-}:" in
+        *":$DEST:"*) ;;
+        *)
+            log ""
+            log "┌───────────────────────────────────────────────────────────────┐"
+            log "│  ⚠ ACTION NEEDED — $DEST is not in your PATH"
+            log "│"
+            log "│  Run this in your current shell so 'veda' resolves now:"
+            log "│"
+            log "│      export PATH=\"$DEST:\$PATH\""
+            log "│"
+            log "│  And append the same line to ~/.bashrc (or ~/.zshrc) so it"
+            log "│  persists across sessions. Without this, 'veda init' below"
+            log "│  will fail with 'command not found'."
+            log "└───────────────────────────────────────────────────────────────┘"
+            ;;
+    esac
 }
 
 main() {
     while [ $# -gt 0 ]; do
         case "$1" in
             --with-fuse)   WITH_FUSE=1 ;;
+            # --source / --from-* take precedence over the VEDA_SOURCE
+            # env var. PR2 removed the user-visible flag in favor of
+            # env-only, but the `VEDA_SOURCE=… curl … | sh` footgun
+            # (env doesn't cross the pipe to sh) bit alpha testers
+            # immediately. Bringing the flag back as the primary lever
+            # while keeping env as a fallback covers both invocation
+            # styles cleanly. `--from-github` / `--from-gitlab` are
+            # kept as aliases for muscle memory.
+            --source)
+                shift
+                [ $# -gt 0 ] || err "--source needs a value (github|gitlab)"
+                [ -n "$1" ] || err "--source value cannot be empty"
+                SOURCE="$1" ;;
+            --source=*)
+                SOURCE="${1#--source=}"
+                [ -n "$SOURCE" ] || err "--source= value cannot be empty (use --source github|gitlab)"
+                ;;
+            --from-github) SOURCE=github ;;
+            --from-gitlab) SOURCE=gitlab ;;
             -h|--help)
                 cat >&2 <<EOF
-Usage: install.sh [--with-fuse]
+Usage: install.sh [--with-fuse] [--source github|gitlab]
 
-Source: gitlab (internal $GITLAB_HOST) by default; set
-VEDA_SOURCE=github to install from public GitHub releases.
+Source defaults to gitlab (internal $GITLAB_HOST). Pass --source github
+to install from public GitHub releases, or set VEDA_SOURCE=github (the
+env var is only honored when the flag is absent, and remember it does
+not cross a \`curl … | sh\` pipe — prefer the flag).
+
 The script auto-resolves the latest version from the chosen source.
 
 Supported platforms: macOS Intel, macOS Apple Silicon, Linux x86_64.
 
-Env overrides:
+Env overrides (lower priority than the matching CLI flag):
   VEDA_VERSION       Pin a specific version (default: auto-resolved)
   VEDA_INSTALL_DIR   Where to put binaries (default: \$HOME/.local/bin)
   VEDA_SOURCE        gitlab (default) | github
+
+Examples:
+  install.sh --with-fuse                         # default gitlab stream
+  install.sh --source github --with-fuse         # public GitHub
+  curl -fL <url> | sh -s -- --source github      # curl-pipe with flag
 EOF
                 exit 0
                 ;;
@@ -352,7 +411,7 @@ EOF
 
     case "$SOURCE" in
         gitlab|github) ;;
-        *) err "VEDA_SOURCE must be gitlab or github, got: $SOURCE" ;;
+        *) err "source must be gitlab or github (got '$SOURCE'); pick via --source <name> or VEDA_SOURCE env" ;;
     esac
 
     if [ -z "$VERSION" ]; then
