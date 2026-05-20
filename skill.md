@@ -208,9 +208,7 @@ veda-fuse umount /mnt/veda
 Default is **daemon mode**: the command forks, detaches stdio, and the
 parent returns as soon as the FUSE handshake completes. Pass
 `--foreground` to keep it attached (logs go to stdout/stderr instead
-of the daemon log file). GitLab release stream doesn't ship `veda-fuse`
-for `aarch64-apple-darwin` (cross-link blocker); Apple Silicon users
-build from source or use the CLI only.
+of the daemon log file).
 
 ### Mount flags / env vars
 

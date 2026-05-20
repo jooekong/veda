@@ -121,28 +121,33 @@ build:darwin-aarch64:
     - veda
   variables:
     TARGET: aarch64-apple-darwin
+    # fuser-0.14's build.rs queries pkg-config for macFUSE. By default
+    # pkg-config rejects cross-architecture lookups (job 1291940 hit
+    # exactly this: "pkg-config has not been configured to support
+    # cross-compilation"). PKG_CONFIG_ALLOW_CROSS=1 disables the
+    # check — safe here because macFUSE on macOS ships universal
+    # binaries (Intel + Apple Silicon in one .dylib), so the .pc
+    # file the Intel runner discovers points at libs the aarch64
+    # linker can also resolve.
+    PKG_CONFIG_ALLOW_CROSS: "1"
   before_script:
     - rustup target add ${TARGET}
     - rustc --version
     - cargo --version
-  # CLI-only on aarch64 from an Intel host. The fuser-0.14 crate's
-  # build.rs uses pkg-config to discover macFUSE, and pkg-config
-  # refuses cross-architecture lookups by default — job 1291940 hit
-  # exactly this:
-  #   "pkg-config has not been configured to support cross-compilation"
-  # GitHub Actions hits the same wall and disables veda-fuse for all
-  # darwin targets. Same policy here. Users who need veda-fuse on
-  # M1/M2/M3 can `cargo install --path crates/veda-fuse` locally
-  # (macFUSE installed on their machine).
   script:
     - cargo build --release --target ${TARGET} --bin veda
+    - cargo build --release --target ${TARGET} -p veda-fuse --bin veda-fuse
     - mv "target/${TARGET}/release/veda" "veda-${TARGET}"
+    - mv "target/${TARGET}/release/veda-fuse" "veda-fuse-${TARGET}"
     - shasum -a 256 "veda-${TARGET}" > "veda-${TARGET}.sha256"
-    - chmod a+rX "veda-${TARGET}" "veda-${TARGET}.sha256"
+    - shasum -a 256 "veda-fuse-${TARGET}" > "veda-fuse-${TARGET}.sha256"
+    - chmod a+rX "veda-${TARGET}" "veda-${TARGET}.sha256" "veda-fuse-${TARGET}" "veda-fuse-${TARGET}.sha256"
   artifacts:
     paths:
       - veda-aarch64-apple-darwin
       - veda-aarch64-apple-darwin.sha256
+      - veda-fuse-aarch64-apple-darwin
+      - veda-fuse-aarch64-apple-darwin.sha256
     expire_in: 1 week
 
 publish:all:
@@ -217,4 +222,5 @@ release:create:
         --assets-link "{\"name\":\"veda-x86_64-darwin\",\"url\":\"${REGISTRY}/veda-x86_64-apple-darwin\",\"link_type\":\"package\"}" \
         --assets-link "{\"name\":\"veda-fuse-x86_64-darwin\",\"url\":\"${REGISTRY}/veda-fuse-x86_64-apple-darwin\",\"link_type\":\"package\"}" \
         --assets-link "{\"name\":\"veda-aarch64-darwin\",\"url\":\"${REGISTRY}/veda-aarch64-apple-darwin\",\"link_type\":\"package\"}" \
+        --assets-link "{\"name\":\"veda-fuse-aarch64-darwin\",\"url\":\"${REGISTRY}/veda-fuse-aarch64-apple-darwin\",\"link_type\":\"package\"}" \
         --assets-link "{\"name\":\"skill.md\",\"url\":\"${REGISTRY}/skill.md\",\"link_type\":\"other\"}"

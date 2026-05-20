@@ -443,17 +443,15 @@ EOF
 
     if [ "$WITH_FUSE" -eq 1 ]; then
         # Probe whether veda-fuse-$target exists on this release. Avoids
-        # hardcoding which platforms ship a prebuilt fuse binary; if the CI
-        # matrix changes (or a future release adds darwin-aarch64 fuse), the
-        # probe picks it up automatically.
+        # hardcoding which platforms ship a prebuilt fuse binary; if a
+        # release predates a target's fuse support (the GitLab CI matrix
+        # only added aarch64-darwin fuse in 0.1.10), the probe falls
+        # through to source-build instructions.
         fuse_url=$(asset_url "veda-fuse-$target")
         if ! curl_with_auth -fsIL -o /dev/null --max-time 10 "$fuse_url"; then
             log ""
             log "veda CLI is installed."
             log "veda-fuse-$target is not in release $VERSION on $SOURCE."
-            log "(Currently only x86_64-linux and x86_64-darwin ship a prebuilt"
-            log " veda-fuse. aarch64-darwin needs a cross-compile sysroot for"
-            log " macFUSE which we haven't validated on CI.)"
             log "To get veda-fuse on $target, compile from source:"
             log "  git clone https://github.com/$GITHUB_REPO.git"
             log "  cd veda && cargo build --release -p veda-fuse"
