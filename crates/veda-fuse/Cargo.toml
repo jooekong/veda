@@ -13,6 +13,9 @@ name = "veda-fuse"
 path = "src/main.rs"
 
 [dependencies]
+# Reused for ~/.config/veda/config.toml loading so `veda-fuse mount`
+# can fall back to the same workspace profile the `veda` CLI uses.
+veda-cli = { path = "../veda-cli" }
 fuser = "0.14"
 reqwest = { version = "0.12", default-features = false, features = ["json", "blocking", "rustls-tls"] }
 sha2 = "0.10"

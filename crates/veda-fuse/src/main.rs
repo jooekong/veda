@@ -37,11 +37,22 @@ enum Cmd {
 
 #[derive(Parser)]
 struct MountArgs {
-    #[arg(long, env = "VEDA_SERVER")]
-    server: String,
+    /// Server URL. Falls back to $VEDA_SERVER, then
+    /// `~/.config/veda/config.toml`'s `server_url`.
+    #[arg(long)]
+    server: Option<String>,
 
-    #[arg(long, env = "VEDA_KEY")]
-    key: String,
+    /// Workspace key (wk_…). Falls back to $VEDA_KEY, then the
+    /// active workspace's key in `~/.config/veda/config.toml`.
+    #[arg(long)]
+    key: Option<String>,
+
+    /// Workspace profile alias (from `~/.config/veda/config.toml`).
+    /// When set, overrides `active_workspace` for `--key` fallback.
+    /// Has no effect when `--key` or `$VEDA_KEY` is supplied
+    /// explicitly.
+    #[arg(long)]
+    workspace: Option<String>,
 
     /// Mount point path
     mountpoint: String,
@@ -127,6 +138,22 @@ fn cmd_mount(args: MountArgs) -> anyhow::Result<()> {
     // all); daemon mode runs preflight in the child and pipes the
     // error back to the parent.
 
+    // Resolve server/key with the documented precedence chain:
+    //   1) explicit --server / --key CLI flag
+    //   2) $VEDA_SERVER / $VEDA_KEY env var
+    //   3) ~/.config/veda/config.toml (server_url + active workspace key,
+    //      or --workspace <alias> if given)
+    //   4) helpful error pointing at `veda init`
+    // The env layer is read here (not via clap `env = ...`) so the
+    // precedence stays explicit and unit-testable.
+    let (server, key) = resolve_server_and_key(
+        args.server.as_deref(),
+        args.key.as_deref(),
+        args.workspace.as_deref(),
+        EnvVars::from_process(),
+        ConfigLoader::Real,
+    )?;
+
     let config = fs::FuseConfig {
         attr_ttl: Duration::from_secs(args.attr_ttl),
         dir_ttl: Duration::from_secs(args.dir_ttl),
@@ -144,15 +171,15 @@ fn cmd_mount(args: MountArgs) -> anyhow::Result<()> {
 
     if args.foreground {
         init_tracing(args.debug);
-        info!(mount = %args.mountpoint, server = %args.server, "mounting (foreground)");
+        info!(mount = %args.mountpoint, server = %server, "mounting (foreground)");
         // Foreground is single-process — safe to build the client here.
-        let client = Arc::new(client::VedaClient::new(&args.server, &args.key));
+        let client = Arc::new(client::VedaClient::new(&server, &key));
         // Preflight inline: typos in --server fail at exit-1 before
         // fuser::mount2 ties up the mountpoint.
         client.stat("/").map_err(|e| {
-            anyhow::anyhow!("server health check failed (stat '/' at {}): {e}", args.server)
+            anyhow::anyhow!("server health check failed (stat '/' at {server}): {e}")
         })?;
-        return mount_and_serve(client, &args.mountpoint, &args.server, &args.key, config, &mount_opts, None);
+        return mount_and_serve(client, &args.mountpoint, &server, &key, config, &mount_opts, None);
     }
 
     // Daemonize: parent waits for child to signal readiness via pipe.
@@ -194,9 +221,9 @@ fn cmd_mount(args: MountArgs) -> anyhow::Result<()> {
             redirect_stdio_for_daemon(log_path.as_deref());
 
             init_tracing(args.debug);
-            info!(mount = %args.mountpoint, server = %args.server, "mounting (background)");
+            info!(mount = %args.mountpoint, server = %server, "mounting (background)");
 
-            let client = Arc::new(client::VedaClient::new(&args.server, &args.key));
+            let client = Arc::new(client::VedaClient::new(&server, &key));
             // Preflight stat AFTER fork. The parent does NOT run any
             // reqwest call before fork on macOS — see the long
             // comment at the top of cmd_mount. Running it here is
@@ -205,7 +232,7 @@ fn cmd_mount(args: MountArgs) -> anyhow::Result<()> {
             // readiness pipe carries the error back to the parent
             // so the user still gets fail-fast UX.
             if let Err(e) = client.stat("/") {
-                let msg = format!("server health check failed (stat '/' at {}): {e}", args.server);
+                let msg = format!("server health check failed (stat '/' at {server}): {e}");
                 tracing::error!("{msg}");
                 // Write the message to the readiness pipe so the
                 // parent prints it instead of "exit 1, check log".
@@ -219,13 +246,125 @@ fn cmd_mount(args: MountArgs) -> anyhow::Result<()> {
                 std::process::exit(1);
             }
 
-            let result = mount_and_serve(client, &args.mountpoint, &args.server, &args.key, config, &mount_opts, Some(write_raw));
+            let result = mount_and_serve(client, &args.mountpoint, &server, &key, config, &mount_opts, Some(write_raw));
             if let Err(ref e) = result {
                 tracing::error!("mount failed: {e}");
             }
             std::mem::forget(write_fd);
             std::process::exit(if result.is_ok() { 0 } else { 1 });
         }
+    }
+}
+
+/// Process-env snapshot for `$VEDA_SERVER` / `$VEDA_KEY`. Kept as an
+/// explicit struct so `resolve_server_and_key` is unit-testable
+/// without mutating real env vars from a multi-threaded test runner
+/// (`std::env::set_var` is unsafe in concurrent tests).
+#[derive(Default, Clone)]
+struct EnvVars {
+    server: Option<String>,
+    key: Option<String>,
+}
+
+impl EnvVars {
+    fn from_process() -> Self {
+        let nonempty = |k: &str| std::env::var(k).ok().filter(|v| !v.is_empty());
+        Self {
+            server: nonempty("VEDA_SERVER"),
+            key: nonempty("VEDA_KEY"),
+        }
+    }
+}
+
+/// Indirection over `~/.config/veda/config.toml` loading. The unit
+/// tests pass `Memory(cfg)` so they don't depend on the user's real
+/// home directory state.
+enum ConfigLoader {
+    Real,
+    #[cfg(test)]
+    Memory(Option<veda_cli::config::CliConfig>),
+    #[cfg(test)]
+    Error,
+}
+
+impl ConfigLoader {
+    /// Try to load the on-disk config. Returns `Ok(None)` when no
+    /// fallback is needed (caller still owns the precedence decision)
+    /// — this happens with `ConfigLoader::Real` only when the file is
+    /// truly absent AND `CliConfig::load()` returns the default empty
+    /// shape. `CliConfig::load()` itself never errors on missing
+    /// files, but a malformed config.toml does — that bubbles up as
+    /// `Err` so the user notices.
+    fn load(&self) -> anyhow::Result<Option<veda_cli::config::CliConfig>> {
+        match self {
+            ConfigLoader::Real => Ok(Some(veda_cli::config::CliConfig::load()?)),
+            #[cfg(test)]
+            ConfigLoader::Memory(cfg) => Ok(cfg.clone()),
+            #[cfg(test)]
+            ConfigLoader::Error => anyhow::bail!("synthetic config load error"),
+        }
+    }
+}
+
+/// Resolve `--server` / `--key` with the precedence chain documented
+/// on `cmd_mount`. Returns the final pair or a user-facing error that
+/// names the missing piece and routes to `veda init` when the config
+/// is empty. Pure function modulo `loader` — see `resolve_*` tests.
+fn resolve_server_and_key(
+    cli_server: Option<&str>,
+    cli_key: Option<&str>,
+    cli_workspace: Option<&str>,
+    env: EnvVars,
+    loader: ConfigLoader,
+) -> anyhow::Result<(String, String)> {
+    // Apply layer 1 (CLI) then layer 2 (env) without touching the
+    // config — most users either pass both flags or set both env
+    // vars and we want to skip disk I/O on that hot path.
+    let mut server = cli_server.map(str::to_string).or_else(|| env.server.clone());
+    let mut key = cli_key.map(str::to_string).or_else(|| env.key.clone());
+
+    // Layer 3: consult config.toml ONLY when CLI flag + env var didn't
+    // supply both pieces. `--workspace` is only meaningful as a key
+    // fallback selector — when key is already resolved, it's silently
+    // ignored (no warning: users who set --workspace habitually
+    // shouldn't see noise when they happen to also set $VEDA_KEY).
+    // Skipping the load entirely on the hot path keeps a malformed
+    // config.toml from breaking explicit-flag mounts.
+    if server.is_none() || key.is_none() {
+        let cfg = loader.load()?;
+        if let Some(cfg) = cfg.as_ref() {
+            if server.is_none() {
+                server = Some(cfg.server_url.clone());
+            }
+            if key.is_none() {
+                // Workspace flag overrides the active workspace
+                // pointer; otherwise honour active_workspace.
+                let alias = cli_workspace
+                    .map(str::to_string)
+                    .or_else(|| cfg.active_alias().map(str::to_string));
+                if let Some(alias) = alias {
+                    let entry = cfg.workspace_for(&alias)?;
+                    if entry.key.is_empty() {
+                        anyhow::bail!(
+                            "workspace '{alias}' has no key — onboarding incomplete. \
+                             Run `veda workspace add {alias}` (or `veda init`) to finish setup."
+                        );
+                    }
+                    key = Some(entry.key.clone());
+                }
+            }
+        }
+    }
+
+    match (server, key) {
+        (Some(s), Some(k)) => Ok((s, k)),
+        (None, _) => anyhow::bail!(
+            "no server URL: pass --server, set $VEDA_SERVER, or run `veda init` first."
+        ),
+        (_, None) => anyhow::bail!(
+            "no workspace key: pass --key, set $VEDA_KEY, or run `veda init` to configure \
+             ~/.config/veda/config.toml. Use --workspace <alias> to pick a non-active profile."
+        ),
     }
 }
 
@@ -504,6 +643,174 @@ mod tests {
         let argv = umount_argv("/mnt/test");
         assert!(!argv.is_empty());
         assert!(argv.last().unwrap() == "/mnt/test");
+    }
+
+    // ── resolve_server_and_key precedence ────────────────────────────
+    //
+    // Each test pins one layer of the chain and asserts no lower
+    // layer leaks through. Tests use `ConfigLoader::Memory(...)` so
+    // they don't depend on the developer's `~/.config/veda/config.toml`.
+    use veda_cli::config::{CliConfig, WorkspaceEntry, DEFAULT_WORKSPACE_ALIAS};
+
+    fn cfg_with_active(server: &str, key: &str) -> CliConfig {
+        let mut c = CliConfig::default();
+        c.server_url = server.into();
+        c.set_active_profile(
+            DEFAULT_WORKSPACE_ALIAS,
+            WorkspaceEntry { id: Some("ws-1".into()), key: key.into() },
+        );
+        c
+    }
+
+    #[test]
+    fn resolve_cli_flags_win_over_env_and_config() {
+        let env = EnvVars { server: Some("http://env".into()), key: Some("wk-env".into()) };
+        let cfg = cfg_with_active("http://cfg", "wk-cfg");
+        let (s, k) = resolve_server_and_key(
+            Some("http://flag"),
+            Some("wk-flag"),
+            None,
+            env,
+            ConfigLoader::Memory(Some(cfg)),
+        )
+        .unwrap();
+        assert_eq!(s, "http://flag");
+        assert_eq!(k, "wk-flag");
+    }
+
+    #[test]
+    fn resolve_env_beats_config_when_flags_absent() {
+        let env = EnvVars { server: Some("http://env".into()), key: Some("wk-env".into()) };
+        let cfg = cfg_with_active("http://cfg", "wk-cfg");
+        let (s, k) =
+            resolve_server_and_key(None, None, None, env, ConfigLoader::Memory(Some(cfg)))
+                .unwrap();
+        assert_eq!(s, "http://env");
+        assert_eq!(k, "wk-env");
+    }
+
+    #[test]
+    fn resolve_falls_back_to_config_when_flags_and_env_absent() {
+        let cfg = cfg_with_active("http://cfg", "wk-cfg");
+        let (s, k) = resolve_server_and_key(
+            None,
+            None,
+            None,
+            EnvVars::default(),
+            ConfigLoader::Memory(Some(cfg)),
+        )
+        .unwrap();
+        assert_eq!(s, "http://cfg");
+        assert_eq!(k, "wk-cfg");
+    }
+
+    #[test]
+    fn resolve_mixes_layers_per_field() {
+        // --server flag, key from config: the resolver pulls each
+        // field from the highest available layer independently.
+        let cfg = cfg_with_active("http://cfg", "wk-cfg");
+        let (s, k) = resolve_server_and_key(
+            Some("http://flag"),
+            None,
+            None,
+            EnvVars::default(),
+            ConfigLoader::Memory(Some(cfg)),
+        )
+        .unwrap();
+        assert_eq!(s, "http://flag");
+        assert_eq!(k, "wk-cfg");
+    }
+
+    #[test]
+    fn resolve_workspace_alias_overrides_active() {
+        // `--workspace work` must pick the `work` profile even when
+        // `active_workspace` points at `default`.
+        let mut cfg = cfg_with_active("http://cfg", "wk-default");
+        cfg.workspaces.insert(
+            "work".into(),
+            WorkspaceEntry { id: Some("ws-w".into()), key: "wk-work".into() },
+        );
+        let (_, k) = resolve_server_and_key(
+            None,
+            None,
+            Some("work"),
+            EnvVars::default(),
+            ConfigLoader::Memory(Some(cfg)),
+        )
+        .unwrap();
+        assert_eq!(k, "wk-work");
+    }
+
+    #[test]
+    fn resolve_errors_when_config_missing_and_nothing_else_supplied() {
+        // Empty default config (no active workspace, no server URL
+        // configured — actually CliConfig::default sets a server URL,
+        // so the resolver returns server="http://localhost:3000" but
+        // still bails on missing key).
+        let err = resolve_server_and_key(
+            None,
+            None,
+            None,
+            EnvVars::default(),
+            ConfigLoader::Memory(Some(CliConfig::default())),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("no workspace key"), "got: {err}");
+        assert!(err.contains("veda init"), "got: {err}");
+    }
+
+    #[test]
+    fn resolve_errors_when_config_loader_fails() {
+        // Malformed config.toml (or any I/O error) must propagate so
+        // the user notices instead of silently falling back to env.
+        let err = resolve_server_and_key(
+            None,
+            None,
+            None,
+            EnvVars::default(),
+            ConfigLoader::Error,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("synthetic"), "got: {err}");
+    }
+
+    #[test]
+    fn resolve_errors_when_workspace_alias_unknown() {
+        let cfg = cfg_with_active("http://cfg", "wk-cfg");
+        let err = resolve_server_and_key(
+            None,
+            None,
+            Some("ghost"),
+            EnvVars::default(),
+            ConfigLoader::Memory(Some(cfg)),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("ghost"), "got: {err}");
+    }
+
+    #[test]
+    fn resolve_errors_when_workspace_key_placeholder_empty() {
+        // Onboarding-incomplete state: profile exists but key is "".
+        // Resolver must bail with a hint, not pass "" through as a
+        // bogus Bearer header to the server.
+        let mut cfg = CliConfig::default();
+        cfg.set_active_profile(
+            DEFAULT_WORKSPACE_ALIAS,
+            WorkspaceEntry { id: Some("ws".into()), key: String::new() },
+        );
+        let err = resolve_server_and_key(
+            None,
+            None,
+            None,
+            EnvVars::default(),
+            ConfigLoader::Memory(Some(cfg)),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("onboarding"), "got: {err}");
     }
 
     #[test]

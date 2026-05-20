@@ -86,6 +86,8 @@ const S = {
     keyCreated: "Workspace key 已创建",
     keyOnce: "⚠ 此 key 仅显示一次，请立即复制。",
     keyLabel: "workspace key",
+    mountCmdLabel: "挂载到本地目录",
+    mountCmdHint: "复制到终端执行。",
     done: "完成",
     jwtTitle: "JWT 已签发（24h）",
     jwtLabel: "workspace JWT",
@@ -153,6 +155,8 @@ const S = {
     keyCreated: "Workspace key created",
     keyOnce: "⚠ This key is shown only once. Copy it now.",
     keyLabel: "Workspace key",
+    mountCmdLabel: "Mount as a local directory",
+    mountCmdHint: "Paste into a terminal.",
     done: "Done",
     jwtTitle: "JWT minted (24h)",
     jwtLabel: "Workspace JWT",
@@ -565,6 +569,7 @@ function newKeyModal(vk: string, wsId: string) {
     const perm = (document.getElementById("key-perm") as HTMLSelectElement).value;
     try {
       const res = await workspaces.createKey(vk, wsId, name, perm);
+      const mountCmd = `mkdir -p ~/veda && veda-fuse mount --server ${location.origin} --key ${res.key} ~/veda`;
       modal(
         L.keyCreated,
         `
@@ -572,6 +577,11 @@ function newKeyModal(vk: string, wsId: string) {
           ${esc(L.keyOnce)}
         </p>
         ${kv(`${L.keyLabel} (${res.permission})`, res.key, "")}
+        <div class="mt-4">
+          <p class="text-xs uppercase tracking-wide text-slate-500 font-semibold mb-1.5">${esc(L.mountCmdLabel)}</p>
+          ${codeblock(mountCmd)}
+          <p class="text-xs text-slate-500 mt-1.5">${esc(L.mountCmdHint)}</p>
+        </div>
         <div class="flex justify-end mt-4">
           <button data-close class="text-sm bg-slate-900 text-white px-3 py-1.5 rounded hover:bg-slate-700">${esc(L.done)}</button>
         </div>

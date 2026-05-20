@@ -4696,6 +4696,7 @@ dependencies = [
  "signal-hook",
  "tracing",
  "tracing-subscriber",
+ "veda-cli",
 ]
 
 [[package]]
