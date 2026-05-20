@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Veda — alpha</title>
+    <link rel="stylesheet" href="/src/style.css" />
+  </head>
+  <body class="bg-slate-50 text-slate-900 font-sans antialiased min-h-screen">
+    <nav class="border-b border-slate-200 bg-white">
+      <div class="max-w-5xl mx-auto px-4 h-14 flex items-center justify-between">
+        <a href="#/" class="font-semibold text-lg">Veda <span class="text-xs text-slate-400 font-normal">alpha</span></a>
+        <div class="flex items-center gap-4 text-sm">
+          <a href="#/console" class="text-slate-600 hover:text-slate-900">Console</a>
+          <a href="#/docs" class="text-slate-600 hover:text-slate-900">Docs</a>
+          <a href="http://git.ddxq.mobi/middleware/dbpaas/veda" target="_blank" class="text-slate-600 hover:text-slate-900">GitLab</a>
+          <span class="border-l border-slate-200 h-5"></span>
+          <div id="lang-toggle" class="text-xs flex items-center gap-1">
+            <button data-lang="zh" class="px-1.5 py-0.5 rounded">中</button>
+            <span class="text-slate-300">|</span>
+            <button data-lang="en" class="px-1.5 py-0.5 rounded">EN</button>
+          </div>
+        </div>
+      </div>
+    </nav>
+    <main id="app" class="max-w-5xl mx-auto px-4 py-10"></main>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

@@ -9,3 +9,8 @@ config/test.toml
 config/server.toml
 deploy/config.docker.toml
 deploy/.env
+
+# Frontend (web/)
+web/node_modules/
+web/dist/
+web/*.tsbuildinfo
