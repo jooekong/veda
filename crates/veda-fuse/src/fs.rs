@@ -53,7 +53,15 @@ pub(crate) fn parent_path(path: &str) -> &str {
 }
 
 pub struct FuseConfig {
+    /// FileAttr cache TTL (used by `inode.attr_cache`). SSE-driven
+    /// invalidation tightens this further, so the TTL is a safety net
+    /// for SSE drops, not the primary freshness mechanism — 30s is
+    /// comfortable for git-status / make-style stat storms.
     pub attr_ttl: Duration,
+    /// Dir listing cache TTL (used by `dir_cache` in readdir / lookup).
+    /// Longer than `attr_ttl` because dir entries change less often
+    /// than file mtime/size and SSE invalidation covers the common case.
+    pub dir_ttl: Duration,
     pub read_only: bool,
     pub cache_size_mb: usize,
 }
@@ -61,7 +69,8 @@ pub struct FuseConfig {
 impl Default for FuseConfig {
     fn default() -> Self {
         Self {
-            attr_ttl: Duration::from_secs(5),
+            attr_ttl: Duration::from_secs(30),
+            dir_ttl: Duration::from_secs(60),
             read_only: false,
             cache_size_mb: 128,
         }
@@ -392,7 +401,7 @@ impl VedaFs {
         let stale = {
             let dc = self.dir_cache.lock().unwrap();
             match dc.get(&ino) {
-                Some(c) => c.fetched_at.elapsed() >= self.config.attr_ttl,
+                Some(c) => c.fetched_at.elapsed() >= self.config.dir_ttl,
                 None => true,
             }
         };
@@ -410,7 +419,7 @@ impl VedaFs {
     fn dir_cache_has_child(&self, parent_ino: u64, name: &str) -> Option<bool> {
         let dc = self.dir_cache.lock().unwrap();
         dc.get(&parent_ino).and_then(|c| {
-            if c.fetched_at.elapsed() < self.config.attr_ttl {
+            if c.fetched_at.elapsed() < self.config.dir_ttl {
                 Some(c.child_names.contains(name))
             } else {
                 None
@@ -1007,6 +1016,29 @@ impl Filesystem for VedaFs {
             Some(p) => p,
             None => { reply.error(libc::ENOENT); return; }
         };
+        // Writeback: the shadow buffer holds the freshly-truncated
+        // bytes; the server hasn't committed yet (it's queued behind
+        // a debounce window). Reading attr via stat would return the
+        // pre-truncate size for up to `write_debounce_ms` — and
+        // with the longer attr_ttl that stale value lingers in
+        // attr_cache. Build attr from the shadow entry instead so
+        // the caller sees the correct size immediately.
+        if self.is_writeback() {
+            if let Some(shadow) = self.shadow.as_ref() {
+                let entry_attr = {
+                    let store = shadow.lock().unwrap();
+                    store.get(&path).map(Self::make_shadow_attr)
+                };
+                if let Some(attr) = entry_attr {
+                    self.inode_set_attr(ino, attr);
+                    reply.attr(&self.config.attr_ttl, &attr);
+                    return;
+                }
+            }
+            // Fall through if no shadow entry exists (e.g. attr-only
+            // setattr — chmod/utimes — on an unmodified file). The
+            // server stat is authoritative in that case.
+        }
         match self.stat_and_cache_attr(&path, ino) {
             Ok(attr) => reply.attr(&self.config.attr_ttl, &attr),
             Err(errno) => reply.error(errno),
@@ -2098,6 +2130,7 @@ mod tests {
         // cache still work in this corner.
         let config = FuseConfig {
             attr_ttl: std::time::Duration::ZERO,
+            dir_ttl: std::time::Duration::ZERO,
             read_only: false,
             cache_size_mb: 1,
         };
@@ -2121,6 +2154,7 @@ mod tests {
         // CI clock jitter makes sub-second sleeps flaky.
         let config = FuseConfig {
             attr_ttl: std::time::Duration::from_secs(5),
+            dir_ttl: std::time::Duration::from_secs(5),
             read_only: false,
             cache_size_mb: 1,
         };

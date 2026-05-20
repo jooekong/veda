@@ -54,9 +54,18 @@ struct MountArgs {
     #[arg(long, default_value = "128")]
     cache_size: usize,
 
-    /// Attribute cache TTL in seconds
-    #[arg(long, default_value = "5")]
+    /// FileAttr cache TTL in seconds. SSE invalidations refresh
+    /// individual entries earlier; this is the safety-net upper
+    /// bound. 30s is comfortable for git-status / make-style stat
+    /// storms.
+    #[arg(long, default_value = "30")]
     attr_ttl: u64,
+
+    /// Directory listing cache TTL in seconds. Longer than
+    /// `--attr-ttl` because dir entries churn less than file
+    /// mtimes; SSE invalidates on add/remove/rename.
+    #[arg(long, default_value = "60")]
+    dir_ttl: u64,
 
     /// Allow other users to access the mount
     #[arg(long, default_value = "false")]
@@ -120,6 +129,7 @@ fn cmd_mount(args: MountArgs) -> anyhow::Result<()> {
 
     let config = fs::FuseConfig {
         attr_ttl: Duration::from_secs(args.attr_ttl),
+        dir_ttl: Duration::from_secs(args.dir_ttl),
         read_only: args.read_only,
         cache_size_mb: args.cache_size,
     };

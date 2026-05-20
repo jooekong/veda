@@ -905,7 +905,13 @@ impl FsService {
             created_at: now,
             updated_at: now,
         };
-        self.meta.insert_dentry_ignore(&dentry).await
+        self.meta.insert_dentry_ignore(&dentry).await?;
+        // Emit a Create event so other clients (FUSE mounts) invalidate
+        // the parent's dir_cache and pick up the new directory promptly.
+        // Concurrent racers may both emit Create for the same path; a
+        // duplicate Create is benign (extra dir_cache invalidation only).
+        let evt = make_fs_event(workspace_id, FsEventType::Create, &norm, None);
+        self.meta.insert_fs_event_direct(&evt).await
     }
 
     pub async fn copy_file(
@@ -1234,7 +1240,21 @@ impl FsService {
         )
         .await?;
 
+        // Every rename — same-dir or cross-dir — needs an explicit
+        // Delete event on the OLD path. Move events alone invalidate
+        // the destination parent's dir_cache via the SSE handler
+        // (which keys off event.path = new path); the stale inode
+        // mapping for the old path is only dropped on Delete. Without
+        // this, `lookup(old_path)` racing the rename keeps hitting
+        // the stale ino — visible as `cat /x/a.txt` (after `mv
+        // /x/a.txt /x/b.txt`) returning the new file's bytes, or a
+        // long-held vim handle writing to the wrong server path.
+        // Same-dir's destination Move and the leading Delete both
+        // invalidate the (shared) parent dir_cache — a benign extra
+        // invalidation.
+
         let mut child_events: Vec<FsEvent> = Vec::new();
+        let mut old_path_deletes: Vec<FsEvent> = Vec::new();
         if src_dentry.is_dir {
             let children = tx
                 .list_dentries_under_capped(workspace_id, &src, MAX_RECURSIVE_DESCENT)
@@ -1247,9 +1267,23 @@ impl FsService {
                     &new_child_path,
                     child.file_id.as_deref(),
                 ));
+                old_path_deletes.push(make_fs_event(
+                    workspace_id,
+                    FsEventType::Delete,
+                    &child.path,
+                    child.file_id.as_deref(),
+                ));
             }
             tx.rename_dentries_under(workspace_id, &src, &dst).await?;
         }
+
+        old_path_deletes.push(make_fs_event(
+            workspace_id,
+            FsEventType::Delete,
+            &src,
+            src_dentry.file_id.as_deref(),
+        ));
+        tx.insert_fs_events(&old_path_deletes).await?;
 
         let evt = make_fs_event(
             workspace_id,
@@ -1445,6 +1479,10 @@ async fn ensure_parents(
 
     // Insert from root to leaf so each parent exists before its child.
     // insert_dentry_ignore is idempotent against concurrent racers.
+    // Emit one Create event per newly-created dir so FUSE/SSE clients
+    // invalidate stale dir_cache entries for the affected subtree.
+    // Concurrent racers may both emit Create for the same path; a
+    // duplicate Create is benign (extra dir_cache invalidation only).
     let now = Utc::now();
     for parent in missing.into_iter().rev() {
         let dentry = Dentry {
@@ -1459,6 +1497,8 @@ async fn ensure_parents(
             updated_at: now,
         };
         store.insert_dentry_ignore(&dentry).await?;
+        let evt = make_fs_event(workspace_id, FsEventType::Create, parent, None);
+        store.insert_fs_event_direct(&evt).await?;
     }
     Ok(())
 }
