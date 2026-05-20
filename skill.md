@@ -102,11 +102,14 @@ veda search "how does authentication work"             # hybrid (general)
 veda search "fn parse_token" --mode fulltext           # BM25 ranking
 veda search "code about retry semantics" --mode semantic
 veda search "anything" --detail-level abstract         # return L0 summaries
+veda search "auth" --path /docs                        # restrict to subtree
 ```
 
 Flags: `--mode {hybrid,semantic,fulltext}`, `--limit N` (10),
-`--detail-level {abstract,overview,full}` (full). Add `--json` (global)
-for one JSON hit per line.
+`--detail-level {abstract,overview,full}` (full), `--path /prefix`
+(absolute, defaults to whole workspace). Add `--json` (global) for
+one JSON hit per line. `--path` is server-side filtering — strictly
+cheaper than client-side post-filter.
 
 **Embedding is async**: a just-uploaded file may not appear in semantic
 results for a few seconds. Retry after 5s if a search misses an obviously
