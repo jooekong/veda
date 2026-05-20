@@ -10,9 +10,7 @@ Same data, three surfaces — pick by scenario:
 
 - **CLI** — the `veda` binary, for scripts and everyday shell
 - **FUSE mount** — `veda-fuse` mounts a workspace as a local directory. **vim / VSCode / `make` / `rsync` don't know it's cloud storage** — every write auto-uploads and re-embeds
-- **HTTP API** — REST + SSE, OpenAPI-style JSON. Direct integration for frontends, custom agents, data pipelines; official SDKs (Python / TypeScript / Go) coming soon to make integration even cheaper
-
-FUSE is particularly good for "I want my familiar editor but with semantic search on top".
+- **HTTP API** — REST + SSE, OpenAPI-style JSON. Direct integration for frontends, custom agents, data pipelines; official SDKs (Python / TypeScript / Go) coming soon to lower integration effort further
 
 ---
 
@@ -22,7 +20,7 @@ FUSE is particularly good for "I want my familiar editor but with semantic searc
 |---|---|
 | **File operations** | `cp` / `cat` / `ls` / `mv` / `rm` / `mkdir` / `append` — same semantics as Unix |
 | **Hybrid search** | Every file is auto-chunked, embedded, indexed. Default `hybrid` (vector + BM25 + RRF); also `semantic` / `fulltext` alone |
-| **Structured collections** | Vector-native database: define a schema + auto-embedded field, filter & search by other fields |
+| **Structured collections** | Like a vector-native database: define a schema + auto-embedded field, filter & search by other fields |
 | **SQL queries** | DataFusion engine over files and collections — filter, aggregate, join |
 | **Multi-tenant** | Account → Workspace; API key or workspace key auth |
 | **FUSE mount** | Mount a workspace as a local directory; use vim / IDE / `make` like any native tree |
@@ -31,8 +29,6 @@ FUSE is particularly good for "I want my familiar editor but with semantic searc
 ---
 
 ## Three layers per file *and* per directory
-
-Veda auto-maintains two summaries plus the raw content for **every file and every directory** in your workspace, in increasing token cost:
 
 | Layer | Command | Size | For files | For directories |
 |---|---|---|---|---|
@@ -49,7 +45,7 @@ veda cat /docs/readme.md           # raw text
 
 ### Why this matters
 
-- **Token cost scales with depth, not up front**: 100 L0s ≈ 5k tokens; 100 L1s ≈ 200k; 100 full files ≈ MB-scale. Escalate L0 → L1 → full on demand instead of paying all-in.
+- **Token cost scales with depth, not up front**: 100 L0s ≈ 5k tokens; 100 L1s ≈ 200k tokens; 100 full files ≈ MB-scale. Escalate L0 → L1 → full on demand instead of paying all-in.
 - **Directory exploration is nearly free**: `veda abstract /knowledge/internal/auth` tells you what a subtree is "about" in one sentence — no `ls && cat` loop.
 - **Computed once on the server, shared across clients**: CLI, FUSE, and custom agents all read the same precomputed summaries — no per-client recomputation, no two agents inventing inconsistent summaries.
 - **The model picks the depth**: instead of a fixed top-k cutoff, agents look at L0 hits and decide per-result whether to expand to L1 or accept the one-sentence answer.
@@ -80,7 +76,7 @@ cat /mnt/veda/docs/.overview       # current dir L1
 
 ### 1. Personal knowledge base
 
-Notes, technical docs, paper highlights, code snippets — all go in:
+Notes, docs, paper highlights, code snippets — drop them in and recall by meaning (not grep):
 
 ```bash
 veda cp ~/Notes/2026-blockchain-paper.md /papers/blockchain-2026.md
@@ -88,68 +84,41 @@ veda cp -r ~/Notes/work /notes/work
 veda search "how does raft handle leader change"
 ```
 
-Unlike a traditional doc store: search isn't grep-by-keyword, it's semantic recall. A note from six months ago that mentioned "distributed consensus" will surface when you search "raft" today.
-
 ### 2. AI agent memory + distributed state
 
-This is Veda's **flagship use case**. LLMs forget across sessions; multi-agent / multi-host setups also face "how do we share context and intermediate state". One workspace + auto-embedding + cross-host reads/writes solves all of these.
-
-**a. Cross-session long-term memory**
+**a. Cross-session long-term memory** — agent dumps a session summary; the next session can use the three-layer ladder to recall what's relevant:
 
 ```bash
-# Agent dumps the session summary
 veda cp /tmp/session-2026-05-19.md /conversations/2026-05-19.md
-# Next session opens with a three-layer escalation
-veda search "the deployment plan we discussed" --detail-level abstract  # L0: relevance
-veda overview /conversations/2026-05-19.md                              # L1: structured
-veda cat /conversations/2026-05-19.md                                    # full when needed
+veda search "the deployment plan we discussed" --detail-level abstract
+veda overview /conversations/2026-05-19.md     # escalate when needed
 ```
 
-The L0 → L1 → full ladder lets the model trade token budget against detail depth on its own.
-
-**b. Cross-host / cross-instance distributed state**
-
-One agent on multiple machines, or several agent instances in parallel — each gets a `wk_` and shares the same workspace; state syncs automatically:
+**b. Cross-host / cross-instance distributed state** — multiple agent instances share one workspace; SSE pushes file changes within ~120s:
 
 ```bash
-# Instance A on host 1: writes the latest todo
-veda cp /tmp/todo.json /state/agent-todo.json
-
-# Instance B on host 2: reads it (push via SSE or poll)
-veda cat /state/agent-todo.json
+veda cp /tmp/todo.json /state/agent-todo.json   # instance A writes
+veda cat /state/agent-todo.json                 # instance B reads
 ```
 
-Veda's server emits server-sent events; file changes propagate to other clients within ~120s without polling.
-
-**c. Checkpoint & resume for long jobs**
-
-For jobs that span hours or days, write a checkpoint per step:
+**c. Checkpoint & resume for long jobs** — write a checkpoint per step; resume on crash:
 
 ```bash
 veda cp /tmp/step-12-result.json /checkpoints/job-X/step-12.json
-# After crash / reboot
-veda ls /checkpoints/job-X         # finds step-12, picks up at step-13
+veda ls /checkpoints/job-X
 ```
 
-**d. Multi-agent collaboration**
-
-Different roles (planner / coder / reviewer) each write outputs into subdirs; downstream agents read by search or fixed path:
+**d. Multi-agent collaboration** — planner / coder / reviewer write into subdirs; downstream agents search for upstream outputs:
 
 ```bash
-# planner writes
 veda cp plan.md /agents/planner/2026-05-19-plan.md
-# coder finds the latest plan
 veda search "deployment plan" --path /agents/planner --limit 1
 ```
 
-**e. Pre-warmed knowledge bases (RAG)**
-
-Embed your repo / docs / papers once; agents recall with zero latency:
+**e. Pre-warmed knowledge bases (RAG)** — embed repos / docs upfront; agents recall with zero latency:
 
 ```bash
 veda cp -r ~/work/internal-docs /knowledge/internal
-veda cp -r ~/work/code-A /knowledge/code-A
-# Agent at runtime
 veda search "how is our retry policy defined" --detail-level abstract
 ```
 
@@ -157,69 +126,41 @@ The bundled [skill system](#/docs/skill) teaches Claude Code, Codex, Cursor, etc
 
 ### 3. Search across multiple repos
 
-Mirror selected subtrees from many team repos into one workspace:
-
 ```bash
 veda cp -r ~/work/repo-a /code/repo-a
 veda cp -r ~/work/repo-b /code/repo-b
 veda search "how is retry handled" --path /code
-veda grep "TODO(joe)" --limit 200      # literal grep also works, with line numbers
+veda grep "TODO(joe)" --limit 200      # literal, sync, file:line
 ```
 
-`veda grep` is synchronous literal match (no embedding lag) — good for specific identifiers. `veda search` is async semantic recall — good for concepts.
+`grep` is synchronous literal match for identifiers; `search` is async semantic recall for concepts.
 
 ### 4. Structured data with vectors
 
-Filtered RAG:
-
-```bash
-veda collection create articles \
-  --schema '[{"name":"title","type":"string","index":true},
-             {"name":"content","type":"string"},
-             {"name":"category","type":"string","index":true}]' \
-  --embed-source content
-
-veda collection insert articles '[{"title":"Intro to Rust","content":"...","category":"tech"}]'
-
-veda collection search articles "systems programming" --limit 5
-veda sql "SELECT title FROM articles WHERE category='tech' LIMIT 5"
-```
-
-The `content` field is auto-embedded; `title` / `category` are filter indexes. More structure than a pure vector store, more semantics than a pure document DB.
+Filtered RAG. Full schema + commands in [CLI reference — Structured collections](#/docs/cli); summary: the `content` field auto-embeds, `title` / `category` are filter indexes, use `veda sql` for filters / aggregates.
 
 ### 5. Shared team context
 
-A single workspace can have many keys handed out to people or agents:
+One workspace can hand out many keys:
 
-- Teammates each get a `wk_readwrite`, all writing into the same workspace
-- CI/CD gets a `wk_read`, read-only consumer
+- Teammates each get a `wk_readwrite`
+- CI/CD gets a `wk_read`
 - Revoke any one key without touching the account
 
 ### 6. Mount the workspace as a directory
 
-Skip the CLI, edit with vim / VSCode directly:
-
-```bash
-veda-fuse mount --server $URL --key $WK ~/veda
-cd ~/veda
-vim notes/today.md      # any editor
-git status              # regular git works
-```
-
-Every write auto-uploads and re-embeds. SSE stream propagates changes to other clients within ~120s.
+`vim` / VSCode / `make` work directly on the remote workspace — see [FUSE mount](#/docs/fuse).
 
 ---
 
 ## What it's NOT good at
 
-| Use case | Veda fit |
+| Use case | Limit |
 |---|---|
 | Binary blobs (PDF / images / video) | ❌ UTF-8 text only |
 | Strict ACLs / quotas | ❌ Fine-grained perms not in alpha |
 | High-concurrency OLTP | ❌ It's a knowledge store, not a transactional DB |
 | Massive small files (>1M chunks) | ⚠️ Alpha is single-replica; scale-out is on the roadmap |
-| Documents + metadata | ✅ File body + collection schema together |
-| Long-context LLM recall | ✅ Layered summaries + hybrid search are designed for this |
 
 ---
 

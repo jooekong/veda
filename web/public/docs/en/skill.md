@@ -1,14 +1,6 @@
 # AI agent integration (Skill)
 
-Veda ships an agent-facing [`skill.md`](http://git.ddxq.mobi/middleware/dbpaas/veda/-/raw/main/skill.md) — a single markdown file an LLM can read to know:
-
-- How to onboard / init
-- How to use each command (files, search, collections, SQL)
-- Decision tables: when to use `search` vs `grep`, when to FUSE-mount
-- Error-code → action mappings
-- What **not** to do (so the agent doesn't go off the rails)
-
-Below is how to install it into different AI tools.
+Veda ships an agent-facing [`skill.md`](http://git.ddxq.mobi/middleware/dbpaas/veda/-/raw/main/skill.md): commands, decision tables, error codes, and what not to do. Below is how to install it into different AI tools.
 
 ---
 
@@ -20,31 +12,19 @@ Below is how to install it into different AI tools.
 curl -fsSL https://veda.dbpaas.dingdongxiaoqu.com/install.sh | sh
 ```
 
-Result:
-
-```
-~/.claude/skills/veda/SKILL.md
-```
-
-Next time you ask Claude Code anything about Veda (upload, search notes, etc.) it auto-loads this skill and calls the `veda` CLI correctly.
-
-**Verify:**
+Verify:
 
 ```bash
 ls ~/.claude/skills/veda/SKILL.md      # exists
 ```
 
-Then ask Claude Code:
-
-> Upload ~/work/notes/today.md to veda under /notes/
-
-Claude will run `veda cp ~/work/notes/today.md /notes/today.md` instead of hand-rolling HTTP.
+Next time you ask Claude Code to upload / search files, it auto-loads this skill and calls the `veda` CLI.
 
 ---
 
 ## Cursor / Continue.dev / other rule-file tools
 
-These typically have project- or global-rules files. Paste skill.md content in.
+These typically have project-level rules or a global system prompt. Paste skill.md content in.
 
 **Cursor:**
 
@@ -82,15 +62,7 @@ Have the agent `cat ~/.codex/skills/veda.md` into its system prompt.
 
 ## Custom RAG agent
 
-Just include skill.md content as part of your `system_message`. Inside it you get:
-
-- Decision trees (when to use which command)
-- Error-code lookup tables
-- "Don't do" list
-
-This alone makes a tool-using LLM dramatically less likely to invent broken commands.
-
-Fetch the latest at agent boot:
+Just include skill.md content as part of your `system_message`. Fetch the latest at agent boot:
 
 ```python
 import requests

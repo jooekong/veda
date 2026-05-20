@@ -39,7 +39,7 @@ veda-fuse mount \
 
 Use a **workspace key** (`wk_`), not an account key — the mount operates on one workspace.
 
-Now use it like a regular directory:
+Use it like a regular directory:
 
 ```bash
 cd ~/veda
@@ -48,8 +48,6 @@ echo "notes from today" > today.md
 cat docs/readme.md
 vim today.md
 ```
-
-Behind the scenes every write is uploaded via the API, chunked, embedded, and indexed for search. Other clients (CLI, browser, other mounts) see the changes through a server-sent events stream.
 
 ## Unmount
 
@@ -60,6 +58,6 @@ fusermount -u ~/veda    # Linux
 ## Behavior to know
 
 - **mtime** reflects real wall-clock time of the upload (not a synthetic constant)
-- **delete-on-other-client** invalidates this mount's inode within ~120s via SSE
+- Deleting a file from another client invalidates this mount's inode within ~120s via SSE
 - **Large files** (> 256KB) are streamed; files over the per-workspace limit are rejected by the server, not silently truncated
 - **SSE reconnect** is automatic; if the network drops you may briefly see stale data until reconnection completes
