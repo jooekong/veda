@@ -9,6 +9,13 @@ that matters.
 
 ## [Unreleased]
 
+## [0.1.9] — 2026-05-19
+
+### Added
+- `veda search --path <prefix>` — restrict a search to a workspace
+  subtree (e.g. `--path /docs`). Server already accepted `path_prefix`
+  on `SearchApiRequest`; this just plumbs it through the CLI.
+
 ## [0.1.8] — 2026-05-19
 
 ### Changed
