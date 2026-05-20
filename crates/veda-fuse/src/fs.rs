@@ -993,19 +993,63 @@ impl Filesystem for VedaFs {
                     Ok(info) => info.revision,
                     Err(ref e) => { reply.error(Self::err_to_errno(e)); return; }
                 };
-                if new_size == 0 {
-                    if let Err(ref e) = self.client.write_file(&path, b"", rev) {
-                        reply.error(Self::err_to_errno(e)); return;
+                let new_rev = if new_size == 0 {
+                    match self.client.write_file(&path, b"", rev) {
+                        Ok(r) => r,
+                        Err(ref e) => { reply.error(Self::err_to_errno(e)); return; }
                     }
                 } else {
                     match self.client.read_file(&path) {
                         Ok(mut bytes) => {
                             Self::resize_bytes(&mut bytes, new_size as usize);
-                            if let Err(ref e) = self.client.write_file(&path, &bytes, rev) {
-                                reply.error(Self::err_to_errno(e)); return;
+                            match self.client.write_file(&path, &bytes, rev) {
+                                Ok(r) => r,
+                                Err(ref e) => { reply.error(Self::err_to_errno(e)); return; }
                             }
                         }
                         Err(ref e) => { reply.error(Self::err_to_errno(e)); return; }
+                    }
+                };
+                // Re-base any open write handles for this ino+path so a
+                // later flush() PUT sends `If-Match: <new_rev>`. Filter
+                // by BOTH ino and path: a rename mid-handle leaves the
+                // handle's path stale but its ino unchanged, and we
+                // don't want to rebase a sibling that happens to share
+                // the same ino post-rename.
+                //
+                // Without this fix, macOS `cp` (and copyfile-based
+                // clients) silently break: they emit `setattr(size=0)`
+                // right after `open(O_CREAT|O_TRUNC)`; the truncate
+                // here bumps the server revision from 1 to 2, and the
+                // eventual flush still sends If-Match: "1" → server
+                // 412 → fuse EBUSY → cp prints "Resource busy".
+                //
+                // When the server returned no parseable ETag (`new_rev
+                // = None`), fall back to a fresh stat to learn the
+                // post-truncate revision. Silently leaving handles at
+                // the pre-truncate base_rev would re-introduce the
+                // same EBUSY race.
+                let resolved_new_rev = match new_rev {
+                    Some(v) => Some(v),
+                    None => match self.client.stat(&path) {
+                        Ok(info) => info.revision,
+                        Err(ref e) => {
+                            warn!(
+                                path = %path,
+                                err = %e,
+                                "setattr could not resolve post-truncate revision \
+                                 (no ETag and stat failed); leaving write handles at \
+                                 pre-truncate base_rev — next flush may 412"
+                            );
+                            None
+                        }
+                    },
+                };
+                if let Some(new_rev_val) = resolved_new_rev {
+                    for h in self.write_handles.values_mut() {
+                        if h.ino == ino && h.path == path {
+                            h.base_rev = Some(new_rev_val);
+                        }
                     }
                 }
             }
