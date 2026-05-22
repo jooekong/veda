@@ -369,6 +369,14 @@ impl FsService {
 
         let outbox = make_outbox(workspace_id, OutboxEventType::ChunkSync, &file_id);
         tx.try_insert_outbox_for_file(&outbox, &file_id).await?;
+        // Summary generation runs independently of embedding. Embedding
+        // can fail (e.g. content > embedding API's per-input token cap,
+        // status 400) — without an independent SummarySync trigger,
+        // the file's L0/L1 would never be computed, and the parent
+        // directory's aggregate would silently miss this file's
+        // contribution.
+        let summary_outbox = make_outbox(workspace_id, OutboxEventType::SummarySync, &file_id);
+        tx.try_insert_outbox_for_file(&summary_outbox, &file_id).await?;
 
         let evt = make_fs_event(workspace_id, FsEventType::Create, &norm, Some(&file_id));
         tx.insert_fs_event(&evt).await?;
@@ -872,6 +880,21 @@ impl FsService {
         if !child_events.is_empty() {
             tx.insert_fs_events(&child_events).await?;
         }
+
+        // Trigger a DirSummarySync for the parent so its aggregated
+        // summary drops the removed dentry's contribution. Without
+        // this, `/foo/.abstract` keeps describing files that no longer
+        // exist until something else writes under /foo. The worker's
+        // recursive parent aggregation only fires when a CHILD summary
+        // updates — a pure delete produces no SummarySync, so the
+        // chain never runs unless we kick it explicitly here.
+        let parent = path::parent(&norm).to_string();
+        if let Some(parent_dentry) = tx.get_dentry(workspace_id, &parent).await? {
+            let outbox =
+                make_dir_summary_outbox(workspace_id, &parent_dentry.id, &parent);
+            tx.insert_outbox(&outbox).await?;
+        }
+
         tx.commit().await?;
         Ok(deleted_count)
     }
@@ -1188,6 +1211,8 @@ impl FsService {
 
         let outbox = make_outbox(workspace_id, OutboxEventType::ChunkSync, &fid_string);
         tx.try_insert_outbox_for_file(&outbox, &fid_string).await?;
+        let summary_outbox = make_outbox(workspace_id, OutboxEventType::SummarySync, &fid_string);
+        tx.try_insert_outbox_for_file(&summary_outbox, &fid_string).await?;
         let evt = make_fs_event(workspace_id, FsEventType::Update, &norm, Some(&fid_string));
         tx.insert_fs_event(&evt).await?;
         tx.commit().await?;
@@ -1295,6 +1320,28 @@ impl FsService {
         if !child_events.is_empty() {
             tx.insert_fs_events(&child_events).await?;
         }
+
+        // Trigger DirSummarySync for the affected parent(s). Same-dir
+        // rename only needs one (src_parent == dst_parent); cross-dir
+        // needs both old and new parent's aggregates refreshed so
+        // neither lists a stale child entry. Skip if parent dentries
+        // can't be resolved (would mean the parent was just removed,
+        // which shouldn't happen for an in-flight rename but worth
+        // not panicking on).
+        let src_parent = path::parent(&src).to_string();
+        let dst_parent = path::parent(&dst).to_string();
+        let mut parents_seen: Vec<String> = Vec::new();
+        for parent in [&src_parent, &dst_parent] {
+            if parents_seen.iter().any(|p| p == parent) {
+                continue;
+            }
+            parents_seen.push(parent.clone());
+            if let Some(pd) = tx.get_dentry(workspace_id, parent).await? {
+                let outbox = make_dir_summary_outbox(workspace_id, &pd.id, parent);
+                tx.insert_outbox(&outbox).await?;
+            }
+        }
+
         tx.commit().await?;
         Ok(())
     }
@@ -1410,6 +1457,8 @@ async fn finalize_full_rewrite(
 
         let outbox = make_outbox(workspace_id, OutboxEventType::ChunkSync, &new_file_id);
         tx.try_insert_outbox_for_file(&outbox, &new_file_id).await?;
+        let summary_outbox = make_outbox(workspace_id, OutboxEventType::SummarySync, &new_file_id);
+        tx.try_insert_outbox_for_file(&summary_outbox, &new_file_id).await?;
         let evt = make_fs_event(
             workspace_id,
             FsEventType::Update,
@@ -1442,6 +1491,8 @@ async fn finalize_full_rewrite(
 
     let outbox = make_outbox(workspace_id, OutboxEventType::ChunkSync, old_file_id);
     tx.try_insert_outbox_for_file(&outbox, old_file_id).await?;
+    let summary_outbox = make_outbox(workspace_id, OutboxEventType::SummarySync, old_file_id);
+    tx.try_insert_outbox_for_file(&summary_outbox, old_file_id).await?;
     let evt = make_fs_event(
         workspace_id,
         FsEventType::Update,
@@ -1510,6 +1561,40 @@ fn make_outbox(workspace_id: &str, event_type: OutboxEventType, file_id: &str) -
         workspace_id: workspace_id.to_string(),
         event_type,
         payload: serde_json::json!({"file_id": file_id}),
+        status: OutboxStatus::Pending,
+        retry_count: 0,
+        max_retries: 5,
+        available_at: now,
+        lease_until: None,
+        created_at: now,
+    }
+}
+
+/// Build a DirSummarySync outbox event. Payload carries dentry_id +
+/// parent_path so the worker can re-aggregate without re-querying the
+/// dentry table for path resolution.
+///
+/// Service callers (delete, rename) use this to keep the parent's
+/// aggregated summary in sync after a structural change. The worker
+/// also enqueues these post-SummarySync via `enqueue_dir_summary_sync`,
+/// which goes through `enqueue_dedup` for debounce; the service path
+/// uses a plain insert (no dedup) because the originating event is a
+/// single discrete operation and the extra dedup machinery would have
+/// to be threaded through tx state.
+fn make_dir_summary_outbox(
+    workspace_id: &str,
+    dentry_id: &str,
+    parent_path: &str,
+) -> OutboxEvent {
+    let now = Utc::now();
+    OutboxEvent {
+        id: 0,
+        workspace_id: workspace_id.to_string(),
+        event_type: OutboxEventType::DirSummarySync,
+        payload: serde_json::json!({
+            "dentry_id": dentry_id,
+            "parent_path": parent_path,
+        }),
         status: OutboxStatus::Pending,
         retry_count: 0,
         max_retries: 5,

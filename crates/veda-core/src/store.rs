@@ -216,6 +216,11 @@ pub trait MetadataStore: Send + Sync {
     )>;
     async fn upsert_summary(&self, summary: &FileSummary) -> Result<()>;
     async fn delete_summary_by_file(&self, file_id: &str) -> Result<()>;
+    /// Delete the directory summary row keyed by dentry_id. Used by the
+    /// worker when a directory aggregation finds no children (the dir
+    /// is now empty), so future reads return "no summary" instead of
+    /// the pre-empty stale aggregate.
+    async fn delete_summary_by_dentry(&self, dentry_id: &str) -> Result<()>;
     async fn list_child_summaries(
         &self,
         workspace_id: &str,

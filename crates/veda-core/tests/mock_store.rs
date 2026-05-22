@@ -312,6 +312,9 @@ impl MetadataStore for MockMetadataStore {
     async fn delete_summary_by_file(&self, _file_id: &str) -> Result<()> {
         Ok(())
     }
+    async fn delete_summary_by_dentry(&self, _dentry_id: &str) -> Result<()> {
+        Ok(())
+    }
     async fn list_child_summaries(&self, _ws: &str, _parent: &str) -> Result<Vec<FileSummary>> {
         Ok(vec![])
     }

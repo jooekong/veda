@@ -147,21 +147,18 @@ impl Worker {
             OutboxEventType::ChunkSync => {
                 self.handle_chunk_sync(&task.workspace_id, file_id, force_reembed)
                     .await?;
-                // Enqueue summary BEFORE completing the ChunkSync, so a
-                // failure in summary enqueue retries the whole ChunkSync.
-                // The retry's handle_chunk_sync short-circuits via
-                // last_embedded_content_hash (no wasted embed), and
-                // enqueue_summary_sync has its own has_pending_event guard.
-                if self.llm.is_some() {
-                    self.enqueue_summary_sync(&task.workspace_id, file_id)
-                        .await?;
-                } else {
-                    // [llm] not configured: a previous summary (generated
-                    // when LLM was enabled) would otherwise persist and
-                    // serve stale content for an updated file. Delete the
-                    // metadata row first so get_summary returns 501
-                    // immediately; the Milvus side can lag without users
-                    // ever seeing stale L0/L1.
+                // ChunkSync no longer enqueues SummarySync — the service
+                // layer (`FsService::write_file`) inserts both outbox
+                // events at write time, so SummarySync runs independently
+                // of ChunkSync. Embedding failures (e.g. content over
+                // the embedding API's per-input token cap) no longer
+                // block L0/L1 generation, and the parent dir aggregation
+                // no longer misses files whose chunk_sync died on a 400.
+                //
+                // When [llm] is not configured we still need to wipe any
+                // pre-existing summary so an updated file doesn't serve
+                // stale L0/L1 from a previous LLM-enabled era.
+                if self.llm.is_none() {
                     self.meta.delete_summary_by_file(file_id).await?;
                     self.vector
                         .delete_summary(&task.workspace_id, file_id)
@@ -336,6 +333,14 @@ impl Worker {
         Ok(())
     }
 
+    /// Burst-aware enqueue of a SummarySync. Currently unused — the
+    /// service layer (`FsService::write_file`) inserts SummarySync
+    /// directly in the same tx as ChunkSync now, so the worker no
+    /// longer needs to enqueue summary work post-embed. Kept for
+    /// reconciler / debug paths that may want burst-debounced
+    /// summary triggering without the dedup overhead of going through
+    /// outbox.
+    #[allow(dead_code)]
     async fn enqueue_summary_sync(
         &self,
         workspace_id: &str,
@@ -499,17 +504,47 @@ impl Worker {
         dentry_id: &str,
         dir_path: &str,
     ) -> veda_types::Result<()> {
-        let Some(llm) = &self.llm else {
-            return Ok(());
-        };
-
         let child_summaries = self
             .meta
             .list_child_summaries(workspace_id, dir_path)
             .await?;
         if child_summaries.is_empty() {
+            // Directory has no children with summaries (just got emptied
+            // or never had any). Delete the previously-aggregated
+            // summary row so the dir doesn't keep serving a stale L0/L1
+            // describing files that were deleted. Best-effort: a missing
+            // row is a no-op, so no need to check existence first.
+            self.meta.delete_summary_by_dentry(dentry_id).await?;
+            // Vector store keys dir summaries by dentry_id (see the
+            // `upsert_summaries` call below in the non-empty branch),
+            // so the same id deletes it.
+            self.vector
+                .delete_summary(workspace_id, dentry_id)
+                .await?;
+            // Cascade to the parent — its aggregate may also need to drop
+            // this dir's L0 if it just turned empty.
+            let parent = parent_path_of(dir_path);
+            if parent != dir_path {
+                if let Some(parent_dentry) =
+                    self.meta.get_dentry(workspace_id, &parent).await?
+                {
+                    self.enqueue_dir_summary_sync(
+                        workspace_id,
+                        &parent_dentry.id,
+                        &parent,
+                    )
+                    .await?;
+                }
+            }
             return Ok(());
         }
+
+        // Aggregation needs an LLM. Cleanup above does not, so it runs
+        // regardless — keeps the dir summary fresh on delete/rename
+        // even when no LLM is configured.
+        let Some(llm) = &self.llm else {
+            return Ok(());
+        };
 
         let child_l0s: Vec<String> = child_summaries
             .iter()

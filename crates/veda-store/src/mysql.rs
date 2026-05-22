@@ -1186,6 +1186,15 @@ impl MetadataStore for MysqlStore {
         Ok(())
     }
 
+    async fn delete_summary_by_dentry(&self, dentry_id: &str) -> Result<()> {
+        sqlx::query(r#"DELETE FROM veda_summaries WHERE dentry_id = ?"#)
+            .bind(dentry_id)
+            .execute(&self.pool)
+            .await
+            .map_err(storage_err)?;
+        Ok(())
+    }
+
     async fn list_child_summaries(
         &self,
         workspace_id: &str,
@@ -1920,9 +1929,20 @@ impl TaskQueue for MysqlStore {
     ) -> Result<bool> {
         let et = db_enum_str(&event_type);
         let json_path = format!("$.{payload_key}");
+        // Dedup against `pending` only — not `processing`. The original
+        // `IN ('pending','processing')` swallowed updates that arrived
+        // while a task held the snapshot, e.g. for DirSummarySync:
+        // worker snapshots children at T1; a child SummarySync completes
+        // at T2; the consequent enqueue_dedup is silently skipped; T1's
+        // aggregate (missing T2's contribution) becomes the persisted
+        // summary, and no future event ever re-aggregates. Same race
+        // shape exists for ChunkSync (in-flight embed + new write =
+        // dropped re-embed). Letting a fresh pending row coexist with
+        // an in-flight row means worst-case we run one redundant pass
+        // when racing; correctness wins over efficiency.
         let row: Option<(i64,)> = sqlx::query_as(
             r#"SELECT COUNT(*) FROM veda_outbox
-               WHERE event_type = ? AND workspace_id = ? AND status IN ('pending','processing')
+               WHERE event_type = ? AND workspace_id = ? AND status = 'pending'
                  AND JSON_UNQUOTE(JSON_EXTRACT(payload, ?)) = ?"#,
         )
         .bind(et)
