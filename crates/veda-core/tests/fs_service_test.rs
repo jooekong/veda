@@ -1035,7 +1035,10 @@ async fn query_events_filtered_by_path_prefix() {
         .query_events_filtered("ws1", 0, Some("/docs"), 100)
         .await
         .unwrap();
-    assert_eq!(events.len(), 2, "only /docs/* events should match");
+    // `ensure_parents` now emits a Create event for /docs the first
+    // time it's auto-created, so the prefix match returns the dir
+    // itself + the two file events = 3.
+    assert_eq!(events.len(), 3, "only /docs and /docs/* events should match");
     assert!(events.iter().all(|e| e.path.starts_with("/docs")));
 }
 
@@ -1052,20 +1055,23 @@ async fn query_events_filtered_does_not_leak_into_sibling_dirs() {
         .query_events_filtered("ws1", 0, Some("/docs"), 100)
         .await
         .unwrap();
+    // `ensure_parents` emits a Create event for /docs (and separately
+    // for /docs_alt); the filter must include /docs itself + /docs/a
+    // + /docs/c, but never anything under /docs_alt.
     assert_eq!(
         events.len(),
-        2,
+        3,
         "/docs prefix must not match /docs_alt/*; got: {:?}",
         events.iter().map(|e| &e.path).collect::<Vec<_>>()
     );
-    assert!(events.iter().all(|e| e.path.starts_with("/docs/")));
+    assert!(events.iter().all(|e| e.path == "/docs" || e.path.starts_with("/docs/")));
 
     // Trailing slash variant should be canonicalized to the same result.
     let events_with_slash = svc
         .query_events_filtered("ws1", 0, Some("/docs/"), 100)
         .await
         .unwrap();
-    assert_eq!(events_with_slash.len(), 2);
+    assert_eq!(events_with_slash.len(), 3);
 }
 
 /// Reserved-name sweep: every mutating call site that creates or moves
