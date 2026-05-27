@@ -103,6 +103,8 @@ async fn main() -> anyhow::Result<()> {
         auth_store: mysql.clone(),
         meta_store: mysql.clone(),
         vector_store: milvus.clone(),
+        milvus: milvus.clone(),
+        embedding_dim: cfg.embedding.dimension,
         sql_engine,
         jwt_secret: cfg.jwt_secret.clone(),
         metrics: metrics.clone(),

@@ -539,6 +539,16 @@ pub trait AuthStore: Send + Sync {
     /// Used by the reconciler to iterate workspaces during drift detection.
     async fn list_active_workspace_ids(&self) -> Result<Vec<String>>;
     async fn delete_workspace(&self, id: &str) -> Result<()>;
+    /// Hard-delete a workspace row by id. Used only for rollback during
+    /// db-kind workspace provisioning (see routes/account.rs::create_workspace).
+    /// Normal soft-delete uses `delete_workspace` (UPDATE status='archived').
+    async fn hard_delete_workspace(&self, id: &str) -> Result<()>;
+
+    // dataset (db-kind workspace only; CRUD endpoints come in Stage 4)
+    async fn create_dataset(&self, dataset: &Dataset) -> Result<()>;
+    /// Hard-delete all dataset rows for a workspace. Used only for rollback
+    /// during db-kind workspace provisioning.
+    async fn hard_delete_datasets_for_workspace(&self, workspace_id: &str) -> Result<()>;
 
     // workspace key
     async fn create_workspace_key(&self, key: &WorkspaceKey) -> Result<()>;

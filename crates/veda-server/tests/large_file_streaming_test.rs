@@ -16,7 +16,7 @@ use veda_core::store::{AuthStore, MetadataStore, VectorStore};
 use veda_pipeline::embedding::EmbeddingProvider;
 use veda_server::worker::Worker;
 use veda_store::{MilvusStore, MysqlStore};
-use veda_types::{Workspace, WorkspaceStatus};
+use veda_types::{Workspace, WorkspaceKind, WorkspaceStatus};
 
 // W4 IT shares MySQL with potentially-running external workers / other tests.
 // Serialize so we don't trip over each other's outbox claims.
@@ -68,6 +68,8 @@ async fn make_workspace(mysql: &Arc<MysqlStore>) -> String {
             account_id: Uuid::new_v4().to_string(),
             name: format!("w4-{}", &ws[..8]),
             status: WorkspaceStatus::Active,
+            kind: WorkspaceKind::Fs,
+            app_id: None,
             created_at: now,
             updated_at: now,
         })

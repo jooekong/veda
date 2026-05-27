@@ -20,7 +20,7 @@ use veda_server::obs;
 use veda_server::reconciler::Reconciler;
 use veda_server::worker::Worker;
 use veda_store::{MilvusStore, MysqlStore};
-use veda_types::{Workspace, WorkspaceStatus};
+use veda_types::{Workspace, WorkspaceKind, WorkspaceStatus};
 
 #[derive(Debug, Deserialize)]
 struct MysqlSection {
@@ -93,6 +93,8 @@ async fn metrics_render_contains_expected_series() {
             account_id: Uuid::new_v4().to_string(),
             name: format!("metrics-{}", &ws[..8]),
             status: WorkspaceStatus::Active,
+            kind: WorkspaceKind::Fs,
+            app_id: None,
             created_at: now,
             updated_at: now,
         })

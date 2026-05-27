@@ -64,6 +64,10 @@ pub struct ClaimAccountResponse {
 #[derive(Debug, Deserialize)]
 pub struct CreateWorkspaceRequest {
     pub name: String,
+    #[serde(default)]
+    pub kind: crate::WorkspaceKind,
+    #[serde(default)]
+    pub app_id: Option<String>,
 }
 
 #[derive(Debug, Serialize)]

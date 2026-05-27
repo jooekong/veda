@@ -12,7 +12,7 @@ use uuid::Uuid;
 use veda_core::service::fs::FsService;
 use veda_core::store::{AuthStore, TaskQueue};
 use veda_store::MysqlStore;
-use veda_types::{Workspace, WorkspaceStatus};
+use veda_types::{Workspace, WorkspaceKind, WorkspaceStatus};
 
 #[derive(Debug, Deserialize)]
 struct MysqlSection {
@@ -42,6 +42,8 @@ async fn make_workspace(mysql: &Arc<MysqlStore>) -> String {
             account_id: Uuid::new_v4().to_string(),
             name: format!("ev-{}", &ws[..8]),
             status: WorkspaceStatus::Active,
+            kind: WorkspaceKind::Fs,
+            app_id: None,
             created_at: now,
             updated_at: now,
         })

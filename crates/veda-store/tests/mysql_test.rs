@@ -11,7 +11,7 @@ use veda_types::{
     Account, AccountStatus, ApiKeyRecord, CollectionSchema, CollectionStatus, CollectionType,
     Dentry, FileChunk, FileRecord, FileSummary, KeyPermission, KeyStatus, OutboxEvent,
     OutboxEventType, OutboxStatus, SourceType, StorageType, SummaryStatus, Workspace,
-    WorkspaceKey, WorkspaceStatus,
+    WorkspaceKey, WorkspaceKind, WorkspaceStatus,
 };
 
 #[derive(Debug, Deserialize)]
@@ -549,6 +549,8 @@ async fn mysql_workspace_crud() {
         account_id: acct_id.clone(),
         name: "my-project".into(),
         status: WorkspaceStatus::Active,
+        kind: WorkspaceKind::Fs,
+        app_id: None,
         created_at: now,
         updated_at: now,
     };
@@ -571,6 +573,211 @@ async fn mysql_workspace_crud() {
     );
 
     cleanup_account(&store, &acct_id).await;
+}
+
+#[tokio::test]
+#[ignore]
+async fn mysql_workspace_kind_roundtrip() {
+    let url = load_mysql_url();
+    let store = MysqlStore::new(&url).await.expect("connect");
+    // Run migrate twice — verifies the Stage 1.1 ALTERs are idempotent
+    // (1060/1061 swallowed on the second run).
+    store.migrate().await.expect("migrate");
+    store.migrate().await.expect("migrate idempotent");
+
+    let acct_id = Uuid::new_v4().to_string();
+    let now = Utc::now();
+    store
+        .create_account(&Account {
+            id: acct_id.clone(),
+            name: "kind-test".into(),
+            email: Some(format!("{}@test.com", &acct_id[..8])),
+            password_hash: None,
+            status: AccountStatus::Active,
+            created_at: now,
+            updated_at: now,
+        })
+        .await
+        .unwrap();
+
+    let db_ws_id = Uuid::new_v4().to_string();
+    store
+        .create_workspace(&Workspace {
+            id: db_ws_id.clone(),
+            account_id: acct_id.clone(),
+            name: "vectors".into(),
+            status: WorkspaceStatus::Active,
+            kind: WorkspaceKind::Db,
+            app_id: Some("acme-app".into()),
+            created_at: now,
+            updated_at: now,
+        })
+        .await
+        .unwrap();
+
+    let fs_ws_id = Uuid::new_v4().to_string();
+    store
+        .create_workspace(&Workspace {
+            id: fs_ws_id.clone(),
+            account_id: acct_id.clone(),
+            name: "files".into(),
+            status: WorkspaceStatus::Active,
+            kind: WorkspaceKind::Fs,
+            app_id: None,
+            created_at: now,
+            updated_at: now,
+        })
+        .await
+        .unwrap();
+
+    let got_db = store.get_workspace(&db_ws_id).await.unwrap().unwrap();
+    assert_eq!(got_db.kind, WorkspaceKind::Db);
+    assert_eq!(got_db.app_id.as_deref(), Some("acme-app"));
+
+    let got_fs = store.get_workspace(&fs_ws_id).await.unwrap().unwrap();
+    assert_eq!(got_fs.kind, WorkspaceKind::Fs);
+    assert_eq!(got_fs.app_id, None);
+
+    let list = store.list_workspaces(&acct_id).await.unwrap();
+    assert_eq!(list.len(), 2);
+    let by_id: std::collections::HashMap<_, _> =
+        list.iter().map(|w| (w.id.clone(), w)).collect();
+    assert_eq!(by_id[&db_ws_id].kind, WorkspaceKind::Db);
+    assert_eq!(by_id[&db_ws_id].app_id.as_deref(), Some("acme-app"));
+    assert_eq!(by_id[&fs_ws_id].kind, WorkspaceKind::Fs);
+    assert_eq!(by_id[&fs_ws_id].app_id, None);
+
+    cleanup_account(&store, &acct_id).await;
+}
+
+#[tokio::test]
+#[ignore]
+async fn mysql_workspace_kind_defaults_to_fs() {
+    let url = load_mysql_url();
+    let store = MysqlStore::new(&url).await.expect("connect");
+    store.migrate().await.expect("migrate");
+
+    let acct_id = Uuid::new_v4().to_string();
+    let now = Utc::now();
+    store
+        .create_account(&Account {
+            id: acct_id.clone(),
+            name: "default-test".into(),
+            email: Some(format!("{}@test.com", &acct_id[..8])),
+            password_hash: None,
+            status: AccountStatus::Active,
+            created_at: now,
+            updated_at: now,
+        })
+        .await
+        .unwrap();
+
+    // Insert via raw SQL without the kind/app_id columns — simulates a row
+    // that existed before the Stage 1.1 ALTER ran. The DEFAULT 'fs' clause
+    // on the kind column is what makes upgrades safe; verify it.
+    let ws_id = Uuid::new_v4().to_string();
+    sqlx::query(
+        r#"INSERT INTO veda_workspaces (id, account_id, name, status, created_at, updated_at)
+           VALUES (?, ?, ?, 'active', ?, ?)"#,
+    )
+    .bind(&ws_id)
+    .bind(&acct_id)
+    .bind("legacy")
+    .bind(now.naive_utc())
+    .bind(now.naive_utc())
+    .execute(store.pool())
+    .await
+    .expect("insert legacy ws");
+
+    let got = store.get_workspace(&ws_id).await.unwrap().unwrap();
+    assert_eq!(got.kind, WorkspaceKind::Fs);
+    assert_eq!(got.app_id, None);
+
+    cleanup_account(&store, &acct_id).await;
+}
+
+#[tokio::test]
+#[ignore]
+async fn mysql_datasets_status_defaults_to_active() {
+    let url = load_mysql_url();
+    let store = MysqlStore::new(&url).await.expect("connect");
+    store.migrate().await.expect("migrate");
+
+    // Insert without status — DEFAULT 'active' should apply.
+    let pool = store.pool();
+    let dataset_id = Uuid::new_v4().to_string();
+    let ws_id = Uuid::new_v4().to_string();
+    let now = Utc::now().naive_utc();
+
+    sqlx::query(
+        r#"INSERT INTO veda_datasets (id, workspace_id, name, created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?)"#,
+    )
+    .bind(&dataset_id)
+    .bind(&ws_id)
+    .bind("default-status")
+    .bind(now)
+    .bind(now)
+    .execute(pool)
+    .await
+    .expect("insert dataset");
+
+    let status: String =
+        sqlx::query_scalar("SELECT status FROM veda_datasets WHERE id = ?")
+            .bind(&dataset_id)
+            .fetch_one(pool)
+            .await
+            .unwrap();
+    assert_eq!(status, "active");
+
+    sqlx::query("DELETE FROM veda_datasets WHERE id = ?")
+        .bind(&dataset_id)
+        .execute(pool)
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+#[ignore]
+async fn mysql_datasets_table_exists() {
+    let url = load_mysql_url();
+    let store = MysqlStore::new(&url).await.expect("connect");
+    store.migrate().await.expect("migrate");
+
+    // veda_datasets has no Rust API in Stage 1; verify the table is well-formed
+    // via raw SQL. Stage 4 adds a proper CRUD layer.
+    let pool = store.pool();
+    let dataset_id = Uuid::new_v4().to_string();
+    let ws_id = Uuid::new_v4().to_string();
+    let now = Utc::now().naive_utc();
+
+    sqlx::query(
+        r#"INSERT INTO veda_datasets (id, workspace_id, name, status, created_at, updated_at)
+           VALUES (?, ?, ?, 'active', ?, ?)"#,
+    )
+    .bind(&dataset_id)
+    .bind(&ws_id)
+    .bind("products")
+    .bind(now)
+    .bind(now)
+    .execute(pool)
+    .await
+    .expect("insert dataset");
+
+    let (name, status): (String, String) =
+        sqlx::query_as(r#"SELECT name, status FROM veda_datasets WHERE id = ?"#)
+            .bind(&dataset_id)
+            .fetch_one(pool)
+            .await
+            .expect("query dataset");
+    assert_eq!(name, "products");
+    assert_eq!(status, "active");
+
+    sqlx::query("DELETE FROM veda_datasets WHERE id = ?")
+        .bind(&dataset_id)
+        .execute(pool)
+        .await
+        .unwrap();
 }
 
 #[tokio::test]
@@ -601,6 +808,8 @@ async fn mysql_workspace_key_crud() {
             account_id: acct_id.clone(),
             name: "ws-for-keys".into(),
             status: WorkspaceStatus::Active,
+            kind: WorkspaceKind::Fs,
+            app_id: None,
             created_at: now,
             updated_at: now,
         })
@@ -729,6 +938,8 @@ async fn mysql_workspace_key_rejected_when_account_suspended() {
             account_id: acct_id.clone(),
             name: "ws".into(),
             status: WorkspaceStatus::Active,
+            kind: WorkspaceKind::Fs,
+            app_id: None,
             created_at: now,
             updated_at: now,
         })

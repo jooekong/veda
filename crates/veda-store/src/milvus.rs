@@ -21,6 +21,17 @@ fn storage_err(e: impl ToString) -> VedaError {
     VedaError::Storage(e.to_string())
 }
 
+/// Compute the per-workspace default Milvus collection name for db-kind workspaces.
+/// Format: `ws_<8-hex-chars-of-sha256(workspace_id)>_default`.
+/// The `_default` suffix distinguishes from v1 dedicated collections
+/// (named `ws_<ws>_<dataset>_dim<DIM>_v<VER>` per docs/vectors-merge-plan.md §2.6).
+/// The hash is over workspace.id (UUID), not workspace.name — so workspace
+/// rename is safe and never affects the underlying Milvus collection.
+pub fn vector_collection_name(workspace_id: &str) -> String {
+    let hash = veda_core::checksum::sha256_hex(workspace_id.as_bytes());
+    format!("ws_{}_default", &hash[..8])
+}
+
 /// Milvus boolean expressions use double-quoted string literals (see Milvus docs).
 fn milvus_quote(s: &str) -> String {
     format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\""))
@@ -185,7 +196,8 @@ impl MilvusStore {
         // Schema v2: adds `sparse_vector` field + BM25 function over `content`
         // so hybrid_search can fuse two real ranking signals (dense ANN +
         // sparse BM25) instead of just RRF-wrapping a single dense source.
-        // Requires Milvus 2.4+. `enable_analyzer` on content is what lets
+        // Requires Milvus 2.5+ (BM25 function landed in 2.5; deployed 2.6.14).
+        // `enable_analyzer` on content is what lets
         // the BM25 function tokenize on insert.
         let body = json!({
             "collectionName": COLLECTION,
@@ -368,6 +380,156 @@ impl MilvusStore {
         )
         .await?;
         Ok(())
+    }
+
+    /// Create a Pinecone-style vector collection for a db-kind workspace.
+    /// Schema follows docs/vectors-merge-plan.md §2.2:
+    ///   - composite PK `{dataset}:{row_key}` (Milvus PK enforces upsert dedup)
+    ///   - 3-tier classification: dataset / category / tags (all default-friendly)
+    ///   - row-level status, created_at/updated_at, optional expire_at
+    ///   - hybrid: dense `vector` + BM25 `sparse_vector`
+    ///   - free-form `meta` JSON
+    ///
+    /// Indexes v0: vector AUTOINDEX COSINE, sparse_vector SPARSE_INVERTED_INDEX BM25,
+    /// scalar INVERTED on dataset/category/tags/status/created_at.
+    /// row_key/updated_at/expire_at are schema-only (no index v0, defer to v1).
+    ///
+    /// PK immutable contract: workspace rename is safe (collection name is hashed
+    /// from workspace.id), but dataset rename requires data migration.
+    pub async fn create_vector_collection(
+        &self,
+        workspace_id: &str,
+        dim: u32,
+    ) -> Result<String> {
+        let name = vector_collection_name(workspace_id);
+        let dim_i = dim as i64;
+        let body = json!({
+            "collectionName": &name,
+            "schema": {
+                "enableDynamicField": false,
+                "fields": [
+                    { "fieldName": "pk", "dataType": "VarChar", "isPrimary": true,
+                      "elementTypeParams": { "max_length": 128 } },
+                    { "fieldName": "row_key", "dataType": "VarChar",
+                      "elementTypeParams": { "max_length": 128 } },
+                    { "fieldName": "dataset", "dataType": "VarChar",
+                      "elementTypeParams": { "max_length": 64 } },
+                    { "fieldName": "category", "dataType": "VarChar",
+                      "elementTypeParams": { "max_length": 64 } },
+                    { "fieldName": "tags", "dataType": "Array",
+                      "elementDataType": "VarChar",
+                      "elementTypeParams": { "max_length": 128, "max_capacity": 8 } },
+                    { "fieldName": "status", "dataType": "VarChar",
+                      "elementTypeParams": { "max_length": 32 } },
+                    { "fieldName": "created_at", "dataType": "Int64" },
+                    { "fieldName": "updated_at", "dataType": "Int64" },
+                    { "fieldName": "expire_at", "dataType": "Int64", "nullable": true },
+                    { "fieldName": "text", "dataType": "VarChar",
+                      "elementTypeParams": {
+                          "max_length": 16384,
+                          "enable_analyzer": true,
+                          "analyzer_params": { "tokenizer": "jieba" }
+                      } },
+                    { "fieldName": "vector", "dataType": "FloatVector",
+                      "elementTypeParams": { "dim": dim_i } },
+                    { "fieldName": "sparse_vector", "dataType": "SparseFloatVector" },
+                    { "fieldName": "meta", "dataType": "JSON" }
+                ],
+                "functions": [{
+                    "name": "bm25_text",
+                    "type": "BM25",
+                    "inputFieldNames": ["text"],
+                    "outputFieldNames": ["sparse_vector"]
+                }]
+            }
+        });
+        // Idempotent: if the collection already exists, fall through to ensure
+        // indexes + load (both also idempotent). Lets caller retry safely after
+        // a transient failure between collection create and Milvus ack.
+        if let Err(e) = self
+            .post_no_retry("/v2/vectordb/collections/create", body)
+            .await
+        {
+            let m = e.to_string();
+            if !m.contains("CollectionAlreadyExists")
+                && !m.contains("collection already exist")
+            {
+                return Err(e);
+            }
+        }
+
+        // 7 indexes: 1 vector + 1 sparse + 5 scalar inverted. Each is its own
+        // POST — Milvus 2.5+ rejects multi-index POST with AUTOINDEX entry.
+        let indexes = [
+            ("vector", "AUTOINDEX", "COSINE"),
+            ("sparse_vector", "SPARSE_INVERTED_INDEX", "BM25"),
+            ("dataset", "INVERTED", ""),
+            ("category", "INVERTED", ""),
+            ("tags", "INVERTED", ""),
+            ("status", "INVERTED", ""),
+            ("created_at", "INVERTED", ""),
+        ];
+        for (field, idx_type, metric) in indexes {
+            let mut params = json!({
+                "index_type": idx_type,
+                "fieldName": field,
+                "indexName": field,
+            });
+            if !metric.is_empty() {
+                params["metricType"] = json!(metric);
+            }
+            let body = json!({
+                "collectionName": &name,
+                "indexParams": [params],
+            });
+            match self.post("/v2/vectordb/indexes/create", body).await {
+                Ok(_) => {}
+                Err(e) => {
+                    let m = e.to_string();
+                    if m.contains("same index name")
+                        || m.contains("IndexAlreadyExists")
+                        || m.contains("index already exist")
+                    {
+                        continue;
+                    }
+                    return Err(e);
+                }
+            }
+        }
+
+        self.post(
+            "/v2/vectordb/collections/load",
+            json!({ "collectionName": &name }),
+        )
+        .await?;
+
+        Ok(name)
+    }
+
+    /// Drop a Milvus collection by name. Used by Stage 2.2 provisioner for
+    /// rollback on partial-failure. Idempotent: returns Ok if the collection
+    /// doesn't exist.
+    pub async fn drop_collection(&self, name: &str) -> Result<()> {
+        match self
+            .post(
+                "/v2/vectordb/collections/drop",
+                json!({ "collectionName": name }),
+            )
+            .await
+        {
+            Ok(_) => Ok(()),
+            Err(e) => {
+                let m = e.to_string();
+                if m.contains("CollectionNotExists")
+                    || m.contains("collection not exist")
+                    || m.contains("can't find collection")
+                {
+                    Ok(())
+                } else {
+                    Err(e)
+                }
+            }
+        }
     }
 
     fn summary_rows_to_hits(rows: &[Value], limit: usize) -> Vec<SearchHit> {

@@ -7,6 +7,7 @@ use axum::extract::{Path, State};
 use axum::routing::{delete, post};
 use axum::{Json, Router};
 use chrono::Utc;
+use tracing::warn;
 use uuid::Uuid;
 use veda_core::checksum::sha256_hex;
 use veda_types::api::{
@@ -15,8 +16,8 @@ use veda_types::api::{
     WorkspaceTokenResponse,
 };
 use veda_types::{
-    Account, AccountStatus, ApiKeyRecord, ApiResponse, KeyPermission, KeyStatus, VedaError,
-    Workspace, WorkspaceKey, WorkspaceStatus,
+    Account, AccountStatus, ApiKeyRecord, ApiResponse, Dataset, DatasetStatus, KeyPermission,
+    KeyStatus, VedaError, Workspace, WorkspaceKey, WorkspaceKind, WorkspaceStatus,
 };
 
 use crate::auth::{create_jwt, AuthAccount};
@@ -176,6 +177,8 @@ async fn create_anonymous_account(
         account_id: account_id.clone(),
         name: "default".into(),
         status: WorkspaceStatus::Active,
+        kind: WorkspaceKind::Fs,
+        app_id: None,
         created_at: now,
         updated_at: now,
     };
@@ -293,11 +296,87 @@ async fn create_workspace(
         account_id: auth.account_id,
         name: req.name,
         status: WorkspaceStatus::Active,
+        kind: req.kind,
+        app_id: req.app_id,
         created_at: now,
         updated_at: now,
     };
     state.auth_store.create_workspace(&ws).await?;
+
+    if ws.kind == WorkspaceKind::Db {
+        provision_db_workspace(&state, &ws).await?;
+    }
+
     Ok(Json(ApiResponse::ok(ws)))
+}
+
+/// Bootstrap the "default" dataset row + Milvus collection for a db-kind
+/// workspace. On any failure, rolls back in reverse order:
+///   Milvus drop_collection -> hard_delete_datasets -> hard_delete_workspace.
+/// All rollback steps are idempotent (drop swallows not-exists), so partial
+/// failures during rollback don't compound.
+async fn provision_db_workspace(state: &AppState, ws: &Workspace) -> Result<(), AppError> {
+    let default_dataset = Dataset {
+        id: Uuid::new_v4().to_string(),
+        workspace_id: ws.id.clone(),
+        name: "default".into(),
+        status: DatasetStatus::Active,
+        created_at: ws.created_at,
+        updated_at: ws.updated_at,
+    };
+
+    if let Err(e) = state.auth_store.create_dataset(&default_dataset).await {
+        if let Err(rb) = state.auth_store.hard_delete_workspace(&ws.id).await {
+            warn!(
+                workspace_id = %ws.id,
+                provision_err = %e,
+                rollback_err = %rb,
+                "rollback hard_delete_workspace failed after dataset create error",
+            );
+        }
+        return Err(e.into());
+    }
+
+    if let Err(e) = state
+        .milvus
+        .create_vector_collection(&ws.id, state.embedding_dim)
+        .await
+    {
+        let collection_name = veda_store::vector_collection_name(&ws.id);
+        if let Err(rb) = state.milvus.drop_collection(&collection_name).await {
+            warn!(
+                workspace_id = %ws.id,
+                collection_name = %collection_name,
+                provision_err = %e,
+                rollback_err = %rb,
+                "rollback drop_collection failed after milvus create error; \
+                 orphan collection may remain",
+            );
+        }
+        if let Err(rb) = state
+            .auth_store
+            .hard_delete_datasets_for_workspace(&ws.id)
+            .await
+        {
+            warn!(
+                workspace_id = %ws.id,
+                provision_err = %e,
+                rollback_err = %rb,
+                "rollback hard_delete_datasets failed",
+            );
+        }
+        if let Err(rb) = state.auth_store.hard_delete_workspace(&ws.id).await {
+            warn!(
+                workspace_id = %ws.id,
+                provision_err = %e,
+                rollback_err = %rb,
+                "rollback hard_delete_workspace failed",
+            );
+        }
+        return Err(e.into());
+    }
+
+    Ok(())
 }
 
 async fn list_workspaces(

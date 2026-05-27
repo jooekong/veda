@@ -17,6 +17,21 @@ pub enum WorkspaceStatus {
     Archived,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkspaceKind {
+    #[default]
+    Fs,
+    Db,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DatasetStatus {
+    Active,
+    Archived,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum KeyStatus {
@@ -144,6 +159,18 @@ pub struct Workspace {
     pub account_id: String,
     pub name: String,
     pub status: WorkspaceStatus,
+    pub kind: WorkspaceKind,
+    pub app_id: Option<String>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Dataset {
+    pub id: String,
+    pub workspace_id: String,
+    pub name: String,
+    pub status: DatasetStatus,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }

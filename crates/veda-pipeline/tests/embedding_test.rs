@@ -1,8 +1,11 @@
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
 
+use async_trait::async_trait;
 use serde::Deserialize;
 use veda_core::store::EmbeddingService;
-use veda_pipeline::embedding::EmbeddingProvider;
+use veda_pipeline::embedding::{EmbeddingCache, EmbeddingProvider};
 use veda_types::Result;
 
 #[derive(Debug, Deserialize)]
@@ -96,4 +99,104 @@ fn cfg_dimension_or_vector_len(provider: &EmbeddingProvider, vector: &[f32]) -> 
     } else {
         vector.len()
     }
+}
+
+// ── EmbeddingCache integration tests (Stage 3.3) ────────────────────
+
+/// Wraps a real `EmbeddingProvider` and counts upstream texts embedded.
+/// Not a mock — inner is the real HTTP-calling provider; this is just
+/// instrumentation to assert cache hits actually skip upstream.
+struct CountingProvider {
+    inner: EmbeddingProvider,
+    upstream_texts: AtomicUsize,
+}
+
+#[async_trait]
+impl EmbeddingService for CountingProvider {
+    async fn embed(&self, texts: &[String]) -> Result<Vec<Vec<f32>>> {
+        self.upstream_texts
+            .fetch_add(texts.len(), Ordering::Relaxed);
+        self.inner.embed(texts).await
+    }
+
+    fn dimension(&self) -> usize {
+        self.inner.dimension()
+    }
+}
+
+#[tokio::test]
+#[ignore]
+async fn embedding_cache_hit_skips_real_upstream() {
+    let cfg = load_test_config();
+    let counting = Arc::new(CountingProvider {
+        inner: make_provider(),
+        upstream_texts: AtomicUsize::new(0),
+    });
+    let cache = EmbeddingCache::new(counting.clone(), &cfg.model);
+
+    // First call: 1 text → 1 upstream
+    let r1 = cache.embed(&["veda cache hit test".into()]).await.unwrap();
+    assert_eq!(r1.len(), 1);
+    assert_eq!(counting.upstream_texts.load(Ordering::Relaxed), 1);
+
+    // Second call same text: 0 new upstream (cache hit)
+    let r2 = cache.embed(&["veda cache hit test".into()]).await.unwrap();
+    assert_eq!(r1, r2, "cache should return identical vector");
+    assert_eq!(
+        counting.upstream_texts.load(Ordering::Relaxed),
+        1,
+        "second embed should hit cache, not upstream"
+    );
+}
+
+#[tokio::test]
+#[ignore]
+async fn embedding_cache_oversize_text_bypasses_cache() {
+    let cfg = load_test_config();
+    let counting = Arc::new(CountingProvider {
+        inner: make_provider(),
+        upstream_texts: AtomicUsize::new(0),
+    });
+    let cache = EmbeddingCache::new(counting.clone(), &cfg.model);
+
+    // 5000 bytes > 4KB cap → bypass cache both times.
+    let oversize = "veda oversize ".repeat(360); // ≈ 5040 bytes
+    assert!(oversize.len() > 4 * 1024);
+
+    cache.embed(&[oversize.clone()]).await.unwrap();
+    assert_eq!(counting.upstream_texts.load(Ordering::Relaxed), 1);
+
+    cache.embed(&[oversize.clone()]).await.unwrap();
+    assert_eq!(
+        counting.upstream_texts.load(Ordering::Relaxed),
+        2,
+        "oversize text must not be cached; second call hits upstream"
+    );
+}
+
+#[tokio::test]
+#[ignore]
+async fn embedding_cache_batched_partition_with_real_provider() {
+    let cfg = load_test_config();
+    let counting = Arc::new(CountingProvider {
+        inner: make_provider(),
+        upstream_texts: AtomicUsize::new(0),
+    });
+    let cache = EmbeddingCache::new(counting.clone(), &cfg.model);
+
+    // Warm one text
+    cache.embed(&["one".into()]).await.unwrap();
+    assert_eq!(counting.upstream_texts.load(Ordering::Relaxed), 1);
+
+    // Three texts: "one" hits cache, "two"/"three" miss → single batched call
+    let r = cache
+        .embed(&["one".into(), "two".into(), "three".into()])
+        .await
+        .unwrap();
+    assert_eq!(r.len(), 3);
+    assert_eq!(
+        counting.upstream_texts.load(Ordering::Relaxed),
+        3,
+        "only 2 new texts should hit upstream (batched as one call)"
+    );
 }

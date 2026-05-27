@@ -16,7 +16,7 @@ use veda_pipeline::embedding::EmbeddingProvider;
 use veda_server::reconciler::Reconciler;
 use veda_server::worker::Worker;
 use veda_store::{MilvusStore, MysqlStore};
-use veda_types::{Workspace, WorkspaceStatus};
+use veda_types::{Workspace, WorkspaceKind, WorkspaceStatus};
 
 /// Serialize all reconciler IT tests within this binary. They share the test
 /// MySQL+Milvus instance with each other AND with whatever external Veda
@@ -157,6 +157,8 @@ async fn create_workspace(mysql: &MysqlStore, ws: &str) {
             account_id: Uuid::new_v4().to_string(),
             name: format!("recon-test-{}", &ws[..8]),
             status: WorkspaceStatus::Active,
+            kind: WorkspaceKind::Fs,
+            app_id: None,
             created_at: now,
             updated_at: now,
         })
@@ -389,6 +391,8 @@ async fn reconciler_skips_disabled_or_archived_workspaces() {
             account_id: Uuid::new_v4().to_string(),
             name: "archived".into(),
             status: WorkspaceStatus::Archived,
+            kind: WorkspaceKind::Fs,
+            app_id: None,
             created_at: now,
             updated_at: now,
         })

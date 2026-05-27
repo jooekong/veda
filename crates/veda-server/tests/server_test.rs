@@ -240,6 +240,8 @@ async fn h_create_ws(
         account_id: aid,
         name: req.name,
         status: veda_types::WorkspaceStatus::Active,
+        kind: veda_types::WorkspaceKind::Fs,
+        app_id: None,
         created_at: now,
         updated_at: now,
     };

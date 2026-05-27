@@ -175,3 +175,88 @@ async fn milvus_dynamic_collection_crud() {
         .await
         .expect("drop collection");
 }
+
+#[tokio::test]
+#[ignore]
+async fn milvus_vector_collection_create_and_drop() {
+    let (url, token, db) = load_milvus();
+    let store = MilvusStore::new(&url, token, db);
+    let dim = load_embedding_dim();
+
+    let ws_id = Uuid::new_v4().to_string();
+    let expected_prefix = format!(
+        "ws_{}",
+        &veda_core::checksum::sha256_hex(ws_id.as_bytes())[..8]
+    );
+    let expected_name = format!("{}_default", expected_prefix);
+
+    // create_vector_collection should: 1) accept the full §2.2 schema (incl
+    // Array<VarChar> with max_capacity, nullable Int64, BM25 function), 2)
+    // build all 7 indexes, 3) load the collection. This validates DDL +
+    // index payload shapes against real Milvus 2.6.14 — write-side semantics
+    // (max_capacity enforcement, dim mismatch, BM25 input vs output handling)
+    // are validated in Stage 4 insert tests.
+    let name = store
+        .create_vector_collection(&ws_id, dim)
+        .await
+        .expect("create_vector_collection");
+    assert_eq!(name, expected_name);
+
+    // drop_collection should remove it cleanly.
+    store
+        .drop_collection(&name)
+        .await
+        .expect("drop_collection");
+}
+
+#[tokio::test]
+#[ignore]
+async fn milvus_vector_collection_create_is_idempotent() {
+    let (url, token, db) = load_milvus();
+    let store = MilvusStore::new(&url, token, db);
+    let dim = load_embedding_dim();
+
+    let ws_id = Uuid::new_v4().to_string();
+
+    let name1 = store
+        .create_vector_collection(&ws_id, dim)
+        .await
+        .expect("first create");
+    // Second create on the same workspace_id must not error — Stage 2.1
+    // added the "CollectionAlreadyExists" swallow.
+    let name2 = store
+        .create_vector_collection(&ws_id, dim)
+        .await
+        .expect("second create (idempotent)");
+    assert_eq!(name1, name2);
+
+    store.drop_collection(&name1).await.expect("drop");
+}
+
+#[tokio::test]
+#[ignore]
+async fn milvus_drop_collection_is_idempotent() {
+    let (url, token, db) = load_milvus();
+    let store = MilvusStore::new(&url, token, db);
+    let dim = load_embedding_dim();
+
+    let ws_id = Uuid::new_v4().to_string();
+    let name = format!(
+        "ws_{}_default",
+        &veda_core::checksum::sha256_hex(ws_id.as_bytes())[..8]
+    );
+
+    // Drop a never-created collection — must succeed (not-exists swallow).
+    store
+        .drop_collection(&name)
+        .await
+        .expect("drop non-existent");
+
+    // Create, drop, drop again — second drop must succeed.
+    store
+        .create_vector_collection(&ws_id, dim)
+        .await
+        .expect("create");
+    store.drop_collection(&name).await.expect("first drop");
+    store.drop_collection(&name).await.expect("second drop");
+}

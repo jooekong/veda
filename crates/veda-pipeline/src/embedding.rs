@@ -1,9 +1,13 @@
+use std::sync::Arc;
 use std::sync::RwLock;
 use std::time::Duration;
 
 use async_trait::async_trait;
+use moka::future::Cache;
 use serde::{Deserialize, Serialize};
 use tracing::warn;
+use unicode_normalization::UnicodeNormalization;
+use veda_core::checksum::sha256_hex;
 use veda_core::store::EmbeddingService;
 use veda_types::{Result, VedaError};
 
@@ -279,6 +283,111 @@ impl EmbeddingService for EmbeddingProvider {
     }
 }
 
+// ── EmbeddingCache (Stage 3.1) ──────────────────────────────────────
+
+const MAX_CACHEABLE_TEXT_BYTES: usize = 4 * 1024;
+const CACHE_CAPACITY: u64 = 50_000;
+const CACHE_TTL_SECS: u64 = 24 * 3600;
+const CACHE_TTI_SECS: u64 = 3600;
+
+/// L1 cache for embeddings. Within one `embed(texts)` call, partitions
+/// texts into cache hits + misses, batches the misses into a single
+/// upstream call, caches the successful results.
+///
+/// Trade-off: across concurrent calls, two requests embedding the same
+/// missing text will each call upstream (no `try_get_with` coalescing).
+/// Accepted for v0 — batching matters more than concurrent-miss dedup at
+/// alpha scale; revisit if company multi-app traffic shows duplication.
+pub struct EmbeddingCache {
+    inner: Arc<dyn EmbeddingService>,
+    cache: Cache<String, Arc<Vec<f32>>>,
+    model: String,
+}
+
+impl EmbeddingCache {
+    pub fn new(inner: Arc<dyn EmbeddingService>, model: impl Into<String>) -> Self {
+        let cache = Cache::builder()
+            .max_capacity(CACHE_CAPACITY)
+            .time_to_live(Duration::from_secs(CACHE_TTL_SECS))
+            .time_to_idle(Duration::from_secs(CACHE_TTI_SECS))
+            .build();
+        Self {
+            inner,
+            cache,
+            model: model.into(),
+        }
+    }
+
+    /// `None` = text uncacheable (too long); skip cache, pass straight through.
+    fn key(&self, text: &str) -> Option<String> {
+        if text.len() > MAX_CACHEABLE_TEXT_BYTES {
+            return None;
+        }
+        let normalized: String = text.trim().nfc().collect();
+        let raw = format!("{}:{}", self.model, normalized);
+        Some(sha256_hex(raw.as_bytes()))
+    }
+}
+
+#[async_trait]
+impl EmbeddingService for EmbeddingCache {
+    async fn embed(&self, texts: &[String]) -> Result<Vec<Vec<f32>>> {
+        if texts.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        // Keys computed once, indexed by `texts` position. None = uncacheable.
+        let keys: Vec<Option<String>> = texts.iter().map(|t| self.key(t)).collect();
+
+        // Phase 1: partition into hits + misses.
+        let mut results: Vec<Option<Vec<f32>>> = vec![None; texts.len()];
+        let mut miss_indexes: Vec<usize> = Vec::new();
+        for (i, key) in keys.iter().enumerate() {
+            if let Some(k) = key {
+                if let Some(v) = self.cache.get(k).await {
+                    results[i] = Some(v.as_ref().clone());
+                    continue;
+                }
+            }
+            miss_indexes.push(i);
+        }
+
+        // Phase 2: single batched upstream call for all misses.
+        // Failed embed propagates Err — phase 3 insert skipped → cache stays clean.
+        if !miss_indexes.is_empty() {
+            let miss_texts: Vec<String> =
+                miss_indexes.iter().map(|&i| texts[i].clone()).collect();
+            let embedded = self.inner.embed(&miss_texts).await?;
+
+            // Defensive: trait contract says one vector per input text; a
+            // misbehaving inner impl could short-return and cause index OOB
+            // on `embedded[rel_i]` below.
+            if embedded.len() != miss_texts.len() {
+                return Err(VedaError::EmbeddingFailed(format!(
+                    "inner.embed returned {} vectors for {} texts",
+                    embedded.len(),
+                    miss_texts.len()
+                )));
+            }
+
+            // Phase 3: fill results + cache the cacheable ones.
+            for (rel_i, &abs_i) in miss_indexes.iter().enumerate() {
+                let vec = embedded[rel_i].clone();
+                if let Some(k) = &keys[abs_i] {
+                    self.cache.insert(k.clone(), Arc::new(vec.clone())).await;
+                }
+                results[abs_i] = Some(vec);
+            }
+        }
+
+        Ok(results.into_iter().map(|v| v.unwrap()).collect())
+    }
+
+    fn dimension(&self) -> usize {
+        self.inner.dimension()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -329,5 +438,108 @@ mod tests {
     fn no_retry_after_uses_exponential() {
         assert_eq!(compute_backoff_ms(0, None), 500);
         assert_eq!(compute_backoff_ms(2, None), 2_000);
+    }
+
+    // ── EmbeddingCache tests ───────────────────────────────────
+
+    use std::sync::Mutex;
+
+    /// Records every call's input. Returns deterministic vectors (first
+    /// component = text length) so tests can sanity-check ordering.
+    struct StubEmbedder {
+        dim: usize,
+        calls: Mutex<Vec<Vec<String>>>,
+    }
+
+    impl StubEmbedder {
+        fn new(dim: usize) -> Self {
+            Self {
+                dim,
+                calls: Mutex::new(Vec::new()),
+            }
+        }
+
+        fn call_count(&self) -> usize {
+            self.calls.lock().unwrap().len()
+        }
+
+        fn last_call(&self) -> Vec<String> {
+            self.calls.lock().unwrap().last().cloned().unwrap_or_default()
+        }
+    }
+
+    #[async_trait]
+    impl EmbeddingService for StubEmbedder {
+        async fn embed(&self, texts: &[String]) -> Result<Vec<Vec<f32>>> {
+            self.calls.lock().unwrap().push(texts.to_vec());
+            Ok(texts
+                .iter()
+                .map(|t| {
+                    let mut v = vec![0.0; self.dim];
+                    v[0] = t.len() as f32;
+                    v
+                })
+                .collect())
+        }
+
+        fn dimension(&self) -> usize {
+            self.dim
+        }
+    }
+
+    #[tokio::test]
+    async fn cache_hit_skips_upstream() {
+        let stub = Arc::new(StubEmbedder::new(4));
+        let cache = EmbeddingCache::new(stub.clone(), "test-model");
+
+        cache.embed(&["hello".into()]).await.unwrap();
+        assert_eq!(stub.call_count(), 1);
+
+        cache.embed(&["hello".into()]).await.unwrap();
+        assert_eq!(stub.call_count(), 1, "second hit should not call upstream");
+    }
+
+    #[tokio::test]
+    async fn cache_partitions_hit_miss_and_oversize() {
+        let stub = Arc::new(StubEmbedder::new(4));
+        let cache = EmbeddingCache::new(stub.clone(), "test-model");
+
+        // Warm "hello".
+        cache.embed(&["hello".into()]).await.unwrap();
+        assert_eq!(stub.last_call(), vec!["hello".to_string()]);
+
+        let oversize = "x".repeat(MAX_CACHEABLE_TEXT_BYTES + 1);
+        let r = cache
+            .embed(&["hello".into(), "world".into(), oversize.clone()])
+            .await
+            .unwrap();
+        assert_eq!(r.len(), 3);
+        // hello hits → upstream batch = [world, oversize]
+        assert_eq!(stub.call_count(), 2);
+        assert_eq!(stub.last_call(), vec!["world".to_string(), oversize.clone()]);
+
+        // Repeat: hello + world cached, oversize re-embedded.
+        cache
+            .embed(&["hello".into(), "world".into(), oversize.clone()])
+            .await
+            .unwrap();
+        assert_eq!(stub.call_count(), 3);
+        assert_eq!(stub.last_call(), vec![oversize]);
+    }
+
+    #[tokio::test]
+    async fn cache_key_normalizes_whitespace_and_unicode() {
+        let stub = Arc::new(StubEmbedder::new(4));
+        let cache = EmbeddingCache::new(stub.clone(), "test-model");
+
+        cache.embed(&["café".into()]).await.unwrap();
+        assert_eq!(stub.call_count(), 1);
+        // NFC normalize + trim: "  caf\u{0065}\u{0301}  " (NFD with combining
+        // accent) should match "café" (NFC).
+        cache
+            .embed(&["  caf\u{0065}\u{0301}  ".into()])
+            .await
+            .unwrap();
+        assert_eq!(stub.call_count(), 1, "NFC+trim should produce same key");
     }
 }
