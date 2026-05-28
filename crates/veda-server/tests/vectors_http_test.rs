@@ -283,7 +283,10 @@ async fn vectors_http_e2e_suite() {
     sub_vectors_api_rejects_fs(&state, &mysql, router.clone()).await;
 
     // Sub-test 4: fs API rejects db workspace (Stage 5.1, closes Stage 1.6).
-    sub_fs_api_rejects_db(&state, &mysql, router).await;
+    sub_fs_api_rejects_db(&state, &mysql, router.clone()).await;
+
+    // Sub-test 5: dataset list pagination cursor (task #5).
+    sub_dataset_pagination(&state, &mysql, router).await;
 }
 
 async fn sub_full_roundtrip(state: &Arc<AppState>, mysql: &MysqlStore, router: axum::Router) {
@@ -722,4 +725,104 @@ async fn sub_fs_api_rejects_db(
         .await;
     let _ = state.auth_store.hard_delete_workspace(&db_ws_id).await;
     cleanup_account_only(&mysql, &acct_id).await;
+}
+
+/// Task #5 — cursor pagination on `GET /v1/workspaces/{ws}/datasets`.
+/// Creates several extra datasets so the default page can be split,
+/// then walks the pages via `?limit=&after=` and verifies the full set
+/// is reachable exactly once across pages.
+async fn sub_dataset_pagination(
+    state: &Arc<AppState>,
+    mysql: &MysqlStore,
+    router: axum::Router,
+) {
+    let setup = provision_test_account(state).await;
+    let token = setup.token.clone();
+    let ws_id = setup.ws_id.clone();
+
+    let do_post = |uri: String, body: serde_json::Value| {
+        let req = Request::builder()
+            .method("POST")
+            .uri(uri)
+            .header("authorization", format!("Bearer {token}"))
+            .header("content-type", "application/json")
+            .body(Body::from(body.to_string()))
+            .unwrap();
+        router.clone().oneshot(req)
+    };
+    let do_get = |uri: String| {
+        let req = Request::builder()
+            .method("GET")
+            .uri(uri)
+            .header("authorization", format!("Bearer {token}"))
+            .body(Body::empty())
+            .unwrap();
+        router.clone().oneshot(req)
+    };
+
+    // Create 3 extra datasets — together with the bootstrapped `default`
+    // we have 4 total. Names are intentionally varied so id sort != name
+    // sort (proves the ordering claim is "id ASC").
+    for name in ["alpha", "delta", "gamma"] {
+        let resp = do_post(
+            format!("/v1/workspaces/{ws_id}/datasets"),
+            json!({ "name": name }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::CREATED,
+            "create dataset {name} failed",
+        );
+    }
+
+    // Walk pages with limit=2; expect 2+2 = 4 items total, has_more flips
+    // false on the second page.
+    let mut seen: Vec<String> = Vec::new();
+    let mut cursor: Option<String> = None;
+    for round in 0..5 {
+        assert!(round < 4, "pagination did not terminate after 4 rounds");
+        let uri = match &cursor {
+            Some(c) => format!("/v1/workspaces/{ws_id}/datasets?limit=2&after={c}"),
+            None => format!("/v1/workspaces/{ws_id}/datasets?limit=2"),
+        };
+        let resp = do_get(uri).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let v = body_json(resp.into_body()).await;
+        let items = v["data"]["items"].as_array().expect("items array");
+        for it in items {
+            seen.push(it["name"].as_str().unwrap().to_string());
+        }
+        let has_more = v["data"]["has_more"].as_bool().unwrap();
+        let next_cursor = v["data"]["next_cursor"].as_str().map(String::from);
+        if has_more {
+            assert!(
+                next_cursor.is_some(),
+                "has_more=true must come with next_cursor: {v:?}"
+            );
+            cursor = next_cursor;
+        } else {
+            assert!(
+                next_cursor.is_none(),
+                "has_more=false must omit next_cursor: {v:?}"
+            );
+            break;
+        }
+    }
+
+    let seen_set: std::collections::HashSet<_> = seen.iter().cloned().collect();
+    assert_eq!(
+        seen_set.len(),
+        seen.len(),
+        "duplicate dataset in pagination: {seen:?}"
+    );
+    for expected in ["default", "alpha", "delta", "gamma"] {
+        assert!(
+            seen_set.contains(expected),
+            "missing {expected} across pages: {seen_set:?}"
+        );
+    }
+
+    cleanup(state, mysql, &setup).await;
 }

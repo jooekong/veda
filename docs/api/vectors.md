@@ -137,11 +137,37 @@ Strict subset of Qdrant-style:
 | Method | Path | Purpose |
 |---|---|---|
 | POST | `/v1/workspaces` | Create workspace (`kind=db` for vector workspaces). For `kind=db` the server also bootstraps a `default` dataset and the Milvus collection. |
+| GET | `/v1/workspaces` | List active workspaces (paginated) |
 | POST | `/v1/workspaces/{ws}/datasets` | Create a new dataset in a db workspace |
-| GET | `/v1/workspaces/{ws}/datasets` | List active datasets |
+| GET | `/v1/workspaces/{ws}/datasets` | List active datasets (paginated) |
 | DELETE | `/v1/workspaces/{ws}/datasets/{name}` | Soft-delete (`status='archived'`). Cannot delete `default`. |
 | POST | `/admin/v1/tokens` | Mint a `vk_` token scoped to the caller's account |
 | POST | `/admin/v1/tokens/{id}/disable` | Revoke a token (ownership-checked) |
+
+### Pagination (GET list endpoints)
+
+Both `GET /v1/workspaces` and `GET /v1/workspaces/{ws}/datasets` support
+cursor pagination via query string:
+
+- `limit` — items per page; default 100, max 200 (silently clamped)
+- `after` — opaque cursor from the previous page's `next_cursor`
+
+Response shape:
+```json
+{
+  "success": true,
+  "data": {
+    "items": [...],
+    "has_more": true,
+    "next_cursor": "<opaque-id-to-pass-as-after-next-call>"
+  }
+}
+```
+
+`next_cursor` is omitted when `has_more` is `false`. Sort order is stable
+across requests but implementation-defined (currently row id ASC,
+UUID-lexicographic) — clients that need a specific sort should resort
+client-side after fetching all pages.
 
 ## Error responses
 

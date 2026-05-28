@@ -3,7 +3,7 @@ use std::sync::Arc;
 use argon2::password_hash::rand_core::OsRng;
 use argon2::password_hash::SaltString;
 use argon2::{Argon2, PasswordHash, PasswordHasher, PasswordVerifier};
-use axum::extract::{Path, State};
+use axum::extract::{Path, Query, State};
 use axum::routing::{delete, post};
 use axum::{Json, Router};
 use chrono::Utc;
@@ -12,8 +12,8 @@ use uuid::Uuid;
 use veda_core::checksum::sha256_hex;
 use veda_types::api::{
     AnonymousOnboardResponse, ClaimAccountRequest, ClaimAccountResponse, CreateAccountRequest,
-    CreateAccountResponse, CreateWorkspaceRequest, LoginRequest, LoginResponse,
-    WorkspaceTokenResponse,
+    CreateAccountResponse, CreateWorkspaceRequest, LoginRequest, LoginResponse, PaginatedResponse,
+    PaginationQuery, WorkspaceTokenResponse,
 };
 use veda_types::{
     Account, AccountStatus, ApiKeyRecord, ApiResponse, Dataset, DatasetStatus, KeyPermission,
@@ -388,12 +388,42 @@ async fn provision_db_workspace(state: &AppState, ws: &Workspace) -> Result<(), 
     Ok(())
 }
 
+/// Default page size when caller omits `?limit=`. 100 fits in a single
+/// TCP frame for typical workspace metadata and matches Pinecone / Stripe
+/// list defaults.
+const LIST_DEFAULT_LIMIT: u32 = 100;
+/// Hard cap on `?limit=`. Higher values are clamped down silently to
+/// protect the server from accidental DoS-by-paging. Server-side
+/// fetch_all of >200 rows on a single page also starts to push response
+/// sizes past axum's default tower-http body-limit.
+const LIST_MAX_LIMIT: u32 = 200;
+
+fn clamp_limit(q: &PaginationQuery) -> u32 {
+    q.limit
+        .unwrap_or(LIST_DEFAULT_LIMIT)
+        .clamp(1, LIST_MAX_LIMIT)
+}
+
 async fn list_workspaces(
     State(state): State<Arc<AppState>>,
     auth: AuthAccount,
-) -> Result<Json<ApiResponse<Vec<Workspace>>>, AppError> {
-    let list = state.auth_store.list_workspaces(&auth.account_id).await?;
-    Ok(Json(ApiResponse::ok(list)))
+    Query(q): Query<PaginationQuery>,
+) -> Result<Json<ApiResponse<PaginatedResponse<Workspace>>>, AppError> {
+    let limit = clamp_limit(&q);
+    let (items, has_more) = state
+        .auth_store
+        .list_workspaces(&auth.account_id, q.after.as_deref(), limit)
+        .await?;
+    let next_cursor = if has_more {
+        items.last().map(|w| w.id.clone())
+    } else {
+        None
+    };
+    Ok(Json(ApiResponse::ok(PaginatedResponse {
+        items,
+        has_more,
+        next_cursor,
+    })))
 }
 
 async fn delete_workspace(

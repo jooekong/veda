@@ -2281,16 +2281,43 @@ impl AuthStore for MysqlStore {
         row.map(|r| row_to_workspace(&r)).transpose()
     }
 
-    async fn list_workspaces(&self, account_id: &str) -> Result<Vec<Workspace>> {
-        let rows = sqlx::query(
-            r#"SELECT id, account_id, name, status, kind, app_id, created_at, updated_at
-               FROM veda_workspaces WHERE account_id = ? AND status = 'active' ORDER BY name"#,
-        )
-        .bind(account_id)
+    async fn list_workspaces(
+        &self,
+        account_id: &str,
+        after: Option<&str>,
+        limit: u32,
+    ) -> Result<(Vec<Workspace>, bool)> {
+        // Fetch limit+1 to detect has_more without a separate COUNT query.
+        let fetch_n = (limit as i64) + 1;
+        let rows = match after {
+            Some(cursor) => sqlx::query(
+                r#"SELECT id, account_id, name, status, kind, app_id, created_at, updated_at
+                   FROM veda_workspaces
+                   WHERE account_id = ? AND status = 'active' AND id > ?
+                   ORDER BY id LIMIT ?"#,
+            )
+            .bind(account_id)
+            .bind(cursor)
+            .bind(fetch_n),
+            None => sqlx::query(
+                r#"SELECT id, account_id, name, status, kind, app_id, created_at, updated_at
+                   FROM veda_workspaces
+                   WHERE account_id = ? AND status = 'active'
+                   ORDER BY id LIMIT ?"#,
+            )
+            .bind(account_id)
+            .bind(fetch_n),
+        }
         .fetch_all(&self.pool)
         .await
         .map_err(storage_err)?;
-        rows.iter().map(|r| row_to_workspace(r)).collect()
+        let has_more = rows.len() > limit as usize;
+        let items: Result<Vec<_>> = rows
+            .iter()
+            .take(limit as usize)
+            .map(row_to_workspace)
+            .collect();
+        Ok((items?, has_more))
     }
 
     async fn list_active_workspace_ids(&self) -> Result<Vec<String>> {
@@ -2351,18 +2378,39 @@ impl AuthStore for MysqlStore {
         }
     }
 
-    async fn list_active_datasets(&self, workspace_id: &str) -> Result<Vec<Dataset>> {
-        let rows = sqlx::query(
-            r#"SELECT id, workspace_id, name, status, created_at, updated_at
-               FROM veda_datasets
-               WHERE workspace_id = ? AND status = 'active'
-               ORDER BY created_at"#,
-        )
-        .bind(workspace_id)
+    async fn list_active_datasets(
+        &self,
+        workspace_id: &str,
+        after: Option<&str>,
+        limit: u32,
+    ) -> Result<(Vec<Dataset>, bool)> {
+        // Fetch limit+1 to detect has_more without a separate COUNT query.
+        let fetch_n = (limit as i64) + 1;
+        let rows = match after {
+            Some(cursor) => sqlx::query(
+                r#"SELECT id, workspace_id, name, status, created_at, updated_at
+                   FROM veda_datasets
+                   WHERE workspace_id = ? AND status = 'active' AND id > ?
+                   ORDER BY id LIMIT ?"#,
+            )
+            .bind(workspace_id)
+            .bind(cursor)
+            .bind(fetch_n),
+            None => sqlx::query(
+                r#"SELECT id, workspace_id, name, status, created_at, updated_at
+                   FROM veda_datasets
+                   WHERE workspace_id = ? AND status = 'active'
+                   ORDER BY id LIMIT ?"#,
+            )
+            .bind(workspace_id)
+            .bind(fetch_n),
+        }
         .fetch_all(&self.pool)
         .await
         .map_err(storage_err)?;
-        rows.iter().map(row_to_dataset).collect()
+        let has_more = rows.len() > limit as usize;
+        let items: Result<Vec<_>> = rows.iter().take(limit as usize).map(row_to_dataset).collect();
+        Ok((items?, has_more))
     }
 
     async fn get_active_dataset_by_name(

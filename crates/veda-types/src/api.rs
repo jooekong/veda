@@ -3,6 +3,31 @@ use serde::{Deserialize, Serialize};
 
 use crate::types::{CollectionType, DetailLevel, FieldDefinition, SearchMode};
 
+// ── Pagination ─────────────────────────────────────────
+
+/// Cursor-pagination query string for list endpoints. The cursor is the
+/// `id` of the last item returned in the previous page (opaque to the
+/// caller — internally just the row's UUID). `limit` is clamped by the
+/// handler (default 100, max 200).
+#[derive(Debug, Deserialize, Default)]
+pub struct PaginationQuery {
+    pub limit: Option<u32>,
+    pub after: Option<String>,
+}
+
+/// Envelope for paginated list responses. `next_cursor` is the id to pass
+/// as `after` for the next page; it's `None` when `has_more` is `false`.
+/// The list endpoints sort by row id (UUID, lexicographic) — order is
+/// stable across requests but not human-meaningful; clients that want a
+/// specific sort should resort client-side.
+#[derive(Debug, Serialize)]
+pub struct PaginatedResponse<T: Serialize> {
+    pub items: Vec<T>,
+    pub has_more: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next_cursor: Option<String>,
+}
+
 // ── Account ────────────────────────────────────────────
 
 #[derive(Debug, Deserialize)]

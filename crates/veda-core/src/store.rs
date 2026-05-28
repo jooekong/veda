@@ -538,7 +538,17 @@ pub trait AuthStore: Send + Sync {
     // workspace
     async fn create_workspace(&self, workspace: &Workspace) -> Result<()>;
     async fn get_workspace(&self, id: &str) -> Result<Option<Workspace>>;
-    async fn list_workspaces(&self, account_id: &str) -> Result<Vec<Workspace>>;
+    /// Cursor-paginated list of active workspaces for an account.
+    /// `after` = id of the last item from the previous page (None = first
+    /// page). Returns up to `limit` items plus a `has_more` flag —
+    /// implementation internally fetches `limit + 1` to detect overflow
+    /// and drops the extra. Sort order is `id ASC` (UUID lexicographic).
+    async fn list_workspaces(
+        &self,
+        account_id: &str,
+        after: Option<&str>,
+        limit: u32,
+    ) -> Result<(Vec<Workspace>, bool)>;
     /// Return the IDs of all active workspaces across all accounts.
     /// Used by the reconciler to iterate workspaces during drift detection.
     async fn list_active_workspace_ids(&self) -> Result<Vec<String>>;
@@ -550,7 +560,15 @@ pub trait AuthStore: Send + Sync {
 
     // dataset (db-kind workspace only)
     async fn create_dataset(&self, dataset: &Dataset) -> Result<()>;
-    async fn list_active_datasets(&self, workspace_id: &str) -> Result<Vec<Dataset>>;
+    /// Cursor-paginated list of active datasets within a workspace.
+    /// Same contract as `list_workspaces` — sort by `id ASC`, returns
+    /// `(items, has_more)` with `items.len() <= limit`.
+    async fn list_active_datasets(
+        &self,
+        workspace_id: &str,
+        after: Option<&str>,
+        limit: u32,
+    ) -> Result<(Vec<Dataset>, bool)>;
     async fn get_active_dataset_by_name(
         &self,
         workspace_id: &str,

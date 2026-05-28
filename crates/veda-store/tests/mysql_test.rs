@@ -562,18 +562,20 @@ async fn mysql_workspace_crud() {
     let got = store.get_workspace(&ws_id).await.unwrap().unwrap();
     assert_eq!(got.name, "my-project");
 
-    let list = store.list_workspaces(&acct_id).await.unwrap();
+    let (list, has_more) = store.list_workspaces(&acct_id, None, 100).await.unwrap();
     assert_eq!(list.len(), 1);
+    assert!(!has_more);
 
     store.delete_workspace(&ws_id).await.unwrap();
     let archived = store.get_workspace(&ws_id).await.unwrap().unwrap();
     assert_eq!(archived.status, WorkspaceStatus::Archived);
 
-    let list_after = store.list_workspaces(&acct_id).await.unwrap();
+    let (list_after, has_more) = store.list_workspaces(&acct_id, None, 100).await.unwrap();
     assert!(
         list_after.is_empty(),
         "archived workspace not in active list"
     );
+    assert!(!has_more);
 
     cleanup_account(&store, &acct_id).await;
 }
@@ -779,8 +781,9 @@ async fn mysql_workspace_kind_roundtrip() {
     assert_eq!(got_fs.kind, WorkspaceKind::Fs);
     assert_eq!(got_fs.app_id, None);
 
-    let list = store.list_workspaces(&acct_id).await.unwrap();
+    let (list, has_more) = store.list_workspaces(&acct_id, None, 100).await.unwrap();
     assert_eq!(list.len(), 2);
+    assert!(!has_more);
     let by_id: std::collections::HashMap<_, _> =
         list.iter().map(|w| (w.id.clone(), w)).collect();
     assert_eq!(by_id[&db_ws_id].kind, WorkspaceKind::Db);

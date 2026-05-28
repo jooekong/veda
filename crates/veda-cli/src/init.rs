@@ -63,6 +63,12 @@ pub fn apply_import_key(
 /// Used by `veda init --import-key vk_…` to short-circuit the
 /// duplicate-name 500 that POST /v1/workspaces produces when the
 /// server already has a default workspace for the imported account.
+///
+/// **First-page only**: scans the default GET /v1/workspaces page
+/// (server default limit = 100). Adequate for the single-user alpha
+/// assumption (Joe + ≤ a few workspaces). If multi-tenant operators
+/// land with >100 workspaces, walk all pages via `has_more` +
+/// `next_cursor` (see docs/api/vectors.md Pagination section).
 pub async fn find_workspace_id_by_name(
     client: &Client,
     api_key: &str,
@@ -72,7 +78,7 @@ pub async fn find_workspace_id_by_name(
         .list_workspaces(api_key)
         .await
         .context("list workspaces failed")?;
-    Ok(list["data"]
+    Ok(list["data"]["items"]
         .as_array()
         .into_iter()
         .flatten()
@@ -226,7 +232,7 @@ pub async fn run_init(
         .list_workspaces(&api_key)
         .await
         .context("could not list existing workspaces")?;
-    let existing = list["data"]
+    let existing = list["data"]["items"]
         .as_array()
         .into_iter()
         .flatten()
@@ -507,7 +513,7 @@ mod tests {
         let server = MockServer::start().await;
         Mock::given(method("GET"))
             .and(path("/v1/workspaces"))
-            .respond_with(ok(json!([
+            .respond_with(paginated(json!([
                 { "id": "ws-other", "name": "scratch" },
                 { "id": "ws-default", "name": "default" }
             ])))
@@ -526,7 +532,7 @@ mod tests {
         let server = MockServer::start().await;
         Mock::given(method("GET"))
             .and(path("/v1/workspaces"))
-            .respond_with(ok(json!([
+            .respond_with(paginated(json!([
                 { "id": "ws-other", "name": "scratch" }
             ])))
             .mount(&server)
@@ -546,7 +552,7 @@ mod tests {
         let server = MockServer::start().await;
         Mock::given(method("GET"))
             .and(path("/v1/workspaces"))
-            .respond_with(ok(json!([])))
+            .respond_with(paginated(json!([])))
             .mount(&server)
             .await;
         let client = Client::new(&server.uri());
@@ -607,6 +613,18 @@ mod tests {
         ResponseTemplate::new(200).set_body_json(json!({ "ok": true, "data": data }))
     }
 
+    /// Wrap `items` array as the paginated GET-list envelope shape the
+    /// real server emits: `{ data: { items, has_more: false } }`. Used
+    /// for `GET /v1/workspaces` mocks. `has_more` is always `false` in
+    /// these unit tests — pagination cursor behavior is covered by
+    /// `vectors_http_test::sub_dataset_pagination` end-to-end.
+    fn paginated(items: serde_json::Value) -> ResponseTemplate {
+        ResponseTemplate::new(200).set_body_json(json!({
+            "ok": true,
+            "data": { "items": items, "has_more": false }
+        }))
+    }
+
     fn params_create(server: &str) -> InitParams {
         InitParams {
             server_url: server.into(),
@@ -636,7 +654,7 @@ mod tests {
             .await;
         Mock::given(method("GET"))
             .and(path("/v1/workspaces"))
-            .respond_with(ok(json!([])))
+            .respond_with(paginated(json!([])))
             .expect(1)
             .mount(&server)
             .await;
@@ -693,7 +711,7 @@ mod tests {
             .await;
         Mock::given(method("GET"))
             .and(path("/v1/workspaces"))
-            .respond_with(ok(json!([
+            .respond_with(paginated(json!([
                 { "id": "ws-existing", "name": "default" }
             ])))
             .expect(1)
@@ -778,7 +796,7 @@ mod tests {
             .await;
         Mock::given(method("GET"))
             .and(path("/v1/workspaces"))
-            .respond_with(ok(json!([])))
+            .respond_with(paginated(json!([])))
             .mount(&server)
             .await;
         Mock::given(method("POST"))
@@ -875,7 +893,7 @@ mod tests {
             .await;
         Mock::given(method("GET"))
             .and(path("/v1/workspaces"))
-            .respond_with(ok(json!([
+            .respond_with(paginated(json!([
                 { "id": "ws-other-1", "name": "scratch" },
                 { "id": "ws-other-2", "name": "experiments" }
             ])))
@@ -1090,7 +1108,7 @@ mod tests {
             .await;
         Mock::given(method("GET"))
             .and(path("/v1/workspaces"))
-            .respond_with(ok(json!([])))
+            .respond_with(paginated(json!([])))
             .mount(&server)
             .await;
         Mock::given(method("POST"))
