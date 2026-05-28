@@ -325,7 +325,7 @@ async fn milvus_vector_data_plane_roundtrip() {
 
     // 2. Search using the first record's vector — top hit should be pk1.
     let hits = VectorWorkspaceStore::search_vectors(
-        &store, &ws_id, "default", &mk_vector(0.1), 2,
+        &store, &ws_id, "default", &mk_vector(0.1), 2, None,
     )
     .await
     .expect("search");
@@ -374,4 +374,198 @@ async fn milvus_vector_data_plane_roundtrip() {
         .drop_collection(&collection_name)
         .await
         .expect("drop");
+}
+
+/// Helper: upsert N synthetic records spread across the given dataset
+/// names. Used by filter / isolation / batch tests.
+async fn seed_records(
+    store: &MilvusStore,
+    ws_id: &str,
+    dim: u32,
+    by_dataset: &[(&str, Vec<(&str, serde_json::Value)>)],
+) {
+    let now_ms = chrono::Utc::now().timestamp_millis();
+    let mk_vector = |seed: f32| -> Vec<f32> {
+        (0..dim).map(|i| seed + (i as f32) * 0.001).collect()
+    };
+    let mut records = Vec::new();
+    for (dataset, rows) in by_dataset {
+        for (i, (rk, meta)) in rows.iter().enumerate() {
+            records.push(UpsertRecord {
+                pk: format!("{dataset}:{rk}"),
+                row_key: rk.to_string(),
+                dataset: dataset.to_string(),
+                category: "default".into(),
+                tags: vec![],
+                status: "active".into(),
+                text: format!("seed-{dataset}-{rk}"),
+                vector: mk_vector(0.1 + (i as f32) * 0.1),
+                meta: meta.clone(),
+                expire_at: None,
+                created_at: now_ms,
+                updated_at: now_ms,
+            });
+        }
+    }
+    VectorWorkspaceStore::upsert_records(store, ws_id, &records)
+        .await
+        .expect("seed upsert");
+    // Allow Milvus indexes a moment to catch up.
+    tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+}
+
+#[tokio::test]
+#[ignore]
+async fn milvus_search_with_filter_dsl_eq_and_range() {
+    // Validates that the Filter DSL → Milvus expr the parser generates
+    // (Stage 4.4) is actually accepted by Milvus 2.6.14 and filters as
+    // expected. Without this real-service check, unit tests can only
+    // prove string SHAPE, not that Milvus interprets `meta["x"]` syntax
+    // the way we expect.
+    let (url, token, db) = load_milvus();
+    let store = MilvusStore::new(&url, token, db);
+    let dim = load_embedding_dim();
+    let ws_id = Uuid::new_v4().to_string();
+    let collection_name = store.create_vector_collection(&ws_id, dim).await.unwrap();
+
+    seed_records(
+        &store,
+        &ws_id,
+        dim,
+        &[(
+            "default",
+            vec![
+                ("a", json!({"price": 50, "category": "shoes"})),
+                ("b", json!({"price": 150, "category": "shoes"})),
+                ("c", json!({"price": 80, "category": "electronics"})),
+            ],
+        )],
+    )
+    .await;
+
+    let query = (0..dim).map(|i| (i as f32) * 0.001).collect::<Vec<_>>();
+
+    // Range filter: price < 100 → expect a (50) + c (80), exclude b (150).
+    let hits = VectorWorkspaceStore::search_vectors(
+        &store,
+        &ws_id,
+        "default",
+        &query,
+        10,
+        Some(r#"meta["price"] < 100"#),
+    )
+    .await
+    .expect("search with range filter");
+    let row_keys: std::collections::HashSet<_> =
+        hits.iter().map(|h| h.row_key.clone()).collect();
+    assert!(row_keys.contains("a"), "expected a in {row_keys:?}");
+    assert!(row_keys.contains("c"), "expected c in {row_keys:?}");
+    assert!(!row_keys.contains("b"), "b should be excluded; got {row_keys:?}");
+
+    // Eq filter on string: category == "shoes" → a + b, not c.
+    let hits = VectorWorkspaceStore::search_vectors(
+        &store,
+        &ws_id,
+        "default",
+        &query,
+        10,
+        Some(r#"meta["category"] == "shoes""#),
+    )
+    .await
+    .expect("search with eq filter");
+    let row_keys: std::collections::HashSet<_> =
+        hits.iter().map(|h| h.row_key.clone()).collect();
+    assert!(row_keys.contains("a"));
+    assert!(row_keys.contains("b"));
+    assert!(!row_keys.contains("c"));
+
+    store.drop_collection(&collection_name).await.unwrap();
+}
+
+#[tokio::test]
+#[ignore]
+async fn milvus_search_with_in_or_expansion() {
+    // Filter DSL `in` operator is implemented as an OR-chain expansion
+    // (Codex Stage 4.4 design review — avoiding Milvus 2.6 JSON-path
+    // TermExpr ambiguity). Verify the generated expression filters
+    // as expected.
+    let (url, token, db) = load_milvus();
+    let store = MilvusStore::new(&url, token, db);
+    let dim = load_embedding_dim();
+    let ws_id = Uuid::new_v4().to_string();
+    let collection_name = store.create_vector_collection(&ws_id, dim).await.unwrap();
+
+    seed_records(
+        &store,
+        &ws_id,
+        dim,
+        &[(
+            "default",
+            vec![
+                ("a", json!({"brand": "nike"})),
+                ("b", json!({"brand": "adidas"})),
+                ("c", json!({"brand": "puma"})),
+            ],
+        )],
+    )
+    .await;
+
+    let query = (0..dim).map(|i| (i as f32) * 0.001).collect::<Vec<_>>();
+    let hits = VectorWorkspaceStore::search_vectors(
+        &store,
+        &ws_id,
+        "default",
+        &query,
+        10,
+        Some(r#"(meta["brand"] == "nike" || meta["brand"] == "adidas")"#),
+    )
+    .await
+    .expect("search with OR-chain");
+    let row_keys: std::collections::HashSet<_> =
+        hits.iter().map(|h| h.row_key.clone()).collect();
+    assert!(row_keys.contains("a"));
+    assert!(row_keys.contains("b"));
+    assert!(!row_keys.contains("c"), "c should be excluded");
+
+    store.drop_collection(&collection_name).await.unwrap();
+}
+
+#[tokio::test]
+#[ignore]
+async fn milvus_multi_dataset_isolation() {
+    // Validates that `dataset == "X"` in the base filter actually isolates
+    // datasets within the same workspace collection. Without this, a
+    // search against dataset "ds_a" could leak rows from "ds_b".
+    let (url, token, db) = load_milvus();
+    let store = MilvusStore::new(&url, token, db);
+    let dim = load_embedding_dim();
+    let ws_id = Uuid::new_v4().to_string();
+    let collection_name = store.create_vector_collection(&ws_id, dim).await.unwrap();
+
+    seed_records(
+        &store,
+        &ws_id,
+        dim,
+        &[
+            ("ds_a", vec![("rk1", json!({})), ("rk2", json!({}))]),
+            ("ds_b", vec![("rk3", json!({})), ("rk4", json!({}))]),
+        ],
+    )
+    .await;
+
+    let query = (0..dim).map(|i| (i as f32) * 0.001).collect::<Vec<_>>();
+    let hits = VectorWorkspaceStore::search_vectors(&store, &ws_id, "ds_a", &query, 10, None)
+        .await
+        .expect("search ds_a");
+    assert!(hits.iter().all(|h| h.dataset == "ds_a"),
+            "ds_a search returned cross-dataset hits: {:?}",
+            hits.iter().map(|h| &h.dataset).collect::<Vec<_>>());
+    let ds_a_keys: std::collections::HashSet<_> =
+        hits.iter().map(|h| h.row_key.clone()).collect();
+    assert!(ds_a_keys.contains("rk1"));
+    assert!(ds_a_keys.contains("rk2"));
+    assert!(!ds_a_keys.contains("rk3"));
+    assert!(!ds_a_keys.contains("rk4"));
+
+    store.drop_collection(&collection_name).await.unwrap();
 }

@@ -2215,6 +2215,19 @@ impl AuthStore for MysqlStore {
         row.map(|r| row_to_api_key(&r)).transpose()
     }
 
+    async fn get_api_key_by_id(&self, id: &str) -> Result<Option<ApiKeyRecord>> {
+        let row = sqlx::query(
+            r#"SELECT id, account_id, name, key_hash, status,
+                      app_id, allowed_workspaces, expires_at, created_at
+               FROM veda_api_keys WHERE id = ?"#,
+        )
+        .bind(id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(storage_err)?;
+        row.map(|r| row_to_api_key(&r)).transpose()
+    }
+
     async fn list_api_keys(&self, account_id: &str) -> Result<Vec<ApiKeyRecord>> {
         let rows = sqlx::query(
             r#"SELECT id, account_id, name, key_hash, status,

@@ -284,9 +284,22 @@ async fn search_vectors(
         VedaError::EmbeddingFailed("embedded 0 vectors for query".into())
     })?;
 
+    // Parse caller's Filter DSL (Stage 4.4) into a Milvus expr string.
+    // None → no extra filter; trait merges with base on its own.
+    let extra_filter = match req.filter.as_ref() {
+        Some(f) => crate::filter::to_milvus_expr(f)?,
+        None => None,
+    };
+
     let hits = state
         .vector_workspace_store
-        .search_vectors(&ws.id, &dataset_name, &query_vector, top_k)
+        .search_vectors(
+            &ws.id,
+            &dataset_name,
+            &query_vector,
+            top_k,
+            extra_filter.as_deref(),
+        )
         .await?;
     Ok(Json(ApiResponse::ok(VectorSearchResponse { hits })))
 }

@@ -233,6 +233,40 @@ pub struct VectorSearchRequest {
     pub dataset: Option<String>,
     pub query: String,
     pub top_k: Option<usize>,
+    pub filter: Option<VectorFilter>,
+}
+
+/// v0 Filter DSL — narrower than vss's Qdrant-style (no `should`/`must_not`,
+/// only meta top-level fields). All clauses are AND-combined and merged
+/// with the base filter (`dataset == "X" && status == "active"`).
+#[derive(Debug, Deserialize)]
+pub struct VectorFilter {
+    #[serde(default)]
+    pub must: Vec<FilterClause>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct FilterClause {
+    /// Must start with `meta.` and reference a single top-level JSON key
+    /// (no nesting). v0 platform fields (dataset/status/tags/…) cannot be
+    /// filtered through this DSL — search auto-applies the active+dataset
+    /// scope already.
+    pub field: String,
+    pub op: FilterOp,
+    /// `Eq` / range ops: scalar (number, string, bool).
+    /// `In`: array of scalars (server expands to `OR`-chain at parse time).
+    pub value: serde_json::Value,
+}
+
+#[derive(Debug, Deserialize, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum FilterOp {
+    Eq,
+    In,
+    Gt,
+    Gte,
+    Lt,
+    Lte,
 }
 
 #[derive(Debug, Deserialize)]
@@ -266,6 +300,27 @@ pub struct VectorQueryResponse {
 #[derive(Debug, Serialize)]
 pub struct VectorDeleteResponse {
     pub accepted_count: usize,
+}
+
+// ── Admin / Tokens ────────────────────────────────────
+
+#[derive(Debug, Deserialize)]
+pub struct CreateTokenRequest {
+    pub app_id: String,
+    pub name: String,
+    /// Restrict the token to a specific set of workspaces. `None` → token
+    /// can access any workspace under the caller's account.
+    pub allowed_workspaces: Option<Vec<String>>,
+    /// Optional expiry as epoch ms. `None` → never expires.
+    pub expires_at: Option<i64>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct CreateTokenResponse {
+    pub id: String,
+    /// Plaintext token — returned ONCE; never available again from the
+    /// server. Caller is responsible for storing securely.
+    pub token: String,
 }
 
 // ── SQL ────────────────────────────────────────────────

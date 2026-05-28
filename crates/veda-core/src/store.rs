@@ -528,6 +528,10 @@ pub trait AuthStore: Send + Sync {
     // api key
     async fn create_api_key(&self, key: &ApiKeyRecord) -> Result<()>;
     async fn get_api_key_by_hash(&self, key_hash: &str) -> Result<Option<ApiKeyRecord>>;
+    /// Look up an api key by its public id (NOT the hash). Used by the
+    /// admin disable endpoint to verify ownership before revoking — without
+    /// this, any account could revoke any token by id.
+    async fn get_api_key_by_id(&self, id: &str) -> Result<Option<ApiKeyRecord>>;
     async fn list_api_keys(&self, account_id: &str) -> Result<Vec<ApiKeyRecord>>;
     async fn revoke_api_key(&self, id: &str) -> Result<()>;
 
@@ -619,15 +623,18 @@ pub trait VectorWorkspaceStore: Send + Sync {
 
     /// Semantic ANN search within a single dataset of one workspace.
     /// The impl auto-appends `status == "active"` and `dataset == "<name>"`
-    /// to the Milvus filter (v0 has no cross-dataset search; Stage 4.4
-    /// Filter DSL will let callers override the active-only default).
-    /// Returns at most `top_k` hits ranked by COSINE similarity.
+    /// to the Milvus filter (v0 has no cross-dataset search; the
+    /// active-only default is *not* overridable by `extra_filter`).
+    /// `extra_filter` (when `Some`) is the caller's Filter DSL already
+    /// translated to a Milvus expression string; impl AND-merges it with
+    /// the base filter. Returns at most `top_k` hits ranked by COSINE.
     async fn search_vectors(
         &self,
         workspace_id: &str,
         dataset: &str,
         query_vector: &[f32],
         top_k: usize,
+        extra_filter: Option<&str>,
     ) -> Result<Vec<VectorSearchHit>>;
 
     /// Look up records by composite PK. Order is not preserved (Milvus may

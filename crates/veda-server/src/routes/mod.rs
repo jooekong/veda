@@ -1,4 +1,5 @@
 pub mod account;
+pub mod admin_tokens;
 pub mod collection;
 pub mod datasets;
 pub mod events;
@@ -33,6 +34,7 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/v1/ready", get(ready))
         .route("/v1/metrics", get(metrics_endpoint))
         .merge(account::routes())
+        .merge(admin_tokens::routes())
         .merge(datasets::routes())
         .merge(vectors::routes())
         .merge(fs::routes())

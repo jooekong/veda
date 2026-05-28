@@ -64,6 +64,8 @@
 
 **delete-by-pk filter 长度上限**（Codex Stage 4.3 review Q4）：500 个 PK × ~128 字节构造 `pk in [...]` filter 接近 65KB。Milvus 2.6 REST filter 字符串长度上限未确认。Stage 4.5 加一个 500-pk delete 测试，失败则下调 `MAX_PK_BATCH`。
 
+**Filter DSL E2E 真实 Milvus 验证**（Codex Stage 4.4 review Q8）：filter.rs 有 15 单测验证字符串生成，但**没有真实 Milvus 验证表达式被接受**。Stage 4.5 加 E2E：upsert 含 meta 字段的多行 → 用 eq / range / in (OR-expansion) 搜索 → 验证 Milvus 2.6.14 接受 `meta["x"]` 语法。如果某 op 被 Milvus 拒绝，parser 改输出形态或砍掉该 op。
+
 ## Stage 4.5 验证清单（review 流转中累积）
 
 集成测试时务必覆盖：

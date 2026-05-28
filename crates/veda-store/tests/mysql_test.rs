@@ -9,9 +9,9 @@ use veda_core::store::{AuthStore, CollectionMetaStore, MetadataStore, TaskQueue}
 use veda_store::MysqlStore;
 use veda_types::{
     Account, AccountStatus, ApiKeyRecord, CollectionSchema, CollectionStatus, CollectionType,
-    Dentry, FileChunk, FileRecord, FileSummary, KeyPermission, KeyStatus, OutboxEvent,
-    OutboxEventType, OutboxStatus, SourceType, StorageType, SummaryStatus, Workspace,
-    WorkspaceKey, WorkspaceKind, WorkspaceStatus,
+    Dataset, DatasetStatus, Dentry, FileChunk, FileRecord, FileSummary, KeyPermission, KeyStatus,
+    OutboxEvent, OutboxEventType, OutboxStatus, SourceType, StorageType, SummaryStatus,
+    Workspace, WorkspaceKey, WorkspaceKind, WorkspaceStatus,
 };
 
 #[derive(Debug, Deserialize)]
@@ -833,6 +833,94 @@ async fn mysql_workspace_kind_defaults_to_fs() {
     let got = store.get_workspace(&ws_id).await.unwrap().unwrap();
     assert_eq!(got.kind, WorkspaceKind::Fs);
     assert_eq!(got.app_id, None);
+
+    cleanup_account(&store, &acct_id).await;
+}
+
+#[tokio::test]
+#[ignore]
+async fn mysql_dataset_name_case_collation_and_canonical() {
+    // veda_datasets is created without explicit COLLATE — default
+    // utf8mb4_0900_ai_ci is case-insensitive. The handler's
+    // `resolve_db_target` returns the DB row's canonical `name` (not the
+    // caller's case) so Milvus rows + control plane stay aligned.
+    // Verify:
+    //   1. UNIQUE INDEX rejects "DEFAULT" insert when "default" exists
+    //   2. get_active_dataset_by_name("DEFAULT") returns the row with
+    //      its original "default" name (preserving canonical form)
+    let url = load_mysql_url();
+    let store = MysqlStore::new(&url).await.expect("connect");
+    store.migrate().await.expect("migrate");
+
+    let acct_id = Uuid::new_v4().to_string();
+    let now = Utc::now();
+    store
+        .create_account(&Account {
+            id: acct_id.clone(),
+            name: "case-test".into(),
+            email: Some(format!("{}@test.com", &acct_id[..8])),
+            password_hash: None,
+            status: AccountStatus::Active,
+            created_at: now,
+            updated_at: now,
+        })
+        .await
+        .unwrap();
+    let ws_id = Uuid::new_v4().to_string();
+    store
+        .create_workspace(&Workspace {
+            id: ws_id.clone(),
+            account_id: acct_id.clone(),
+            name: "case-ws".into(),
+            status: WorkspaceStatus::Active,
+            kind: WorkspaceKind::Db,
+            app_id: None,
+            created_at: now,
+            updated_at: now,
+        })
+        .await
+        .unwrap();
+
+    // 1. Insert "default", then attempt "DEFAULT" — UNIQUE should reject.
+    store
+        .create_dataset(&Dataset {
+            id: Uuid::new_v4().to_string(),
+            workspace_id: ws_id.clone(),
+            name: "default".into(),
+            status: DatasetStatus::Active,
+            created_at: now,
+            updated_at: now,
+        })
+        .await
+        .unwrap();
+    let err = store
+        .create_dataset(&Dataset {
+            id: Uuid::new_v4().to_string(),
+            workspace_id: ws_id.clone(),
+            name: "DEFAULT".into(),
+            status: DatasetStatus::Active,
+            created_at: now,
+            updated_at: now,
+        })
+        .await
+        .err();
+    assert!(
+        matches!(err, Some(veda_types::VedaError::AlreadyExists(_))),
+        "expected AlreadyExists, got {err:?}"
+    );
+
+    // 2. Canonical-name lookup — passing "DEFAULT" must return the
+    //    original "default" row, so handler's `ds.name` propagates the
+    //    canonical form forward to Milvus.
+    let got = store
+        .get_active_dataset_by_name(&ws_id, "DEFAULT")
+        .await
+        .unwrap()
+        .expect("found by case-insensitive match");
+    assert_eq!(
+        got.name, "default",
+        "canonical name should be 'default', not the caller's 'DEFAULT'"
+    );
 
     cleanup_account(&store, &acct_id).await;
 }

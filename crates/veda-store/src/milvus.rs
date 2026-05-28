@@ -680,9 +680,16 @@ impl MilvusStore {
         dataset: &str,
         query_vector: &[f32],
         top_k: usize,
+        extra_filter: Option<&str>,
     ) -> Result<Vec<VectorSearchHit>> {
         let name = vector_collection_name(workspace_id);
-        let filter = Self::build_dataset_active_filter(dataset);
+        let base = Self::build_dataset_active_filter(dataset);
+        // AND-merge the caller's parsed Filter DSL (Stage 4.4) with the base.
+        // None / empty extra → just base.
+        let filter = match extra_filter {
+            Some(s) if !s.is_empty() => format!("({base}) && ({s})"),
+            _ => base,
+        };
         let body = json!({
             "collectionName": &name,
             "data": [query_vector],
@@ -1236,9 +1243,17 @@ impl VectorWorkspaceStore for MilvusStore {
         dataset: &str,
         query_vector: &[f32],
         top_k: usize,
+        extra_filter: Option<&str>,
     ) -> Result<Vec<VectorSearchHit>> {
-        MilvusStore::search_vector_collection(self, workspace_id, dataset, query_vector, top_k)
-            .await
+        MilvusStore::search_vector_collection(
+            self,
+            workspace_id,
+            dataset,
+            query_vector,
+            top_k,
+            extra_filter,
+        )
+        .await
     }
 
     async fn query_vectors_by_pk(

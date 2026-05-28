@@ -4,6 +4,7 @@ use axum::Json;
 use tracing::error;
 use veda_types::{ApiResponse, VedaError};
 
+#[derive(Debug)]
 pub struct AppError(pub VedaError);
 
 impl IntoResponse for AppError {
