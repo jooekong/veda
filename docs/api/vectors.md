@@ -143,16 +143,35 @@ Strict subset of Qdrant-style:
 | POST | `/admin/v1/tokens` | Mint a `vk_` token scoped to the caller's account |
 | POST | `/admin/v1/tokens/{id}/disable` | Revoke a token (ownership-checked) |
 
-## Validation contract
+## Error responses
 
-Stable error codes (HTTP body `error` field):
-- `workspace_kind_mismatch` (400) — wrong API for the workspace's kind
-- `cannot delete the default dataset` (400)
-- `invalid input: <field>: <reason>` (400)
-- `not found: <resource>` (404)
-- `payload too large: <field>: <count> exceeds <limit>` (413)
-- `already exists: dataset <name>` (409)
-- `unauthorized` (401), `permission denied` (403)
+Every error response has shape:
+```json
+{
+  "success": false,
+  "error_code": "<STABLE_CODE>",
+  "error": "<human-readable message; wording may evolve, do not match on it>"
+}
+```
+
+**Always match on `error_code`, not `error`.** Codes are stable; messages
+are not.
+
+| `error_code` | HTTP | Meaning |
+|---|---:|---|
+| `INVALID_INPUT` | 400 | Generic validation failure (charset, length, missing field). `error` carries `<field>: <reason>` |
+| `WORKSPACE_KIND_MISMATCH` | 400 | Vector API called on an fs workspace, or fs API called on a db workspace |
+| `CANNOT_DELETE_DEFAULT_DATASET` | 400 | `DELETE /v1/workspaces/{ws}/datasets/default` is refused; the implicit-fallback dataset is reserved |
+| `INVALID_PATH` | 400 | Path-shaped input failed (fs-side only) |
+| `UNAUTHORIZED` | 401 | Missing / invalid bearer token |
+| `PERMISSION_DENIED` | 403 | Authenticated but the token's `allowed_workspaces` doesn't cover the target |
+| `NOT_FOUND` | 404 | Workspace / dataset / record / token doesn't exist |
+| `ALREADY_EXISTS` | 409 | Dataset name collision (case-insensitive per MySQL collation) |
+| `PRECONDITION_FAILED` | 412 | Conditional request lost the race (fs-side only) |
+| `PAYLOAD_TOO_LARGE` | 413 | Batch / field exceeds documented limit |
+| `QUOTA_EXCEEDED` | 429 | Vectors API does not return this currently; fs and SQL paths may (workspace storage cap / scan limit) |
+| `EMBEDDING_FAILED` | 500 | Server-side embedding upstream error |
+| `INTERNAL` | 500 | Catch-all for storage / deadlock / unexpected — opaque on purpose |
 
 Charset and size limits:
 - `dataset` / `id`: `[a-zA-Z0-9_-]+`, must not contain `:` (PK separator)

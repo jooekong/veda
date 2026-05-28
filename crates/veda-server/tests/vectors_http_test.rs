@@ -626,12 +626,10 @@ async fn sub_vectors_api_rejects_fs(
         "vectors API must reject fs workspace"
     );
     let v = body_json(resp.into_body()).await;
-    assert!(
-        v["error"]
-            .as_str()
-            .map(|s| s.contains("workspace_kind_mismatch"))
-            .unwrap_or(false),
-        "expected workspace_kind_mismatch in error body, got: {v:?}"
+    assert_eq!(
+        v["error_code"].as_str(),
+        Some("WORKSPACE_KIND_MISMATCH"),
+        "expected error_code=WORKSPACE_KIND_MISMATCH, got: {v:?}"
     );
 
     // Cleanup.
@@ -707,12 +705,10 @@ async fn sub_fs_api_rejects_db(
         resp.status()
     );
     let v = body_json(resp.into_body()).await;
-    assert!(
-        v["error"]
-            .as_str()
-            .map(|s| s.contains("workspace_kind_mismatch"))
-            .unwrap_or(false),
-        "expected workspace_kind_mismatch in error body, got: {v:?}"
+    assert_eq!(
+        v["error_code"].as_str(),
+        Some("WORKSPACE_KIND_MISMATCH"),
+        "expected error_code=WORKSPACE_KIND_MISMATCH, got: {v:?}"
     );
 
     // Cleanup.

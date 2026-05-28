@@ -114,6 +114,7 @@ async fn serve_overview(
 fn summary_pending_response(summary_enabled: bool) -> Response {
     if !summary_enabled {
         let body = Json(ApiResponse::<()>::err(
+            "FEATURE_DISABLED",
             "summary generation is disabled (server has no [llm] configured)",
         ));
         // RFC 7231 lets clients cache 501 by default. Force no-store so
@@ -124,7 +125,7 @@ fn summary_pending_response(summary_enabled: bool) -> Response {
             .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
         resp
     } else {
-        let body = Json(ApiResponse::<()>::err("summary pending"));
+        let body = Json(ApiResponse::<()>::err("PENDING", "summary pending"));
         let mut resp = (StatusCode::ACCEPTED, body).into_response();
         resp.headers_mut()
             .insert(header::RETRY_AFTER, HeaderValue::from_static("5"));

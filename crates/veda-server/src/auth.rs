@@ -184,10 +184,7 @@ impl AuthAccount {
             return Err(veda_types::VedaError::NotFound("workspace".into()).into());
         }
         if ws.kind != veda_types::WorkspaceKind::Db {
-            return Err(veda_types::VedaError::InvalidInput(
-                "workspace_kind_mismatch".into(),
-            )
-            .into());
+            return Err(veda_types::VedaError::WorkspaceKindMismatch.into());
         }
         self.check_workspace_allowed(&ws.id)?;
         Ok(ws)
@@ -278,7 +275,7 @@ impl FromRequestParts<Arc<AppState>> for AuthWorkspace {
 fn auth_err() -> Response {
     (
         StatusCode::UNAUTHORIZED,
-        Json(ApiResponse::<()>::err("unauthorized")),
+        Json(ApiResponse::<()>::err("UNAUTHORIZED", "unauthorized")),
     )
         .into_response()
 }
@@ -286,7 +283,7 @@ fn auth_err() -> Response {
 fn internal_err() -> Response {
     (
         StatusCode::INTERNAL_SERVER_ERROR,
-        Json(ApiResponse::<()>::err("internal server error")),
+        Json(ApiResponse::<()>::err("INTERNAL", "internal server error")),
     )
         .into_response()
 }
@@ -294,7 +291,10 @@ fn internal_err() -> Response {
 fn kind_mismatch_err() -> Response {
     (
         StatusCode::BAD_REQUEST,
-        Json(ApiResponse::<()>::err("workspace_kind_mismatch")),
+        Json(ApiResponse::<()>::err(
+            "WORKSPACE_KIND_MISMATCH",
+            "workspace kind does not match this API path",
+        )),
     )
         .into_response()
 }

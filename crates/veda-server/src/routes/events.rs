@@ -18,6 +18,14 @@ const POLL_INTERVAL: Duration = Duration::from_secs(1);
 const MAX_BACKOFF: Duration = Duration::from_secs(30);
 const BATCH_SIZE: usize = 100;
 
+// NB: `/v1/events` error responses (503 / 400 / 410) are deliberately NOT
+// wrapped in `ApiResponse { success, error_code, error }` — this endpoint
+// is a public SSE protocol with shape `{ "error": "...", current_min_id,
+// current_max_id }` that FUSE and CLI clients parse directly. Changing
+// the body shape here is a coordinated client release, not a server-side
+// refactor. Other endpoints use `ApiResponse::err(code, msg)` via
+// `AppError::into_response`.
+
 pub fn routes() -> Router<Arc<AppState>> {
     Router::new().route("/v1/events", get(sse_events))
 }

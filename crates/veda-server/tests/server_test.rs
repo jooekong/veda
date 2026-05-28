@@ -120,7 +120,7 @@ type S = Arc<St>;
 fn unauthorized() -> Response {
     (
         StatusCode::UNAUTHORIZED,
-        Json(veda_types::ApiResponse::<()>::err("unauthorized")),
+        Json(veda_types::ApiResponse::<()>::err("UNAUTHORIZED", "unauthorized")),
     )
         .into_response()
 }
@@ -128,54 +128,35 @@ fn unauthorized() -> Response {
 fn forbidden() -> Response {
     (
         StatusCode::FORBIDDEN,
-        Json(veda_types::ApiResponse::<()>::err("permission denied")),
+        Json(veda_types::ApiResponse::<()>::err(
+            "PERMISSION_DENIED",
+            "permission denied",
+        )),
     )
         .into_response()
 }
 
 fn veda_error_to_response(err: veda_types::VedaError) -> Response {
-    let (status, msg) = match err {
-        veda_types::VedaError::NotFound(p) => (StatusCode::NOT_FOUND, format!("not found: {p}")),
-        veda_types::VedaError::AlreadyExists(p) => {
-            (StatusCode::CONFLICT, format!("already exists: {p}"))
+    let status = match &err {
+        veda_types::VedaError::NotFound(_) => StatusCode::NOT_FOUND,
+        veda_types::VedaError::AlreadyExists(_) => StatusCode::CONFLICT,
+        veda_types::VedaError::Unauthorized(_) => StatusCode::UNAUTHORIZED,
+        veda_types::VedaError::PermissionDenied => StatusCode::FORBIDDEN,
+        veda_types::VedaError::WorkspaceKindMismatch
+        | veda_types::VedaError::CannotDeleteDefaultDataset => StatusCode::BAD_REQUEST,
+        veda_types::VedaError::InvalidPath(_) | veda_types::VedaError::InvalidInput(_) => {
+            StatusCode::BAD_REQUEST
         }
-        veda_types::VedaError::Unauthorized(m) => {
-            (StatusCode::UNAUTHORIZED, format!("unauthorized: {m}"))
-        }
-        veda_types::VedaError::PermissionDenied => {
-            (StatusCode::FORBIDDEN, "permission denied".to_string())
-        }
-        veda_types::VedaError::InvalidPath(p) => {
-            (StatusCode::BAD_REQUEST, format!("invalid path: {p}"))
-        }
-        veda_types::VedaError::InvalidInput(p) => {
-            (StatusCode::BAD_REQUEST, format!("invalid input: {p}"))
-        }
-        veda_types::VedaError::QuotaExceeded(p) => (
-            StatusCode::TOO_MANY_REQUESTS,
-            format!("quota exceeded: {p}"),
-        ),
-        veda_types::VedaError::PayloadTooLarge(p) => (
-            StatusCode::PAYLOAD_TOO_LARGE,
-            format!("payload too large: {p}"),
-        ),
-        veda_types::VedaError::PreconditionFailed(p) => (
-            StatusCode::PRECONDITION_FAILED,
-            format!("precondition failed: {p}"),
-        ),
-        veda_types::VedaError::Storage(_) | veda_types::VedaError::Internal(_) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "internal server error".to_string(),
-        ),
-        veda_types::VedaError::Deadlock(p) => {
-            (StatusCode::INTERNAL_SERVER_ERROR, format!("deadlock: {p}"))
-        }
-        veda_types::VedaError::EmbeddingFailed(p) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("embedding failed: {p}"),
-        ),
+        veda_types::VedaError::QuotaExceeded(_) => StatusCode::TOO_MANY_REQUESTS,
+        veda_types::VedaError::PayloadTooLarge(_) => StatusCode::PAYLOAD_TOO_LARGE,
+        veda_types::VedaError::PreconditionFailed(_) => StatusCode::PRECONDITION_FAILED,
+        _ => StatusCode::INTERNAL_SERVER_ERROR,
     };
-    (status, Json(veda_types::ApiResponse::<()>::err(msg))).into_response()
+    (
+        status,
+        Json(veda_types::ApiResponse::<()>::from_veda_error(&err)),
+    )
+        .into_response()
 }
 
 async fn h_create_account(

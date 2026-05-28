@@ -99,13 +99,31 @@ fn api_response_ok() {
 
 #[test]
 fn api_response_err() {
-    let resp = ApiResponse::<()>::err("bad request");
+    let resp = ApiResponse::<()>::err("INVALID_INPUT", "bad request");
     assert!(!resp.success);
     assert!(resp.data.is_none());
+    assert_eq!(resp.error_code, Some("INVALID_INPUT"));
     assert_eq!(resp.error.as_deref(), Some("bad request"));
 
     let json = serde_json::to_string(&resp).unwrap();
     assert!(!json.contains("\"data\""));
+    assert!(json.contains("\"error_code\":\"INVALID_INPUT\""));
+}
+
+#[test]
+fn api_response_from_veda_error() {
+    use veda_types::VedaError;
+    let resp = ApiResponse::<()>::from_veda_error(&VedaError::NotFound("dataset foo".into()));
+    assert_eq!(resp.error_code, Some("NOT_FOUND"));
+    assert_eq!(resp.error.as_deref(), Some("not found: dataset foo"));
+
+    let resp = ApiResponse::<()>::from_veda_error(&VedaError::WorkspaceKindMismatch);
+    assert_eq!(resp.error_code, Some("WORKSPACE_KIND_MISMATCH"));
+
+    // Storage / Deadlock / Internal collapse to INTERNAL on the wire —
+    // never leak backend specifics.
+    let resp = ApiResponse::<()>::from_veda_error(&VedaError::Storage("mysql 1234".into()));
+    assert_eq!(resp.error_code, Some("INTERNAL"));
 }
 
 #[test]

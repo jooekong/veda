@@ -79,7 +79,7 @@ async fn delete_dataset(
     // that omit the `dataset` field. Deleting it would break every such
     // caller silently — refuse.
     if name == validate::DEFAULT_DATASET {
-        return Err(VedaError::InvalidInput("cannot delete the default dataset".into()).into());
+        return Err(VedaError::CannotDeleteDefaultDataset.into());
     }
     validate::validate_dataset_name(&name)?;
 
