@@ -373,7 +373,7 @@ async fn sub_full_roundtrip(state: &Arc<AppState>, mysql: &MysqlStore, router: a
     .unwrap();
     assert_eq!(resp.status(), StatusCode::OK, "delete status");
     let v = body_json(resp.into_body()).await;
-    assert_eq!(v["data"]["accepted_count"], 2);
+    assert_eq!(v["data"]["delete_count"], 2);
 
     tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
 

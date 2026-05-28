@@ -758,11 +758,35 @@ impl MilvusStore {
             "collectionName": &name,
             "filter": filter,
         });
-        self.post("/v2/vectordb/entities/delete", body).await?;
-        // Milvus REST DELETE response doesn't surface deletedCount reliably
-        // — return the number of PKs we sent. The handler exposes this as
-        // `accepted_count` to avoid lying about real deletion semantics.
-        Ok(pks.len())
+        let resp = self.post("/v2/vectordb/entities/delete", body).await?;
+        // Milvus 2.6 REST returns `data.deleteCount` — the number of delete
+        // markers the engine created for the filter. For our `pk in [...]`
+        // filter this equals `pks.len()` regardless of whether each pk
+        // physically existed (Milvus creates a tombstone per matched PK
+        // expression term). Documented in docs/api/vectors.md so callers
+        // don't mistake it for "rows that existed and were removed".
+        //
+        // Fall back to `pks.len()` if the field is missing (defensive
+        // against future REST gateway shape changes; current 2.6.14
+        // always returns it — verified by sub_full_roundtrip).
+        let count = match resp
+            .get("data")
+            .and_then(|d| d.get("deleteCount"))
+            .and_then(|n| n.as_u64())
+        {
+            Some(n) => n as usize,
+            None => {
+                // Should not happen on Milvus 2.6.14 — log so a future
+                // REST gateway shape change surfaces in ops dashboards
+                // instead of silently degrading the published contract.
+                warn!(
+                    response = %resp,
+                    "Milvus delete response missing data.deleteCount; falling back to submitted count"
+                );
+                pks.len()
+            }
+        };
+        Ok(count)
     }
 
     fn summary_rows_to_hits(rows: &[Value], limit: usize) -> Vec<SearchHit> {

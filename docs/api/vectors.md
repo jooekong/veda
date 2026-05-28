@@ -110,14 +110,20 @@ Direct lookup by `id`. Order not preserved; missing ids silently absent
 
 ### POST `/v1/vectors/delete`
 
-Hard-deletes by `id`. Returns Milvus's `accepted_count` — the number of
-delete markers the engine created (for an `id in [...]` filter this equals
-`len(ids)`; per Milvus 2.6 REST `data.deleteCount` semantics). Max 500
-per call.
+Hard-deletes by `id`. Returns `delete_count` — Milvus's number of delete
+markers created (mirrored from REST `data.deleteCount`). For our `id in
+[...]` filter this always equals `len(ids)` regardless of which ids
+physically existed; it is **not** "rows that existed and were removed".
+Use `query` first if you need to distinguish. Max 500 per call.
 
 ```json
 {"workspace_id": "...", "dataset": "products",
  "ids": ["sku-1", "sku-2"]}
+```
+
+Response:
+```json
+{"success": true, "data": {"delete_count": 2}}
 ```
 
 ## Filter DSL (v0)

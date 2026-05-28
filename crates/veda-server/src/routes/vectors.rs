@@ -351,13 +351,11 @@ async fn delete_vectors(
     )
     .await?;
     let pks = build_pks(&dataset_name, &req.ids)?;
-    let accepted_count = state
+    let delete_count = state
         .vector_workspace_store
         .delete_vectors_by_pk(&ws.id, &pks)
         .await?;
-    Ok(Json(ApiResponse::ok(VectorDeleteResponse {
-        accepted_count,
-    })))
+    Ok(Json(ApiResponse::ok(VectorDeleteResponse { delete_count })))
 }
 
 fn build_pks(dataset: &str, ids: &[String]) -> Result<Vec<String>, AppError> {

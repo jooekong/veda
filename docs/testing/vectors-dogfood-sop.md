@@ -122,7 +122,7 @@ VEDA_URL="$VEDA_URL" \
 upsert: {'inserted': [...], 'commit_ts': ...}
   hit: sku-1 score=... meta={'price': 1299}
 query hits: ['sku-1', 'sku-2']
-delete: {'accepted_count': 2}
+delete: {'delete_count': 2}
 ```
 
 烟测过了就进入分项验证。

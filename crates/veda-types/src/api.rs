@@ -316,13 +316,15 @@ pub struct VectorQueryResponse {
     pub hits: Vec<crate::VectorRecordHit>,
 }
 
-/// Milvus REST `/entities/delete` does not surface the real deleted count;
-/// `accepted_count` is the number of pks the server submitted to Milvus,
-/// not the number Milvus actually matched. Deviates from vss design's
-/// `deleted_count` deliberately — see docs/vectors-merge-backlog.md.
+/// Number of delete markers Milvus 2.6 created for the request, mirrored
+/// from REST `data.deleteCount`. v0 delete contract is "by id list", so
+/// this **always equals `len(req.ids)`** regardless of physical
+/// existence — Milvus's tombstone model creates one marker per id
+/// expression term, not per row that previously existed. Callers who
+/// need "rows that existed and were removed" must `query` first.
 #[derive(Debug, Serialize)]
 pub struct VectorDeleteResponse {
-    pub accepted_count: usize,
+    pub delete_count: usize,
 }
 
 // ── Admin / Tokens ────────────────────────────────────
