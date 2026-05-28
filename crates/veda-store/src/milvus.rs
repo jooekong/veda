@@ -388,7 +388,7 @@ impl MilvusStore {
 
     /// Create a Pinecone-style vector collection for a db-kind workspace.
     /// Schema follows docs/vectors-merge-plan.md §2.2:
-    ///   - composite PK `{dataset}:{row_key}` (Milvus PK enforces upsert dedup)
+    ///   - composite PK `{dataset}:{id}` (Milvus PK enforces upsert dedup)
     ///   - 3-tier classification: dataset / category / tags (all default-friendly)
     ///   - row-level status, created_at/updated_at, optional expire_at
     ///   - hybrid: dense `vector` + BM25 `sparse_vector`
@@ -396,7 +396,7 @@ impl MilvusStore {
     ///
     /// Indexes v0: vector AUTOINDEX COSINE, sparse_vector SPARSE_INVERTED_INDEX BM25,
     /// scalar INVERTED on dataset/category/tags/status/created_at.
-    /// row_key/updated_at/expire_at are schema-only (no index v0, defer to v1).
+    /// id/updated_at/expire_at are schema-only (no index v0, defer to v1).
     ///
     /// PK immutable contract: workspace rename is safe (collection name is hashed
     /// from workspace.id), but dataset rename requires data migration.
@@ -414,7 +414,7 @@ impl MilvusStore {
                 "fields": [
                     { "fieldName": "pk", "dataType": "VarChar", "isPrimary": true,
                       "elementTypeParams": { "max_length": 128 } },
-                    { "fieldName": "row_key", "dataType": "VarChar",
+                    { "fieldName": "id", "dataType": "VarChar",
                       "elementTypeParams": { "max_length": 128 } },
                     { "fieldName": "dataset", "dataType": "VarChar",
                       "elementTypeParams": { "max_length": 64 } },
@@ -542,18 +542,19 @@ impl MilvusStore {
 
     /// Output fields returned for every search/query hit on db-workspace
     /// collections. `vector` and `sparse_vector` are intentionally absent
-    /// (no client needs raw embeddings back from the server).
+    /// (no client needs raw embeddings back from the server). `pk` /
+    /// `status` / `expire_at` are columns in the Milvus schema but
+    /// deliberately not surfaced via the API (composite pk is internal;
+    /// status pins to "active" via the base filter; expire_at is schema-
+    /// only until v1 ships TTL).
     fn vector_output_fields() -> Vec<&'static str> {
         vec![
-            "pk",
-            "row_key",
+            "id",
             "dataset",
             "category",
             "tags",
-            "status",
             "text",
             "meta",
-            "expire_at",
             "created_at",
             "updated_at",
         ]
@@ -592,23 +593,23 @@ impl MilvusStore {
         let data: Vec<Value> = records
             .iter()
             .map(|r| {
-                let mut row = json!({
+                // status is hardcoded "active" because v0 doesn't surface
+                // status as a public API field; the base search filter
+                // pins to active anyway. expire_at is omitted (v0 has no
+                // TTL feature; column stays nullable in Milvus schema).
+                json!({
                     "pk": r.pk,
-                    "row_key": r.row_key,
+                    "id": r.id,
                     "dataset": r.dataset,
                     "category": r.category,
                     "tags": r.tags,
-                    "status": r.status,
+                    "status": "active",
                     "created_at": r.created_at,
                     "updated_at": r.updated_at,
                     "text": r.text,
                     "vector": r.vector,
                     "meta": r.meta,
-                });
-                if let Some(exp) = r.expire_at {
-                    row["expire_at"] = json!(exp);
-                }
-                row
+                })
             })
             .collect();
         let body = json!({ "collectionName": &name, "data": data });
@@ -619,13 +620,13 @@ impl MilvusStore {
     /// Map one Milvus row (from search/get response `data`) to a record hit
     /// without score. Caller of search adds the distance separately.
     ///
-    /// Required fields (pk/row_key/dataset/category/status/text/created_at/
-    /// updated_at) are extracted with explicit error — `outputFields` already
-    /// asked Milvus for these, so a missing field signals schema drift or a
-    /// REST contract change, not normal data. Silently returning empty
-    /// strings (the v1 of this code) hid those bugs as "successful" hits
-    /// with all blank fields. Optional fields (tags, meta, expire_at) keep
-    /// their default-on-missing behavior — those are nullable by design.
+    /// Required fields (id/dataset/category/text/created_at/updated_at) are
+    /// extracted with explicit error — `outputFields` already asked Milvus
+    /// for these, so a missing field signals schema drift or a REST
+    /// contract change, not normal data. Silently returning empty strings
+    /// (the v1 of this code) hid those bugs as "successful" hits with all
+    /// blank fields. Optional fields (tags, meta) keep their default-on-
+    /// missing behavior — those are nullable by design.
     fn row_to_vector_record_hit(row: &Value) -> Result<VectorRecordHit> {
         let s = |k: &str| -> Result<String> {
             row.get(k)
@@ -662,17 +663,13 @@ impl MilvusStore {
             .and_then(|v| v.as_str())
             .and_then(|s| serde_json::from_str::<Value>(s).ok())
             .unwrap_or_else(|| json!({}));
-        let expire_at = row.get("expire_at").and_then(|v| v.as_i64());
         Ok(VectorRecordHit {
-            pk: s("pk")?,
-            row_key: s("row_key")?,
+            id: s("id")?,
             dataset: s("dataset")?,
             category: s("category")?,
             tags,
-            status: s("status")?,
             text: s("text")?,
             meta,
-            expire_at,
             created_at: i("created_at")?,
             updated_at: i("updated_at")?,
         })
@@ -714,15 +711,12 @@ impl MilvusStore {
                     .map(|d| d as f32)
                     .unwrap_or(0.0);
                 Ok(VectorSearchHit {
-                    pk: base.pk,
-                    row_key: base.row_key,
+                    id: base.id,
                     dataset: base.dataset,
                     category: base.category,
                     tags: base.tags,
-                    status: base.status,
                     text: base.text,
                     meta: base.meta,
-                    expire_at: base.expire_at,
                     created_at: base.created_at,
                     updated_at: base.updated_at,
                     score,

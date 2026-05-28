@@ -117,11 +117,12 @@ coll_<uuid>                          # 现有, structured collections, 不变
 字段:
   # 主键 - composite,Milvus PK 强制 upsert dedup
   pk            VARCHAR(128)         PRIMARY KEY
-                                     # 格式: "{dataset}:{row_key}"
+                                     # 格式: "{dataset}:{id}"
                                      # workspace 由 collection 隐含,不入 PK
+                                     # API 不暴露 pk,业务方只见 id
 
   # 用户 record 标识 - 反向冗余,读侧人类可读
-  row_key       VARCHAR(128)         无索引 v0
+  id            VARCHAR(128)         无索引 v0
                                      # 业务方传 → 用;不传 → 服务端生成 UUID
 
   # 3 层分类 - 全部支持默认值
@@ -154,11 +155,12 @@ Collection 配置:
 ```
 
 **索引 v0**（7 个）：vector / sparse_vector / dataset / category / tags / status / created_at
-**推后 v1**：row_key / updated_at / expire_at（中低频，按需补建即可，不要重建 collection）
+**推后 v1**：id / updated_at / expire_at（中低频，按需补建即可，不要重建 collection）
+**API 不暴露**：`pk`（内部 composite）、`status`（pin 到 "active"）、`expire_at`（v0 不实施 TTL）—— 这些是 schema 列但不出现在 request/response
 
 ### 2.3 字段约束（app 层校验，per vss §4.3）
 
-- `dataset` / `row_key`：必须匹配 `[a-zA-Z0-9_-]+`，禁止含 `:`（PK 分隔符）
+- `dataset` / `id`：必须匹配 `[a-zA-Z0-9_-]+`，禁止含 `:`（PK 分隔符）
 - `text`：必填，≤ 65535 bytes UTF-8 (Milvus VARCHAR 硬上限，~22k 中文字)
 - `meta`：≤ 16KB
 - `tags`：≤ 8 个，单个 ≤ 128 字节
@@ -170,11 +172,9 @@ Collection 配置:
 | 字段 | 默认 | 业务方使用场景 |
 |---|---|---|
 | `dataset` | `"default"` | 不填 → 写到默认 dataset；workspace 建时 bootstrap 一个 `veda_datasets(name="default")` |
-| `row_key` | 服务端生成 UUID | 不填 → insert 语义（无 dedup）；要 upsert 必须传 |
+| `id` | 服务端生成 UUID | 不填 → insert 语义（无 dedup，retry 会重复）；要 upsert 必须传 |
 | `category` | `"default"` | 中粒度分类，不填即"default"分类 |
 | `tags` | `[]` | 多值细标签 |
-| `status` | `"active"` | 行级状态，业务方可显式设 inactive 等 |
-| `expire_at` | NULL | 业务方传 epoch ms；search 默认不自动过滤过期，业务方按需加 filter |
 | `created_at` / `updated_at` | 服务端 upsert 时 `Utc::now()` ms | **PK 重写时同样覆盖**（Pinecone-style：upsert = full replace）。如需"首写时间"语义，业务方自己塞 `meta.first_seen_at` |
 | `meta` | `{}` | 业务自由字段 |
 
@@ -183,7 +183,7 @@ Collection 配置:
 - `workspace.id` (UUID) 不可变 → collection 名稳定
 - `workspace.name` 可改 → 不影响 collection
 - `dataset.name` rename = **数据迁移**（pk 和 dataset 字段烘焙了 name），v0 拒绝
-- `row_key` rename = pk rename = 数据迁移（删旧 + 写新）
+- `id` rename = pk rename = 数据迁移（删旧 + 写新）
 
 ### 2.6 创建时序
 

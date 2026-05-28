@@ -66,7 +66,7 @@ veda-fuse       FUSE 挂载                           (已实现)
 
 **三类数据集合在 fs workspace 下并存**：dentry/files、structured collections、L0/L1 summaries。**db workspace 只承载** Pinecone-style 裸向量记录，不允许建 file 或 structured collection。
 
-Vector dataset 是 db workspace 内的逻辑分组（pk = `{dataset}:{row_key}`，全 collection 共享 PK 空间）。每个 db workspace 创建时自动 bootstrap 一个 `default` dataset，业务方可不指定 dataset 直接 upsert。
+Vector dataset 是 db workspace 内的逻辑分组（内部物理 pk = `{dataset}:{id}`，全 collection 共享 PK 空间；API 只暴露 `id`，pk 不出 wire）。每个 db workspace 创建时自动 bootstrap 一个 `default` dataset，业务方可不指定 dataset 直接 upsert。
 
 完整设计：`docs/vectors-merge-plan.md`；未修待办：`docs/vectors-merge-backlog.md`。
 

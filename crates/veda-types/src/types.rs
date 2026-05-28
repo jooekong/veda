@@ -177,21 +177,20 @@ pub struct Dataset {
 
 /// Fully-resolved record ready for Milvus upsert. Handler builds this from
 /// the user-facing `NewRecord` after filling defaults, computing pk via
-/// `validate::build_pk(dataset, row_key)`, and embedding `text`.
+/// `validate::build_pk(dataset, id)`, and embedding `text`.
 /// `sparse_vector` is intentionally absent — Milvus's BM25 function
-/// computes it from `text` on insert.
+/// computes it from `text` on insert. `status` is hardcoded `"active"`
+/// on write inside `milvus.rs` (v0 has no soft-delete via API status).
 #[derive(Debug, Clone)]
 pub struct UpsertRecord {
     pub pk: String,
-    pub row_key: String,
+    pub id: String,
     pub dataset: String,
     pub category: String,
     pub tags: Vec<String>,
-    pub status: String,
     pub text: String,
     pub vector: Vec<f32>,
     pub meta: serde_json::Value,
-    pub expire_at: Option<i64>,
     pub created_at: i64,
     pub updated_at: i64,
 }
@@ -202,35 +201,27 @@ pub struct UpsertRecord {
 /// contract clean rather than serialize `score: null`).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VectorSearchHit {
-    pub pk: String,
-    pub row_key: String,
+    pub id: String,
     pub dataset: String,
     pub category: String,
     pub tags: Vec<String>,
-    pub status: String,
     pub text: String,
     pub meta: serde_json::Value,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub expire_at: Option<i64>,
     pub created_at: i64,
     pub updated_at: i64,
     pub score: f32,
 }
 
-/// Hit returned from `/v1/vectors/query` (by composite pk). No score — this
-/// is a direct lookup, not a ranked match.
+/// Hit returned from `/v1/vectors/query` (by id). No score — this is a
+/// direct lookup, not a ranked match.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VectorRecordHit {
-    pub pk: String,
-    pub row_key: String,
+    pub id: String,
     pub dataset: String,
     pub category: String,
     pub tags: Vec<String>,
-    pub status: String,
     pub text: String,
     pub meta: serde_json::Value,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub expire_at: Option<i64>,
     pub created_at: i64,
     pub updated_at: i64,
 }

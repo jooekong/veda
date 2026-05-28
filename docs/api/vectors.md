@@ -12,10 +12,11 @@ tracked in [`docs/vectors-merge-backlog.md`](../vectors-merge-backlog.md).
 - **Dataset**: logical grouping within a workspace (`"products"`, `"faq"`,
   etc.). Shares the workspace's collection; rows are separated by a scalar
   `dataset` field. Every db workspace ships with a `default` dataset.
-- **Record**: one row. Has a composite `pk = "{dataset}:{row_key}"`, a
-  `text` (required, indexed for BM25), an optional dense `vector` (server
-  computes from `text`), a JSON `meta`, plus optional `category` / `tags` /
-  `status` / `expire_at`.
+- **Record**: one row. Has a unique `id` (within its dataset), a `text`
+  (required, indexed for BM25), an optional dense `vector` (server computes
+  from `text`), a JSON `meta`, plus optional `category` / `tags`. Server
+  composes a physical `{dataset}:{id}` primary key internally — the wire
+  contract never exposes it.
 
 ## Auth
 
@@ -31,26 +32,25 @@ the bearer can touch. Issue tokens via `POST /admin/v1/tokens`.
 | Field | Default | Notes |
 |---|---|---|
 | `dataset` (body top-level) | `"default"` | The bootstrapped dataset |
-| `row_key` | server UUID | Means insert-only; supply your own for upsert dedup |
+| `id` | server UUID | Insert-only when omitted (each retry creates a new record). **Retry-prone callers must supply their own `id`** to get upsert (insert-or-replace by id) semantics |
 | `category` | `"default"` | Mid-level taxonomy |
 | `tags` | `[]` | Multi-value labels |
-| `status` | `"active"` | Search auto-filters `status=="active"` |
 | `meta` | `{}` | Free-form JSON, ≤16KB |
-| `expire_at` | `null` | Epoch ms; v0 doesn't auto-cleanup |
-| `created_at` / `updated_at` | server-now | Both reset on every upsert (Pinecone-style; PK upsert is a full replace) |
+| `created_at` / `updated_at` | server-now | Both reset on every upsert (Pinecone-style; same `(workspace, dataset, id)` collision = full replace) |
 
 ## Endpoints
 
 ### POST `/v1/vectors/upsert`
 
-Inserts or replaces records. Max 500 per call. PK-collision = full replace.
+Inserts or replaces records by `(dataset, id)`. Max 500 records per call.
+Same-batch duplicate `id` → last entry wins (Milvus PK upsert semantics).
 
 ```json
 {
   "workspace_id": "...",         // optional if token scope = exactly 1 ws
   "dataset": "products",         // optional, default "default"
   "records": [
-    {"row_key": "sku-1", "text": "Air Jordan 1",
+    {"id": "sku-1", "text": "Air Jordan 1",
      "category": "shoes", "tags": ["sale","new"],
      "meta": {"price": 1299}}
   ]
@@ -60,10 +60,15 @@ Inserts or replaces records. Max 500 per call. PK-collision = full replace.
 Response:
 ```json
 {"success": true, "data": {
-  "inserted": [{"pk": "products:sku-1", "row_key": "sku-1"}],
+  "ids": ["sku-1"],
   "commit_ts": 1735689600000
 }}
 ```
+
+`ids` is the same length and order as `records` in the request. For
+auto-generated UUIDs (records omitting `id`), this is the **only** place
+to discover them — capture them client-side before they're needed for
+query/delete.
 
 `commit_ts` is server-now ms — Milvus REST doesn't expose the real timestamp.
 Under synchronous semantics, this is sufficient for read-your-writes on the
@@ -71,9 +76,9 @@ same server.
 
 ### POST `/v1/vectors/search`
 
-Dense ANN over the embedded `query`. Always implicitly filtered by
-`status == "active"` and `dataset == "<name>"`; v0 has no cross-dataset
-search. Optional `filter` (see below) AND-merges with the base.
+Dense ANN over the embedded `query`. Always implicitly scoped to the
+target dataset (v0 has no cross-dataset search). Optional `filter` (see
+below) AND-merges with the base scope.
 
 ```json
 {
@@ -90,28 +95,29 @@ search. Optional `filter` (see below) AND-merges with the base.
 }
 ```
 
-Each hit returns `pk / row_key / dataset / category / tags / status / text /
-meta / expire_at / created_at / updated_at / score` (COSINE distance).
+Each hit returns `id / dataset / category / tags / text / meta / created_at
+/ updated_at / score` (COSINE distance).
 
 ### POST `/v1/vectors/query`
 
-Direct lookup by composite PK. Order not preserved; missing PKs silently
-absent. Max 500 row_keys per call.
+Direct lookup by `id`. Order not preserved; missing ids silently absent
+(no error). Max 500 ids per call.
 
 ```json
 {"workspace_id": "...", "dataset": "products",
- "row_keys": ["sku-1", "sku-2"]}
+ "ids": ["sku-1", "sku-2"]}
 ```
 
 ### POST `/v1/vectors/delete`
 
-Hard-deletes by composite PK. Returns the **accepted** count (PKs submitted
-to Milvus), not the actually-deleted count — Milvus REST doesn't surface
-that. Max 500 per call.
+Hard-deletes by `id`. Returns Milvus's `accepted_count` — the number of
+delete markers the engine created (for an `id in [...]` filter this equals
+`len(ids)`; per Milvus 2.6 REST `data.deleteCount` semantics). Max 500
+per call.
 
 ```json
 {"workspace_id": "...", "dataset": "products",
- "row_keys": ["sku-1", "sku-2"]}
+ "ids": ["sku-1", "sku-2"]}
 ```
 
 ## Filter DSL (v0)
@@ -119,9 +125,9 @@ that. Max 500 per call.
 Strict subset of Qdrant-style:
 
 - Only `must` (no `should` / `must_not`).
-- Only `meta.<top_level_key>` paths. Platform fields (`dataset`, `status`,
-  `tags`, …) are not filterable through this DSL — they're handled by the
-  base filter.
+- Only `meta.<top_level_key>` paths. Platform fields (`dataset`, `tags`,
+  …) are not filterable through this DSL — `dataset` is part of the base
+  scope and others are unexposed.
 - Operators: `eq`, `in`, `gt`, `gte`, `lt`, `lte`.
 - `in` is parser-expanded to an OR-chain: `(meta["x"] == "a" || meta["x"]
   == "b")`. Don't rely on Milvus 2.6 TermExpr support over JSON paths.
@@ -149,7 +155,6 @@ Stable error codes (HTTP body `error` field):
 - `unauthorized` (401), `permission denied` (403)
 
 Charset and size limits:
-- `dataset` / `row_key`: `[a-zA-Z0-9_-]+`, must not contain `:` (PK separator)
-- `dataset` ≤ 64 bytes, `row_key` ≤ 64 bytes, composite `pk` ≤ 128 bytes
+- `dataset` / `id`: `[a-zA-Z0-9_-]+`, must not contain `:` (PK separator)
+- `dataset` ≤ 64 bytes, `id` ≤ 64 bytes (composite physical pk `{dataset}:{id}` ≤ 128 bytes)
 - `text` ≤ 65535 bytes UTF-8 (Milvus VARCHAR hard cap), `meta` (JSON-serialized) ≤ 16 KB, `tags` ≤ 8 entries × 128 bytes each
-- `status` ∈ {`"active"`, `"inactive"`}; search base filter pins to `"active"`

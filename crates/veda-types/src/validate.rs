@@ -22,15 +22,15 @@ pub const DEFAULT_DATASET: &str = "default";
 /// `dataset` field VARCHAR(64) in Milvus + UNIQUE constraint key in MySQL.
 const DATASET_NAME_MAX: usize = 64;
 
-/// `row_key` field VARCHAR(128) in Milvus, but the composite pk
-/// `{dataset}:{row_key}` is also bound by `PK_MAX = 128`. With a 64-byte
-/// `dataset` worst-case and 1-byte ':' separator, the budget for row_key
-/// is 63 bytes. We round to 64 for symmetry with `DATASET_NAME_MAX` —
-/// `build_pk` still enforces the total ≤ `PK_MAX` at runtime, so a 64+64
-/// combo correctly rejects (64+1+64 = 129 > 128).
-const ROW_KEY_MAX: usize = 64;
+/// `id` field VARCHAR(128) in Milvus (column literally named `id`), but
+/// the composite pk `{dataset}:{id}` is also bound by `PK_MAX = 128`.
+/// With a 64-byte `dataset` worst-case and 1-byte ':' separator, the
+/// budget for `id` is 63 bytes. We round to 64 for symmetry with
+/// `DATASET_NAME_MAX` — `build_pk` still enforces the total ≤ `PK_MAX`
+/// at runtime, so a 64+64 combo correctly rejects (64+1+64 = 129 > 128).
+const ID_MAX: usize = 64;
 
-/// `pk` field VARCHAR(128) in Milvus — total `{dataset}:{row_key}` budget.
+/// `pk` field VARCHAR(128) in Milvus — total `{dataset}:{id}` budget.
 const PK_MAX: usize = 128;
 
 /// `text` field — UTF-8 byte cap, exactly matches Milvus VARCHAR
@@ -52,10 +52,7 @@ const TAG_MAX_BYTES: usize = 128;
 /// `category` field VARCHAR(64) in Milvus.
 const CATEGORY_MAX: usize = 64;
 
-/// `status` field VARCHAR(32) in Milvus.
-const STATUS_MAX: usize = 32;
-
-/// Allowed character class for identifiers (`dataset`, `row_key`).
+/// Allowed character class for identifiers (`dataset`, `id`).
 /// `:` is forbidden because it's the composite PK separator.
 fn is_id_char(c: char) -> bool {
     c.is_ascii_alphanumeric() || c == '_' || c == '-'
@@ -84,16 +81,16 @@ pub fn validate_dataset_name(s: &str) -> Result<()> {
     Ok(())
 }
 
-pub fn validate_row_key(s: &str) -> Result<()> {
+pub fn validate_id(s: &str) -> Result<()> {
     if s.is_empty() {
-        return Err(invalid("row_key", "must not be empty"));
+        return Err(invalid("id", "must not be empty"));
     }
-    if s.len() > ROW_KEY_MAX {
-        return Err(invalid("row_key", &format!("exceeds {ROW_KEY_MAX} bytes")));
+    if s.len() > ID_MAX {
+        return Err(invalid("id", &format!("exceeds {ID_MAX} bytes")));
     }
     if !s.chars().all(is_id_char) {
         return Err(invalid(
-            "row_key",
+            "id",
             "must match [a-zA-Z0-9_-]+ (no ':' allowed; it is the PK separator)",
         ));
     }
@@ -158,33 +155,12 @@ pub fn validate_category(s: &str) -> Result<()> {
     Ok(())
 }
 
-/// Allowlist for `status`. Search auto-appends `status == "active"` to its
-/// Milvus filter (Codex Stage 2.1 review Q3), so any caller-supplied value
-/// outside this set would write rows that search can never reach.
-/// v0 accepts only `active` and `inactive`; expand the set rather than
-/// allowing arbitrary strings.
-const ALLOWED_STATUSES: &[&str] = &["active", "inactive"];
-
-pub fn validate_status(s: &str) -> Result<()> {
-    if !ALLOWED_STATUSES.contains(&s) {
-        return Err(invalid(
-            "status",
-            &format!(
-                "must be one of {:?}; got {s:?}",
-                ALLOWED_STATUSES
-            ),
-        ));
-    }
-    let _ = STATUS_MAX; // retained as schema-width reference; allowlist is the binding constraint
-    Ok(())
-}
-
-/// Compose the Milvus PK `{dataset}:{row_key}` after validating both parts
+/// Compose the Milvus PK `{dataset}:{id}` after validating both parts
 /// and the total ≤ `PK_MAX` budget.
-pub fn build_pk(dataset: &str, row_key: &str) -> Result<String> {
+pub fn build_pk(dataset: &str, id: &str) -> Result<String> {
     validate_dataset_name(dataset)?;
-    validate_row_key(row_key)?;
-    let pk = format!("{dataset}:{row_key}");
+    validate_id(id)?;
+    let pk = format!("{dataset}:{id}");
     if pk.len() > PK_MAX {
         return Err(invalid(
             "pk",
@@ -192,7 +168,7 @@ pub fn build_pk(dataset: &str, row_key: &str) -> Result<String> {
                 "composed length {} exceeds {PK_MAX} bytes ({}+1+{})",
                 pk.len(),
                 dataset.len(),
-                row_key.len()
+                id.len()
             ),
         ));
     }
@@ -235,20 +211,20 @@ mod tests {
     }
 
     #[test]
-    fn row_key_ok() {
-        assert!(validate_row_key("sku-123").is_ok());
-        assert!(validate_row_key("550e8400-e29b-41d4-a716-446655440000").is_ok());
+    fn id_ok() {
+        assert!(validate_id("sku-123").is_ok());
+        assert!(validate_id("550e8400-e29b-41d4-a716-446655440000").is_ok());
     }
 
     #[test]
-    fn row_key_colon_rejected() {
-        assert!(validate_row_key("a:b").is_err());
+    fn id_colon_rejected() {
+        assert!(validate_id("a:b").is_err());
     }
 
     #[test]
-    fn row_key_too_long_rejected() {
-        let s = "a".repeat(ROW_KEY_MAX + 1);
-        assert!(validate_row_key(&s).is_err());
+    fn id_too_long_rejected() {
+        let s = "a".repeat(ID_MAX + 1);
+        assert!(validate_id(&s).is_err());
     }
 
     #[test]
@@ -319,20 +295,6 @@ mod tests {
     }
 
     #[test]
-    fn status_allowlist_ok() {
-        assert!(validate_status("active").is_ok());
-        assert!(validate_status("inactive").is_ok());
-    }
-
-    #[test]
-    fn status_unknown_rejected() {
-        assert!(validate_status("ACTIVE").is_err()); // wrong case
-        assert!(validate_status(" active ").is_err()); // whitespace
-        assert!(validate_status("pending").is_err()); // unknown value
-        assert!(validate_status("").is_err()); // empty
-    }
-
-    #[test]
     fn build_pk_ok() {
         let pk = build_pk("products", "sku-123").unwrap();
         assert_eq!(pk, "products:sku-123");
@@ -344,13 +306,13 @@ mod tests {
     }
 
     #[test]
-    fn build_pk_rejects_invalid_row_key() {
+    fn build_pk_rejects_invalid_id() {
         assert!(build_pk("products", "row:1").is_err());
     }
 
     #[test]
     fn build_pk_total_length_capped() {
-        // 64-byte dataset + 1 ':' + 64-byte row_key = 129 → over PK_MAX
+        // 64-byte dataset + 1 ':' + 64-byte id = 129 → over PK_MAX
         let ds = "a".repeat(64);
         let rk = "b".repeat(64);
         let err = build_pk(&ds, &rk).unwrap_err();

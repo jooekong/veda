@@ -285,29 +285,25 @@ async fn milvus_vector_data_plane_roundtrip() {
     let records = vec![
         UpsertRecord {
             pk: pk1.clone(),
-            row_key: pk1.strip_prefix("default:").unwrap().to_string(),
+            id: pk1.strip_prefix("default:").unwrap().to_string(),
             dataset: "default".into(),
             category: "default".into(),
             tags: vec!["sale".into(), "new".into()],
-            status: "active".into(),
             text: "hello milvus data plane".into(),
             vector: mk_vector(0.1),
             meta: json!({ "price": 42 }),
-            expire_at: None,
             created_at: now_ms,
             updated_at: now_ms,
         },
         UpsertRecord {
             pk: pk2.clone(),
-            row_key: pk2.strip_prefix("default:").unwrap().to_string(),
+            id: pk2.strip_prefix("default:").unwrap().to_string(),
             dataset: "default".into(),
             category: "default".into(),
             tags: vec![],
-            status: "active".into(),
             text: "another vector record".into(),
             vector: mk_vector(0.5),
             meta: json!({}),
-            expire_at: Some(now_ms + 86_400_000),
             created_at: now_ms,
             updated_at: now_ms,
         },
@@ -331,11 +327,11 @@ async fn milvus_vector_data_plane_roundtrip() {
     .expect("search");
     assert!(!hits.is_empty(), "search returned no hits");
     let top = &hits[0];
-    assert_eq!(top.pk, pk1, "expected top hit pk={pk1}, got {}", top.pk);
+    let expected_id1 = pk1.strip_prefix("default:").unwrap();
+    assert_eq!(top.id, expected_id1, "expected top hit id={expected_id1}, got {}", top.id);
     assert_eq!(top.dataset, "default");
     assert_eq!(top.category, "default");
     assert_eq!(top.tags, vec!["sale".to_string(), "new".to_string()]);
-    assert_eq!(top.status, "active");
     assert_eq!(top.text, "hello milvus data plane");
     assert_eq!(top.meta["price"], 42);
 
@@ -345,14 +341,13 @@ async fn milvus_vector_data_plane_roundtrip() {
         .await
         .expect("query");
     assert_eq!(results.len(), 2, "expected 2 hits, got {}", results.len());
-    // Order not preserved; index by pk.
-    let by_pk: std::collections::HashMap<_, _> =
-        results.into_iter().map(|h| (h.pk.clone(), h)).collect();
-    assert!(by_pk.contains_key(&pk1));
-    assert!(by_pk.contains_key(&pk2));
-    // Verify nullable expire_at round-trip: pk1 None, pk2 Some.
-    assert_eq!(by_pk[&pk1].expire_at, None);
-    assert!(by_pk[&pk2].expire_at.is_some());
+    // Order not preserved; index by id.
+    let by_id: std::collections::HashMap<_, _> =
+        results.into_iter().map(|h| (h.id.clone(), h)).collect();
+    let id1 = pk1.strip_prefix("default:").unwrap().to_string();
+    let id2 = pk2.strip_prefix("default:").unwrap().to_string();
+    assert!(by_id.contains_key(&id1));
+    assert!(by_id.contains_key(&id2));
 
     // 4. Delete both pks.
     let accepted = VectorWorkspaceStore::delete_vectors_by_pk(&store, &ws_id, &pks)
@@ -393,15 +388,13 @@ async fn seed_records(
         for (i, (rk, meta)) in rows.iter().enumerate() {
             records.push(UpsertRecord {
                 pk: format!("{dataset}:{rk}"),
-                row_key: rk.to_string(),
+                id: rk.to_string(),
                 dataset: dataset.to_string(),
                 category: "default".into(),
                 tags: vec![],
-                status: "active".into(),
                 text: format!("seed-{dataset}-{rk}"),
                 vector: mk_vector(0.1 + (i as f32) * 0.1),
                 meta: meta.clone(),
-                expire_at: None,
                 created_at: now_ms,
                 updated_at: now_ms,
             });
@@ -456,11 +449,11 @@ async fn milvus_search_with_filter_dsl_eq_and_range() {
     )
     .await
     .expect("search with range filter");
-    let row_keys: std::collections::HashSet<_> =
-        hits.iter().map(|h| h.row_key.clone()).collect();
-    assert!(row_keys.contains("a"), "expected a in {row_keys:?}");
-    assert!(row_keys.contains("c"), "expected c in {row_keys:?}");
-    assert!(!row_keys.contains("b"), "b should be excluded; got {row_keys:?}");
+    let ids: std::collections::HashSet<_> =
+        hits.iter().map(|h| h.id.clone()).collect();
+    assert!(ids.contains("a"), "expected a in {ids:?}");
+    assert!(ids.contains("c"), "expected c in {ids:?}");
+    assert!(!ids.contains("b"), "b should be excluded; got {ids:?}");
 
     // Eq filter on string: category == "shoes" → a + b, not c.
     let hits = VectorWorkspaceStore::search_vectors(
@@ -473,11 +466,11 @@ async fn milvus_search_with_filter_dsl_eq_and_range() {
     )
     .await
     .expect("search with eq filter");
-    let row_keys: std::collections::HashSet<_> =
-        hits.iter().map(|h| h.row_key.clone()).collect();
-    assert!(row_keys.contains("a"));
-    assert!(row_keys.contains("b"));
-    assert!(!row_keys.contains("c"));
+    let ids: std::collections::HashSet<_> =
+        hits.iter().map(|h| h.id.clone()).collect();
+    assert!(ids.contains("a"));
+    assert!(ids.contains("b"));
+    assert!(!ids.contains("c"));
 
     store.drop_collection(&collection_name).await.unwrap();
 }
@@ -521,11 +514,11 @@ async fn milvus_search_with_in_or_expansion() {
     )
     .await
     .expect("search with OR-chain");
-    let row_keys: std::collections::HashSet<_> =
-        hits.iter().map(|h| h.row_key.clone()).collect();
-    assert!(row_keys.contains("a"));
-    assert!(row_keys.contains("b"));
-    assert!(!row_keys.contains("c"), "c should be excluded");
+    let ids: std::collections::HashSet<_> =
+        hits.iter().map(|h| h.id.clone()).collect();
+    assert!(ids.contains("a"));
+    assert!(ids.contains("b"));
+    assert!(!ids.contains("c"), "c should be excluded");
 
     store.drop_collection(&collection_name).await.unwrap();
 }
@@ -561,7 +554,7 @@ async fn milvus_multi_dataset_isolation() {
             "ds_a search returned cross-dataset hits: {:?}",
             hits.iter().map(|h| &h.dataset).collect::<Vec<_>>());
     let ds_a_keys: std::collections::HashSet<_> =
-        hits.iter().map(|h| h.row_key.clone()).collect();
+        hits.iter().map(|h| h.id.clone()).collect();
     assert!(ds_a_keys.contains("rk1"));
     assert!(ds_a_keys.contains("rk2"));
     assert!(!ds_a_keys.contains("rk3"));

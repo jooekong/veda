@@ -12,9 +12,8 @@ use chrono::Utc;
 use serde_json::json;
 use uuid::Uuid;
 use veda_types::api::{
-    InsertedRecord, NewRecord, UpsertRequest, UpsertResponse, VectorDeleteRequest,
-    VectorDeleteResponse, VectorQueryRequest, VectorQueryResponse, VectorSearchRequest,
-    VectorSearchResponse,
+    NewRecord, UpsertRequest, UpsertResponse, VectorDeleteRequest, VectorDeleteResponse,
+    VectorQueryRequest, VectorQueryResponse, VectorSearchRequest, VectorSearchResponse,
 };
 use veda_types::{validate, ApiResponse, UpsertRecord, VedaError, Workspace};
 
@@ -83,7 +82,7 @@ async fn upsert_vectors(
     // 4. Validate every record and resolve defaults BEFORE the embedding
     //    call — embedding is the expensive step, no point spending it on
     //    a batch we'll reject later. Each record is normalized into
-    //    `(row_key, NormalizedFields)` plus the text to embed.
+    //    `(id, NormalizedFields)` plus the text to embed.
     let now_ms = Utc::now().timestamp_millis();
     let mut texts: Vec<String> = Vec::with_capacity(req.records.len());
     let mut normalized: Vec<NormalizedRecord> = Vec::with_capacity(req.records.len());
@@ -108,23 +107,18 @@ async fn upsert_vectors(
 
     // 6. Build Milvus payload records.
     let mut to_insert: Vec<UpsertRecord> = Vec::with_capacity(normalized.len());
-    let mut inserted: Vec<InsertedRecord> = Vec::with_capacity(normalized.len());
+    let mut ids: Vec<String> = Vec::with_capacity(normalized.len());
     for (nr, vec) in normalized.into_iter().zip(vectors.into_iter()) {
-        inserted.push(InsertedRecord {
-            pk: nr.pk.clone(),
-            row_key: nr.row_key.clone(),
-        });
+        ids.push(nr.id.clone());
         to_insert.push(UpsertRecord {
             pk: nr.pk,
-            row_key: nr.row_key,
+            id: nr.id,
             dataset: nr.dataset,
             category: nr.category,
             tags: nr.tags,
-            status: nr.status,
             text: nr.text,
             vector: vec,
             meta: nr.meta,
-            expire_at: nr.expire_at,
             created_at: now_ms,
             updated_at: now_ms,
         });
@@ -132,42 +126,42 @@ async fn upsert_vectors(
 
     // 7. Synchronous upsert. commit_ts is server-now (Milvus REST doesn't
     //    surface a real one; see VectorWorkspaceStore::upsert_records doc).
+    //
+    // Same-batch duplicate `id`: Milvus PK upsert semantics — last entry
+    // wins. v0 doesn't dedupe server-side; the response `ids` echoes the
+    // request order. TODO(#7): explicit integration test for this once the
+    // idempotency-docs task lands.
     let commit_ts = state
         .vector_workspace_store
         .upsert_records(&ws.id, &to_insert)
         .await?;
 
-    Ok(Json(ApiResponse::ok(UpsertResponse {
-        inserted,
-        commit_ts,
-    })))
+    Ok(Json(ApiResponse::ok(UpsertResponse { ids, commit_ts })))
 }
 
 /// Resolved input ready to be paired with an embedding.
 struct NormalizedRecord {
     pk: String,
-    row_key: String,
+    id: String,
     dataset: String,
     category: String,
     tags: Vec<String>,
-    status: String,
     text: String,
     meta: serde_json::Value,
-    expire_at: Option<i64>,
 }
 
 fn normalize_record(rec: &NewRecord, dataset: &str) -> Result<NormalizedRecord, AppError> {
     validate::validate_text(&rec.text)?;
-    let row_key = match rec.row_key.as_deref() {
+    let id = match rec.id.as_deref() {
         Some(rk) => {
-            validate::validate_row_key(rk)?;
+            validate::validate_id(rk)?;
             rk.to_string()
         }
-        // No row_key → server-generated UUID. Documented as insert-only
-        // semantics (no upsert dedup); caller must pass row_key for upsert.
+        // No id → server-generated UUID. Documented as insert-only
+        // semantics (no upsert dedup); caller must pass id for upsert.
         None => Uuid::new_v4().to_string().replace('-', ""),
     };
-    let pk = validate::build_pk(dataset, &row_key)?;
+    let pk = validate::build_pk(dataset, &id)?;
     let category = rec
         .category
         .clone()
@@ -175,20 +169,16 @@ fn normalize_record(rec: &NewRecord, dataset: &str) -> Result<NormalizedRecord, 
     validate::validate_category(&category)?;
     let tags = rec.tags.clone().unwrap_or_default();
     validate::validate_tags(&tags)?;
-    let status = rec.status.clone().unwrap_or_else(|| "active".to_string());
-    validate::validate_status(&status)?;
     let meta = rec.meta.clone().unwrap_or_else(|| json!({}));
     validate::validate_meta(&meta)?;
     Ok(NormalizedRecord {
         pk,
-        row_key,
+        id,
         dataset: dataset.to_string(),
         category,
         tags,
-        status,
         text: rec.text.clone(),
         meta,
-        expire_at: rec.expire_at,
     })
 }
 
@@ -304,7 +294,7 @@ async fn search_vectors(
     Ok(Json(ApiResponse::ok(VectorSearchResponse { hits })))
 }
 
-/// Cap on `row_keys` for query/delete. Matches MAX_RECORDS_PER_UPSERT so
+/// Cap on `ids` for query/delete. Matches MAX_RECORDS_PER_UPSERT so
 /// batch shape is symmetric across endpoints; oversize → 413.
 const MAX_PK_BATCH: usize = 500;
 
@@ -313,13 +303,13 @@ async fn query_vectors(
     auth: AuthAccount,
     Json(req): Json<VectorQueryRequest>,
 ) -> Result<Json<ApiResponse<VectorQueryResponse>>, AppError> {
-    if req.row_keys.is_empty() {
-        return Err(VedaError::InvalidInput("row_keys must not be empty".into()).into());
+    if req.ids.is_empty() {
+        return Err(VedaError::InvalidInput("ids must not be empty".into()).into());
     }
-    if req.row_keys.len() > MAX_PK_BATCH {
+    if req.ids.len() > MAX_PK_BATCH {
         return Err(VedaError::PayloadTooLarge(format!(
-            "row_keys: {} exceeds {MAX_PK_BATCH}",
-            req.row_keys.len()
+            "ids: {} exceeds {MAX_PK_BATCH}",
+            req.ids.len()
         ))
         .into());
     }
@@ -330,7 +320,7 @@ async fn query_vectors(
         req.dataset.as_deref(),
     )
     .await?;
-    let pks = build_pks(&dataset_name, &req.row_keys)?;
+    let pks = build_pks(&dataset_name, &req.ids)?;
     let hits = state
         .vector_workspace_store
         .query_vectors_by_pk(&ws.id, &pks)
@@ -343,13 +333,13 @@ async fn delete_vectors(
     auth: AuthAccount,
     Json(req): Json<VectorDeleteRequest>,
 ) -> Result<Json<ApiResponse<VectorDeleteResponse>>, AppError> {
-    if req.row_keys.is_empty() {
-        return Err(VedaError::InvalidInput("row_keys must not be empty".into()).into());
+    if req.ids.is_empty() {
+        return Err(VedaError::InvalidInput("ids must not be empty".into()).into());
     }
-    if req.row_keys.len() > MAX_PK_BATCH {
+    if req.ids.len() > MAX_PK_BATCH {
         return Err(VedaError::PayloadTooLarge(format!(
-            "row_keys: {} exceeds {MAX_PK_BATCH}",
-            req.row_keys.len()
+            "ids: {} exceeds {MAX_PK_BATCH}",
+            req.ids.len()
         ))
         .into());
     }
@@ -360,7 +350,7 @@ async fn delete_vectors(
         req.dataset.as_deref(),
     )
     .await?;
-    let pks = build_pks(&dataset_name, &req.row_keys)?;
+    let pks = build_pks(&dataset_name, &req.ids)?;
     let accepted_count = state
         .vector_workspace_store
         .delete_vectors_by_pk(&ws.id, &pks)
@@ -370,10 +360,10 @@ async fn delete_vectors(
     })))
 }
 
-fn build_pks(dataset: &str, row_keys: &[String]) -> Result<Vec<String>, AppError> {
-    let mut out = Vec::with_capacity(row_keys.len());
-    for rk in row_keys {
-        out.push(validate::build_pk(dataset, rk)?);
+fn build_pks(dataset: &str, ids: &[String]) -> Result<Vec<String>, AppError> {
+    let mut out = Vec::with_capacity(ids.len());
+    for id in ids {
+        out.push(validate::build_pk(dataset, id)?);
     }
     Ok(out)
 }

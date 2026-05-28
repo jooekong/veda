@@ -195,36 +195,34 @@ pub struct UpsertRequest {
 
 /// Per-record user input. `text` is the only required field; everything
 /// else has a default (see docs/vectors-merge-plan.md §2.4):
-///   row_key   → server-generated UUID (insert semantics; no upsert dedup)
+///   id        → server-generated UUID (insert semantics; no upsert dedup)
 ///   category  → "default"
 ///   tags      → []
-///   status    → "active"
 ///   meta      → {}
 #[derive(Debug, Deserialize)]
 pub struct NewRecord {
-    pub row_key: Option<String>,
+    /// Record identifier, unique within (workspace, dataset). Omit → server
+    /// generates a UUID (insert-only; retry-prone callers must supply
+    /// their own `id` to avoid duplicate writes on network retry).
+    pub id: Option<String>,
     pub text: String,
     pub category: Option<String>,
     pub tags: Option<Vec<String>>,
-    pub status: Option<String>,
-    pub expire_at: Option<i64>,
     pub meta: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Serialize)]
 pub struct UpsertResponse {
-    pub inserted: Vec<InsertedRecord>,
+    /// `id`s of the records written, in the same order as `records` in the
+    /// request. For caller-supplied ids this just echoes input; for omitted
+    /// ids it surfaces the server-generated UUIDs so the caller can
+    /// reference them later via query/delete.
+    pub ids: Vec<String>,
     /// Server's local-time ms epoch when Milvus upsert completed.
     /// Milvus REST does not surface a true commit_ts; under synchronous
     /// upsert semantics (no outbox) this stand-in is sufficient for
     /// read-your-writes on the same server (caller can re-query immediately).
     pub commit_ts: i64,
-}
-
-#[derive(Debug, Serialize)]
-pub struct InsertedRecord {
-    pub pk: String,
-    pub row_key: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -273,14 +271,14 @@ pub enum FilterOp {
 pub struct VectorQueryRequest {
     pub workspace_id: Option<String>,
     pub dataset: Option<String>,
-    pub row_keys: Vec<String>,
+    pub ids: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]
 pub struct VectorDeleteRequest {
     pub workspace_id: Option<String>,
     pub dataset: Option<String>,
-    pub row_keys: Vec<String>,
+    pub ids: Vec<String>,
 }
 
 #[derive(Debug, Serialize)]

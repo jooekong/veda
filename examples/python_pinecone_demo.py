@@ -9,7 +9,7 @@ vk_ API key scoped to (at minimum) that workspace. Env vars:
     VEDA_WS_ID     UUID of the db-kind workspace
 
 Demonstrates: upsert with defaults, search with a meta-field filter,
-query by row_key, delete.
+query by id, delete.
 """
 from __future__ import annotations
 
@@ -38,11 +38,11 @@ def main() -> int:
     upserted = request("POST", f"{base}/v1/vectors/upsert", {
         "workspace_id": ws,
         "records": [
-            {"row_key": "sku-1", "text": "Air Jordan 1", "meta": {"price": 1299}},
-            {"row_key": "sku-2", "text": "Yeezy 350",    "meta": {"price": 1599}},
+            {"id": "sku-1", "text": "Air Jordan 1", "meta": {"price": 1299}},
+            {"id": "sku-2", "text": "Yeezy 350",    "meta": {"price": 1599}},
         ],
     })
-    print("upsert:", upserted["data"])
+    print("upsert ids:", upserted["data"]["ids"])
 
     # 2. Semantic search with a meta-field filter (price < 1500).
     found = request("POST", f"{base}/v1/vectors/search", {
@@ -52,19 +52,19 @@ def main() -> int:
         "filter": {"must": [{"field": "meta.price", "op": "lt", "value": 1500}]},
     })
     for hit in found["data"]["hits"]:
-        print(f"  hit: {hit['row_key']} score={hit['score']:.4f} meta={hit['meta']}")
+        print(f"  hit: {hit['id']} score={hit['score']:.4f} meta={hit['meta']}")
 
-    # 3. Query by row_key (no semantic search; direct lookup).
+    # 3. Query by id (no semantic search; direct lookup).
     queried = request("POST", f"{base}/v1/vectors/query", {
         "workspace_id": ws,
-        "row_keys": ["sku-1", "sku-2"],
+        "ids": ["sku-1", "sku-2"],
     })
-    print("query hits:", [h["row_key"] for h in queried["data"]["hits"]])
+    print("query hits:", [h["id"] for h in queried["data"]["hits"]])
 
     # 4. Delete both records.
     deleted = request("POST", f"{base}/v1/vectors/delete", {
         "workspace_id": ws,
-        "row_keys": ["sku-1", "sku-2"],
+        "ids": ["sku-1", "sku-2"],
     })
     print("delete:", deleted["data"])
     return 0

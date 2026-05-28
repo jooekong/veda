@@ -193,8 +193,8 @@ curl -sS -X POST http://localhost:9009/v1/vectors/upsert \
   -H "Authorization: Bearer $VEDA_API_KEY" \
   -H "Content-Type: application/json" \
   -d '{"workspace_id":"'$WS_ID'","records":[
-        {"row_key":"sku-1","text":"Air Jordan 1","meta":{"price":1299}},
-        {"row_key":"sku-2","text":"Yeezy 350","meta":{"price":1599}}]}'
+        {"id":"sku-1","text":"Air Jordan 1","meta":{"price":1299}},
+        {"id":"sku-2","text":"Yeezy 350","meta":{"price":1599}}]}'
 
 # Semantic search with a meta-field filter
 curl -sS -X POST http://localhost:9009/v1/vectors/search \

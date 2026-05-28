@@ -306,8 +306,8 @@ async fn sub_full_roundtrip(state: &Arc<AppState>, mysql: &MysqlStore, router: a
         json!({
             "workspace_id": setup.ws_id,
             "records": [
-                { "row_key": "rk-http-1", "text": "first vector http test", "meta": {"score": 1} },
-                { "row_key": "rk-http-2", "text": "second vector http test", "meta": {"score": 2} },
+                { "id": "rk-http-1", "text": "first vector http test", "meta": {"score": 1} },
+                { "id": "rk-http-2", "text": "second vector http test", "meta": {"score": 2} },
             ],
         }),
     )
@@ -316,7 +316,7 @@ async fn sub_full_roundtrip(state: &Arc<AppState>, mysql: &MysqlStore, router: a
     assert_eq!(resp.status(), StatusCode::OK, "upsert status");
     let v = body_json(resp.into_body()).await;
     assert_eq!(v["success"], true, "upsert success flag: {v:?}");
-    assert_eq!(v["data"]["inserted"].as_array().unwrap().len(), 2);
+    assert_eq!(v["data"]["ids"].as_array().unwrap().len(), 2);
 
     tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
 
@@ -335,21 +335,21 @@ async fn sub_full_roundtrip(state: &Arc<AppState>, mysql: &MysqlStore, router: a
     let v = body_json(resp.into_body()).await;
     let hits = v["data"]["hits"].as_array().unwrap();
     assert!(!hits.is_empty(), "search returned no hits");
-    let row_keys: std::collections::HashSet<String> = hits
+    let ids: std::collections::HashSet<String> = hits
         .iter()
-        .filter_map(|h| h["row_key"].as_str().map(String::from))
+        .filter_map(|h| h["id"].as_str().map(String::from))
         .collect();
     assert!(
-        row_keys.contains("rk-http-1") || row_keys.contains("rk-http-2"),
-        "expected one of our upserted keys in search hits: {row_keys:?}"
+        ids.contains("rk-http-1") || ids.contains("rk-http-2"),
+        "expected one of our upserted keys in search hits: {ids:?}"
     );
 
-    // 3. Query by row_keys.
+    // 3. Query by ids.
     let resp = do_post(
         "/v1/vectors/query",
         json!({
             "workspace_id": setup.ws_id,
-            "row_keys": ["rk-http-1", "rk-http-2"],
+            "ids": ["rk-http-1", "rk-http-2"],
         }),
     )
     .await
@@ -363,7 +363,7 @@ async fn sub_full_roundtrip(state: &Arc<AppState>, mysql: &MysqlStore, router: a
         "/v1/vectors/delete",
         json!({
             "workspace_id": setup.ws_id,
-            "row_keys": ["rk-http-1", "rk-http-2"],
+            "ids": ["rk-http-1", "rk-http-2"],
         }),
     )
     .await
@@ -379,7 +379,7 @@ async fn sub_full_roundtrip(state: &Arc<AppState>, mysql: &MysqlStore, router: a
         "/v1/vectors/query",
         json!({
             "workspace_id": setup.ws_id,
-            "row_keys": ["rk-http-1", "rk-http-2"],
+            "ids": ["rk-http-1", "rk-http-2"],
         }),
     )
     .await
@@ -390,6 +390,60 @@ async fn sub_full_roundtrip(state: &Arc<AppState>, mysql: &MysqlStore, router: a
         v["data"]["hits"].as_array().unwrap().is_empty(),
         "expected empty hits after delete"
     );
+
+    // 6. UUID auto-generation flow (codex review Q10): omit `id`, capture
+    //    the server-generated UUID from the response, prove we can query +
+    //    delete by that UUID. This is the full closed loop for callers
+    //    that don't supply their own ids.
+    let resp = do_post(
+        "/v1/vectors/upsert",
+        json!({
+            "workspace_id": setup.ws_id,
+            "records": [
+                { "text": "auto-id record one" },
+                { "text": "auto-id record two" },
+            ],
+        }),
+    )
+    .await
+    .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK, "auto-id upsert status");
+    let v = body_json(resp.into_body()).await;
+    let gen_ids: Vec<String> = v["data"]["ids"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|x| x.as_str().unwrap().to_string())
+        .collect();
+    assert_eq!(gen_ids.len(), 2, "expected 2 auto-generated ids");
+    assert!(
+        gen_ids.iter().all(|id| !id.is_empty() && id.len() >= 16),
+        "auto-generated ids should be UUID-shaped: {gen_ids:?}"
+    );
+
+    tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+
+    let resp = do_post(
+        "/v1/vectors/query",
+        json!({"workspace_id": setup.ws_id, "ids": gen_ids}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let v = body_json(resp.into_body()).await;
+    assert_eq!(
+        v["data"]["hits"].as_array().unwrap().len(),
+        2,
+        "expected to round-trip both auto-id records via query"
+    );
+
+    let resp = do_post(
+        "/v1/vectors/delete",
+        json!({"workspace_id": setup.ws_id, "ids": gen_ids}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
 
     cleanup(&state, &mysql, &setup).await;
 }
@@ -499,7 +553,7 @@ async fn sub_provisioning_http_e2e(
         "/v1/vectors/upsert",
         json!({
             "workspace_id": ws_id,
-            "records": [{ "row_key": "rk-e2e-prov", "text": "provisioning end to end" }],
+            "records": [{ "id": "rk-e2e-prov", "text": "provisioning end to end" }],
         }),
     )
     .await
