@@ -79,8 +79,16 @@ fn load_config() -> TestConfig {
 
 async fn build_test_app() -> (Arc<AppState>, Arc<MysqlStore>, axum::Router) {
     let cfg = load_config();
+    // Conservative pool. Test binary shares one AppState via OnceCell, so
+    // this is the single pool serving 4 tests sequentially; 20 conns leaves
+    // headroom for the multi-step HTTP roundtrips without saturating
+    // dev-MySQL limits.
+    let pool_config = PoolConfig {
+        max_connections: 20,
+        ..Default::default()
+    };
     let mysql = Arc::new(
-        MysqlStore::with_pool_config(&cfg.mysql.database_url, PoolConfig::default())
+        MysqlStore::with_pool_config(&cfg.mysql.database_url, pool_config)
             .await
             .expect("mysql connect"),
     );
@@ -252,11 +260,34 @@ async fn body_json(body: Body) -> serde_json::Value {
     serde_json::from_slice(&bytes).unwrap()
 }
 
-#[tokio::test]
+/// Mega-test: drives all 4 vectors HTTP scenarios in a single tokio
+/// runtime. Reason: sqlx connection pools are tied to the runtime that
+/// created them; multiple `#[tokio::test]` functions in the same binary
+/// each get their own runtime, so a shared (OnceCell) pool times out
+/// after the first test's runtime dies. Splitting into separate test
+/// files works but multiplies cargo's per-binary linking cost. One mega
+/// test with explicit sub-sections is the simplest "simple-effective"
+/// answer for v0.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore]
-async fn vectors_http_full_roundtrip() {
+async fn vectors_http_e2e_suite() {
     let (state, mysql, router) = build_test_app().await;
-    let setup = provision_test_account(&state).await;
+
+    // Sub-test 1: end-to-end happy path roundtrip (Stage 4.5).
+    sub_full_roundtrip(&state, &mysql, router.clone()).await;
+
+    // Sub-test 2: full HTTP provisioning (Stage 5.1).
+    sub_provisioning_http_e2e(&state, &mysql, router.clone()).await;
+
+    // Sub-test 3: vectors API rejects fs workspace (Stage 5.1).
+    sub_vectors_api_rejects_fs(&state, &mysql, router.clone()).await;
+
+    // Sub-test 4: fs API rejects db workspace (Stage 5.1, closes Stage 1.6).
+    sub_fs_api_rejects_db(&state, &mysql, router).await;
+}
+
+async fn sub_full_roundtrip(state: &Arc<AppState>, mysql: &MysqlStore, router: axum::Router) {
+    let setup = provision_test_account(state).await;
 
     let do_post = |uri: &str, body: serde_json::Value| {
         let req = Request::builder()
@@ -361,4 +392,284 @@ async fn vectors_http_full_roundtrip() {
     );
 
     cleanup(&state, &mysql, &setup).await;
+}
+
+// ── Stage 5.1: E2E + fs regression ───────────────────────────────────
+
+/// Create account + vk_ token via direct store calls (no workspace).
+/// Used by tests that want to drive workspace creation via the HTTP path.
+async fn provision_account_only(state: &AppState) -> (String, String) {
+    let acct_id = Uuid::new_v4().to_string();
+    let now = Utc::now();
+    state
+        .auth_store
+        .create_account(&Account {
+            id: acct_id.clone(),
+            name: "stage-5-1".into(),
+            email: Some(format!("{}@test.com", &acct_id[..8])),
+            password_hash: None,
+            status: AccountStatus::Active,
+            created_at: now,
+            updated_at: now,
+        })
+        .await
+        .unwrap();
+    let raw_token = format!("vk_{}", Uuid::new_v4().simple());
+    let key_hash = sha256_hex(raw_token.as_bytes());
+    state
+        .auth_store
+        .create_api_key(&ApiKeyRecord {
+            id: Uuid::new_v4().to_string(),
+            account_id: acct_id.clone(),
+            name: "test-vk".into(),
+            key_hash,
+            status: KeyStatus::Active,
+            app_id: None,
+            allowed_workspaces: None,
+            expires_at: None,
+            created_at: now,
+        })
+        .await
+        .unwrap();
+    (acct_id, raw_token)
+}
+
+async fn cleanup_account_only(mysql: &MysqlStore, acct_id: &str) {
+    let _ = sqlx::query("DELETE FROM veda_workspace_keys WHERE workspace_id IN (SELECT id FROM veda_workspaces WHERE account_id = ?)")
+        .bind(acct_id)
+        .execute(mysql.pool())
+        .await;
+    let _ = sqlx::query("DELETE FROM veda_workspaces WHERE account_id = ?")
+        .bind(acct_id)
+        .execute(mysql.pool())
+        .await;
+    let _ = sqlx::query("DELETE FROM veda_api_keys WHERE account_id = ?")
+        .bind(acct_id)
+        .execute(mysql.pool())
+        .await;
+    let _ = sqlx::query("DELETE FROM veda_accounts WHERE id = ?")
+        .bind(acct_id)
+        .execute(mysql.pool())
+        .await;
+}
+
+/// Stage 5.1 — drive a db-workspace through the HTTP provisioning path
+/// (POST /v1/workspaces with kind=db). End-to-end exercise:
+/// account auth → workspace creation (which triggers provision_db_workspace,
+/// hence Milvus collection create + default dataset bootstrap) → immediate
+/// vectors upsert against the new workspace. If provisioning is silently
+/// skipping a step, the upsert fails clearly.
+async fn sub_provisioning_http_e2e(
+    state: &Arc<AppState>,
+    mysql: &MysqlStore,
+    router: axum::Router,
+) {
+    let (acct_id, token) = provision_account_only(state).await;
+
+    let do_post = |uri: &str, body: serde_json::Value| {
+        let req = Request::builder()
+            .method("POST")
+            .uri(uri)
+            .header("authorization", format!("Bearer {token}"))
+            .header("content-type", "application/json")
+            .body(Body::from(serde_json::to_vec(&body).unwrap()))
+            .unwrap();
+        router.clone().oneshot(req)
+    };
+
+    let resp = do_post(
+        "/v1/workspaces",
+        json!({
+            "name": "http-e2e-db-ws",
+            "kind": "db",
+            "app_id": "test-app",
+        }),
+    )
+    .await
+    .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK, "workspace create status");
+    let v = body_json(resp.into_body()).await;
+    let ws_id = v["data"]["id"].as_str().unwrap().to_string();
+    assert_eq!(v["data"]["kind"], "db");
+
+    // Upsert against the newly-provisioned workspace — verifies Milvus
+    // collection + default dataset row were both created during the
+    // HTTP POST above.
+    let resp = do_post(
+        "/v1/vectors/upsert",
+        json!({
+            "workspace_id": ws_id,
+            "records": [{ "row_key": "rk-e2e-prov", "text": "provisioning end to end" }],
+        }),
+    )
+    .await
+    .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK, "upsert post-provisioning");
+
+    // Cleanup.
+    let _ = state
+        .vector_workspace_store
+        .drop_collection(&veda_store::vector_collection_name(&ws_id))
+        .await;
+    let _ = state
+        .auth_store
+        .hard_delete_datasets_for_workspace(&ws_id)
+        .await;
+    let _ = state.auth_store.hard_delete_workspace(&ws_id).await;
+    cleanup_account_only(&mysql, &acct_id).await;
+}
+
+/// Stage 5.1 — vectors API must reject fs-kind workspaces.
+/// Without this, a caller could mistakenly point /v1/vectors/upsert at
+/// an fs workspace and the handler would NOT find a Milvus collection
+/// (because fs workspaces don't provision one) — opaque downstream
+/// errors. Better: refuse at auth time with 400 kind_mismatch.
+async fn sub_vectors_api_rejects_fs(
+    state: &Arc<AppState>,
+    mysql: &MysqlStore,
+    router: axum::Router,
+) {
+    let (acct_id, token) = provision_account_only(state).await;
+
+    let do_post = |uri: &str, body: serde_json::Value| {
+        let req = Request::builder()
+            .method("POST")
+            .uri(uri)
+            .header("authorization", format!("Bearer {token}"))
+            .header("content-type", "application/json")
+            .body(Body::from(serde_json::to_vec(&body).unwrap()))
+            .unwrap();
+        router.clone().oneshot(req)
+    };
+
+    // Create an fs workspace.
+    let resp = do_post(
+        "/v1/workspaces",
+        json!({
+            "name": "fs-ws-for-isolation",
+            "kind": "fs",
+        }),
+    )
+    .await
+    .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let v = body_json(resp.into_body()).await;
+    let fs_ws_id = v["data"]["id"].as_str().unwrap().to_string();
+
+    // Try /v1/vectors/upsert with the fs workspace — expect 400.
+    let resp = do_post(
+        "/v1/vectors/upsert",
+        json!({
+            "workspace_id": fs_ws_id,
+            "records": [{ "text": "should be rejected" }],
+        }),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::BAD_REQUEST,
+        "vectors API must reject fs workspace"
+    );
+    let v = body_json(resp.into_body()).await;
+    assert!(
+        v["error"]
+            .as_str()
+            .map(|s| s.contains("workspace_kind_mismatch"))
+            .unwrap_or(false),
+        "expected workspace_kind_mismatch in error body, got: {v:?}"
+    );
+
+    // Cleanup.
+    let _ = state.auth_store.hard_delete_workspace(&fs_ws_id).await;
+    cleanup_account_only(&mysql, &acct_id).await;
+}
+
+/// Stage 5.1 — fs API must reject db-kind workspaces.
+/// Covers the deferred Stage 1.6 HTTP-layer check: `AuthWorkspace`
+/// extractor enforces `kind == Fs` and returns 400 when a wk_ token
+/// scoped to a db workspace is presented on an fs endpoint.
+async fn sub_fs_api_rejects_db(
+    state: &Arc<AppState>,
+    mysql: &MysqlStore,
+    router: axum::Router,
+) {
+    let (acct_id, token) = provision_account_only(state).await;
+
+    let do_post = |uri: &str, body: serde_json::Value, bearer: &str| {
+        let req = Request::builder()
+            .method("POST")
+            .uri(uri)
+            .header("authorization", format!("Bearer {bearer}"))
+            .header("content-type", "application/json")
+            .body(Body::from(serde_json::to_vec(&body).unwrap()))
+            .unwrap();
+        router.clone().oneshot(req)
+    };
+
+    // Create a db workspace.
+    let resp = do_post(
+        "/v1/workspaces",
+        json!({
+            "name": "db-ws-for-fs-reject",
+            "kind": "db",
+            "app_id": "test",
+        }),
+        &token,
+    )
+    .await
+    .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let v = body_json(resp.into_body()).await;
+    let db_ws_id = v["data"]["id"].as_str().unwrap().to_string();
+
+    // Issue a wk_ token for the db workspace. `create_workspace_key`
+    // doesn't check kind — that's by design; kind enforcement happens
+    // at use-time on the fs API path.
+    let resp = do_post(
+        &format!("/v1/workspaces/{db_ws_id}/keys"),
+        json!({ "name": "test-wk", "permission": "readwrite" }),
+        &token,
+    )
+    .await
+    .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let v = body_json(resp.into_body()).await;
+    let wk_token = v["data"]["key"].as_str().unwrap().to_string();
+
+    // Use the wk_ on an fs endpoint — AuthWorkspace extractor must
+    // reject with 400 workspace_kind_mismatch.
+    let resp = do_post(
+        "/v1/search",
+        json!({ "query": "anything" }),
+        &wk_token,
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::BAD_REQUEST,
+        "fs API must reject db workspace via wk_ token; got {}",
+        resp.status()
+    );
+    let v = body_json(resp.into_body()).await;
+    assert!(
+        v["error"]
+            .as_str()
+            .map(|s| s.contains("workspace_kind_mismatch"))
+            .unwrap_or(false),
+        "expected workspace_kind_mismatch in error body, got: {v:?}"
+    );
+
+    // Cleanup.
+    let _ = state
+        .vector_workspace_store
+        .drop_collection(&veda_store::vector_collection_name(&db_ws_id))
+        .await;
+    let _ = state
+        .auth_store
+        .hard_delete_datasets_for_workspace(&db_ws_id)
+        .await;
+    let _ = state.auth_store.hard_delete_workspace(&db_ws_id).await;
+    cleanup_account_only(&mysql, &acct_id).await;
 }
