@@ -10,8 +10,7 @@
 
 **症状**：`config.embedding.dimension` 改后，老 db workspace 的 collection 仍是旧 dim。Milvus collection schema 不可演进（plan §2 + §7），写入侧会得到 dim mismatch hard error。
 **位置**：`crates/veda-server/src/state.rs:24-25` / `crates/veda-server/src/main.rs:75-83`
-**最简修法**：startup 时遍历所有 active db workspaces，比对 collection dim 与 `config.embedding.dimension`，不一致就 panic 启动失败。
-**承诺**：Stage 4 上线前补。
+**决定（2026-05-28）**：不做 startup guard。Runtime 第一次 upsert 即得 Milvus `dim mismatch` hard error，运维（= Joe）看到错误能立刻识别为 config drift 自行处理。新增校验代码不抵这个简化的收益（参考 codex review + Joe 决策）。
 
 ### C4 — workspace 软删不级联 datasets
 
@@ -24,10 +23,7 @@
 
 ### I1 — text 单位歧义（字符 vs 字节）
 
-**症状**：Milvus schema `max_length: 16384`（字符），plan §2.3 写"≤ 16KB"（字节）。中文 UTF-8 3 bytes/char，理论能存 48KB。
-**位置**：`crates/veda-store/src/milvus.rs:429` / `docs/vectors-merge-plan.md:161`
-**决策点**：按字节限（更严，对齐 plan）还是按字符限（对齐 Milvus schema）？
-**承诺**：Stage 4 validate_text 函数实现时决定，回写到 plan + schema。
+**决定（2026-05-28）**：Milvus VARCHAR `max_length` 实际单位是 UTF-8 字节（per 官方 operational FAQ），歧义不存在；同时把上限从 16384 提到 Milvus 硬上限 65535（对齐 Milvus 官方 BM25 tutorial）。代码 + 文档已对齐，记录 > 64 KiB 由 client chunk（Pinecone-style 契约）。
 
 ### I6 — operational visibility 单薄
 
@@ -51,6 +47,7 @@
 ## Subagent 提的 Minor（接受不修）
 
 - `milvus.rs:454-456` "CollectionAlreadyExists" string match —— Milvus minor 版本可能改 message。v0 接受，failed-fast。
+- text 字段恰好 65535 bytes UTF-8（含多字节字符）的 round-trip 集成测试 —— 边界覆盖空洞，codex review I1 时提的 follow-up，下一轮 hardening 顺手加
 - `account.rs:319-326` default_dataset 用 `ws.created_at` 而非 `Utc::now()` —— 风格小问题，无功能影响。
 - `embedding.rs:303` `Arc<Vec<f32>>` 但读侧仍 deep clone —— Arc 在当前 partition 模式收益小，但未来用 try_get_with 时省 clone。
 - Workspace struct 没 `#[derive(Default)]` —— test fixture 多写几行而已。

@@ -430,7 +430,11 @@ impl MilvusStore {
                     { "fieldName": "expire_at", "dataType": "Int64", "nullable": true },
                     { "fieldName": "text", "dataType": "VarChar",
                       "elementTypeParams": {
-                          "max_length": 16384,
+                          // max_length is UTF-8 bytes (per Milvus 2.6 FAQ,
+                          // not characters despite some doc pages). 65535
+                          // is the VARCHAR hard upper bound. Aligned with
+                          // validate::TEXT_MAX_BYTES.
+                          "max_length": 65535,
                           "enable_analyzer": true,
                           "analyzer_params": { "tokenizer": "jieba" }
                       } },

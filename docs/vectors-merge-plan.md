@@ -138,7 +138,7 @@ coll_<uuid>                          # 现有, structured collections, 不变
   expire_at     INT64 nullable       无索引 v0  # 业务方传,v0 不自动清理
 
   # 向量
-  text          VARCHAR(16384, jieba) # 必填,dense + BM25 输入
+  text          VARCHAR(65535, jieba) # 必填,dense + BM25 输入 (UTF-8 bytes)
   vector        FLOAT_VECTOR(<DIM>)   AUTOINDEX, COSINE
                                       # <DIM> = config.embedding.dim
   sparse_vector SPARSE_FLOAT_VECTOR   SPARSE_INVERTED_INDEX, BM25 output
@@ -159,7 +159,7 @@ Collection 配置:
 ### 2.3 字段约束（app 层校验，per vss §4.3）
 
 - `dataset` / `row_key`：必须匹配 `[a-zA-Z0-9_-]+`，禁止含 `:`（PK 分隔符）
-- `text`：必填，≤ 16KB
+- `text`：必填，≤ 65535 bytes UTF-8 (Milvus VARCHAR 硬上限，~22k 中文字)
 - `meta`：≤ 16KB
 - `tags`：≤ 8 个，单个 ≤ 128 字节
 - 类型不匹配 → 400 拒写，**不做 coercion**
@@ -325,7 +325,7 @@ upsert/search 时 text → EmbeddingService:
 | 1 | 3 天 | `crates/veda-store/src/mysql.rs`, `crates/veda-server/src/routes/account.rs`, `crates/veda-server/src/auth.rs`, `crates/veda-types/src/errors.rs` | ALTER workspaces (kind/app_id) + ALTER api_keys (app_id/allowed_workspaces/expires_at) + CREATE datasets；workspace 创建 API 加 kind/app_id 参数（model 从 config 取）；auth middleware 加 kind 路径校验；新错误码（WORKSPACE_KIND_MISMATCH / DATASET_NOT_FOUND / WORKSPACE_NOT_FOUND）；admin token 签发 endpoint 占位 |
 | 2 | 3 天 | `crates/veda-store/src/milvus.rs`, 新 `crates/veda-server/src/services/workspace_provisioner.rs` | `create_vector_collection(ws_id, dim)`：pk/dataset_id/text(jieba)/vector(AUTOINDEX COSINE)/sparse_vector(BM25)/meta/timestamps + BM25 function + 索引 + load；workspace 创建串 DB+Milvus + 失败回滚；soft delete 路径不动 Milvus |
 | 3 | 2 天 | `crates/veda-pipeline/src/embedding.rs` | 加 moka 依赖；在现有 `EmbeddingProvider` 之上包一层 `EmbeddingCache::try_get_with`（key=sha256(model:NFC_norm(trim(text)))，TTL write 24h/access 1h，>4KB skip）；单 provider，不引入 registry |
-| 4 | 6 天 | 新 `crates/veda-server/src/routes/{vectors,datasets,admin_tokens}.rs`, 新 `crates/veda-server/src/filter.rs` | dataset CRUD (`POST/GET/DELETE /v1/workspaces/{ws}/datasets`)；admin token 签发/disable；`vectors/{upsert,search,query,delete}` 同步走 Milvus 返 commit_ts；Filter parser (must + eq/in/gt/gte/lt/lte，meta top-level) → Milvus expr；pk 拼装与 charset 校验；limits (batch ≤500, top_k ≤100, text ≤16KB) |
+| 4 | 6 天 | 新 `crates/veda-server/src/routes/{vectors,datasets,admin_tokens}.rs`, 新 `crates/veda-server/src/filter.rs` | dataset CRUD (`POST/GET/DELETE /v1/workspaces/{ws}/datasets`)；admin token 签发/disable；`vectors/{upsert,search,query,delete}` 同步走 Milvus 返 commit_ts；Filter parser (must + eq/in/gt/gte/lt/lte，meta top-level) → Milvus expr；pk 拼装与 charset 校验；limits (batch ≤500, top_k ≤100, text ≤64KiB UTF-8) |
 | 5 | 3 天 | 新 `tests/vectors_e2e.rs`, `README.md`, 新 `docs/api/vectors.md`, `ARCHITECTURE.md`, 新 `examples/python_pinecone_demo.py` | E2E：create db ws → dataset → upsert → search → query → delete → search 空；fs API 回归；客户端 demo；ARCHITECTURE 加 fs/structured/vector 三类并列段 |
 
 **总计 ~3-4 周 dedicated work**。calendar 5-6 周。

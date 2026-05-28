@@ -5,9 +5,10 @@
 //! these BEFORE any Milvus write so that bad input rejects with a stable
 //! `VedaError::InvalidInput` instead of a downstream Milvus error.
 //!
-//! Limits are denominated in **bytes** for text/meta/tags (matches the plan's
-//! "≤ 16KB" wording). Milvus schema declares text `max_length=16384` in
-//! characters, which is slack — the API contract is the tighter bound.
+//! Limits are denominated in **UTF-8 bytes** for text/meta/tags. This aligns
+//! with Milvus VARCHAR `max_length` semantics — despite the "characters"
+//! wording in some user-guide pages, Milvus 2.6 operational FAQ confirms
+//! the unit is bytes (see `text` field in `milvus.rs`).
 
 use crate::{Result, VedaError};
 
@@ -32,8 +33,12 @@ const ROW_KEY_MAX: usize = 64;
 /// `pk` field VARCHAR(128) in Milvus — total `{dataset}:{row_key}` budget.
 const PK_MAX: usize = 128;
 
-/// `text` field — API contract bound, tighter than Milvus's character cap.
-const TEXT_MAX_BYTES: usize = 16 * 1024;
+/// `text` field — UTF-8 byte cap, exactly matches Milvus VARCHAR
+/// `max_length=65535` (Milvus 2.6's hard upper bound). Bumped from 16 KiB
+/// (vss merge initial) to 64 KiB per Milvus official BM25 tutorial
+/// recommendation. Records > 64 KiB UTF-8 must be chunked client-side
+/// (Pinecone-style atomic record contract).
+const TEXT_MAX_BYTES: usize = 65_535;
 
 /// `meta` JSON serialized size cap.
 const META_MAX_BYTES: usize = 16 * 1024;

@@ -151,5 +151,5 @@ Stable error codes (HTTP body `error` field):
 Charset and size limits:
 - `dataset` / `row_key`: `[a-zA-Z0-9_-]+`, must not contain `:` (PK separator)
 - `dataset` ≤ 64 bytes, `row_key` ≤ 64 bytes, composite `pk` ≤ 128 bytes
-- `text` ≤ 16 KB, `meta` (JSON-serialized) ≤ 16 KB, `tags` ≤ 8 entries × 128 bytes each
+- `text` ≤ 65535 bytes UTF-8 (Milvus VARCHAR hard cap), `meta` (JSON-serialized) ≤ 16 KB, `tags` ≤ 8 entries × 128 bytes each
 - `status` ∈ {`"active"`, `"inactive"`}; search base filter pins to `"active"`
