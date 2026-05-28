@@ -43,7 +43,8 @@ the bearer can touch. Issue tokens via `POST /admin/v1/tokens`.
 ### POST `/v1/vectors/upsert`
 
 Inserts or replaces records by `(dataset, id)`. Max 500 records per call.
-Same-batch duplicate `id` → last entry wins (Milvus PK upsert semantics).
+Same-batch duplicate `id` is server-side deduped (last entry wins) — see
+**Idempotency** below.
 
 ```json
 {
@@ -65,14 +66,48 @@ Response:
 }}
 ```
 
-`ids` is the same length and order as `records` in the request. For
-auto-generated UUIDs (records omitting `id`), this is the **only** place
-to discover them — capture them client-side before they're needed for
-query/delete.
+`ids` echoes the request order, **minus any duplicates collapsed by
+server-side dedupe** (see Idempotency below). For auto-generated UUIDs
+(records omitting `id`), this is the **only** place to discover them —
+capture them client-side before they're needed for query/delete.
 
 `commit_ts` is server-now ms — Milvus REST doesn't expose the real timestamp.
 Under synchronous semantics, this is sufficient for read-your-writes on the
 same server.
+
+#### Idempotency
+
+The upsert handler has two modes depending on whether `id` is supplied:
+
+| Mode | `id` field | On retry of the same request |
+|---|---|---|
+| **Supplied** | caller provides `id` | **Idempotent**: same `(workspace, dataset, id)` → row is replaced in place. `created_at`/`updated_at` reset on every replay; meta/tags/etc fully overwritten by the latest payload. |
+| **Omitted** | server generates a UUID | **Not idempotent**: each retry creates a fresh record with a different UUID. Network-level retries (proxy timeouts, client reconnects) will duplicate writes. |
+
+**Retry-prone callers MUST supply their own `id`.** This is the only way
+to get idempotent semantics. If the client cannot stably derive an id at
+write time, generate a content-hash or UUIDv7 client-side and pass it
+explicitly — server-generated UUIDs are for one-shot ingestion only.
+
+Within a single upsert call, duplicate `id` is **server-side deduped,
+last-wins**: the later record in the `records` array overrides earlier
+ones; earlier copies are dropped before embedding so you don't pay for
+vectors you won't store. (Milvus itself rejects same-batch duplicate
+PKs with error code 1100, so the server collapses before submitting.)
+There is no error for duplicate ids in the same batch — the response
+`ids` reflects the deduped count, which may be shorter than the
+request's `records` length.
+
+Example — request body:
+```json
+{"records": [
+  {"id": "A", "text": "first",  "meta": {"v": 1}},
+  {"id": "B", "text": "other",  "meta": {"v": 1}},
+  {"id": "A", "text": "winner", "meta": {"v": 2}}
+]}
+```
+Response: `{"ids": ["A", "B"], "commit_ts": ...}`. After this call the
+stored `A` row has `text: "winner"` and `meta: {"v": 2}`.
 
 ### POST `/v1/vectors/search`
 

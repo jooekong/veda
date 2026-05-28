@@ -286,7 +286,10 @@ async fn vectors_http_e2e_suite() {
     sub_fs_api_rejects_db(&state, &mysql, router.clone()).await;
 
     // Sub-test 5: dataset list pagination cursor (task #5).
-    sub_dataset_pagination(&state, &mysql, router).await;
+    sub_dataset_pagination(&state, &mysql, router.clone()).await;
+
+    // Sub-test 6: upsert idempotency + delete semantics (task #7).
+    sub_upsert_idempotency_and_delete_semantics(&state, &mysql, router).await;
 }
 
 async fn sub_full_roundtrip(state: &Arc<AppState>, mysql: &MysqlStore, router: axum::Router) {
@@ -823,6 +826,149 @@ async fn sub_dataset_pagination(
             "missing {expected} across pages: {seen_set:?}"
         );
     }
+
+    cleanup(state, mysql, &setup).await;
+}
+
+/// Task #7 — upsert idempotency contract + delete semantics.
+/// Three contracts in one sub-test:
+///   1. Same-batch duplicate `id`: server-side dedupe, last-wins value
+///      at first-occurrence position (Milvus 2.6 rejects same-batch dup
+///      PKs with code 1100, so handler must collapse).
+///   2. Cross-call same `id`: idempotent replace, query shows the latest
+///      payload, no duplicate rows.
+///   3. Delete with mixed-existence ids: `delete_count` always equals
+///      `len(ids)` per Milvus tombstone model (locks the v0 contract
+///      claimed in docs/api/vectors.md).
+async fn sub_upsert_idempotency_and_delete_semantics(
+    state: &Arc<AppState>,
+    mysql: &MysqlStore,
+    router: axum::Router,
+) {
+    let setup = provision_test_account(state).await;
+    let token = setup.token.clone();
+    let ws_id = setup.ws_id.clone();
+
+    let do_post = |uri: &str, body: serde_json::Value| {
+        let req = Request::builder()
+            .method("POST")
+            .uri(uri)
+            .header("authorization", format!("Bearer {token}"))
+            .header("content-type", "application/json")
+            .body(Body::from(body.to_string()))
+            .unwrap();
+        router.clone().oneshot(req)
+    };
+
+    // 1. Same-batch duplicate id — server-side dedupe, last entry wins.
+    //    Milvus 2.6 rejects same-batch dup PKs (code 1100), so handler
+    //    collapses before sending. Response `ids` reflects deduped count.
+    let resp = do_post(
+        "/v1/vectors/upsert",
+        json!({
+            "workspace_id": ws_id,
+            "records": [
+                { "id": "dup-1", "text": "first", "meta": {"version": 1} },
+                { "id": "other", "text": "unrelated", "meta": {"version": 0} },
+                { "id": "dup-1", "text": "second", "meta": {"version": 2} },
+                { "id": "dup-1", "text": "third (winner)", "meta": {"version": 3} },
+            ],
+        }),
+    )
+    .await
+    .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK, "duplicate-id batch must not 4xx");
+    let v = body_json(resp.into_body()).await;
+    let ids: Vec<String> = v["data"]["ids"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|x| x.as_str().unwrap().to_string())
+        .collect();
+    assert_eq!(
+        ids,
+        vec!["dup-1".to_string(), "other".to_string()],
+        "deduped ids preserve first-occurrence position; got {ids:?}"
+    );
+
+    tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+
+    let resp = do_post(
+        "/v1/vectors/query",
+        json!({"workspace_id": ws_id, "ids": ["dup-1"]}),
+    )
+    .await
+    .unwrap();
+    let v = body_json(resp.into_body()).await;
+    let hits = v["data"]["hits"].as_array().unwrap();
+    assert_eq!(hits.len(), 1, "must be exactly one row after PK collapse");
+    assert_eq!(
+        hits[0]["text"].as_str(),
+        Some("third (winner)"),
+        "last entry must win"
+    );
+    assert_eq!(
+        hits[0]["meta"]["version"].as_i64(),
+        Some(3),
+        "winner's meta also wins"
+    );
+
+    // 2. Cross-call same id — idempotent replace.
+    let resp = do_post(
+        "/v1/vectors/upsert",
+        json!({
+            "workspace_id": ws_id,
+            "records": [{ "id": "idem-1", "text": "v1", "meta": {"v": 1} }],
+        }),
+    )
+    .await
+    .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+
+    let resp = do_post(
+        "/v1/vectors/upsert",
+        json!({
+            "workspace_id": ws_id,
+            "records": [{ "id": "idem-1", "text": "v2", "meta": {"v": 2} }],
+        }),
+    )
+    .await
+    .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+
+    let resp = do_post(
+        "/v1/vectors/query",
+        json!({"workspace_id": ws_id, "ids": ["idem-1"]}),
+    )
+    .await
+    .unwrap();
+    let v = body_json(resp.into_body()).await;
+    let hits = v["data"]["hits"].as_array().unwrap();
+    assert_eq!(hits.len(), 1, "idempotent replace, not duplicate rows");
+    assert_eq!(hits[0]["text"].as_str(), Some("v2"));
+    assert_eq!(hits[0]["meta"]["v"].as_i64(), Some(2));
+
+    // 3. Mixed-existence delete: locks the public contract that
+    //    delete_count = len(ids), independent of physical existence.
+    //    (Three ids exist: dup-1, other, idem-1. Two don't: ghost-a, ghost-b.)
+    let resp = do_post(
+        "/v1/vectors/delete",
+        json!({
+            "workspace_id": ws_id,
+            "ids": ["dup-1", "other", "idem-1", "ghost-a", "ghost-b"],
+        }),
+    )
+    .await
+    .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let v = body_json(resp.into_body()).await;
+    assert_eq!(
+        v["data"]["delete_count"].as_u64(),
+        Some(5),
+        "delete_count must equal len(ids) (Milvus tombstone marker count, NOT physical-existence count)"
+    );
 
     cleanup(state, mysql, &setup).await;
 }

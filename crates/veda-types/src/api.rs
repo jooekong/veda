@@ -238,10 +238,12 @@ pub struct NewRecord {
 
 #[derive(Debug, Serialize)]
 pub struct UpsertResponse {
-    /// `id`s of the records written, in the same order as `records` in the
-    /// request. For caller-supplied ids this just echoes input; for omitted
-    /// ids it surfaces the server-generated UUIDs so the caller can
-    /// reference them later via query/delete.
+    /// `id`s of the records written, in request order **after server-side
+    /// dedupe by id** (last-wins, first-occurrence position — see
+    /// `docs/api/vectors.md` "Idempotency"). May be shorter than
+    /// `request.records` when the caller sent duplicate ids in one batch.
+    /// For omitted-id records this surfaces the server-generated UUIDs so
+    /// the caller can reference them later via query/delete.
     pub ids: Vec<String>,
     /// Server's local-time ms epoch when Milvus upsert completed.
     /// Milvus REST does not surface a true commit_ts; under synchronous

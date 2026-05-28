@@ -84,31 +84,53 @@ async fn upsert_vectors(
     //    a batch we'll reject later. Each record is normalized into
     //    `(id, NormalizedFields)` plus the text to embed.
     let now_ms = Utc::now().timestamp_millis();
-    let mut texts: Vec<String> = Vec::with_capacity(req.records.len());
     let mut normalized: Vec<NormalizedRecord> = Vec::with_capacity(req.records.len());
     for rec in &req.records {
-        let nr = normalize_record(rec, &dataset_name)?;
-        texts.push(nr.text.clone());
-        normalized.push(nr);
+        normalized.push(normalize_record(rec, &dataset_name)?);
     }
 
-    // 5. Batched embed — one upstream call (cache hits skip).
+    // 5. Server-side dedupe by id, last-wins. Milvus 2.6 rejects same-
+    //    batch duplicate PKs (error code 1100), so we collapse here to
+    //    deliver the wire contract documented in docs/api/vectors.md
+    //    "Idempotency": "the latest occurrence in the records array
+    //    wins; earlier occurrences are dropped before embedding". Done
+    //    BEFORE embedding so we don't pay for vectors we'll discard.
+    //
+    //    Algorithm: walk forward, track first-seen index per id; on
+    //    collision, overwrite in place to keep position of first
+    //    occurrence with the value of last. Auto-generated UUIDs
+    //    (omitted id case) are random v4 — collision is negligible.
+    let mut seen_at: std::collections::HashMap<String, usize> =
+        std::collections::HashMap::with_capacity(normalized.len());
+    let mut deduped: Vec<NormalizedRecord> = Vec::with_capacity(normalized.len());
+    for nr in normalized {
+        match seen_at.get(&nr.id).copied() {
+            Some(idx) => deduped[idx] = nr,
+            None => {
+                seen_at.insert(nr.id.clone(), deduped.len());
+                deduped.push(nr);
+            }
+        }
+    }
+
+    // 6. Batched embed — one upstream call (cache hits skip).
+    let texts: Vec<String> = deduped.iter().map(|nr| nr.text.clone()).collect();
     let vectors = state.vector_embedding.embed(&texts).await?;
-    if vectors.len() != normalized.len() {
+    if vectors.len() != deduped.len() {
         // EmbeddingCache + EmbeddingProvider both guarantee 1-to-1; treat
         // any mismatch as an upstream contract violation, not silent loss.
         return Err(VedaError::EmbeddingFailed(format!(
             "embedded {} vectors for {} records",
             vectors.len(),
-            normalized.len()
+            deduped.len()
         ))
         .into());
     }
 
-    // 6. Build Milvus payload records.
-    let mut to_insert: Vec<UpsertRecord> = Vec::with_capacity(normalized.len());
-    let mut ids: Vec<String> = Vec::with_capacity(normalized.len());
-    for (nr, vec) in normalized.into_iter().zip(vectors.into_iter()) {
+    // 7. Build Milvus payload records.
+    let mut to_insert: Vec<UpsertRecord> = Vec::with_capacity(deduped.len());
+    let mut ids: Vec<String> = Vec::with_capacity(deduped.len());
+    for (nr, vec) in deduped.into_iter().zip(vectors.into_iter()) {
         ids.push(nr.id.clone());
         to_insert.push(UpsertRecord {
             pk: nr.pk,
@@ -124,13 +146,8 @@ async fn upsert_vectors(
         });
     }
 
-    // 7. Synchronous upsert. commit_ts is server-now (Milvus REST doesn't
+    // 8. Synchronous upsert. commit_ts is server-now (Milvus REST doesn't
     //    surface a real one; see VectorWorkspaceStore::upsert_records doc).
-    //
-    // Same-batch duplicate `id`: Milvus PK upsert semantics — last entry
-    // wins. v0 doesn't dedupe server-side; the response `ids` echoes the
-    // request order. TODO(#7): explicit integration test for this once the
-    // idempotency-docs task lands.
     let commit_ts = state
         .vector_workspace_store
         .upsert_records(&ws.id, &to_insert)
