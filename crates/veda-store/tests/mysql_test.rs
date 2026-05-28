@@ -503,6 +503,9 @@ async fn mysql_api_key_crud() {
         name: "default".into(),
         key_hash: key_hash.into(),
         status: KeyStatus::Active,
+        app_id: None,
+        allowed_workspaces: None,
+        expires_at: None,
         created_at: now,
     };
     store.create_api_key(&ak).await.unwrap();
@@ -570,6 +573,144 @@ async fn mysql_workspace_crud() {
     assert!(
         list_after.is_empty(),
         "archived workspace not in active list"
+    );
+
+    cleanup_account(&store, &acct_id).await;
+}
+
+#[tokio::test]
+#[ignore]
+async fn mysql_api_key_with_scope_and_expiry_roundtrip() {
+    let url = load_mysql_url();
+    let store = MysqlStore::new(&url).await.expect("connect");
+    store.migrate().await.expect("migrate");
+
+    let acct_id = Uuid::new_v4().to_string();
+    let now = Utc::now();
+    store
+        .create_account(&Account {
+            id: acct_id.clone(),
+            name: "scope-test".into(),
+            email: Some(format!("{}@test.com", &acct_id[..8])),
+            password_hash: None,
+            status: AccountStatus::Active,
+            created_at: now,
+            updated_at: now,
+        })
+        .await
+        .unwrap();
+
+    let key_id = Uuid::new_v4().to_string();
+    let key_hash = format!("sha256_scope_{}", &Uuid::new_v4().to_string()[..8]);
+    let ws_a = Uuid::new_v4().to_string();
+    let ws_b = Uuid::new_v4().to_string();
+    let expires = now + chrono::Duration::hours(24);
+    store
+        .create_api_key(&ApiKeyRecord {
+            id: key_id.clone(),
+            account_id: acct_id.clone(),
+            name: "scoped".into(),
+            key_hash: key_hash.clone(),
+            status: KeyStatus::Active,
+            app_id: Some("acme-app".into()),
+            allowed_workspaces: Some(vec![ws_a.clone(), ws_b.clone()]),
+            expires_at: Some(expires),
+            created_at: now,
+        })
+        .await
+        .unwrap();
+
+    let got = store.get_api_key_by_hash(&key_hash).await.unwrap().unwrap();
+    assert_eq!(got.app_id.as_deref(), Some("acme-app"));
+    let scope = got.allowed_workspaces.as_ref().expect("allowed_workspaces");
+    assert_eq!(scope.len(), 2);
+    assert!(scope.contains(&ws_a));
+    assert!(scope.contains(&ws_b));
+    // Roundtrip to second-precision; MySQL DATETIME truncates/rounds
+    // subseconds inconsistently, allow ≤1s drift.
+    let got_exp = got.expires_at.expect("expires_at");
+    let drift = (got_exp.timestamp() - expires.timestamp()).abs();
+    assert!(
+        drift <= 1,
+        "expires_at drift > 1s: stored={}, sent={}",
+        got_exp.timestamp(),
+        expires.timestamp()
+    );
+
+    cleanup_account(&store, &acct_id).await;
+}
+
+#[tokio::test]
+#[ignore]
+async fn mysql_expired_api_key_filtered_out() {
+    let url = load_mysql_url();
+    let store = MysqlStore::new(&url).await.expect("connect");
+    store.migrate().await.expect("migrate");
+
+    let acct_id = Uuid::new_v4().to_string();
+    let now = Utc::now();
+    store
+        .create_account(&Account {
+            id: acct_id.clone(),
+            name: "expiry-test".into(),
+            email: Some(format!("{}@test.com", &acct_id[..8])),
+            password_hash: None,
+            status: AccountStatus::Active,
+            created_at: now,
+            updated_at: now,
+        })
+        .await
+        .unwrap();
+
+    // Key 1: expired 1h ago → must be filtered out
+    let key_hash_expired = format!("sha256_exp_{}", &Uuid::new_v4().to_string()[..8]);
+    store
+        .create_api_key(&ApiKeyRecord {
+            id: Uuid::new_v4().to_string(),
+            account_id: acct_id.clone(),
+            name: "expired".into(),
+            key_hash: key_hash_expired.clone(),
+            status: KeyStatus::Active,
+            app_id: None,
+            allowed_workspaces: None,
+            expires_at: Some(now - chrono::Duration::hours(1)),
+            created_at: now,
+        })
+        .await
+        .unwrap();
+
+    // Key 2: no expiry → always valid
+    let key_hash_never = format!("sha256_never_{}", &Uuid::new_v4().to_string()[..8]);
+    store
+        .create_api_key(&ApiKeyRecord {
+            id: Uuid::new_v4().to_string(),
+            account_id: acct_id.clone(),
+            name: "never".into(),
+            key_hash: key_hash_never.clone(),
+            status: KeyStatus::Active,
+            app_id: None,
+            allowed_workspaces: None,
+            expires_at: None,
+            created_at: now,
+        })
+        .await
+        .unwrap();
+
+    assert!(
+        store
+            .get_api_key_by_hash(&key_hash_expired)
+            .await
+            .unwrap()
+            .is_none(),
+        "expired key must not be returned"
+    );
+    assert!(
+        store
+            .get_api_key_by_hash(&key_hash_never)
+            .await
+            .unwrap()
+            .is_some(),
+        "non-expiring key must be returned"
     );
 
     cleanup_account(&store, &acct_id).await;
@@ -884,6 +1025,9 @@ async fn mysql_api_key_rejected_when_account_suspended() {
             name: "default".into(),
             key_hash: key_hash.clone(),
             status: KeyStatus::Active,
+            app_id: None,
+            allowed_workspaces: None,
+            expires_at: None,
             created_at: now,
         })
         .await

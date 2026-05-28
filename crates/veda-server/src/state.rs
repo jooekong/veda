@@ -2,9 +2,8 @@ use std::sync::Arc;
 use veda_core::service::collection::CollectionService;
 use veda_core::service::fs::FsService;
 use veda_core::service::search::SearchService;
-use veda_core::store::{AuthStore, MetadataStore, VectorStore};
+use veda_core::store::{AuthStore, MetadataStore, VectorStore, VectorWorkspaceStore};
 use veda_sql::VedaSqlEngine;
-use veda_store::MilvusStore;
 
 use crate::obs::MetricsHandle;
 
@@ -15,11 +14,11 @@ pub struct AppState {
     pub auth_store: Arc<dyn AuthStore>,
     pub meta_store: Arc<dyn MetadataStore>,
     pub vector_store: Arc<dyn VectorStore>,
-    /// Concrete `MilvusStore` ref used by db-kind workspace provisioning
-    /// (see routes/account.rs::create_workspace). `vector_store` is the same
-    /// instance via trait object; this field exposes inherent methods
-    /// (`create_vector_collection`, `drop_collection`).
-    pub milvus: Arc<MilvusStore>,
+    /// db-kind workspace collection lifecycle (create/drop). Separate from
+    /// `vector_store` (fs-side chunk/summary ops); both currently happen to
+    /// be the same MilvusStore instance, but the trait split lets Stage 4+
+    /// stub the vector path independently of fs.
+    pub vector_workspace_store: Arc<dyn VectorWorkspaceStore>,
     /// Embedding dim from `config.embedding.dimension`. Stamped into Milvus
     /// vector field on db workspace collection creation.
     pub embedding_dim: u32,

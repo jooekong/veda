@@ -212,6 +212,9 @@ async fn h_create_account(
             name: "default".into(),
             key_hash: kh,
             status: veda_types::KeyStatus::Active,
+            app_id: None,
+            allowed_workspaces: None,
+            expires_at: None,
             created_at: now,
         })
         .await

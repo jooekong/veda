@@ -119,12 +119,17 @@ fn row_to_workspace(row: &sqlx::mysql::MySqlRow) -> Result<Workspace> {
 
 fn row_to_api_key(row: &sqlx::mysql::MySqlRow) -> Result<ApiKeyRecord> {
     let st: String = row.try_get("status").map_err(storage_err)?;
+    let allowed_raw: Option<Json<Vec<String>>> =
+        row.try_get("allowed_workspaces").map_err(storage_err)?;
     Ok(ApiKeyRecord {
         id: row.try_get("id").map_err(storage_err)?,
         account_id: row.try_get("account_id").map_err(storage_err)?,
         name: row.try_get("name").map_err(storage_err)?,
         key_hash: row.try_get("key_hash").map_err(storage_err)?,
         status: db_enum("key_status", &st)?,
+        app_id: row.try_get("app_id").map_err(storage_err)?,
+        allowed_workspaces: allowed_raw.map(|j| j.0),
+        expires_at: row.try_get("expires_at").map_err(storage_err)?,
         created_at: row.try_get("created_at").map_err(storage_err)?,
     })
 }
@@ -2104,14 +2109,18 @@ impl AuthStore for MysqlStore {
         .map_err(storage_err)?;
 
         sqlx::query(
-            r#"INSERT INTO veda_api_keys (id, account_id, name, key_hash, status, created_at)
-               VALUES (?, ?, ?, ?, ?, ?)"#,
+            r#"INSERT INTO veda_api_keys
+               (id, account_id, name, key_hash, status, app_id, allowed_workspaces, expires_at, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)"#,
         )
         .bind(&api_key.id)
         .bind(&api_key.account_id)
         .bind(&api_key.name)
         .bind(&api_key.key_hash)
         .bind(db_enum_str(&api_key.status))
+        .bind(&api_key.app_id)
+        .bind(api_key.allowed_workspaces.as_ref().map(Json))
+        .bind(api_key.expires_at.map(|d| d.naive_utc()))
         .bind(api_key.created_at.naive_utc())
         .execute(&mut *tx)
         .await
@@ -2154,14 +2163,18 @@ impl AuthStore for MysqlStore {
 
     async fn create_api_key(&self, key: &ApiKeyRecord) -> Result<()> {
         sqlx::query(
-            r#"INSERT INTO veda_api_keys (id, account_id, name, key_hash, status, created_at)
-               VALUES (?, ?, ?, ?, ?, ?)"#,
+            r#"INSERT INTO veda_api_keys
+               (id, account_id, name, key_hash, status, app_id, allowed_workspaces, expires_at, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)"#,
         )
         .bind(&key.id)
         .bind(&key.account_id)
         .bind(&key.name)
         .bind(&key.key_hash)
         .bind(db_enum_str(&key.status))
+        .bind(&key.app_id)
+        .bind(key.allowed_workspaces.as_ref().map(Json))
+        .bind(key.expires_at.map(|d| d.naive_utc()))
         .bind(key.created_at.naive_utc())
         .execute(&self.pool)
         .await
@@ -2172,11 +2185,16 @@ impl AuthStore for MysqlStore {
     async fn get_api_key_by_hash(&self, key_hash: &str) -> Result<Option<ApiKeyRecord>> {
         // JOIN veda_accounts so a suspended account's keys stop authorizing
         // immediately. Without this, AccountStatus::Suspended is dead weight.
+        // expires_at filter: NULL = never expires; non-NULL = enforce.
         let row = sqlx::query(
-            r#"SELECT k.id, k.account_id, k.name, k.key_hash, k.status, k.created_at
+            r#"SELECT k.id, k.account_id, k.name, k.key_hash, k.status,
+                      k.app_id, k.allowed_workspaces, k.expires_at, k.created_at
                FROM veda_api_keys k
                INNER JOIN veda_accounts a ON a.id = k.account_id
-               WHERE k.key_hash = ? AND k.status = 'active' AND a.status = 'active'"#,
+               WHERE k.key_hash = ?
+                 AND k.status = 'active'
+                 AND a.status = 'active'
+                 AND (k.expires_at IS NULL OR k.expires_at > NOW())"#,
         )
         .bind(key_hash)
         .fetch_optional(&self.pool)
@@ -2187,7 +2205,8 @@ impl AuthStore for MysqlStore {
 
     async fn list_api_keys(&self, account_id: &str) -> Result<Vec<ApiKeyRecord>> {
         let rows = sqlx::query(
-            r#"SELECT id, account_id, name, key_hash, status, created_at
+            r#"SELECT id, account_id, name, key_hash, status,
+                      app_id, allowed_workspaces, expires_at, created_at
                FROM veda_api_keys WHERE account_id = ? ORDER BY created_at"#,
         )
         .bind(account_id)

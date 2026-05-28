@@ -183,6 +183,14 @@ pub struct ApiKeyRecord {
     #[serde(skip_serializing)]
     pub key_hash: String,
     pub status: KeyStatus,
+    /// Governance label identifying the business app this token represents.
+    /// NOT a security boundary — workspace access is gated by
+    /// `allowed_workspaces` + `workspace.kind`. Used for audit / oncall.
+    pub app_id: Option<String>,
+    /// Workspace scope. `None` = unrestricted (account-wide); `Some(list)` =
+    /// token can only access workspaces whose `id` is in the list.
+    pub allowed_workspaces: Option<Vec<String>>,
+    pub expires_at: Option<DateTime<Utc>>,
     pub created_at: DateTime<Utc>,
 }
 

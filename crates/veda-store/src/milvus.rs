@@ -4,7 +4,7 @@ use async_trait::async_trait;
 use reqwest::header::{HeaderMap, HeaderValue, AUTHORIZATION, CONTENT_TYPE};
 use serde_json::{json, Value};
 use tracing::warn;
-use veda_core::store::{CollectionVectorStore, VectorStore};
+use veda_core::store::{CollectionVectorStore, VectorStore, VectorWorkspaceStore};
 use veda_types::{
     ChunkWithEmbedding, FieldDefinition, Result, SearchHit, SearchMode, SearchRequest,
     SummaryWithEmbedding, VedaError,
@@ -968,6 +968,25 @@ fn field_to_milvus_type(ft: &str) -> &str {
         "float64" | "double" => "Double",
         "bool" | "boolean" => "Bool",
         _ => "VarChar",
+    }
+}
+
+#[async_trait]
+impl VectorWorkspaceStore for MilvusStore {
+    async fn create_vector_collection(
+        &self,
+        workspace_id: &str,
+        dim: u32,
+    ) -> Result<String> {
+        // Delegate to the inherent method. The trait keeps the
+        // collection-management API testable behind a stub for non-Milvus
+        // backends (future) and avoids forcing AppState to carry a concrete
+        // `Arc<MilvusStore>` alongside `Arc<dyn VectorStore>`.
+        MilvusStore::create_vector_collection(self, workspace_id, dim).await
+    }
+
+    async fn drop_collection(&self, name: &str) -> Result<()> {
+        MilvusStore::drop_collection(self, name).await
     }
 }
 

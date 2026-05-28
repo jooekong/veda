@@ -66,6 +66,31 @@ pub fn validate_jwt_secret(secret: &str) -> anyhow::Result<()> {
 
 pub struct AuthAccount {
     pub account_id: String,
+    /// Token's `app_id` governance label. `None` for legacy account-owner
+    /// keys; `Some` for service tokens issued for company apps.
+    pub app_id: Option<String>,
+    /// Token's workspace scope. `None` = unrestricted (token can access
+    /// any workspace under its account). `Some(list)` = token can only
+    /// access workspaces whose `id` is in the list.
+    pub allowed_workspaces: Option<Vec<String>>,
+}
+
+impl AuthAccount {
+    /// Returns Err if `allowed_workspaces` is `Some` and `workspace_id`
+    /// is not in the list. Returns Ok if unrestricted or in scope.
+    /// Stage 4 vectors handlers call this before any operation against
+    /// a workspace_id pulled from the request body.
+    pub fn check_workspace_allowed(
+        &self,
+        workspace_id: &str,
+    ) -> Result<(), crate::error::AppError> {
+        if let Some(allowed) = &self.allowed_workspaces {
+            if !allowed.iter().any(|w| w == workspace_id) {
+                return Err(veda_types::VedaError::PermissionDenied.into());
+            }
+        }
+        Ok(())
+    }
 }
 
 impl FromRequestParts<Arc<AppState>> for AuthAccount {
@@ -88,6 +113,10 @@ impl FromRequestParts<Arc<AppState>> for AuthAccount {
                 .ok_or_else(auth_err)?;
 
             let key_hash = veda_core::checksum::sha256_hex(token.as_bytes());
+            // get_api_key_by_hash filters out expired tokens at the SQL
+            // layer (WHERE expires_at IS NULL OR expires_at > NOW()), so an
+            // expired token appears as "not found" → 401, matching the spec
+            // (don't leak the existence of expired tokens to attackers).
             let key = state
                 .auth_store
                 .get_api_key_by_hash(&key_hash)
@@ -100,6 +129,8 @@ impl FromRequestParts<Arc<AppState>> for AuthAccount {
 
             Ok(AuthAccount {
                 account_id: key.account_id,
+                app_id: key.app_id,
+                allowed_workspaces: key.allowed_workspaces,
             })
         }
     }
@@ -134,6 +165,31 @@ impl AuthAccount {
         if ws.account_id != self.account_id {
             return Err(veda_types::VedaError::PermissionDenied.into());
         }
+        Ok(ws)
+    }
+
+    /// Resolve and authorize a db-kind workspace for a vector API call.
+    /// Bundles all the checks Stage 4 handlers must run before any vector
+    /// op: workspace exists + active, account ownership, kind == Db, and
+    /// the token's allowed_workspaces scope. Stage 4 handlers call this
+    /// instead of stitching individual checks together — forgetting any
+    /// one is a silent security gap (Codex Q2 in Stage 1.7 review).
+    pub async fn load_db_workspace(
+        &self,
+        state: &AppState,
+        ws_id: &str,
+    ) -> Result<veda_types::Workspace, crate::error::AppError> {
+        let ws = self.load_owned_workspace(state, ws_id).await?;
+        if ws.status != veda_types::WorkspaceStatus::Active {
+            return Err(veda_types::VedaError::NotFound("workspace".into()).into());
+        }
+        if ws.kind != veda_types::WorkspaceKind::Db {
+            return Err(veda_types::VedaError::InvalidInput(
+                "workspace_kind_mismatch".into(),
+            )
+            .into());
+        }
+        self.check_workspace_allowed(&ws.id)?;
         Ok(ws)
     }
 }
@@ -241,4 +297,43 @@ fn kind_mismatch_err() -> Response {
         Json(ApiResponse::<()>::err("workspace_kind_mismatch")),
     )
         .into_response()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn auth(allowed: Option<Vec<&str>>) -> AuthAccount {
+        AuthAccount {
+            account_id: "acct".into(),
+            app_id: None,
+            allowed_workspaces: allowed.map(|v| v.into_iter().map(String::from).collect()),
+        }
+    }
+
+    #[test]
+    fn check_workspace_allowed_unrestricted() {
+        assert!(auth(None).check_workspace_allowed("any").is_ok());
+    }
+
+    #[test]
+    fn check_workspace_allowed_in_scope() {
+        let a = auth(Some(vec!["ws-a", "ws-b"]));
+        assert!(a.check_workspace_allowed("ws-a").is_ok());
+        assert!(a.check_workspace_allowed("ws-b").is_ok());
+    }
+
+    #[test]
+    fn check_workspace_allowed_out_of_scope() {
+        let a = auth(Some(vec!["ws-a"]));
+        assert!(a.check_workspace_allowed("ws-c").is_err());
+    }
+
+    #[test]
+    fn check_workspace_allowed_empty_list_denies_all() {
+        // An empty allow-list (set explicitly to vec![]) denies everything —
+        // distinct from None (unrestricted).
+        let a = auth(Some(vec![]));
+        assert!(a.check_workspace_allowed("ws-a").is_err());
+    }
 }

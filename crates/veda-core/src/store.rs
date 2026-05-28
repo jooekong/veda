@@ -565,6 +565,29 @@ pub trait EmbeddingService: Send + Sync {
     fn dimension(&self) -> usize;
 }
 
+// ── Vector Workspace Store ────────────────────────────
+//
+// Pinecone-style collection lifecycle for db-kind workspaces. Kept separate
+// from `VectorStore` (which serves fs-side chunks/summaries) so the file-API
+// trait stays focused. Stage 4 will extend this trait with upsert/search/
+// query/delete as the data plane lands.
+
+#[async_trait]
+pub trait VectorWorkspaceStore: Send + Sync {
+    /// Provision the per-workspace default Milvus collection with the
+    /// §2.2 schema and all v0 indexes; loads on success. Idempotent: a
+    /// duplicate-create call returns the same name without error.
+    async fn create_vector_collection(
+        &self,
+        workspace_id: &str,
+        dim: u32,
+    ) -> Result<String>;
+
+    /// Drop a Milvus collection by name. Idempotent: not-exists returns Ok.
+    /// Used both for rollback (failed provisioning) and admin GC.
+    async fn drop_collection(&self, name: &str) -> Result<()>;
+}
+
 // ── LLM Service (for L0/L1 summary generation) ────────
 
 #[async_trait]

@@ -75,6 +75,9 @@ async fn create_account(
         name: "default".into(),
         key_hash,
         status: KeyStatus::Active,
+        app_id: None,
+        allowed_workspaces: None,
+        expires_at: None,
         created_at: now,
     };
     state.auth_store.create_api_key(&api_key).await?;
@@ -128,6 +131,9 @@ async fn login(
         name: "login".into(),
         key_hash,
         status: KeyStatus::Active,
+        app_id: None,
+        allowed_workspaces: None,
+        expires_at: None,
         created_at: now,
     };
     state.auth_store.create_api_key(&api_key).await?;
@@ -168,6 +174,9 @@ async fn create_anonymous_account(
         name: "anonymous".into(),
         key_hash: api_key_hash,
         status: KeyStatus::Active,
+        app_id: None,
+        allowed_workspaces: None,
+        expires_at: None,
         created_at: now,
     };
 
@@ -338,12 +347,12 @@ async fn provision_db_workspace(state: &AppState, ws: &Workspace) -> Result<(), 
     }
 
     if let Err(e) = state
-        .milvus
+        .vector_workspace_store
         .create_vector_collection(&ws.id, state.embedding_dim)
         .await
     {
         let collection_name = veda_store::vector_collection_name(&ws.id);
-        if let Err(rb) = state.milvus.drop_collection(&collection_name).await {
+        if let Err(rb) = state.vector_workspace_store.drop_collection(&collection_name).await {
             warn!(
                 workspace_id = %ws.id,
                 collection_name = %collection_name,
