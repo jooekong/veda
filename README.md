@@ -174,6 +174,39 @@ veda insert --vector "[0.1, 0.2, ...]" --payload '{"label":"example"}'
 veda collection search my-vectors --vector "[0.1, 0.2, ...]"
 ```
 
+### Vector Workspaces (Pinecone-style)
+
+Veda also offers a Pinecone-style data plane on `kind=db` workspaces — designed
+for company apps that need cheap raw-vector storage without the file abstraction.
+Schema, defaults, and contracts: [`docs/api/vectors.md`](docs/api/vectors.md).
+
+```bash
+# Create a db-kind workspace (one-time; server provisions Milvus collection
+# and bootstraps a `default` dataset).
+curl -sS -X POST http://localhost:9009/v1/workspaces \
+  -H "Authorization: Bearer $VEDA_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"name":"my-vectors","kind":"db","app_id":"my-app"}'
+
+# Upsert records. text is required; everything else has a friendly default.
+curl -sS -X POST http://localhost:9009/v1/vectors/upsert \
+  -H "Authorization: Bearer $VEDA_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"workspace_id":"'$WS_ID'","records":[
+        {"row_key":"sku-1","text":"Air Jordan 1","meta":{"price":1299}},
+        {"row_key":"sku-2","text":"Yeezy 350","meta":{"price":1599}}]}'
+
+# Semantic search with a meta-field filter
+curl -sS -X POST http://localhost:9009/v1/vectors/search \
+  -H "Authorization: Bearer $VEDA_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"workspace_id":"'$WS_ID'","query":"sneakers under 1500",
+       "top_k":5,
+       "filter":{"must":[{"field":"meta.price","op":"lt","value":1500}]}}'
+```
+
+Python client example: [`examples/python_pinecone_demo.py`](examples/python_pinecone_demo.py).
+
 ## Project Structure
 
 ```

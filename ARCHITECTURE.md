@@ -51,6 +51,25 @@ veda-fuse       FUSE 挂载                           (已实现)
   - CLI：`veda --version`，`veda cp -r` 递归目录上传（跳 symlink），`veda grep`，`veda abstract` (L0) + `veda overview` (L1) 两个独立子命令
   - CLI 初始化：单子命令 `veda init` 五模式互斥分发（anonymous / named `--email` / `--login` / `--upgrade` / `--import-key`），`veda status`（配置健康度 + server reachability ping）。`--import-key` 接 `vk_*` 或 `wk_*`，覆写前自动把旧 `config.toml` 备份成 `config.toml.bak.<unix-ts>`
 
+## Workspace kinds: fs vs db
+
+每个 workspace 在创建时锁定 `kind`，决定它服务哪条 API 通道：
+
+| `kind` | 数据载体 | API 通道 | 用途 |
+|---|---|---|---|
+| `fs`（默认） | `veda_dentries / files / chunks / summaries` (MySQL) + `veda_chunks / veda_summaries` (Milvus) + `veda_collection_schemas` (structured collections) | `/v1/files/*`, `/v1/search`, `/v1/grep`, `/v1/sql`, `/v1/abstract`, `/v1/overview`, `/v1/collections/*`, FUSE | 文件知识库（既有能力） |
+| `db` | `veda_datasets` (MySQL) + per-ws Milvus collection `ws_<hash16>_default` | `/v1/vectors/{upsert,search,query,delete}`, `/v1/workspaces/{ws}/datasets` | Pinecone-style 裸向量服务（公司 app 共享） |
+
+**强制隔离**：
+- fs API 路径（`AuthWorkspace` extractor）拒绝 db workspace，返 400 `workspace_kind_mismatch`
+- 数据面 vectors API（`AuthAccount.load_db_workspace`）拒绝 fs workspace，同 400
+
+**三类数据集合在 fs workspace 下并存**：dentry/files、structured collections、L0/L1 summaries。**db workspace 只承载** Pinecone-style 裸向量记录，不允许建 file 或 structured collection。
+
+Vector dataset 是 db workspace 内的逻辑分组（pk = `{dataset}:{row_key}`，全 collection 共享 PK 空间）。每个 db workspace 创建时自动 bootstrap 一个 `default` dataset，业务方可不指定 dataset 直接 upsert。
+
+完整设计：`docs/vectors-merge-plan.md`；未修待办：`docs/vectors-merge-backlog.md`。
+
 ## 测试策略
 
 - 单元测试：`cargo test`（148 个测试，全部自动运行）
