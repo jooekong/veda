@@ -2,7 +2,7 @@ use std::sync::Arc;
 use veda_core::service::collection::CollectionService;
 use veda_core::service::fs::FsService;
 use veda_core::service::search::SearchService;
-use veda_core::store::{AuthStore, MetadataStore, VectorStore, VectorWorkspaceStore};
+use veda_core::store::{AuthStore, EmbeddingService, MetadataStore, VectorStore, VectorWorkspaceStore};
 use veda_sql::VedaSqlEngine;
 
 use crate::obs::MetricsHandle;
@@ -19,6 +19,11 @@ pub struct AppState {
     /// be the same MilvusStore instance, but the trait split lets Stage 4+
     /// stub the vector path independently of fs.
     pub vector_workspace_store: Arc<dyn VectorWorkspaceStore>,
+    /// L1-cached embedding provider used by the vectors data plane (Stage 4).
+    /// Wraps the raw HTTP EmbeddingProvider with moka cache; cache hits skip
+    /// upstream, misses are batched into one upstream call per `embed()`.
+    /// Separate from the fs-side embedding (Stage 3.1 cache is vector-only).
+    pub vector_embedding: Arc<dyn EmbeddingService>,
     /// Embedding dim from `config.embedding.dimension`. Stamped into Milvus
     /// vector field on db workspace collection creation.
     pub embedding_dim: u32,

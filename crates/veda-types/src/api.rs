@@ -179,6 +179,95 @@ pub struct GrepHit {
     pub line: String,
 }
 
+// ── Vectors (db-kind workspace) ───────────────────────
+
+/// Body for `POST /v1/vectors/upsert`. `workspace_id` is optional: if
+/// omitted, the server resolves to the first entry of the token's
+/// `allowed_workspaces` (per docs/vectors-merge-plan.md §0). `dataset`
+/// is optional: if omitted, the implicit `validate::DEFAULT_DATASET` is
+/// used (the dataset bootstrapped at workspace creation).
+#[derive(Debug, Deserialize)]
+pub struct UpsertRequest {
+    pub workspace_id: Option<String>,
+    pub dataset: Option<String>,
+    pub records: Vec<NewRecord>,
+}
+
+/// Per-record user input. `text` is the only required field; everything
+/// else has a default (see docs/vectors-merge-plan.md §2.4):
+///   row_key   → server-generated UUID (insert semantics; no upsert dedup)
+///   category  → "default"
+///   tags      → []
+///   status    → "active"
+///   meta      → {}
+#[derive(Debug, Deserialize)]
+pub struct NewRecord {
+    pub row_key: Option<String>,
+    pub text: String,
+    pub category: Option<String>,
+    pub tags: Option<Vec<String>>,
+    pub status: Option<String>,
+    pub expire_at: Option<i64>,
+    pub meta: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct UpsertResponse {
+    pub inserted: Vec<InsertedRecord>,
+    /// Server's local-time ms epoch when Milvus upsert completed.
+    /// Milvus REST does not surface a true commit_ts; under synchronous
+    /// upsert semantics (no outbox) this stand-in is sufficient for
+    /// read-your-writes on the same server (caller can re-query immediately).
+    pub commit_ts: i64,
+}
+
+#[derive(Debug, Serialize)]
+pub struct InsertedRecord {
+    pub pk: String,
+    pub row_key: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct VectorSearchRequest {
+    pub workspace_id: Option<String>,
+    pub dataset: Option<String>,
+    pub query: String,
+    pub top_k: Option<usize>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct VectorQueryRequest {
+    pub workspace_id: Option<String>,
+    pub dataset: Option<String>,
+    pub row_keys: Vec<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct VectorDeleteRequest {
+    pub workspace_id: Option<String>,
+    pub dataset: Option<String>,
+    pub row_keys: Vec<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct VectorSearchResponse {
+    pub hits: Vec<crate::VectorSearchHit>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct VectorQueryResponse {
+    pub hits: Vec<crate::VectorRecordHit>,
+}
+
+/// Milvus REST `/entities/delete` does not surface the real deleted count;
+/// `accepted_count` is the number of pks the server submitted to Milvus,
+/// not the number Milvus actually matched. Deviates from vss design's
+/// `deleted_count` deliberately — see docs/vectors-merge-backlog.md.
+#[derive(Debug, Serialize)]
+pub struct VectorDeleteResponse {
+    pub accepted_count: usize,
+}
+
 // ── SQL ────────────────────────────────────────────────
 
 #[derive(Debug, Deserialize)]

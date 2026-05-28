@@ -7,7 +7,7 @@ use tracing::warn;
 use veda_core::store::{CollectionVectorStore, VectorStore, VectorWorkspaceStore};
 use veda_types::{
     ChunkWithEmbedding, FieldDefinition, Result, SearchHit, SearchMode, SearchRequest,
-    SummaryWithEmbedding, VedaError,
+    SummaryWithEmbedding, VectorRecordHit, VectorSearchHit, VedaError,
 };
 
 use std::time::Duration;
@@ -22,14 +22,18 @@ fn storage_err(e: impl ToString) -> VedaError {
 }
 
 /// Compute the per-workspace default Milvus collection name for db-kind workspaces.
-/// Format: `ws_<8-hex-chars-of-sha256(workspace_id)>_default`.
+/// Format: `ws_<16-hex-chars-of-sha256(workspace_id)>_default`.
+/// 16 hex = 64-bit hash space → collision probability is negligible even at
+/// the plan's 1500-workspace target. 8 hex (32-bit) was the v1 of this code;
+/// at 1500 ws the birthday-paradox probability was ~3e-4 and the "DB check
+/// uniq" the plan mentioned was never actually wired.
 /// The `_default` suffix distinguishes from v1 dedicated collections
 /// (named `ws_<ws>_<dataset>_dim<DIM>_v<VER>` per docs/vectors-merge-plan.md §2.6).
-/// The hash is over workspace.id (UUID), not workspace.name — so workspace
+/// Hash is over workspace.id (UUID), not workspace.name — workspace
 /// rename is safe and never affects the underlying Milvus collection.
 pub fn vector_collection_name(workspace_id: &str) -> String {
     let hash = veda_core::checksum::sha256_hex(workspace_id.as_bytes());
-    format!("ws_{}_default", &hash[..8])
+    format!("ws_{}_default", &hash[..16])
 }
 
 /// Milvus boolean expressions use double-quoted string literals (see Milvus docs).
@@ -532,6 +536,230 @@ impl MilvusStore {
         }
     }
 
+    /// Output fields returned for every search/query hit on db-workspace
+    /// collections. `vector` and `sparse_vector` are intentionally absent
+    /// (no client needs raw embeddings back from the server).
+    fn vector_output_fields() -> Vec<&'static str> {
+        vec![
+            "pk",
+            "row_key",
+            "dataset",
+            "category",
+            "tags",
+            "status",
+            "text",
+            "meta",
+            "expire_at",
+            "created_at",
+            "updated_at",
+        ]
+    }
+
+    /// Build a Milvus filter expression that scopes a query to one dataset
+    /// and (by default) active rows. Stage 4.4 will introduce caller-side
+    /// filters that this baseline AND-merges with.
+    fn build_dataset_active_filter(dataset: &str) -> String {
+        format!(
+            "dataset == {} && status == \"active\"",
+            milvus_quote(dataset)
+        )
+    }
+
+    /// Build `pk in [...]` for query and delete by composite PK.
+    fn build_pk_in_filter(pks: &[String]) -> String {
+        let inner: Vec<String> = pks.iter().map(|p| milvus_quote(p)).collect();
+        format!("pk in [{}]", inner.join(","))
+    }
+
+    /// Upsert a batch of records into a db-workspace collection.
+    /// Caller-supplied `UpsertRecord` is the source of truth — defaults
+    /// already filled, `pk` already composed, dense `vector` already
+    /// computed. `sparse_vector` is NOT in the payload: Milvus 2.5+ runs
+    /// the BM25 function on `text` automatically.
+    pub async fn upsert_vector_records(
+        &self,
+        workspace_id: &str,
+        records: &[veda_types::UpsertRecord],
+    ) -> Result<()> {
+        if records.is_empty() {
+            return Ok(());
+        }
+        let name = vector_collection_name(workspace_id);
+        let data: Vec<Value> = records
+            .iter()
+            .map(|r| {
+                let mut row = json!({
+                    "pk": r.pk,
+                    "row_key": r.row_key,
+                    "dataset": r.dataset,
+                    "category": r.category,
+                    "tags": r.tags,
+                    "status": r.status,
+                    "created_at": r.created_at,
+                    "updated_at": r.updated_at,
+                    "text": r.text,
+                    "vector": r.vector,
+                    "meta": r.meta,
+                });
+                if let Some(exp) = r.expire_at {
+                    row["expire_at"] = json!(exp);
+                }
+                row
+            })
+            .collect();
+        let body = json!({ "collectionName": &name, "data": data });
+        self.post("/v2/vectordb/entities/upsert", body).await?;
+        Ok(())
+    }
+
+    /// Map one Milvus row (from search/get response `data`) to a record hit
+    /// without score. Caller of search adds the distance separately.
+    ///
+    /// Required fields (pk/row_key/dataset/category/status/text/created_at/
+    /// updated_at) are extracted with explicit error — `outputFields` already
+    /// asked Milvus for these, so a missing field signals schema drift or a
+    /// REST contract change, not normal data. Silently returning empty
+    /// strings (the v1 of this code) hid those bugs as "successful" hits
+    /// with all blank fields. Optional fields (tags, meta, expire_at) keep
+    /// their default-on-missing behavior — those are nullable by design.
+    fn row_to_vector_record_hit(row: &Value) -> Result<VectorRecordHit> {
+        let s = |k: &str| -> Result<String> {
+            row.get(k)
+                .and_then(|v| v.as_str())
+                .map(String::from)
+                .ok_or_else(|| {
+                    VedaError::Storage(format!("Milvus hit missing required string field: {k}"))
+                })
+        };
+        let i = |k: &str| -> Result<i64> {
+            row.get(k).and_then(|v| v.as_i64()).ok_or_else(|| {
+                VedaError::Storage(format!("Milvus hit missing required int field: {k}"))
+            })
+        };
+        // Milvus 2.6 REST quirks discovered via Stage 4 data-plane test:
+        // - Array<VarChar> returns nested as `{"Data":{"StringData":{"data":[...]}}}`,
+        //   not a flat JSON array. Traverse the wrapper.
+        // - JSON column returns as a JSON-encoded string (not parsed). Re-parse.
+        // Empty/null on either path → reasonable default (empty Vec / `{}`).
+        let tags: Vec<String> = row
+            .get("tags")
+            .and_then(|v| v.get("Data"))
+            .and_then(|v| v.get("StringData"))
+            .and_then(|v| v.get("data"))
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|x| x.as_str().map(String::from))
+                    .collect()
+            })
+            .unwrap_or_default();
+        let meta = row
+            .get("meta")
+            .and_then(|v| v.as_str())
+            .and_then(|s| serde_json::from_str::<Value>(s).ok())
+            .unwrap_or_else(|| json!({}));
+        let expire_at = row.get("expire_at").and_then(|v| v.as_i64());
+        Ok(VectorRecordHit {
+            pk: s("pk")?,
+            row_key: s("row_key")?,
+            dataset: s("dataset")?,
+            category: s("category")?,
+            tags,
+            status: s("status")?,
+            text: s("text")?,
+            meta,
+            expire_at,
+            created_at: i("created_at")?,
+            updated_at: i("updated_at")?,
+        })
+    }
+
+    pub async fn search_vector_collection(
+        &self,
+        workspace_id: &str,
+        dataset: &str,
+        query_vector: &[f32],
+        top_k: usize,
+    ) -> Result<Vec<VectorSearchHit>> {
+        let name = vector_collection_name(workspace_id);
+        let filter = Self::build_dataset_active_filter(dataset);
+        let body = json!({
+            "collectionName": &name,
+            "data": [query_vector],
+            "annsField": "vector",
+            "filter": filter,
+            "limit": top_k,
+            "outputFields": Self::vector_output_fields(),
+            "searchParams": { "metricType": "COSINE" },
+        });
+        let resp = self.post("/v2/vectordb/entities/search", body).await?;
+        let rows = flatten_entity_rows(resp.get("data"));
+        rows.iter()
+            .map(|row| {
+                let base = Self::row_to_vector_record_hit(row)?;
+                let score = row
+                    .get("distance")
+                    .and_then(|v| v.as_f64())
+                    .map(|d| d as f32)
+                    .unwrap_or(0.0);
+                Ok(VectorSearchHit {
+                    pk: base.pk,
+                    row_key: base.row_key,
+                    dataset: base.dataset,
+                    category: base.category,
+                    tags: base.tags,
+                    status: base.status,
+                    text: base.text,
+                    meta: base.meta,
+                    expire_at: base.expire_at,
+                    created_at: base.created_at,
+                    updated_at: base.updated_at,
+                    score,
+                })
+            })
+            .collect()
+    }
+
+    pub async fn query_vector_records_by_pk(
+        &self,
+        workspace_id: &str,
+        pks: &[String],
+    ) -> Result<Vec<VectorRecordHit>> {
+        if pks.is_empty() {
+            return Ok(Vec::new());
+        }
+        let name = vector_collection_name(workspace_id);
+        let body = json!({
+            "collectionName": &name,
+            "id": pks,
+            "outputFields": Self::vector_output_fields(),
+        });
+        let resp = self.post("/v2/vectordb/entities/get", body).await?;
+        let rows = flatten_entity_rows(resp.get("data"));
+        rows.iter().map(Self::row_to_vector_record_hit).collect()
+    }
+
+    pub async fn delete_vector_records_by_pk(
+        &self,
+        workspace_id: &str,
+        pks: &[String],
+    ) -> Result<usize> {
+        if pks.is_empty() {
+            return Ok(0);
+        }
+        let name = vector_collection_name(workspace_id);
+        let filter = Self::build_pk_in_filter(pks);
+        let body = json!({
+            "collectionName": &name,
+            "filter": filter,
+        });
+        self.post("/v2/vectordb/entities/delete", body).await?;
+        // Milvus REST DELETE response doesn't surface deletedCount reliably
+        // — return the number of PKs we sent. The handler exposes this as
+        // `accepted_count` to avoid lying about real deletion semantics.
+        Ok(pks.len())
+    }
+
     fn summary_rows_to_hits(rows: &[Value], limit: usize) -> Vec<SearchHit> {
         rows.iter()
             .take(limit)
@@ -987,6 +1215,46 @@ impl VectorWorkspaceStore for MilvusStore {
 
     async fn drop_collection(&self, name: &str) -> Result<()> {
         MilvusStore::drop_collection(self, name).await
+    }
+
+    async fn upsert_records(
+        &self,
+        workspace_id: &str,
+        records: &[veda_types::UpsertRecord],
+    ) -> Result<i64> {
+        MilvusStore::upsert_vector_records(self, workspace_id, records).await?;
+        // Milvus REST `/v2/vectordb/entities/upsert` doesn't return a true
+        // commit_ts. Under synchronous semantics (no outbox), the call
+        // returns after Milvus acked → server-now is a valid stand-in for
+        // read-your-writes on the same instance.
+        Ok(chrono::Utc::now().timestamp_millis())
+    }
+
+    async fn search_vectors(
+        &self,
+        workspace_id: &str,
+        dataset: &str,
+        query_vector: &[f32],
+        top_k: usize,
+    ) -> Result<Vec<VectorSearchHit>> {
+        MilvusStore::search_vector_collection(self, workspace_id, dataset, query_vector, top_k)
+            .await
+    }
+
+    async fn query_vectors_by_pk(
+        &self,
+        workspace_id: &str,
+        pks: &[String],
+    ) -> Result<Vec<VectorRecordHit>> {
+        MilvusStore::query_vector_records_by_pk(self, workspace_id, pks).await
+    }
+
+    async fn delete_vectors_by_pk(
+        &self,
+        workspace_id: &str,
+        pks: &[String],
+    ) -> Result<usize> {
+        MilvusStore::delete_vector_records_by_pk(self, workspace_id, pks).await
     }
 }
 

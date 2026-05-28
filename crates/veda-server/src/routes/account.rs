@@ -328,7 +328,7 @@ async fn provision_db_workspace(state: &AppState, ws: &Workspace) -> Result<(), 
     let default_dataset = Dataset {
         id: Uuid::new_v4().to_string(),
         workspace_id: ws.id.clone(),
-        name: "default".into(),
+        name: veda_types::validate::DEFAULT_DATASET.to_string(),
         status: DatasetStatus::Active,
         created_at: ws.created_at,
         updated_at: ws.updated_at,

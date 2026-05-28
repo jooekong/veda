@@ -60,6 +60,20 @@
 **症状**：auth.rs `AuthWorkspace` kind=Fs 校验在 db workspace 上是否真返 400 workspace_kind_mismatch，目前只靠代码 review 信心，无 HTTP 层端到端测试。
 **承诺**：Stage 5 E2E 测试覆盖（届时 vectors API 也存在，一起覆盖）。
 
+## Stage 4.5 风险验证
+
+**delete-by-pk filter 长度上限**（Codex Stage 4.3 review Q4）：500 个 PK × ~128 字节构造 `pk in [...]` filter 接近 65KB。Milvus 2.6 REST filter 字符串长度上限未确认。Stage 4.5 加一个 500-pk delete 测试，失败则下调 `MAX_PK_BATCH`。
+
+## Stage 4.5 验证清单（review 流转中累积）
+
+集成测试时务必覆盖：
+- **MySQL collation case-insensitivity**：默认 `utf8mb4_0900_ai_ci`，dataset "Foo" 和 "foo" 会撞 UNIQUE。Stage 4.1 review Q5。决定是否接受这个行为（推荐接受，"避免大小写歧义"是好事），文档化即可
+- **URL-decoded {name} 路径含 reserved 字符**：%3A → ":" 是否被 validate_dataset_name 在 axum Path 提取后拦下
+- **empty / oversized name** in POST body 和 DELETE path
+- **duplicate create** 返 409（不是 500）
+- **DELETE default** 在 auth 通过后返 400（不是 401/404）
+- vectors upsert 路径的 dataset "Foo" vs "foo" 行为（如果 dataset 写入 Milvus 用 verbatim "Foo"，但 list/lookup 用 case-insensitive，会不一致）
+
 ## Stage 4 设计指引（Codex Stage 2.4 review Q4）
 
 `VectorWorkspaceStore` trait 在 Stage 4 扩 upsert/search/query/delete 时，**方法签名收 Veda 领域 DTO（workspace_id / dataset / records / filter），不要让 routes 层传 collection_name + Milvus payload**。否则物理命名 + Milvus expr 语法泄露到 handler 层，后续要 breaking cleanup。

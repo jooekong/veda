@@ -102,6 +102,18 @@ fn row_to_account(row: &sqlx::mysql::MySqlRow) -> Result<Account> {
     })
 }
 
+fn row_to_dataset(row: &sqlx::mysql::MySqlRow) -> Result<Dataset> {
+    let st: String = row.try_get("status").map_err(storage_err)?;
+    Ok(Dataset {
+        id: row.try_get("id").map_err(storage_err)?,
+        workspace_id: row.try_get("workspace_id").map_err(storage_err)?,
+        name: row.try_get("name").map_err(storage_err)?,
+        status: db_enum("dataset_status", &st)?,
+        created_at: row.try_get("created_at").map_err(storage_err)?,
+        updated_at: row.try_get("updated_at").map_err(storage_err)?,
+    })
+}
+
 fn row_to_workspace(row: &sqlx::mysql::MySqlRow) -> Result<Workspace> {
     let st: String = row.try_get("status").map_err(storage_err)?;
     let kd: String = row.try_get("kind").map_err(storage_err)?;
@@ -2297,7 +2309,10 @@ impl AuthStore for MysqlStore {
     }
 
     async fn create_dataset(&self, dataset: &Dataset) -> Result<()> {
-        sqlx::query(
+        // UNIQUE (workspace_id, name) collisions surface as MySQL error 1062.
+        // Map to `AlreadyExists` so the route layer can return 409 cleanly
+        // (instead of an opaque 500 from a generic Storage error).
+        let res = sqlx::query(
             r#"INSERT INTO veda_datasets (id, workspace_id, name, status, created_at, updated_at)
                VALUES (?, ?, ?, ?, ?, ?)"#,
         )
@@ -2308,9 +2323,64 @@ impl AuthStore for MysqlStore {
         .bind(dataset.created_at.naive_utc())
         .bind(dataset.updated_at.naive_utc())
         .execute(&self.pool)
+        .await;
+        match res {
+            Ok(_) => Ok(()),
+            Err(sqlx::Error::Database(db_err))
+                if db_err
+                    .try_downcast_ref::<sqlx::mysql::MySqlDatabaseError>()
+                    .map(|e| e.number() == 1062)
+                    .unwrap_or(false) =>
+            {
+                Err(VedaError::AlreadyExists(format!("dataset {}", dataset.name)))
+            }
+            Err(e) => Err(storage_err(e)),
+        }
+    }
+
+    async fn list_active_datasets(&self, workspace_id: &str) -> Result<Vec<Dataset>> {
+        let rows = sqlx::query(
+            r#"SELECT id, workspace_id, name, status, created_at, updated_at
+               FROM veda_datasets
+               WHERE workspace_id = ? AND status = 'active'
+               ORDER BY created_at"#,
+        )
+        .bind(workspace_id)
+        .fetch_all(&self.pool)
         .await
         .map_err(storage_err)?;
-        Ok(())
+        rows.iter().map(row_to_dataset).collect()
+    }
+
+    async fn get_active_dataset_by_name(
+        &self,
+        workspace_id: &str,
+        name: &str,
+    ) -> Result<Option<Dataset>> {
+        let row = sqlx::query(
+            r#"SELECT id, workspace_id, name, status, created_at, updated_at
+               FROM veda_datasets
+               WHERE workspace_id = ? AND name = ? AND status = 'active'"#,
+        )
+        .bind(workspace_id)
+        .bind(name)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(storage_err)?;
+        row.map(|r| row_to_dataset(&r)).transpose()
+    }
+
+    async fn archive_dataset(&self, workspace_id: &str, name: &str) -> Result<bool> {
+        let result = sqlx::query(
+            r#"UPDATE veda_datasets SET status = 'archived'
+               WHERE workspace_id = ? AND name = ? AND status = 'active'"#,
+        )
+        .bind(workspace_id)
+        .bind(name)
+        .execute(&self.pool)
+        .await
+        .map_err(storage_err)?;
+        Ok(result.rows_affected() > 0)
     }
 
     async fn hard_delete_datasets_for_workspace(&self, workspace_id: &str) -> Result<()> {

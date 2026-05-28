@@ -11,11 +11,23 @@
 
 use crate::{Result, VedaError};
 
+/// The name of the per-workspace bootstrap dataset created automatically
+/// when a db-kind workspace is provisioned (`provision_db_workspace`).
+/// It is also the implicit fallback when vector API callers omit the
+/// `dataset` field. **Cannot be deleted** — doing so would break the
+/// implicit-default UX promise for any caller that doesn't specify dataset.
+pub const DEFAULT_DATASET: &str = "default";
+
 /// `dataset` field VARCHAR(64) in Milvus + UNIQUE constraint key in MySQL.
 const DATASET_NAME_MAX: usize = 64;
 
-/// `row_key` field VARCHAR(128) in Milvus.
-const ROW_KEY_MAX: usize = 128;
+/// `row_key` field VARCHAR(128) in Milvus, but the composite pk
+/// `{dataset}:{row_key}` is also bound by `PK_MAX = 128`. With a 64-byte
+/// `dataset` worst-case and 1-byte ':' separator, the budget for row_key
+/// is 63 bytes. We round to 64 for symmetry with `DATASET_NAME_MAX` —
+/// `build_pk` still enforces the total ≤ `PK_MAX` at runtime, so a 64+64
+/// combo correctly rejects (64+1+64 = 129 > 128).
+const ROW_KEY_MAX: usize = 64;
 
 /// `pk` field VARCHAR(128) in Milvus — total `{dataset}:{row_key}` budget.
 const PK_MAX: usize = 128;
@@ -31,6 +43,12 @@ const TAGS_MAX_COUNT: usize = 8;
 
 /// Single tag VARCHAR(128).
 const TAG_MAX_BYTES: usize = 128;
+
+/// `category` field VARCHAR(64) in Milvus.
+const CATEGORY_MAX: usize = 64;
+
+/// `status` field VARCHAR(32) in Milvus.
+const STATUS_MAX: usize = 32;
 
 /// Allowed character class for identifiers (`dataset`, `row_key`).
 /// `:` is forbidden because it's the composite PK separator.
@@ -122,6 +140,37 @@ pub fn validate_tags(tags: &[String]) -> Result<()> {
             ));
         }
     }
+    Ok(())
+}
+
+pub fn validate_category(s: &str) -> Result<()> {
+    if s.is_empty() {
+        return Err(invalid("category", "must not be empty"));
+    }
+    if s.len() > CATEGORY_MAX {
+        return Err(invalid("category", &format!("exceeds {CATEGORY_MAX} bytes")));
+    }
+    Ok(())
+}
+
+/// Allowlist for `status`. Search auto-appends `status == "active"` to its
+/// Milvus filter (Codex Stage 2.1 review Q3), so any caller-supplied value
+/// outside this set would write rows that search can never reach.
+/// v0 accepts only `active` and `inactive`; expand the set rather than
+/// allowing arbitrary strings.
+const ALLOWED_STATUSES: &[&str] = &["active", "inactive"];
+
+pub fn validate_status(s: &str) -> Result<()> {
+    if !ALLOWED_STATUSES.contains(&s) {
+        return Err(invalid(
+            "status",
+            &format!(
+                "must be one of {:?}; got {s:?}",
+                ALLOWED_STATUSES
+            ),
+        ));
+    }
+    let _ = STATUS_MAX; // retained as schema-width reference; allowlist is the binding constraint
     Ok(())
 }
 
@@ -246,6 +295,36 @@ mod tests {
     fn tags_entry_oversize_rejected() {
         let long = "x".repeat(TAG_MAX_BYTES + 1);
         assert!(validate_tags(&[long]).is_err());
+    }
+
+    #[test]
+    fn category_ok() {
+        assert!(validate_category("shoes").is_ok());
+    }
+
+    #[test]
+    fn category_empty_rejected() {
+        assert!(validate_category("").is_err());
+    }
+
+    #[test]
+    fn category_oversize_rejected() {
+        let s = "a".repeat(CATEGORY_MAX + 1);
+        assert!(validate_category(&s).is_err());
+    }
+
+    #[test]
+    fn status_allowlist_ok() {
+        assert!(validate_status("active").is_ok());
+        assert!(validate_status("inactive").is_ok());
+    }
+
+    #[test]
+    fn status_unknown_rejected() {
+        assert!(validate_status("ACTIVE").is_err()); // wrong case
+        assert!(validate_status(" active ").is_err()); // whitespace
+        assert!(validate_status("pending").is_err()); // unknown value
+        assert!(validate_status("").is_err()); // empty
     }
 
     #[test]

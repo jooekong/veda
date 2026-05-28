@@ -79,6 +79,14 @@ async fn main() -> anyhow::Result<()> {
         Some(cfg.embedding.dimension),
         cfg.embedding.batch_size,
     )?);
+    // Vector data plane (db-kind workspace) gets its own L1 cache wrap.
+    // fs path uses the raw `embedding` to avoid double-caching with the
+    // existing search/collection services.
+    let vector_embedding: Arc<dyn veda_core::store::EmbeddingService> =
+        Arc::new(veda_pipeline::embedding::EmbeddingCache::new(
+            embedding.clone(),
+            &cfg.embedding.model,
+        ));
 
     milvus.init_collections(cfg.embedding.dimension).await?;
 
@@ -104,6 +112,7 @@ async fn main() -> anyhow::Result<()> {
         meta_store: mysql.clone(),
         vector_store: milvus.clone(),
         vector_workspace_store: milvus.clone(),
+        vector_embedding,
         embedding_dim: cfg.embedding.dimension,
         sql_engine,
         jwt_secret: cfg.jwt_secret.clone(),

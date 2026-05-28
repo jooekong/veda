@@ -61,6 +61,24 @@
 - 变量和注释使用英文
 - 保持简洁，避免过度抽象
 - 无需向后兼容，可自由打破旧格式
+- 简化偏好：能 MySQL 不上 Kafka，能 partition 不上 sharding，能单 pod 不上多 pod 并发保护，能 row count 不上 checksum
+
+---
+
+## 测试约定
+
+- 集成 / E2E 测试用测试环境真实 Milvus / MySQL / embedding，避免 mock
+- 单元测试可以 mock 纯逻辑（filter parser、PK 拼接、配置加载等）
+- 每个 Stage 收尾要有一个跑真实依赖的集成测试作为 DoD
+- 测试端点写在 `config/veda.test.toml` 或环境变量，不要 hard-code
+
+---
+
+## 评审约定
+
+- 收到 Codex / subagent / 其他 reviewer 的 findings，**独立评判，不照单全收**
+- 分三类讲给 Joe：真问题（必修）/ 边缘（取舍）/ 过度（拒绝）
+- 不要默默全部应用补丁，要让 Joe 看到取舍逻辑
 
 ---
 

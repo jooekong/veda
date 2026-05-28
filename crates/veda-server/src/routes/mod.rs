@@ -1,9 +1,11 @@
 pub mod account;
 pub mod collection;
+pub mod datasets;
 pub mod events;
 pub mod fs;
 pub mod search;
 pub mod sql;
+pub mod vectors;
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -31,6 +33,8 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/v1/ready", get(ready))
         .route("/v1/metrics", get(metrics_endpoint))
         .merge(account::routes())
+        .merge(datasets::routes())
+        .merge(vectors::routes())
         .merge(fs::routes())
         .merge(events::routes())
         .merge(search::routes())

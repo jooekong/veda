@@ -175,6 +175,7 @@ Collection 配置:
 | `tags` | `[]` | 多值细标签 |
 | `status` | `"active"` | 行级状态，业务方可显式设 inactive 等 |
 | `expire_at` | NULL | 业务方传 epoch ms；search 默认不自动过滤过期，业务方按需加 filter |
+| `created_at` / `updated_at` | 服务端 upsert 时 `Utc::now()` ms | **PK 重写时同样覆盖**（Pinecone-style：upsert = full replace）。如需"首写时间"语义，业务方自己塞 `meta.first_seen_at` |
 | `meta` | `{}` | 业务自由字段 |
 
 ### 2.5 PK 不可变契约

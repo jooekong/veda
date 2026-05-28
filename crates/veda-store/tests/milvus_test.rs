@@ -6,9 +6,12 @@ use std::time::Duration;
 
 use serde::Deserialize;
 use uuid::Uuid;
-use veda_core::store::{CollectionVectorStore, VectorStore};
+use serde_json::json;
+use veda_core::store::{CollectionVectorStore, VectorStore, VectorWorkspaceStore};
 use veda_store::MilvusStore;
-use veda_types::{ChunkWithEmbedding, FieldDefinition, SearchMode, SearchRequest};
+use veda_types::{
+    ChunkWithEmbedding, FieldDefinition, SearchMode, SearchRequest, UpsertRecord,
+};
 
 #[derive(Debug, Deserialize)]
 struct MilvusSection {
@@ -184,11 +187,7 @@ async fn milvus_vector_collection_create_and_drop() {
     let dim = load_embedding_dim();
 
     let ws_id = Uuid::new_v4().to_string();
-    let expected_prefix = format!(
-        "ws_{}",
-        &veda_core::checksum::sha256_hex(ws_id.as_bytes())[..8]
-    );
-    let expected_name = format!("{}_default", expected_prefix);
+    let expected_name = veda_store::vector_collection_name(&ws_id);
 
     // create_vector_collection should: 1) accept the full §2.2 schema (incl
     // Array<VarChar> with max_capacity, nullable Int64, BM25 function), 2)
@@ -241,10 +240,7 @@ async fn milvus_drop_collection_is_idempotent() {
     let dim = load_embedding_dim();
 
     let ws_id = Uuid::new_v4().to_string();
-    let name = format!(
-        "ws_{}_default",
-        &veda_core::checksum::sha256_hex(ws_id.as_bytes())[..8]
-    );
+    let name = veda_store::vector_collection_name(&ws_id);
 
     // Drop a never-created collection — must succeed (not-exists swallow).
     store
@@ -259,4 +255,123 @@ async fn milvus_drop_collection_is_idempotent() {
         .expect("create");
     store.drop_collection(&name).await.expect("first drop");
     store.drop_collection(&name).await.expect("second drop");
+}
+
+#[tokio::test]
+#[ignore]
+async fn milvus_vector_data_plane_roundtrip() {
+    // Exercises the full Stage 4.2/4.3 wire shapes against real Milvus 2.6.14:
+    // upsert (incl. tags Array, nullable expire_at, BM25 sparse auto-gen) →
+    // search by ANN → query by pk array → delete by `pk in [...]`.
+    // Catches REST shape bugs cheaply; without it, Stage 4.4 would build
+    // filter DSL on top of an unverified data plane.
+
+    let (url, token, db) = load_milvus();
+    let store = MilvusStore::new(&url, token, db);
+    let dim = load_embedding_dim();
+
+    let ws_id = Uuid::new_v4().to_string();
+    let collection_name = store
+        .create_vector_collection(&ws_id, dim)
+        .await
+        .expect("create");
+
+    let pk1 = format!("default:rk1-{}", &Uuid::new_v4().to_string()[..8]);
+    let pk2 = format!("default:rk2-{}", &Uuid::new_v4().to_string()[..8]);
+    let now_ms = chrono::Utc::now().timestamp_millis();
+    let mk_vector = |seed: f32| -> Vec<f32> {
+        (0..dim).map(|i| seed + (i as f32) * 0.001).collect()
+    };
+    let records = vec![
+        UpsertRecord {
+            pk: pk1.clone(),
+            row_key: pk1.strip_prefix("default:").unwrap().to_string(),
+            dataset: "default".into(),
+            category: "default".into(),
+            tags: vec!["sale".into(), "new".into()],
+            status: "active".into(),
+            text: "hello milvus data plane".into(),
+            vector: mk_vector(0.1),
+            meta: json!({ "price": 42 }),
+            expire_at: None,
+            created_at: now_ms,
+            updated_at: now_ms,
+        },
+        UpsertRecord {
+            pk: pk2.clone(),
+            row_key: pk2.strip_prefix("default:").unwrap().to_string(),
+            dataset: "default".into(),
+            category: "default".into(),
+            tags: vec![],
+            status: "active".into(),
+            text: "another vector record".into(),
+            vector: mk_vector(0.5),
+            meta: json!({}),
+            expire_at: Some(now_ms + 86_400_000),
+            created_at: now_ms,
+            updated_at: now_ms,
+        },
+    ];
+
+    // 1. Upsert via the trait (commit_ts is server-now).
+    let commit_ts = VectorWorkspaceStore::upsert_records(&store, &ws_id, &records)
+        .await
+        .expect("upsert");
+    assert!(commit_ts >= now_ms, "commit_ts must be >= now_ms");
+
+    // Milvus is eventually consistent — give the index a moment to load
+    // the freshly upserted rows. ~1s in practice on the test cluster.
+    tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+
+    // 2. Search using the first record's vector — top hit should be pk1.
+    let hits = VectorWorkspaceStore::search_vectors(
+        &store, &ws_id, "default", &mk_vector(0.1), 2,
+    )
+    .await
+    .expect("search");
+    assert!(!hits.is_empty(), "search returned no hits");
+    let top = &hits[0];
+    assert_eq!(top.pk, pk1, "expected top hit pk={pk1}, got {}", top.pk);
+    assert_eq!(top.dataset, "default");
+    assert_eq!(top.category, "default");
+    assert_eq!(top.tags, vec!["sale".to_string(), "new".to_string()]);
+    assert_eq!(top.status, "active");
+    assert_eq!(top.text, "hello milvus data plane");
+    assert_eq!(top.meta["price"], 42);
+
+    // 3. Query by pk array.
+    let pks = vec![pk1.clone(), pk2.clone()];
+    let results = VectorWorkspaceStore::query_vectors_by_pk(&store, &ws_id, &pks)
+        .await
+        .expect("query");
+    assert_eq!(results.len(), 2, "expected 2 hits, got {}", results.len());
+    // Order not preserved; index by pk.
+    let by_pk: std::collections::HashMap<_, _> =
+        results.into_iter().map(|h| (h.pk.clone(), h)).collect();
+    assert!(by_pk.contains_key(&pk1));
+    assert!(by_pk.contains_key(&pk2));
+    // Verify nullable expire_at round-trip: pk1 None, pk2 Some.
+    assert_eq!(by_pk[&pk1].expire_at, None);
+    assert!(by_pk[&pk2].expire_at.is_some());
+
+    // 4. Delete both pks.
+    let accepted = VectorWorkspaceStore::delete_vectors_by_pk(&store, &ws_id, &pks)
+        .await
+        .expect("delete");
+    assert_eq!(accepted, 2);
+
+    // Allow delete to propagate.
+    tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+
+    // 5. Verify gone.
+    let after = VectorWorkspaceStore::query_vectors_by_pk(&store, &ws_id, &pks)
+        .await
+        .expect("query after delete");
+    assert!(after.is_empty(), "expected 0 hits after delete, got {}", after.len());
+
+    // Cleanup.
+    store
+        .drop_collection(&collection_name)
+        .await
+        .expect("drop");
 }
