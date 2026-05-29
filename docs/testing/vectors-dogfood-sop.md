@@ -80,7 +80,7 @@ export VEDA_WS_ID=$(echo "$RESP" | python3 -c "import sys,json;print(json.load(s
 echo "WS_ID=$VEDA_WS_ID"
 ```
 
-预期：返回 `kind:"db"` 的 workspace，server 后台日志同时刻应看到 `provision_db_workspace` 类似条目（Milvus collection 已建）。
+预期：返回 `kind:"db"` 的 workspace。workspace 行 + default dataset 行现在是**单事务原子提交**（`create_db_workspace`），随后服务端建 Milvus collection（`provision_db_collection`）；任一步失败会回滚这两行并 drop collection，不会留下"能 list 但 upsert 404"的孤儿 workspace。
 
 ### 2.3 用 admin token 接口签 app token（scope 收窄）
 
@@ -130,6 +130,11 @@ delete: {'delete_count': 2}
 ---
 
 ## 4. 数据面深入测试（curl）
+
+> **read-your-writes（C1 验证点）**：本批 commit 起 db 读路径（search / query）
+> 强制 `consistencyLevel: Strong`。所以下面所有 upsert→search、delete→search
+> 序列都应**立即一致**——刚 upsert 的数据必须当场搜到，刚 delete 的必须当场消失。
+> 任何"刚写却查不到 / 已删却还在"都是 C1 的回归，**不要**用 sleep/重试掩盖。
 
 ### 4.1 Upsert：默认 dataset + 命名 dataset
 
@@ -247,7 +252,7 @@ curl -sS -X POST "$VEDA_URL/v1/vectors/search" \
   }" | python3 -m json.tool --no-ensure-ascii
 ```
 
-⚠️ Milvus delete 是 async，**理论上**第二个 search 可能还能看见旧数据。实测 2.6.14 同实例 sync 下基本不出现，若出现等 1-2s 重试。
+✅ search/query 现在走 `consistencyLevel: Strong`，delete 后第二个 search 应**立即**返回 0 hits（p-3 已删）。若仍看到 p-3，是 read-your-writes 回归（C1），按 §4 顶部提示处理，不要用"等 1-2s"绕过。
 
 ---
 
