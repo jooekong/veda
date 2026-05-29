@@ -699,6 +699,11 @@ impl MilvusStore {
             "limit": top_k,
             "outputFields": Self::vector_output_fields(),
             "searchParams": { "metricType": "COSINE" },
+            // Strong consistency so a search right after upsert sees the
+            // write — the upsert commit_ts contract promises read-your-writes,
+            // and the default Bounded level would silently break it (all fs
+            // read paths use Strong for the same reason).
+            "consistencyLevel": "Strong",
         });
         let resp = self.post("/v2/vectordb/entities/search", body).await?;
         let rows = flatten_entity_rows(resp.get("data"));
@@ -734,12 +739,25 @@ impl MilvusStore {
             return Ok(Vec::new());
         }
         let name = vector_collection_name(workspace_id);
+        // Use entities/query with `pk in [...]` instead of entities/get:
+        // get doesn't carry a consistencyLevel, and we need Strong here so a
+        // query right after upsert sees the write (read-your-writes, matching
+        // the commit_ts contract). `limit` must cover the whole pk batch
+        // (caller caps it at MAX_PK_BATCH = 500).
+        let pk_list = pks
+            .iter()
+            .map(|p| milvus_quote(p))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let filter = format!("pk in [{pk_list}]");
         let body = json!({
             "collectionName": &name,
-            "id": pks,
+            "filter": filter,
+            "limit": pks.len(),
             "outputFields": Self::vector_output_fields(),
+            "consistencyLevel": "Strong",
         });
-        let resp = self.post("/v2/vectordb/entities/get", body).await?;
+        let resp = self.post("/v2/vectordb/entities/query", body).await?;
         let rows = flatten_entity_rows(resp.get("data"));
         rows.iter().map(Self::row_to_vector_record_hit).collect()
     }

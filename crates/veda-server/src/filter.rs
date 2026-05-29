@@ -112,6 +112,16 @@ fn expand_in(path: &str, value: &Value) -> Result<String, AppError> {
     if arr.is_empty() {
         return Err(invalid("in value must not be empty".into()));
     }
+    // Cap the OR-expansion: a pathological `in [huge array]` would otherwise
+    // build an unbounded Milvus expr string. Same order of magnitude as
+    // MAX_TOP_K; callers needing more should narrow their query.
+    const MAX_IN_VALUES: usize = 100;
+    if arr.len() > MAX_IN_VALUES {
+        return Err(invalid(format!(
+            "in value has {} items, exceeds {MAX_IN_VALUES}",
+            arr.len()
+        )));
+    }
     let mut alts = Vec::with_capacity(arr.len());
     for item in arr {
         alts.push(format!("{path} == {}", scalar_to_expr(item)?));

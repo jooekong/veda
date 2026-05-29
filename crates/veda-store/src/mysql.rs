@@ -2269,6 +2269,72 @@ impl AuthStore for MysqlStore {
         Ok(())
     }
 
+    async fn create_db_workspace(
+        &self,
+        workspace: &Workspace,
+        dataset: &Dataset,
+    ) -> Result<()> {
+        // MySQL duplicate-key (UNIQUE violation). veda_workspaces has
+        // UNIQUE(account_id, name), veda_datasets has UNIQUE(workspace_id,
+        // name). Map both to AlreadyExists so the route returns 409 instead
+        // of an opaque 500.
+        fn is_dup_key(e: &sqlx::Error) -> bool {
+            matches!(e, sqlx::Error::Database(db) if db
+                .try_downcast_ref::<sqlx::mysql::MySqlDatabaseError>()
+                .map(|x| x.number() == 1062)
+                .unwrap_or(false))
+        }
+
+        let mut tx = self.pool.begin().await.map_err(storage_err)?;
+
+        if let Err(e) = sqlx::query(
+            r#"INSERT INTO veda_workspaces (id, account_id, name, status, kind, app_id, created_at, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?)"#,
+        )
+        .bind(&workspace.id)
+        .bind(&workspace.account_id)
+        .bind(&workspace.name)
+        .bind(db_enum_str(&workspace.status))
+        .bind(db_enum_str(&workspace.kind))
+        .bind(&workspace.app_id)
+        .bind(workspace.created_at.naive_utc())
+        .bind(workspace.updated_at.naive_utc())
+        .execute(&mut *tx)
+        .await
+        {
+            if is_dup_key(&e) {
+                return Err(VedaError::AlreadyExists(format!(
+                    "workspace {}",
+                    workspace.name
+                )));
+            }
+            return Err(storage_err(e));
+        }
+
+        if let Err(e) = sqlx::query(
+            r#"INSERT INTO veda_datasets (id, workspace_id, name, status, created_at, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?)"#,
+        )
+        .bind(&dataset.id)
+        .bind(&dataset.workspace_id)
+        .bind(&dataset.name)
+        .bind(db_enum_str(&dataset.status))
+        .bind(dataset.created_at.naive_utc())
+        .bind(dataset.updated_at.naive_utc())
+        .execute(&mut *tx)
+        .await
+        {
+            // tx drops here → the workspace insert rolls back too.
+            if is_dup_key(&e) {
+                return Err(VedaError::AlreadyExists(format!("dataset {}", dataset.name)));
+            }
+            return Err(storage_err(e));
+        }
+
+        tx.commit().await.map_err(storage_err)?;
+        Ok(())
+    }
+
     async fn get_workspace(&self, id: &str) -> Result<Option<Workspace>> {
         let row = sqlx::query(
             r#"SELECT id, account_id, name, status, kind, app_id, created_at, updated_at

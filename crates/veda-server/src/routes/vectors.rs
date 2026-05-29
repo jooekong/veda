@@ -182,7 +182,7 @@ fn normalize_record(rec: &NewRecord, dataset: &str) -> Result<NormalizedRecord, 
     let category = rec
         .category
         .clone()
-        .unwrap_or_else(|| validate::DEFAULT_DATASET.to_string());
+        .unwrap_or_else(|| validate::DEFAULT_CATEGORY.to_string());
     validate::validate_category(&category)?;
     let tags = rec.tags.clone().unwrap_or_default();
     validate::validate_tags(&tags)?;

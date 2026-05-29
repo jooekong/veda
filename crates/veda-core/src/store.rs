@@ -537,6 +537,17 @@ pub trait AuthStore: Send + Sync {
 
     // workspace
     async fn create_workspace(&self, workspace: &Workspace) -> Result<()>;
+    /// Atomically insert a db-kind workspace together with its bootstrap
+    /// dataset in a single transaction — either both rows land or neither.
+    /// Closes the crash window where `create_workspace` followed by a
+    /// separate `create_dataset` could leave an `active` workspace with no
+    /// default dataset (unusable, no repair path). Milvus collection
+    /// provisioning still happens after this returns.
+    async fn create_db_workspace(
+        &self,
+        workspace: &Workspace,
+        dataset: &Dataset,
+    ) -> Result<()>;
     async fn get_workspace(&self, id: &str) -> Result<Option<Workspace>>;
     /// Cursor-paginated list of active workspaces for an account.
     /// `after` = id of the last item from the previous page (None = first

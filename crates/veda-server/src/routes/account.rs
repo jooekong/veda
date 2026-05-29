@@ -310,58 +310,45 @@ async fn create_workspace(
         created_at: now,
         updated_at: now,
     };
-    state.auth_store.create_workspace(&ws).await?;
-
     if ws.kind == WorkspaceKind::Db {
-        provision_db_workspace(&state, &ws).await?;
+        // workspace + bootstrap dataset commit together in one tx (no
+        // orphan-workspace window), then provision the Milvus collection
+        // with rollback on failure.
+        let default_dataset = Dataset {
+            id: Uuid::new_v4().to_string(),
+            workspace_id: ws.id.clone(),
+            name: veda_types::validate::DEFAULT_DATASET.to_string(),
+            status: DatasetStatus::Active,
+            created_at: ws.created_at,
+            updated_at: ws.updated_at,
+        };
+        state
+            .auth_store
+            .create_db_workspace(&ws, &default_dataset)
+            .await?;
+        provision_db_collection(&state, &ws).await?;
+    } else {
+        state.auth_store.create_workspace(&ws).await?;
     }
 
     Ok(Json(ApiResponse::ok(ws)))
 }
 
-/// Bootstrap the "default" dataset row + Milvus collection for a db-kind
-/// workspace. On any failure, rolls back in reverse order:
-///   Milvus drop_collection -> hard_delete_datasets -> hard_delete_workspace.
-/// All rollback steps are idempotent (drop swallows not-exists), so partial
-/// failures during rollback don't compound.
-async fn provision_db_workspace(state: &AppState, ws: &Workspace) -> Result<(), AppError> {
-    let default_dataset = Dataset {
-        id: Uuid::new_v4().to_string(),
-        workspace_id: ws.id.clone(),
-        name: veda_types::validate::DEFAULT_DATASET.to_string(),
-        status: DatasetStatus::Active,
-        created_at: ws.created_at,
-        updated_at: ws.updated_at,
-    };
-
-    if let Err(e) = state.auth_store.create_dataset(&default_dataset).await {
-        if let Err(rb) = state.auth_store.hard_delete_workspace(&ws.id).await {
-            warn!(
-                workspace_id = %ws.id,
-                provision_err = %e,
-                rollback_err = %rb,
-                "rollback hard_delete_workspace failed after dataset create error",
-            );
-        }
-        return Err(e.into());
-    }
-
+/// Create the Milvus collection for an already-persisted db workspace (its
+/// workspace + default dataset rows were committed together by
+/// `create_db_workspace`). On failure, roll back the DB metadata FIRST, then
+/// drop the partial collection. Order matters: if we crash mid-rollback,
+/// dropping the control-plane rows first means the user sees a clean "no such
+/// workspace" rather than a zombie workspace they can list but can't use
+/// (collection gone); the leftover orphan collection is pure storage waste
+/// that the archived-resource GC (todo H1) reclaims. All steps are idempotent
+/// (drop swallows not-exists), so partial rollback failures don't compound.
+async fn provision_db_collection(state: &AppState, ws: &Workspace) -> Result<(), AppError> {
     if let Err(e) = state
         .vector_workspace_store
         .create_vector_collection(&ws.id, state.embedding_dim)
         .await
     {
-        let collection_name = veda_store::vector_collection_name(&ws.id);
-        if let Err(rb) = state.vector_workspace_store.drop_collection(&collection_name).await {
-            warn!(
-                workspace_id = %ws.id,
-                collection_name = %collection_name,
-                provision_err = %e,
-                rollback_err = %rb,
-                "rollback drop_collection failed after milvus create error; \
-                 orphan collection may remain",
-            );
-        }
         if let Err(rb) = state
             .auth_store
             .hard_delete_datasets_for_workspace(&ws.id)
@@ -380,6 +367,17 @@ async fn provision_db_workspace(state: &AppState, ws: &Workspace) -> Result<(), 
                 provision_err = %e,
                 rollback_err = %rb,
                 "rollback hard_delete_workspace failed",
+            );
+        }
+        let collection_name = veda_store::vector_collection_name(&ws.id);
+        if let Err(rb) = state.vector_workspace_store.drop_collection(&collection_name).await {
+            warn!(
+                workspace_id = %ws.id,
+                collection_name = %collection_name,
+                provision_err = %e,
+                rollback_err = %rb,
+                "rollback drop_collection failed after milvus create error; \
+                 orphan collection may remain (reclaimed by archived-resource GC)",
             );
         }
         return Err(e.into());

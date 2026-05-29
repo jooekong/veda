@@ -19,6 +19,12 @@ use crate::{Result, VedaError};
 /// implicit-default UX promise for any caller that doesn't specify dataset.
 pub const DEFAULT_DATASET: &str = "default";
 
+/// Default `category` when the caller omits it. Kept as a SEPARATE constant
+/// from `DEFAULT_DATASET` even though both are "default": they're independent
+/// schema fields, and coupling them risks one silently drifting onto the
+/// other if either default ever changes.
+pub const DEFAULT_CATEGORY: &str = "default";
+
 /// `dataset` field VARCHAR(64) in Milvus + UNIQUE constraint key in MySQL.
 const DATASET_NAME_MAX: usize = 64;
 
