@@ -33,7 +33,22 @@ impl IntoResponse for AppError {
                 StatusCode::INTERNAL_SERVER_ERROR
             }
         };
-        let body = ApiResponse::<()>::from_veda_error(&self.0);
+        // Internal-class errors collapse to an opaque MESSAGE on the wire so
+        // raw sqlx / Milvus text (SQL fragments, constraint & column names, the
+        // ws_<hash16> collection name) never leaks via from_veda_error's
+        // e.to_string() — full detail stays in the tracing log above. The
+        // stable error_code is preserved via self.0.code(): EmbeddingFailed
+        // keeps "EMBEDDING_FAILED", Storage/Deadlock/Internal keep "INTERNAL".
+        // Client-safe variants keep their descriptive message.
+        let body = match &self.0 {
+            VedaError::EmbeddingFailed(_)
+            | VedaError::Deadlock(_)
+            | VedaError::Storage(_)
+            | VedaError::Internal(_) => {
+                ApiResponse::<()>::err(self.0.code(), "internal server error")
+            }
+            _ => ApiResponse::<()>::from_veda_error(&self.0),
+        };
         (status, Json(body)).into_response()
     }
 }
