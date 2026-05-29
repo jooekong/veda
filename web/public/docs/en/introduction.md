@@ -4,6 +4,20 @@
 
 Think of it as **"a network drive that knows how to search itself"** plus **"a vector database that indexes itself"** plus **"a SQL engine that runs over both"**.
 
+## Two workspace types
+
+A Veda workspace is one of two kinds, fixed at creation — pick by scenario:
+
+| | File Workspace | Vector Workspace |
+|---|---|---|
+| **kind** | `fs` | `db` |
+| **Data model** | files / directories | vector records (text + meta) |
+| **Access** | CLI / FUSE / HTTP, `wk_` or JWT | REST API / SDK, account `vk_` |
+| **Typical use** | personal knowledge base, agent memory, code search | managed vector retrieval for apps (Pinecone-style) |
+| **Analogy** | a network drive that searches itself | a managed vector database |
+
+**Everything below describes the File Workspace** (file ops, hybrid search, structured collections, SQL, FUSE, tiered summaries). The Vector Workspace is a separate, business-facing data plane — see [Vector Workspace API](#/docs/vectors).
+
 ## Three ways to use it
 
 Same data, three surfaces — pick by scenario:

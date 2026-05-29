@@ -101,6 +101,19 @@ const S = {
     displayNamePlaceholder: "显示名（可选）",
     claim: "升级",
     claimedAlert: (email: string) => `升级成功。现在可以在其他机器用 ${email} 登录。`,
+    wsType: "类型",
+    kindFile: "文件库",
+    kindVector: "向量库",
+    kindFileHint: "文件 + 语义搜索，CLI / FUSE 接入",
+    kindVectorHint: "向量记录 + 检索，REST API 接入",
+    badgeFile: "文件库",
+    badgeVector: "向量库",
+    btnDatasets: "数据集",
+    btnApiDocs: "API 文档",
+    vectorHint: "向量库用账号 key (vk_) 直接调 REST API；wk_ / JWT / FUSE 不适用于向量库。",
+    datasetsTitle: "数据集",
+    datasetsEmpty: "还没有额外数据集（只有默认的 default）。",
+    datasetsLoadFail: "加载数据集失败：",
   },
   en: {
     tagline: "A programmable knowledge store.",
@@ -170,6 +183,19 @@ const S = {
     displayNamePlaceholder: "display name (optional)",
     claim: "Claim",
     claimedAlert: (email: string) => `Claimed. You can now log in with ${email} from another machine.`,
+    wsType: "Type",
+    kindFile: "File Workspace",
+    kindVector: "Vector Workspace",
+    kindFileHint: "Files + semantic search, via CLI / FUSE",
+    kindVectorHint: "Vector records + retrieval, via REST API",
+    badgeFile: "File",
+    badgeVector: "Vector",
+    btnDatasets: "Datasets",
+    btnApiDocs: "API docs",
+    vectorHint: "Vector Workspaces use the account key (vk_) with the REST API directly; wk_ / JWT / FUSE don't apply.",
+    datasetsTitle: "Datasets",
+    datasetsEmpty: "No extra datasets yet (only the bootstrapped default).",
+    datasetsLoadFail: "Failed to load datasets: ",
   },
 } as const;
 
@@ -227,15 +253,28 @@ type Workspace = {
   name: string;
   account_id: string;
   status: string;
+  kind: string; // "fs" | "db"
   created_at: string;
 };
 
+type Dataset = {
+  id: string;
+  name: string;
+  status: string;
+  created_at: string;
+};
+
+// GET list endpoints return a cursor-paginated envelope. The console shows
+// only the first page — workspace / dataset counts are small in alpha.
+type Page<T> = { items: T[]; has_more: boolean; next_cursor?: string };
+
 const workspaces = {
-  list: (vk: string) => api<Workspace[]>("/v1/workspaces", {}, vk),
-  create: (vk: string, name: string) =>
+  list: (vk: string) =>
+    api<Page<Workspace>>("/v1/workspaces", {}, vk).then((p) => p.items),
+  create: (vk: string, name: string, kind: string) =>
     api<Workspace>(
       "/v1/workspaces",
-      { method: "POST", body: JSON.stringify({ name }) },
+      { method: "POST", body: JSON.stringify({ name, kind }) },
       vk,
     ),
   remove: (vk: string, id: string) =>
@@ -251,6 +290,13 @@ const workspaces = {
       `/v1/workspaces/${id}/token`,
       { method: "POST" },
       vk,
+    ),
+};
+
+const datasetsApi = {
+  list: (vk: string, wsId: string) =>
+    api<Page<Dataset>>(`/v1/workspaces/${wsId}/datasets`, {}, vk).then(
+      (p) => p.items,
     ),
 };
 
@@ -491,21 +537,32 @@ function renderWsList(list: Workspace[], vk: string) {
     return;
   }
   root.innerHTML = list
-    .map(
-      (w) => `
+    .map((w) => {
+      const isVector = w.kind === "db";
+      const badge = isVector
+        ? `<span class="text-xs px-1.5 py-0.5 rounded bg-violet-100 text-violet-700 font-medium">${esc(L.badgeVector)}</span>`
+        : `<span class="text-xs px-1.5 py-0.5 rounded bg-sky-100 text-sky-700 font-medium">${esc(L.badgeFile)}</span>`;
+      // Vector Workspaces use vk_ + REST API; wk_ / JWT / FUSE don't apply,
+      // so they get a different action set (datasets + API docs).
+      const actions = isVector
+        ? `<button data-act="datasets" data-id="${attr(w.id)}" class="text-sm border border-slate-300 px-3 py-1.5 rounded hover:bg-slate-50">${esc(L.btnDatasets)}</button>
+        <a href="#/docs/vectors" class="text-sm border border-slate-300 px-3 py-1.5 rounded hover:bg-slate-50">${esc(L.btnApiDocs)}</a>
+        <button data-act="delete" data-id="${attr(w.id)}" class="text-sm border border-red-300 text-red-700 px-3 py-1.5 rounded hover:bg-red-50">${esc(L.btnDelete)}</button>`
+        : `<button data-act="new-key" data-id="${attr(w.id)}" class="text-sm border border-slate-300 px-3 py-1.5 rounded hover:bg-slate-50">${esc(L.btnNewKey)}</button>
+        <button data-act="token" data-id="${attr(w.id)}" class="text-sm border border-slate-300 px-3 py-1.5 rounded hover:bg-slate-50">${esc(L.btnJwt)}</button>
+        <button data-act="delete" data-id="${attr(w.id)}" class="text-sm border border-red-300 text-red-700 px-3 py-1.5 rounded hover:bg-red-50">${esc(L.btnDelete)}</button>`;
+      return `
     <div class="bg-white border border-slate-200 rounded-lg p-4 flex justify-between items-center gap-4">
       <div class="min-w-0">
-        <div class="font-medium">${esc(w.name)}</div>
+        <div class="font-medium flex items-center gap-2">${esc(w.name)} ${badge}</div>
         <div class="text-xs text-slate-500 font-mono mt-0.5 truncate">${esc(w.id)}</div>
       </div>
       <div class="flex gap-2 shrink-0">
-        <button data-act="new-key" data-id="${attr(w.id)}" class="text-sm border border-slate-300 px-3 py-1.5 rounded hover:bg-slate-50">${esc(L.btnNewKey)}</button>
-        <button data-act="token" data-id="${attr(w.id)}" class="text-sm border border-slate-300 px-3 py-1.5 rounded hover:bg-slate-50">${esc(L.btnJwt)}</button>
-        <button data-act="delete" data-id="${attr(w.id)}" class="text-sm border border-red-300 text-red-700 px-3 py-1.5 rounded hover:bg-red-50">${esc(L.btnDelete)}</button>
+        ${actions}
       </div>
     </div>
-  `,
-    )
+  `;
+    })
     .join("");
   root.querySelectorAll("[data-act]").forEach((el) => {
     el.addEventListener("click", (e) => {
@@ -514,6 +571,7 @@ function renderWsList(list: Workspace[], vk: string) {
       const id = t.dataset.id!;
       if (act === "new-key") newKeyModal(vk, id);
       else if (act === "token") mintTokenModal(vk, id);
+      else if (act === "datasets") datasetsModal(vk, id);
       else if (act === "delete") deleteWs(vk, id);
     });
   });
@@ -524,7 +582,18 @@ function createWsModal(vk: string) {
   modal(
     L.newWsTitle,
     `
-    <input id="ws-name" placeholder="${attr(L.wsNamePlaceholder)}" class="w-full border border-slate-300 rounded px-3 py-2 mb-4 focus:outline-none focus:border-slate-500">
+    <input id="ws-name" placeholder="${attr(L.wsNamePlaceholder)}" class="w-full border border-slate-300 rounded px-3 py-2 mb-3 focus:outline-none focus:border-slate-500">
+    <p class="text-xs uppercase tracking-wide text-slate-500 font-semibold mb-1.5">${esc(L.wsType)}</p>
+    <div class="space-y-2 mb-4">
+      <label class="flex items-start gap-2 border border-slate-300 rounded px-3 py-2 cursor-pointer hover:bg-slate-50">
+        <input type="radio" name="ws-kind" value="fs" checked class="mt-1">
+        <span><span class="font-medium">${esc(L.kindFile)}</span><br><span class="text-xs text-slate-500">${esc(L.kindFileHint)}</span></span>
+      </label>
+      <label class="flex items-start gap-2 border border-slate-300 rounded px-3 py-2 cursor-pointer hover:bg-slate-50">
+        <input type="radio" name="ws-kind" value="db" class="mt-1">
+        <span><span class="font-medium">${esc(L.kindVector)}</span><br><span class="text-xs text-slate-500">${esc(L.kindVectorHint)}</span></span>
+      </label>
+    </div>
     <div class="flex justify-end gap-2">
       <button data-close class="text-sm border border-slate-300 px-3 py-1.5 rounded hover:bg-slate-50">${esc(L.cancel)}</button>
       <button id="ws-create" class="text-sm bg-slate-900 text-white px-3 py-1.5 rounded hover:bg-slate-700">${esc(L.create)}</button>
@@ -535,8 +604,9 @@ function createWsModal(vk: string) {
   document.getElementById("ws-create")!.addEventListener("click", async () => {
     const name = (document.getElementById("ws-name") as HTMLInputElement).value.trim();
     if (!name) return;
+    const kind = (document.querySelector('input[name="ws-kind"]:checked') as HTMLInputElement).value;
     try {
-      await workspaces.create(vk, name);
+      await workspaces.create(vk, name, kind);
       closeModal();
       render();
     } catch (e: any) {
@@ -614,6 +684,44 @@ function mintTokenModal(vk: string, wsId: string) {
     .catch((e) => alert(L.failed + e.message));
 }
 
+function datasetsModal(vk: string, wsId: string) {
+  const L = t();
+  modal(L.datasetsTitle, `<p class="text-sm text-slate-500">${esc(L.loading)}</p>`);
+  datasetsApi
+    .list(vk, wsId)
+    .then((list) => {
+      const rows = list.length
+        ? `<div class="space-y-2">${list
+            .map(
+              (d) => `<div class="flex justify-between items-center bg-slate-50 border border-slate-200 rounded px-3 py-2">
+            <span class="font-mono text-sm">${esc(d.name)}</span>
+            <span class="text-xs text-slate-400">${esc(d.status)}</span>
+          </div>`,
+            )
+            .join("")}</div>`
+        : `<p class="text-sm text-slate-500">${esc(L.datasetsEmpty)}</p>`;
+      modal(
+        L.datasetsTitle,
+        `${rows}
+        <p class="text-xs text-slate-500 mt-4">${esc(L.vectorHint)}</p>
+        <div class="flex justify-end mt-4">
+          <button data-close class="text-sm bg-slate-900 text-white px-3 py-1.5 rounded hover:bg-slate-700">${esc(L.done)}</button>
+        </div>`,
+      );
+      document.querySelector("[data-close]")!.addEventListener("click", closeModal);
+    })
+    .catch((e) => {
+      modal(
+        L.datasetsTitle,
+        `<p class="text-red-600 text-sm">${esc(L.datasetsLoadFail + e.message)}</p>
+        <div class="flex justify-end mt-4">
+          <button data-close class="text-sm bg-slate-900 text-white px-3 py-1.5 rounded hover:bg-slate-700">${esc(L.done)}</button>
+        </div>`,
+      );
+      document.querySelector("[data-close]")!.addEventListener("click", closeModal);
+    });
+}
+
 async function deleteWs(vk: string, id: string) {
   const L = t();
   if (!confirm(L.deleteConfirm)) return;
@@ -667,6 +775,7 @@ const DOCS_META: Record<Lang, { sectionLabel: string; items: { id: string; title
       { id: "cli", title: "CLI 速查" },
       { id: "skill", title: "AI 助手集成" },
       { id: "fuse", title: "FUSE 挂载" },
+      { id: "vectors", title: "向量库 API" },
       { id: "troubleshooting", title: "常见问题" },
     ],
     loadFailed: (m) => `加载失败：${m}`,
@@ -679,6 +788,7 @@ const DOCS_META: Record<Lang, { sectionLabel: string; items: { id: string; title
       { id: "cli", title: "CLI reference" },
       { id: "skill", title: "AI agent skill" },
       { id: "fuse", title: "FUSE mount" },
+      { id: "vectors", title: "Vector Workspace API" },
       { id: "troubleshooting", title: "Troubleshooting" },
     ],
     loadFailed: (m) => `Failed: ${m}`,
