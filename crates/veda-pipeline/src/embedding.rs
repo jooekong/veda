@@ -42,6 +42,12 @@ struct EmbeddingResponse {
 
 #[derive(Debug, Deserialize)]
 struct EmbeddingItem {
+    /// Position in the request's `input` array. The OpenAI-compatible API is
+    /// not contractually ordered, so we reorder by this instead of trusting
+    /// array position. Servers that omit it leave every item at 0; a stable
+    /// sort then preserves the response's own order (the old behavior).
+    #[serde(default)]
+    index: usize,
     embedding: Vec<f32>,
 }
 
@@ -194,8 +200,16 @@ impl EmbeddingProvider {
             });
         }
 
-        let mut out = Vec::with_capacity(parsed.data.len());
-        for item in parsed.data {
+        // Reorder by the API-provided `index`. The OpenAI-compatible embedding
+        // response is not contractually ordered; trusting array position would
+        // silently misalign every embedding with its input text on a server
+        // that returns items out of order. Stable sort, so a server that omits
+        // `index` (all default to 0) keeps the response's own order.
+        let mut data = parsed.data;
+        data.sort_by_key(|item| item.index);
+
+        let mut out = Vec::with_capacity(data.len());
+        for item in data {
             self.resolve_dimension(item.embedding.len())
                 .map_err(|e| EmbedError {
                     inner: e,
