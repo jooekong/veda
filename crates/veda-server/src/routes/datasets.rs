@@ -102,7 +102,7 @@ async fn delete_dataset(
     // The bootstrap dataset is the implicit fallback for vector API calls
     // that omit the `dataset` field. Deleting it would break every such
     // caller silently — refuse.
-    if name == validate::DEFAULT_DATASET {
+    if name.eq_ignore_ascii_case(validate::DEFAULT_DATASET) {
         return Err(VedaError::CannotDeleteDefaultDataset.into());
     }
     validate::validate_dataset_name(&name)?;

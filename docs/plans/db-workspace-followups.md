@@ -26,3 +26,12 @@
 - **问题**：plan 目标 1500 workspace = 1500 个常驻内存 collection。Milvus loaded collection 数受 querynode 内存 + 元数据限制，到量级后 `load` 失败 → 新 workspace provision 失败（并触发 H2 回滚）。这是这套架构最硬的扩展性天花板。
 - **待办（接公司业务方前硬门槛）**：① spike 验证目标 Milvus 部署的 loaded collection 上限 + 单 collection 内存占用；② 设计 lazy load + LRU unload（文档 §决策4 已列为 v1）。
 - 风险已记在 `vectors-merge-plan.md` §7。
+
+## D1. 对外 SDK（Java/Python）——走 OpenAPI 生成，不上 gRPC
+
+- **背景**：业务方接入想要 Java/Python SDK。评估结论：**不改 gRPC**——现有 axum REST 已适合做 SDK，瓶颈在 embedding+Milvus 而非 JSON 序列化；gRPC 改造（tonic + .proto + handler/auth/error 全重写 + CLI/FUSE/web/部署全改）成本高且负收益。SDK 友好度取决于**有没有机器可读契约（OpenAPI）**，与协议无关。
+- **现状**：REST/JSON over axum；`veda-types/src/api.rs` 已是强类型 Request/Response；统一 `ApiResponse<T>` + 稳定 `error_code`；cursor 分页已具备。**无 OpenAPI spec**（代码注释引用过 vss `openapi.yaml`）。
+- **待办**：① 产出 OpenAPI spec——对齐迁移 vss `openapi.yaml`，或给 axum 加 `utoipa` 从代码生成，覆盖 vectors 数据面 + accounts/workspaces/datasets/admin tokens 控制面；② `openapi-generator` 生成 Java/Python client 骨架；③ 薄封装：auth 注入、重试、cursor 分页迭代器。
+- **不做**：不替换对外接口为 gRPC。若将来出现高 QPS 服务间内部调用（profile 证明 JSON 是瓶颈）或流式需求，再考虑**对外 REST + 对内 gRPC 双协议**，而非换掉业务方 SDK 接口。
+- **触发**：正式对业务方发 SDK 时。alpha 自用 / curl 直连不阻塞。
+- **关联**：完整接口参考见 `docs/api/db-workspace-api.md`。

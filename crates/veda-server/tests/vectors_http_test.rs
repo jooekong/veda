@@ -289,7 +289,16 @@ async fn vectors_http_e2e_suite() {
     sub_dataset_pagination(&state, &mysql, router.clone()).await;
 
     // Sub-test 6: upsert idempotency + delete semantics (task #7).
-    sub_upsert_idempotency_and_delete_semantics(&state, &mysql, router).await;
+    sub_upsert_idempotency_and_delete_semantics(&state, &mysql, router.clone()).await;
+
+    // Sub-test 7: admin token minting + allowed_workspaces scope + disable.
+    sub_admin_tokens_scope(&state, &mysql, router.clone()).await;
+
+    // Sub-test 8: dataset delete guard incl. case-insensitive default (S5).
+    sub_dataset_delete_guard(&state, &mysql, router.clone()).await;
+
+    // Sub-test 9: accounts register + login (production account.rs handlers).
+    sub_accounts_auth(&state, &mysql, router).await;
 }
 
 async fn sub_full_roundtrip(state: &Arc<AppState>, mysql: &MysqlStore, router: axum::Router) {
@@ -971,4 +980,306 @@ async fn sub_upsert_idempotency_and_delete_semantics(
     );
 
     cleanup(state, mysql, &setup).await;
+}
+
+/// Task #8 — `POST /admin/v1/tokens` minting + `allowed_workspaces` scope
+/// enforcement + disable. The auth-critical token path had no HTTP e2e: the
+/// other sub-tests mint tokens by inserting `veda_api_keys` rows directly,
+/// bypassing the production handler entirely. This drives the real flow.
+async fn sub_admin_tokens_scope(state: &Arc<AppState>, mysql: &MysqlStore, router: axum::Router) {
+    // setup: unrestricted account token + a db workspace WITH a real Milvus
+    // collection (so an in-scope query reaches the data plane and returns 200).
+    let setup = provision_test_account(state).await;
+
+    // A second db workspace under the SAME account = the out-of-scope target.
+    // No collection needed: load_db_workspace runs check_workspace_allowed
+    // BEFORE touching Milvus, so the 403 fires first. Same-account ownership
+    // isolates the allowed_workspaces check from the ownership check.
+    let other_ws_id = Uuid::new_v4().to_string();
+    let now = Utc::now();
+    state
+        .auth_store
+        .create_workspace(&Workspace {
+            id: other_ws_id.clone(),
+            account_id: setup.acct_id.clone(),
+            name: "out-of-scope-ws".into(),
+            status: WorkspaceStatus::Active,
+            kind: WorkspaceKind::Db,
+            app_id: None,
+            created_at: now,
+            updated_at: now,
+        })
+        .await
+        .unwrap();
+
+    let do_post = |uri: &str, body: serde_json::Value, bearer: &str| {
+        let req = Request::builder()
+            .method("POST")
+            .uri(uri)
+            .header("authorization", format!("Bearer {bearer}"))
+            .header("content-type", "application/json")
+            .body(Body::from(serde_json::to_vec(&body).unwrap()))
+            .unwrap();
+        router.clone().oneshot(req)
+    };
+
+    // 1. Mint a service token scoped to ONLY setup.ws_id (caller = account token).
+    let resp = do_post(
+        "/admin/v1/tokens",
+        json!({ "app_id": "scoped-app", "name": "prod", "allowed_workspaces": [setup.ws_id] }),
+        &setup.token,
+    )
+    .await
+    .unwrap();
+    assert_eq!(resp.status(), StatusCode::CREATED, "mint token status");
+    let v = body_json(resp.into_body()).await;
+    let token_id = v["data"]["id"].as_str().unwrap().to_string();
+    let scoped = v["data"]["token"].as_str().unwrap().to_string();
+    assert!(scoped.starts_with("vk_"), "minted token must be vk_: {scoped}");
+
+    // 2. Scoped token reaches the in-scope workspace (200; empty hits is fine).
+    let resp = do_post(
+        "/v1/vectors/query",
+        json!({ "workspace_id": setup.ws_id, "ids": ["nope"] }),
+        &scoped,
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::OK,
+        "scoped token must reach in-scope workspace"
+    );
+
+    // 3. Scoped token is denied the out-of-scope workspace → 403.
+    let resp = do_post(
+        "/v1/vectors/query",
+        json!({ "workspace_id": other_ws_id, "ids": ["nope"] }),
+        &scoped,
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::FORBIDDEN,
+        "out-of-scope workspace must be denied"
+    );
+    let v = body_json(resp.into_body()).await;
+    assert_eq!(v["error_code"].as_str(), Some("PERMISSION_DENIED"), "{v:?}");
+
+    // 4. Disable → 204; afterwards the token no longer authenticates (401).
+    let resp = do_post(
+        &format!("/admin/v1/tokens/{token_id}/disable"),
+        json!({}),
+        &setup.token,
+    )
+    .await
+    .unwrap();
+    assert_eq!(resp.status(), StatusCode::NO_CONTENT, "disable status");
+
+    let resp = do_post(
+        "/v1/vectors/query",
+        json!({ "workspace_id": setup.ws_id, "ids": ["nope"] }),
+        &scoped,
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::UNAUTHORIZED,
+        "disabled token must stop authenticating"
+    );
+
+    let _ = state.auth_store.hard_delete_workspace(&other_ws_id).await;
+    cleanup(state, mysql, &setup).await;
+}
+
+/// S5 — `DELETE /v1/workspaces/{ws}/datasets/{name}`, the only delete path
+/// with no prior e2e. Covers normal archive (204), the `default` guard, the
+/// case-insensitive `default` guard (MySQL `utf8mb4_0900_ai_ci` would
+/// otherwise let `Default` archive the `default` row), and missing → 404.
+async fn sub_dataset_delete_guard(state: &Arc<AppState>, mysql: &MysqlStore, router: axum::Router) {
+    let setup = provision_test_account(state).await;
+    let token = setup.token.clone();
+    let ws_id = setup.ws_id.clone();
+
+    let do_post = |uri: String, body: serde_json::Value| {
+        let req = Request::builder()
+            .method("POST")
+            .uri(uri)
+            .header("authorization", format!("Bearer {token}"))
+            .header("content-type", "application/json")
+            .body(Body::from(body.to_string()))
+            .unwrap();
+        router.clone().oneshot(req)
+    };
+    let do_delete = |uri: String| {
+        let req = Request::builder()
+            .method("DELETE")
+            .uri(uri)
+            .header("authorization", format!("Bearer {token}"))
+            .body(Body::empty())
+            .unwrap();
+        router.clone().oneshot(req)
+    };
+
+    // Create a removable dataset, then archive it → 204.
+    let resp = do_post(
+        format!("/v1/workspaces/{ws_id}/datasets"),
+        json!({ "name": "removable" }),
+    )
+    .await
+    .unwrap();
+    assert_eq!(resp.status(), StatusCode::CREATED, "create removable dataset");
+
+    let resp = do_delete(format!("/v1/workspaces/{ws_id}/datasets/removable"))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NO_CONTENT, "archive removable → 204");
+
+    // default guard — exact lowercase.
+    let resp = do_delete(format!("/v1/workspaces/{ws_id}/datasets/default"))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST, "default must be protected");
+    let v = body_json(resp.into_body()).await;
+    assert_eq!(
+        v["error_code"].as_str(),
+        Some("CANNOT_DELETE_DEFAULT_DATASET"),
+        "{v:?}"
+    );
+
+    // default guard — case-insensitive (S5). The handler must reject `Default`
+    // BEFORE archive_dataset runs, else the ci collation archives `default`.
+    let resp = do_delete(format!("/v1/workspaces/{ws_id}/datasets/Default"))
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::BAD_REQUEST,
+        "Default (mixed case) must also be protected (S5)"
+    );
+    let v = body_json(resp.into_body()).await;
+    assert_eq!(
+        v["error_code"].as_str(),
+        Some("CANNOT_DELETE_DEFAULT_DATASET"),
+        "case-insensitive default guard: {v:?}"
+    );
+
+    // Missing dataset → 404.
+    let resp = do_delete(format!("/v1/workspaces/{ws_id}/datasets/nonexistent"))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND, "missing dataset → 404");
+
+    // Prove `default` survived the `Default` attempt (S5: must NOT have been
+    // archived through the ci-collation match).
+    let req = Request::builder()
+        .method("GET")
+        .uri(format!("/v1/workspaces/{ws_id}/datasets"))
+        .header("authorization", format!("Bearer {token}"))
+        .body(Body::empty())
+        .unwrap();
+    let resp = router.clone().oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let v = body_json(resp.into_body()).await;
+    let names: Vec<String> = v["data"]["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|d| d["name"].as_str().unwrap().to_string())
+        .collect();
+    assert!(
+        names.iter().any(|n| n == "default"),
+        "default dataset must survive the Default delete attempt: {names:?}"
+    );
+
+    cleanup(state, mysql, &setup).await;
+}
+
+/// Accounts register + login against the production `account.rs` handlers
+/// (server_test.rs exercises mock handlers; this file otherwise mints via
+/// direct store inserts). Covers registration, duplicate-email conflict,
+/// login success, wrong-password rejection, and that the returned key works.
+async fn sub_accounts_auth(_state: &Arc<AppState>, mysql: &MysqlStore, router: axum::Router) {
+    let email = format!("acct-{}@test.com", Uuid::new_v4().simple());
+    let password = "correct-horse-battery";
+
+    let do_post = |uri: &str, body: serde_json::Value, bearer: Option<&str>| {
+        let mut req = Request::builder()
+            .method("POST")
+            .uri(uri)
+            .header("content-type", "application/json");
+        if let Some(b) = bearer {
+            req = req.header("authorization", format!("Bearer {b}"));
+        }
+        let req = req
+            .body(Body::from(serde_json::to_vec(&body).unwrap()))
+            .unwrap();
+        router.clone().oneshot(req)
+    };
+
+    // 1. Register → 200 + account_id + vk_ api_key.
+    let resp = do_post(
+        "/v1/accounts",
+        json!({ "name": "acct-auth-test", "email": email, "password": password }),
+        None,
+    )
+    .await
+    .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK, "register status");
+    let v = body_json(resp.into_body()).await;
+    let acct_id = v["data"]["account_id"].as_str().unwrap().to_string();
+    let api_key = v["data"]["api_key"].as_str().unwrap().to_string();
+    assert!(api_key.starts_with("vk_"), "api_key must be vk_: {api_key}");
+
+    // 2. Duplicate email → 409.
+    let resp = do_post(
+        "/v1/accounts",
+        json!({ "name": "dup", "email": email, "password": "another" }),
+        None,
+    )
+    .await
+    .unwrap();
+    assert_eq!(resp.status(), StatusCode::CONFLICT, "duplicate email → 409");
+    let v = body_json(resp.into_body()).await;
+    assert_eq!(v["error_code"].as_str(), Some("ALREADY_EXISTS"), "{v:?}");
+
+    // 3. Login with correct password → 200, same account.
+    let resp = do_post(
+        "/v1/accounts/login",
+        json!({ "email": email, "password": password }),
+        None,
+    )
+    .await
+    .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK, "login status");
+    let v = body_json(resp.into_body()).await;
+    assert_eq!(v["data"]["account_id"].as_str(), Some(acct_id.as_str()));
+
+    // 4. Login with wrong password → 401.
+    let resp = do_post(
+        "/v1/accounts/login",
+        json!({ "email": email, "password": "wrong" }),
+        None,
+    )
+    .await
+    .unwrap();
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED, "wrong password → 401");
+
+    // 5. The registration key actually authorizes a real endpoint.
+    let resp = do_post(
+        "/v1/workspaces",
+        json!({ "name": "from-registered-key", "kind": "fs" }),
+        Some(&api_key),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::OK,
+        "registered api_key must authorize workspace creation"
+    );
+
+    cleanup_account_only(mysql, &acct_id).await;
 }
