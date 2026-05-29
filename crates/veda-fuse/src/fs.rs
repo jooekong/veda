@@ -398,22 +398,32 @@ impl VedaFs {
     }
 
     fn fetch_dir(&mut self, ino: u64, path: &str) -> Result<Arc<Vec<DirEntry>>, i32> {
-        let stale = {
+        // Fast path: clone the cached entries while still holding the lock.
+        // No drop-then-reacquire, so the SSE thread can't evict the entry
+        // between the freshness check and the read.
+        {
             let dc = self.dir_cache.lock().unwrap();
-            match dc.get(&ino) {
-                Some(c) => c.fetched_at.elapsed() >= self.config.dir_ttl,
-                None => true,
+            if let Some(c) = dc.get(&ino) {
+                if c.fetched_at.elapsed() < self.config.dir_ttl {
+                    return Ok(c.entries.clone());
+                }
             }
-        };
-        if stale {
-            let entries = self.client.list_dir(path).map_err(|ref e| Self::err_to_errno(e))?;
-            let child_names: HashSet<String> = entries.iter().map(|de| de.name.clone()).collect();
-            let entries = Arc::new(entries);
-            let mut dc = self.dir_cache.lock().unwrap();
-            dc.insert(ino, DirCacheEntry { entries: entries.clone(), child_names, fetched_at: Instant::now() });
         }
-        let dc = self.dir_cache.lock().unwrap();
-        Ok(dc.get(&ino).unwrap().entries.clone())
+        // Stale or missing: fetch from the server with no lock held, then
+        // insert and return the Arc we just built. Returning that local Arc
+        // (rather than re-reading the map) is the fix for the dead-mount bug:
+        // a concurrent SSE invalidate (remove/clear) landing between insert
+        // and read made the old `dc.get(&ino).unwrap()` panic while holding
+        // the guard, poisoning the mutex and killing every later dir op.
+        let entries = self.client.list_dir(path).map_err(|ref e| Self::err_to_errno(e))?;
+        let child_names: HashSet<String> = entries.iter().map(|de| de.name.clone()).collect();
+        let entries = Arc::new(entries);
+        let mut dc = self.dir_cache.lock().unwrap();
+        dc.insert(
+            ino,
+            DirCacheEntry { entries: entries.clone(), child_names, fetched_at: Instant::now() },
+        );
+        Ok(entries)
     }
 
     fn dir_cache_has_child(&self, parent_ino: u64, name: &str) -> Option<bool> {
