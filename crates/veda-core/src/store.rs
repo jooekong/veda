@@ -664,6 +664,10 @@ pub trait VectorWorkspaceStore: Send + Sync {
         query_vector: &[f32],
         top_k: usize,
         extra_filter: Option<&str>,
+        // Projection whitelist (already validated). `None` → all fields;
+        // `Some(&[..])` → only `id` + the listed fields. `id`/`score`
+        // are always returned regardless.
+        output_fields: Option<&[String]>,
     ) -> Result<Vec<VectorSearchHit>>;
 
     /// Look up records by composite PK. Order is not preserved (Milvus may
@@ -673,6 +677,7 @@ pub trait VectorWorkspaceStore: Send + Sync {
         &self,
         workspace_id: &str,
         pks: &[String],
+        output_fields: Option<&[String]>,
     ) -> Result<Vec<VectorRecordHit>>;
 
     /// Delete records by composite PK. Returns the number of PKs submitted

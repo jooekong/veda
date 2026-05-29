@@ -259,6 +259,11 @@ pub struct VectorSearchRequest {
     pub query: String,
     pub top_k: Option<usize>,
     pub filter: Option<VectorFilter>,
+    /// Projection whitelist. `None` → all fields; `Some([...])` → only the
+    /// listed projectable fields (`id`/`score` always returned). Validated
+    /// against `validate::PROJECTABLE_FIELDS`; internal columns are rejected.
+    #[serde(default)]
+    pub output_fields: Option<Vec<String>>,
 }
 
 /// v0 Filter DSL — narrower than vss's Qdrant-style (no `should`/`must_not`,
@@ -299,6 +304,10 @@ pub struct VectorQueryRequest {
     pub workspace_id: Option<String>,
     pub dataset: Option<String>,
     pub ids: Vec<String>,
+    /// Projection whitelist; same semantics as `VectorSearchRequest`
+    /// (`id` always returned, no `score` on this endpoint).
+    #[serde(default)]
+    pub output_fields: Option<Vec<String>>,
 }
 
 #[derive(Debug, Deserialize)]

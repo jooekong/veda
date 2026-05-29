@@ -263,6 +263,11 @@ async fn search_vectors(
     Json(req): Json<VectorSearchRequest>,
 ) -> Result<Json<ApiResponse<VectorSearchResponse>>, AppError> {
     validate::validate_text(&req.query)?;
+    // Validate projection before the (paid) embedding call — fail fast on a
+    // bad output_fields instead of spending an embed we'll reject.
+    if let Some(fields) = req.output_fields.as_deref() {
+        validate::validate_output_fields(fields)?;
+    }
     let top_k = match req.top_k {
         None => DEFAULT_TOP_K,
         Some(0) => {
@@ -306,6 +311,7 @@ async fn search_vectors(
             &query_vector,
             top_k,
             extra_filter.as_deref(),
+            req.output_fields.as_deref(),
         )
         .await?;
     Ok(Json(ApiResponse::ok(VectorSearchResponse { hits })))
@@ -337,10 +343,13 @@ async fn query_vectors(
         req.dataset.as_deref(),
     )
     .await?;
+    if let Some(fields) = req.output_fields.as_deref() {
+        validate::validate_output_fields(fields)?;
+    }
     let pks = build_pks(&dataset_name, &req.ids)?;
     let hits = state
         .vector_workspace_store
-        .query_vectors_by_pk(&ws.id, &pks)
+        .query_vectors_by_pk(&ws.id, &pks, req.output_fields.as_deref())
         .await?;
     Ok(Json(ApiResponse::ok(VectorQueryResponse { hits })))
 }

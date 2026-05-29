@@ -298,7 +298,126 @@ async fn vectors_http_e2e_suite() {
     sub_dataset_delete_guard(&state, &mysql, router.clone()).await;
 
     // Sub-test 9: accounts register + login (production account.rs handlers).
-    sub_accounts_auth(&state, &mysql, router).await;
+    sub_accounts_auth(&state, &mysql, router.clone()).await;
+
+    // Sub-test 10: output_fields projection whitelist (search/query).
+    sub_projection(&state, &mysql, router).await;
+}
+
+/// `output_fields` projection: id/score always returned, selected fields
+/// projected in, the rest absent from the wire JSON; internal columns
+/// rejected with 400. Closes the Stage-4 wire contract for projection.
+async fn sub_projection(state: &Arc<AppState>, mysql: &MysqlStore, router: axum::Router) {
+    let setup = provision_test_account(state).await;
+
+    let do_post = |uri: &str, body: serde_json::Value| {
+        let req = Request::builder()
+            .method("POST")
+            .uri(uri)
+            .header("authorization", format!("Bearer {}", setup.token))
+            .header("content-type", "application/json")
+            .body(Body::from(serde_json::to_vec(&body).unwrap()))
+            .unwrap();
+        router.clone().oneshot(req)
+    };
+
+    // Upsert one fully-populated record.
+    let resp = do_post(
+        "/v1/vectors/upsert",
+        json!({
+            "workspace_id": setup.ws_id,
+            "records": [{
+                "id": "proj-1",
+                "text": "projection test body",
+                "category": "cat-x",
+                "tags": ["t1", "t2"],
+                "meta": {"k": "v"},
+            }],
+        }),
+    )
+    .await
+    .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK, "projection upsert status");
+
+    tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+
+    // search output_fields=["text"] → id + score + text only.
+    let resp = do_post(
+        "/v1/vectors/search",
+        json!({
+            "workspace_id": setup.ws_id,
+            "query": "projection test body",
+            "top_k": 5,
+            "output_fields": ["text"],
+        }),
+    )
+    .await
+    .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let v = body_json(resp.into_body()).await;
+    let hit = &v["data"]["hits"][0];
+    assert!(hit["id"].is_string(), "id always returned: {hit:?}");
+    assert!(hit["score"].is_number(), "score always returned");
+    assert!(hit["text"].is_string(), "text projected in");
+    assert!(hit["meta"].is_null(), "meta projected out");
+    assert!(hit["dataset"].is_null(), "dataset projected out");
+    assert!(hit["category"].is_null(), "category projected out");
+    assert!(hit["tags"].is_null(), "tags projected out");
+    assert!(hit["created_at"].is_null(), "created_at projected out");
+
+    // search output_fields=[] → only id + score.
+    let resp = do_post(
+        "/v1/vectors/search",
+        json!({
+            "workspace_id": setup.ws_id,
+            "query": "projection test body",
+            "output_fields": [],
+        }),
+    )
+    .await
+    .unwrap();
+    let v = body_json(resp.into_body()).await;
+    let hit = &v["data"]["hits"][0];
+    assert!(hit["id"].is_string());
+    assert!(hit["score"].is_number());
+    assert!(hit["text"].is_null(), "empty output_fields → no text");
+    assert!(hit["meta"].is_null());
+
+    // query output_fields=["meta"] → id + meta, no text.
+    let resp = do_post(
+        "/v1/vectors/query",
+        json!({
+            "workspace_id": setup.ws_id,
+            "ids": ["proj-1"],
+            "output_fields": ["meta"],
+        }),
+    )
+    .await
+    .unwrap();
+    let v = body_json(resp.into_body()).await;
+    let hit = &v["data"]["hits"][0];
+    assert!(hit["id"].is_string());
+    assert_eq!(hit["meta"]["k"].as_str(), Some("v"), "meta projected in");
+    assert!(hit["text"].is_null(), "text projected out on query");
+
+    // whitelist: projecting an internal column → 400.
+    let resp = do_post(
+        "/v1/vectors/search",
+        json!({
+            "workspace_id": setup.ws_id,
+            "query": "x",
+            "output_fields": ["pk"],
+        }),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::BAD_REQUEST,
+        "projecting internal column pk must be rejected"
+    );
+
+    cleanup(state, mysql, &setup).await;
 }
 
 async fn sub_full_roundtrip(state: &Arc<AppState>, mysql: &MysqlStore, router: axum::Router) {

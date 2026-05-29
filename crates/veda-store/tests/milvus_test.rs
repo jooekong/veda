@@ -321,7 +321,7 @@ async fn milvus_vector_data_plane_roundtrip() {
 
     // 2. Search using the first record's vector — top hit should be pk1.
     let hits = VectorWorkspaceStore::search_vectors(
-        &store, &ws_id, "default", &mk_vector(0.1), 2, None,
+        &store, &ws_id, "default", &mk_vector(0.1), 2, None, None,
     )
     .await
     .expect("search");
@@ -329,15 +329,15 @@ async fn milvus_vector_data_plane_roundtrip() {
     let top = &hits[0];
     let expected_id1 = pk1.strip_prefix("default:").unwrap();
     assert_eq!(top.id, expected_id1, "expected top hit id={expected_id1}, got {}", top.id);
-    assert_eq!(top.dataset, "default");
-    assert_eq!(top.category, "default");
-    assert_eq!(top.tags, vec!["sale".to_string(), "new".to_string()]);
-    assert_eq!(top.text, "hello milvus data plane");
-    assert_eq!(top.meta["price"], 42);
+    assert_eq!(top.dataset.as_deref(), Some("default"));
+    assert_eq!(top.category.as_deref(), Some("default"));
+    assert_eq!(top.tags, Some(vec!["sale".to_string(), "new".to_string()]));
+    assert_eq!(top.text.as_deref(), Some("hello milvus data plane"));
+    assert_eq!(top.meta.as_ref().unwrap()["price"], 42);
 
     // 3. Query by pk array.
     let pks = vec![pk1.clone(), pk2.clone()];
-    let results = VectorWorkspaceStore::query_vectors_by_pk(&store, &ws_id, &pks)
+    let results = VectorWorkspaceStore::query_vectors_by_pk(&store, &ws_id, &pks, None)
         .await
         .expect("query");
     assert_eq!(results.len(), 2, "expected 2 hits, got {}", results.len());
@@ -359,7 +359,7 @@ async fn milvus_vector_data_plane_roundtrip() {
     tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
 
     // 5. Verify gone.
-    let after = VectorWorkspaceStore::query_vectors_by_pk(&store, &ws_id, &pks)
+    let after = VectorWorkspaceStore::query_vectors_by_pk(&store, &ws_id, &pks, None)
         .await
         .expect("query after delete");
     assert!(after.is_empty(), "expected 0 hits after delete, got {}", after.len());
@@ -446,6 +446,7 @@ async fn milvus_search_with_filter_dsl_eq_and_range() {
         &query,
         10,
         Some(r#"meta["price"] < 100"#),
+        None,
     )
     .await
     .expect("search with range filter");
@@ -463,6 +464,7 @@ async fn milvus_search_with_filter_dsl_eq_and_range() {
         &query,
         10,
         Some(r#"meta["category"] == "shoes""#),
+        None,
     )
     .await
     .expect("search with eq filter");
@@ -511,6 +513,7 @@ async fn milvus_search_with_in_or_expansion() {
         &query,
         10,
         Some(r#"(meta["brand"] == "nike" || meta["brand"] == "adidas")"#),
+        None,
     )
     .await
     .expect("search with OR-chain");
@@ -547,10 +550,10 @@ async fn milvus_multi_dataset_isolation() {
     .await;
 
     let query = (0..dim).map(|i| (i as f32) * 0.001).collect::<Vec<_>>();
-    let hits = VectorWorkspaceStore::search_vectors(&store, &ws_id, "ds_a", &query, 10, None)
+    let hits = VectorWorkspaceStore::search_vectors(&store, &ws_id, "ds_a", &query, 10, None, None)
         .await
         .expect("search ds_a");
-    assert!(hits.iter().all(|h| h.dataset == "ds_a"),
+    assert!(hits.iter().all(|h| h.dataset.as_deref() == Some("ds_a")),
             "ds_a search returned cross-dataset hits: {:?}",
             hits.iter().map(|h| &h.dataset).collect::<Vec<_>>());
     let ds_a_keys: std::collections::HashSet<_> =

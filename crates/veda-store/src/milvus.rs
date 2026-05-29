@@ -547,17 +547,30 @@ impl MilvusStore {
     /// deliberately not surfaced via the API (composite pk is internal;
     /// status pins to "active" via the base filter; expire_at is schema-
     /// only until v1 ships TTL).
-    fn vector_output_fields() -> Vec<&'static str> {
-        vec![
-            "id",
-            "dataset",
-            "category",
-            "tags",
-            "text",
-            "meta",
-            "created_at",
-            "updated_at",
-        ]
+    fn vector_output_fields(selected: Option<&[String]>) -> Vec<String> {
+        match selected {
+            // Default: id + all projectable fields (the old fixed list).
+            None => [
+                "id",
+                "dataset",
+                "category",
+                "tags",
+                "text",
+                "meta",
+                "created_at",
+                "updated_at",
+            ]
+            .iter()
+            .map(|s| (*s).to_string())
+            .collect(),
+            // Projection: id is always fetched (correlation + always
+            // returned); append the caller-selected projectable fields.
+            Some(sel) => {
+                let mut v = vec!["id".to_string()];
+                v.extend(sel.iter().cloned());
+                v
+            }
+        }
     }
 
     /// Build a Milvus filter expression that scopes a query to one dataset
@@ -628,50 +641,47 @@ impl MilvusStore {
     /// blank fields. Optional fields (tags, meta) keep their default-on-
     /// missing behavior — those are nullable by design.
     fn row_to_vector_record_hit(row: &Value) -> Result<VectorRecordHit> {
-        let s = |k: &str| -> Result<String> {
-            row.get(k)
-                .and_then(|v| v.as_str())
-                .map(String::from)
-                .ok_or_else(|| {
-                    VedaError::Storage(format!("Milvus hit missing required string field: {k}"))
-                })
-        };
-        let i = |k: &str| -> Result<i64> {
-            row.get(k).and_then(|v| v.as_i64()).ok_or_else(|| {
-                VedaError::Storage(format!("Milvus hit missing required int field: {k}"))
-            })
-        };
+        // `id` is always in outputFields (always fetched/returned). Every
+        // other field is present only when not projected out, so map
+        // present → Some / absent → None to honor the caller's projection.
+        let id = row
+            .get("id")
+            .and_then(|v| v.as_str())
+            .map(String::from)
+            .ok_or_else(|| VedaError::Storage("Milvus hit missing required field: id".into()))?;
+        let opt_str = |k: &str| row.get(k).and_then(|v| v.as_str()).map(String::from);
+        let opt_i64 = |k: &str| row.get(k).and_then(|v| v.as_i64());
         // Milvus 2.6 REST quirks discovered via Stage 4 data-plane test:
         // - Array<VarChar> returns nested as `{"Data":{"StringData":{"data":[...]}}}`,
         //   not a flat JSON array. Traverse the wrapper.
         // - JSON column returns as a JSON-encoded string (not parsed). Re-parse.
-        // Empty/null on either path → reasonable default (empty Vec / `{}`).
-        let tags: Vec<String> = row
-            .get("tags")
-            .and_then(|v| v.get("Data"))
-            .and_then(|v| v.get("StringData"))
-            .and_then(|v| v.get("data"))
-            .and_then(|v| v.as_array())
-            .map(|arr| {
-                arr.iter()
-                    .filter_map(|x| x.as_str().map(String::from))
-                    .collect()
-            })
-            .unwrap_or_default();
-        let meta = row
-            .get("meta")
-            .and_then(|v| v.as_str())
-            .and_then(|s| serde_json::from_str::<Value>(s).ok())
-            .unwrap_or_else(|| json!({}));
+        // Field present (even if empty) → Some(default); projected out → None.
+        let tags = row.get("tags").map(|v| {
+            v.get("Data")
+                .and_then(|v| v.get("StringData"))
+                .and_then(|v| v.get("data"))
+                .and_then(|v| v.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|x| x.as_str().map(String::from))
+                        .collect()
+                })
+                .unwrap_or_default()
+        });
+        let meta = row.get("meta").map(|v| {
+            v.as_str()
+                .and_then(|s| serde_json::from_str::<Value>(s).ok())
+                .unwrap_or_else(|| json!({}))
+        });
         Ok(VectorRecordHit {
-            id: s("id")?,
-            dataset: s("dataset")?,
-            category: s("category")?,
+            id,
+            dataset: opt_str("dataset"),
+            category: opt_str("category"),
             tags,
-            text: s("text")?,
+            text: opt_str("text"),
             meta,
-            created_at: i("created_at")?,
-            updated_at: i("updated_at")?,
+            created_at: opt_i64("created_at"),
+            updated_at: opt_i64("updated_at"),
         })
     }
 
@@ -682,6 +692,7 @@ impl MilvusStore {
         query_vector: &[f32],
         top_k: usize,
         extra_filter: Option<&str>,
+        output_fields: Option<&[String]>,
     ) -> Result<Vec<VectorSearchHit>> {
         let name = vector_collection_name(workspace_id);
         let base = Self::build_dataset_active_filter(dataset);
@@ -697,7 +708,7 @@ impl MilvusStore {
             "annsField": "vector",
             "filter": filter,
             "limit": top_k,
-            "outputFields": Self::vector_output_fields(),
+            "outputFields": Self::vector_output_fields(output_fields),
             "searchParams": { "metricType": "COSINE" },
             // Strong consistency so a search right after upsert sees the
             // write — the upsert commit_ts contract promises read-your-writes,
@@ -734,6 +745,7 @@ impl MilvusStore {
         &self,
         workspace_id: &str,
         pks: &[String],
+        output_fields: Option<&[String]>,
     ) -> Result<Vec<VectorRecordHit>> {
         if pks.is_empty() {
             return Ok(Vec::new());
@@ -754,7 +766,7 @@ impl MilvusStore {
             "collectionName": &name,
             "filter": filter,
             "limit": pks.len(),
-            "outputFields": Self::vector_output_fields(),
+            "outputFields": Self::vector_output_fields(output_fields),
             "consistencyLevel": "Strong",
         });
         let resp = self.post("/v2/vectordb/entities/query", body).await?;
@@ -1284,6 +1296,7 @@ impl VectorWorkspaceStore for MilvusStore {
         query_vector: &[f32],
         top_k: usize,
         extra_filter: Option<&str>,
+        output_fields: Option<&[String]>,
     ) -> Result<Vec<VectorSearchHit>> {
         MilvusStore::search_vector_collection(
             self,
@@ -1292,6 +1305,7 @@ impl VectorWorkspaceStore for MilvusStore {
             query_vector,
             top_k,
             extra_filter,
+            output_fields,
         )
         .await
     }
@@ -1300,8 +1314,9 @@ impl VectorWorkspaceStore for MilvusStore {
         &self,
         workspace_id: &str,
         pks: &[String],
+        output_fields: Option<&[String]>,
     ) -> Result<Vec<VectorRecordHit>> {
-        MilvusStore::query_vector_records_by_pk(self, workspace_id, pks).await
+        MilvusStore::query_vector_records_by_pk(self, workspace_id, pks, output_fields).await
     }
 
     async fn delete_vectors_by_pk(

@@ -161,6 +161,40 @@ pub fn validate_category(s: &str) -> Result<()> {
     Ok(())
 }
 
+/// Fields a vectors search/query caller may request via `output_fields`.
+/// `id` (and `score` for search) are ALWAYS returned and must not be listed.
+/// Internal columns (`pk`, `vector`, `sparse_vector`, `status`, `expire_at`)
+/// are deliberately absent — projecting them is rejected so implementation
+/// detail never leaks to a caller.
+pub const PROJECTABLE_FIELDS: &[&str] = &[
+    "dataset",
+    "category",
+    "tags",
+    "text",
+    "meta",
+    "created_at",
+    "updated_at",
+];
+
+/// Validate a caller-supplied `output_fields` projection list. An empty list
+/// is allowed (means "only id/score"). Any name outside `PROJECTABLE_FIELDS`
+/// — including internal columns and `id`/`score` themselves — is rejected
+/// with a stable `InvalidInput`.
+pub fn validate_output_fields(fields: &[String]) -> Result<()> {
+    for f in fields {
+        if !PROJECTABLE_FIELDS.contains(&f.as_str()) {
+            return Err(invalid(
+                "output_fields",
+                &format!(
+                    "{f:?} is not projectable (allowed: {}; id/score are always returned)",
+                    PROJECTABLE_FIELDS.join(", ")
+                ),
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// Compose the Milvus PK `{dataset}:{id}` after validating both parts
 /// and the total ≤ `PK_MAX` budget.
 pub fn build_pk(dataset: &str, id: &str) -> Result<String> {
@@ -326,5 +360,44 @@ mod tests {
             VedaError::InvalidInput(msg) => assert!(msg.contains("pk")),
             _ => panic!("expected InvalidInput, got {err:?}"),
         }
+    }
+
+    #[test]
+    fn output_fields_empty_ok() {
+        // Empty list means "only id/score" — a legal rerank-style projection.
+        assert!(validate_output_fields(&[]).is_ok());
+    }
+
+    #[test]
+    fn output_fields_projectable_ok() {
+        let f: Vec<String> = ["text", "meta", "dataset", "category", "tags"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        assert!(validate_output_fields(&f).is_ok());
+    }
+
+    #[test]
+    fn output_fields_internal_columns_rejected() {
+        // Projecting internal columns must never leak them.
+        for bad in ["pk", "vector", "sparse_vector", "status", "expire_at"] {
+            assert!(
+                validate_output_fields(&[bad.to_string()]).is_err(),
+                "{bad} must be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn output_fields_always_returned_fields_rejected() {
+        // id/score are always returned and must not be listed explicitly —
+        // keeps the contract unambiguous (output_fields = the optional set).
+        assert!(validate_output_fields(&["id".to_string()]).is_err());
+        assert!(validate_output_fields(&["score".to_string()]).is_err());
+    }
+
+    #[test]
+    fn output_fields_unknown_rejected() {
+        assert!(validate_output_fields(&["bogus".to_string()]).is_err());
     }
 }

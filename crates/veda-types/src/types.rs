@@ -202,13 +202,24 @@ pub struct UpsertRecord {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VectorSearchHit {
     pub id: String,
-    pub dataset: String,
-    pub category: String,
-    pub tags: Vec<String>,
-    pub text: String,
-    pub meta: serde_json::Value,
-    pub created_at: i64,
-    pub updated_at: i64,
+    // Projectable fields: `None` when the caller's `output_fields` excluded
+    // them, and `skip_serializing_if` keeps them out of the wire JSON. With
+    // no `output_fields` (default), all are `Some` — identical wire shape to
+    // before projection landed. `id`/`score` are always returned.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dataset: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub category: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tags: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub text: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub meta: Option<serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub created_at: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub updated_at: Option<i64>,
     pub score: f32,
 }
 
@@ -217,13 +228,21 @@ pub struct VectorSearchHit {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VectorRecordHit {
     pub id: String,
-    pub dataset: String,
-    pub category: String,
-    pub tags: Vec<String>,
-    pub text: String,
-    pub meta: serde_json::Value,
-    pub created_at: i64,
-    pub updated_at: i64,
+    // Same projection semantics as VectorSearchHit (minus score).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dataset: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub category: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tags: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub text: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub meta: Option<serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub created_at: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub updated_at: Option<i64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
