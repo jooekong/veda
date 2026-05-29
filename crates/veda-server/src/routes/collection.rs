@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use axum::extract::{Path, State};
+use axum::extract::{DefaultBodyLimit, Path, State};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use veda_types::api::{CollectionSearchRequest, CreateCollectionRequest, InsertRowsRequest};
@@ -9,6 +9,10 @@ use veda_types::{ApiResponse, CollectionSchema, CollectionType};
 use crate::auth::AuthWorkspace;
 use crate::error::AppError;
 use crate::state::AppState;
+
+/// HTTP request-body ceiling for collection routes — insert_rows takes a
+/// bulk row payload like the vectors plane, well over axum's 2MB default.
+const MAX_BODY_MB: usize = 64;
 
 pub fn routes() -> Router<Arc<AppState>> {
     Router::new()
@@ -22,6 +26,7 @@ pub fn routes() -> Router<Arc<AppState>> {
         )
         .route("/v1/collections/{name}/rows", post(insert_rows))
         .route("/v1/collections/{name}/search", post(search_collection))
+        .layer(DefaultBodyLimit::max(MAX_BODY_MB * 1024 * 1024))
 }
 
 async fn create_collection(

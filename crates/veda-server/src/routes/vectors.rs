@@ -5,7 +5,7 @@
 
 use std::sync::Arc;
 
-use axum::extract::State;
+use axum::extract::{DefaultBodyLimit, State};
 use axum::routing::post;
 use axum::{Json, Router};
 use chrono::Utc;
@@ -27,6 +27,11 @@ pub fn routes() -> Router<Arc<AppState>> {
         .route("/v1/vectors/search", post(search_vectors))
         .route("/v1/vectors/query", post(query_vectors))
         .route("/v1/vectors/delete", post(delete_vectors))
+        // These endpoints accept bulk bodies far over axum's 2MB default: a
+        // documented 500-record upsert (text <=64KB + meta <=16KB each) is
+        // ~40MB. Without this the body-limit layer 413s such a request with a
+        // bare error before the handler's structured PayloadTooLarge check.
+        .layer(DefaultBodyLimit::max(MAX_BODY_MB * 1024 * 1024))
 }
 
 /// top_k default + ceiling from plan §3.2 / vss design.
@@ -37,6 +42,11 @@ const MAX_TOP_K: usize = 100;
 /// `VedaError::PayloadTooLarge`) instead of letting Milvus / embedding
 /// upstream reject opaquely. Matches vss `openapi.yaml` Error413 contract.
 const MAX_RECORDS_PER_UPSERT: usize = 500;
+
+/// HTTP request-body ceiling for the bulk vectors endpoints. Sized to admit
+/// a max MAX_RECORDS_PER_UPSERT batch plus JSON overhead; far above axum's
+/// 2MB default (which would otherwise 413 a legitimate large upsert).
+const MAX_BODY_MB: usize = 64;
 
 async fn upsert_vectors(
     State(state): State<Arc<AppState>>,
