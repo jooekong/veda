@@ -11,10 +11,13 @@ use veda_types::{
     SummaryStatus, VedaError, Workspace, WorkspaceKey,
 };
 
-// Batched INSERT sizes chosen to stay well under a conservative
-// max_allowed_packet=16MB. File chunks can each carry CHUNK_SIZE bytes
-// (256KB), so 50 rows ≈ 12.5MB payload before overhead. FS events are
-// tiny rows; 500 per batch keeps throughput high without risking the cap.
+// Batched INSERT sizes. FS events are tiny rows; 500/batch keeps
+// throughput high. File chunks are normally <= CHUNK_SIZE (256KB), so
+// 50/batch is ~12.5MB — but split_and_hash's single-line fallback can
+// emit one chunk up to the 50MB file cap (a >256KB span with no newline).
+// A single file's chunks total <= MAX_FILE_BYTES (50MB), so one batch
+// stays under MySQL 8's default max_allowed_packet (64MB); a deployment
+// that lowers it below ~50MB can fail the INSERT for such a file.
 const CHUNK_INSERT_BATCH: usize = 50;
 const FS_EVENT_INSERT_BATCH: usize = 500;
 
@@ -370,7 +373,7 @@ impl MysqlStore {
     line_count INT NOT NULL,
     byte_len INT NOT NULL,
     chunk_sha256 VARCHAR(64) NOT NULL,
-    content MEDIUMTEXT NOT NULL,
+    content LONGTEXT NOT NULL,
     PRIMARY KEY (file_id, chunk_index),
     INDEX idx_line_lookup (file_id, start_line)
 )"#,
@@ -506,6 +509,29 @@ impl MysqlStore {
                     return Err(VedaError::Storage(e.to_string()));
                 }
             }
+        }
+
+        // One-time widen of veda_file_chunks.content from the original
+        // MEDIUMTEXT (16 MB) to LONGTEXT, matching veda_file_contents. A
+        // single chunk can reach the 50 MB file cap when a >16 MB span has
+        // no newline (split_and_hash extends the chunk to the next '\n'/EOF
+        // with no byte cap), overflowing MEDIUMTEXT and failing the INSERT
+        // under strict sql_mode. Guarded by information_schema so the
+        // table-rebuilding MODIFY runs only on a not-yet-migrated schema,
+        // not on every boot.
+        let chunk_content_mediumtext: Option<(String,)> = sqlx::query_as(
+            "SELECT DATA_TYPE FROM information_schema.COLUMNS \
+             WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'veda_file_chunks' \
+               AND COLUMN_NAME = 'content' AND DATA_TYPE = 'mediumtext'",
+        )
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|e| VedaError::Storage(e.to_string()))?;
+        if chunk_content_mediumtext.is_some() {
+            sqlx::query("ALTER TABLE veda_file_chunks MODIFY content LONGTEXT NOT NULL")
+                .execute(&self.pool)
+                .await
+                .map_err(|e| VedaError::Storage(e.to_string()))?;
         }
         Ok(())
     }
