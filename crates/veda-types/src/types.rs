@@ -221,6 +221,33 @@ pub struct VectorSearchHit {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub updated_at: Option<i64>,
     pub score: f32,
+    /// What `score` means: `"cosine"` (semantic ANN, ~[0,1]), `"bm25"`
+    /// (full-text, ~[0,30]), or `"rrf"` (hybrid fusion, ~[0,0.033]). Scores
+    /// are NOT comparable across types — clients must read this before
+    /// reasoning about magnitude. Defaults to `"cosine"` when absent so an
+    /// older payload (semantic-only era) deserializes to its true meaning.
+    #[serde(default = "default_vector_score_type")]
+    pub score_type: String,
+}
+
+fn default_vector_score_type() -> String {
+    "cosine".to_string()
+}
+
+/// What to search for in a db-workspace `search_vectors` call. Carries exactly
+/// the data each mode needs, so illegal combinations (e.g. full-text with a
+/// dense vector, or semantic without one) are unrepresentable. The handler
+/// builds this after deciding whether to embed: semantic/hybrid embed the
+/// query, fulltext does not.
+#[derive(Debug, Clone, Copy)]
+pub enum VectorSearchQuery<'a> {
+    /// Dense ANN over `vector` (COSINE). Maps to `score_type = "cosine"`.
+    Semantic { vector: &'a [f32] },
+    /// BM25 full-text over `sparse_vector`, using the raw query string.
+    /// Maps to `score_type = "bm25"`.
+    Fulltext { text: &'a str },
+    /// Dense + BM25 fused by RRF. Maps to `score_type = "rrf"`.
+    Hybrid { vector: &'a [f32], text: &'a str },
 }
 
 /// Hit returned from `/v1/vectors/query` (by id). No score — this is a

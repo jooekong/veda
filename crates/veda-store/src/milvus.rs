@@ -7,7 +7,7 @@ use tracing::warn;
 use veda_core::store::{CollectionVectorStore, VectorStore, VectorWorkspaceStore};
 use veda_types::{
     ChunkWithEmbedding, FieldDefinition, Result, SearchHit, SearchMode, SearchRequest,
-    SummaryWithEmbedding, VectorRecordHit, VectorSearchHit, VedaError,
+    SummaryWithEmbedding, VectorRecordHit, VectorSearchHit, VectorSearchQuery, VedaError,
 };
 
 use std::time::Duration;
@@ -685,39 +685,10 @@ impl MilvusStore {
         })
     }
 
-    pub async fn search_vector_collection(
-        &self,
-        workspace_id: &str,
-        dataset: &str,
-        query_vector: &[f32],
-        top_k: usize,
-        extra_filter: Option<&str>,
-        output_fields: Option<&[String]>,
-    ) -> Result<Vec<VectorSearchHit>> {
-        let name = vector_collection_name(workspace_id);
-        let base = Self::build_dataset_active_filter(dataset);
-        // AND-merge the caller's parsed Filter DSL (Stage 4.4) with the base.
-        // None / empty extra → just base.
-        let filter = match extra_filter {
-            Some(s) if !s.is_empty() => format!("({base}) && ({s})"),
-            _ => base,
-        };
-        let body = json!({
-            "collectionName": &name,
-            "data": [query_vector],
-            "annsField": "vector",
-            "filter": filter,
-            "limit": top_k,
-            "outputFields": Self::vector_output_fields(output_fields),
-            "searchParams": { "metricType": "COSINE" },
-            // Strong consistency so a search right after upsert sees the
-            // write — the upsert commit_ts contract promises read-your-writes,
-            // and the default Bounded level would silently break it (all fs
-            // read paths use Strong for the same reason).
-            "consistencyLevel": "Strong",
-        });
-        let resp = self.post("/v2/vectordb/entities/search", body).await?;
-        let rows = flatten_entity_rows(resp.get("data"));
+    /// Map search-response rows to scored hits. `distance` carries the score
+    /// for every mode (COSINE similarity, BM25 relevance, or RRF fused score);
+    /// `score_type` records which so callers don't compare across modes.
+    fn vector_rows_to_hits(rows: &[Value], score_type: &str) -> Result<Vec<VectorSearchHit>> {
         rows.iter()
             .map(|row| {
                 let base = Self::row_to_vector_record_hit(row)?;
@@ -736,9 +707,121 @@ impl MilvusStore {
                     created_at: base.created_at,
                     updated_at: base.updated_at,
                     score,
+                    score_type: score_type.to_string(),
                 })
             })
             .collect()
+    }
+
+    pub async fn search_vector_collection(
+        &self,
+        workspace_id: &str,
+        dataset: &str,
+        query: VectorSearchQuery<'_>,
+        top_k: usize,
+        extra_filter: Option<&str>,
+        output_fields: Option<&[String]>,
+    ) -> Result<Vec<VectorSearchHit>> {
+        let name = vector_collection_name(workspace_id);
+        let base = Self::build_dataset_active_filter(dataset);
+        // AND-merge the caller's parsed Filter DSL (Stage 4.4) with the base.
+        // None / empty extra → just base.
+        let filter = match extra_filter {
+            Some(s) if !s.is_empty() => format!("({base}) && ({s})"),
+            _ => base,
+        };
+        // Clamp to Milvus's hard `limit < 16384` bound (same guard every other
+        // method in this file applies). The HTTP layer already caps top_k at
+        // 100, but a direct store caller must not be able to overflow the
+        // `top_k * 5` over-fetch below or send an out-of-range top-level limit.
+        let top_k = top_k.min(16_383);
+        // Strong consistency on every read path so a search right after upsert
+        // sees the write — the upsert commit_ts contract promises
+        // read-your-writes, and the default Bounded level would silently break
+        // it (all fs read paths use Strong for the same reason).
+        match query {
+            VectorSearchQuery::Semantic { vector } => {
+                let body = json!({
+                    "collectionName": &name,
+                    "data": [vector],
+                    "annsField": "vector",
+                    "filter": filter,
+                    "limit": top_k,
+                    "outputFields": Self::vector_output_fields(output_fields),
+                    "searchParams": { "metricType": "COSINE" },
+                    "consistencyLevel": "Strong",
+                });
+                let resp = self.post("/v2/vectordb/entities/search", body).await?;
+                let rows = flatten_entity_rows(resp.get("data"));
+                Self::vector_rows_to_hits(&rows, "cosine")
+            }
+            VectorSearchQuery::Fulltext { text } => {
+                // BM25 over sparse_vector. Per the Milvus 2.6 REST
+                // full-text-search example: `data` is the raw query string,
+                // `annsField` is the sparse field, and the metric is INFERRED
+                // from the sparse index — so we send `searchParams.params: {}`
+                // and NO metricType. (The fs `query_fulltext` puts a top-level
+                // `metricType: "BM25"`, which is not in the official shape and
+                // is unverified — deliberately not copied here.)
+                let body = json!({
+                    "collectionName": &name,
+                    "data": [text],
+                    "annsField": "sparse_vector",
+                    "filter": filter,
+                    "limit": top_k,
+                    "outputFields": Self::vector_output_fields(output_fields),
+                    "searchParams": { "params": {} },
+                    "consistencyLevel": "Strong",
+                });
+                let resp = self.post("/v2/vectordb/entities/search", body).await?;
+                let rows = flatten_entity_rows(resp.get("data"));
+                Self::vector_rows_to_hits(&rows, "bm25")
+            }
+            VectorSearchQuery::Hybrid { vector, text } => {
+                // True hybrid: dense ANN (COSINE) + BM25 (sparse) fused by RRF.
+                // Over-fetch each sub-request well beyond top_k so RRF can see
+                // results that rank mid-list in one ranker but high in the
+                // other; using top_k as the sub-limit (the fs F3 mistake)
+                // buries exactly those. Top-level rerank then truncates to
+                // top_k.
+                let fetch = (top_k * 5).min(16_383);
+                // Both sub-requests MUST carry the same dataset+active(+extra)
+                // filter — dropping it on either path would leak cross-dataset
+                // rows into the RRF pool.
+                let dense = json!({
+                    "data": [vector],
+                    "annsField": "vector",
+                    "filter": filter.clone(),
+                    "limit": fetch,
+                    "metricType": "COSINE",
+                });
+                // Sparse/BM25 sub-request carries NO metricType: Milvus REST
+                // only accepts L2/IP/COSINE there, and BM25 is inferred from
+                // the sparse index (raw query string in `data`).
+                let sparse = json!({
+                    "data": [text],
+                    "annsField": "sparse_vector",
+                    "filter": filter,
+                    "limit": fetch,
+                });
+                let body = json!({
+                    "collectionName": &name,
+                    "search": [dense, sparse],
+                    "rerank": { "strategy": "rrf", "params": { "k": 60 } },
+                    "limit": top_k,
+                    "outputFields": Self::vector_output_fields(output_fields),
+                    "consistencyLevel": "Strong",
+                });
+                // No fallback (decision D4): transient errors are already
+                // absorbed by the retry layer in `post`, so an error that
+                // reaches here is a deterministic body/index/config bug.
+                // Silently degrading to semantic would hide it on every
+                // request — exactly the fs F1 trap. Propagate instead.
+                let resp = self.post("/v2/vectordb/entities/hybrid_search", body).await?;
+                let rows = flatten_entity_rows(resp.get("data"));
+                Self::vector_rows_to_hits(&rows, "rrf")
+            }
+        }
     }
 
     pub async fn query_vector_records_by_pk(
@@ -1293,7 +1376,7 @@ impl VectorWorkspaceStore for MilvusStore {
         &self,
         workspace_id: &str,
         dataset: &str,
-        query_vector: &[f32],
+        query: VectorSearchQuery<'_>,
         top_k: usize,
         extra_filter: Option<&str>,
         output_fields: Option<&[String]>,
@@ -1302,7 +1385,7 @@ impl VectorWorkspaceStore for MilvusStore {
             self,
             workspace_id,
             dataset,
-            query_vector,
+            query,
             top_k,
             extra_filter,
             output_fields,

@@ -650,18 +650,22 @@ pub trait VectorWorkspaceStore: Send + Sync {
         records: &[UpsertRecord],
     ) -> Result<i64>;
 
-    /// Semantic ANN search within a single dataset of one workspace.
-    /// The impl auto-appends `status == "active"` and `dataset == "<name>"`
-    /// to the Milvus filter (v0 has no cross-dataset search; the
-    /// active-only default is *not* overridable by `extra_filter`).
+    /// Search within a single dataset of one workspace. `query` selects the
+    /// mode and carries its data (`Semantic`/`Hybrid` need the dense vector,
+    /// `Fulltext` the raw text). The impl auto-appends `status == "active"`
+    /// and `dataset == "<name>"` to the Milvus filter (v0 has no cross-dataset
+    /// search; the active-only default is *not* overridable by `extra_filter`),
+    /// and for hybrid applies that base to BOTH sub-requests.
     /// `extra_filter` (when `Some`) is the caller's Filter DSL already
     /// translated to a Milvus expression string; impl AND-merges it with
-    /// the base filter. Returns at most `top_k` hits ranked by COSINE.
+    /// the base filter. Returns at most `top_k` hits. Each hit's `score_type`
+    /// reflects the mode (`cosine`/`bm25`/`rrf`); scores are not comparable
+    /// across modes. Hybrid failures propagate as errors (no silent fallback).
     async fn search_vectors(
         &self,
         workspace_id: &str,
         dataset: &str,
-        query_vector: &[f32],
+        query: VectorSearchQuery<'_>,
         top_k: usize,
         extra_filter: Option<&str>,
         // Projection whitelist (already validated). `None` → all fields;

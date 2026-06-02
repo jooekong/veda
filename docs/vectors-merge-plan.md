@@ -3,6 +3,12 @@
 > 起源：归并 vss (Java/Spring Boot, v3.7 设计稿, pre-code) 到 Veda。
 > 决策：vss Java 项目停止；Veda 同时承接个人知识库（fs）与公司向量服务（db）。
 > 状态：v2 草稿。
+>
+> **更新 2026-06-02**：原列为 v1 的 hybrid / fulltext / `score_type` 已实现并接通
+> `/v1/vectors/search`（`mode = hybrid|semantic|fulltext`，默认 hybrid）。本文档
+> §3.2「search 仅 semantic」、§3.4「allow_fallback（v0 没 hybrid）」、§5 v0/v1 表中
+> 的 hybrid/fulltext 行均已过时——以 `docs/api/vectors.md` + `docs/api/db-workspace-api.md`
+> + CHANGELOG 为对外契约的现行来源，实现细节见 `docs/plans/db-sparse-vector-plan.md`。
 
 ## 0. 决策摘要
 

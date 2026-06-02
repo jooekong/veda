@@ -111,16 +111,37 @@ stored `A` row has `text: "winner"` and `meta: {"v": 2}`.
 
 ### POST `/v1/vectors/search`
 
-Dense ANN over the embedded `query`. Always implicitly scoped to the
-target dataset (v0 has no cross-dataset search). Optional `filter` (see
-below) AND-merges with the base scope.
+Search the target dataset (v0 has no cross-dataset search). Optional `filter`
+(see below) AND-merges with the base scope. `mode` selects the ranker:
+
+| `mode` | what it does | embeds query? | `score_type` | score range |
+|---|---|---|---|---|
+| `hybrid` (**default**) | dense ANN + BM25 fused by RRF | yes | `rrf` | ~[0, 0.033] |
+| `semantic` | dense ANN over the embedded query | yes | `cosine` | ~[0, 1] |
+| `fulltext` | BM25 full-text over the analyzed `text` | no | `bm25` | ~[0, 30+] |
+
+Scores are **not comparable across modes** — read `score_type` before reasoning
+about magnitude. `fulltext` skips the embedding call entirely (cheaper, and the
+only mode that works without an embedding model). `hybrid` failures surface as
+errors (no silent fallback to semantic).
+
+`min_score` is an optional **relevance floor**: hits scoring below it are
+dropped. It applies **only to `semantic` (cosine) / `fulltext` (bm25)** — sending
+it with `hybrid` (including the default mode) returns `400`, because the RRF
+score is a rank artifact, not a relevance value (use `top_k`, or `mode=semantic`,
+for a gate). It is applied *after* `top_k`, so the response may contain fewer
+than `top_k` hits (raise `top_k` to surface more above the floor). Calibrate per
+model: with dense embeddings even unrelated text scores ~0.15–0.25, so a useful
+cosine floor sits well above that (e.g. 0.4–0.6) — there is no universal "0.5".
 
 ```json
 {
   "workspace_id": "...",
   "dataset": "products",       // optional
   "query": "sneakers under 1500",
+  "mode": "hybrid",            // optional: hybrid (default) | semantic | fulltext
   "top_k": 10,                 // default 10, max 100
+  "min_score": 0.4,            // optional; semantic/fulltext only (400 on hybrid)
   "filter": {                  // optional
     "must": [
       {"field": "meta.price", "op": "lt", "value": 1500},
@@ -131,7 +152,7 @@ below) AND-merges with the base scope.
 ```
 
 Each hit returns `id / dataset / category / tags / text / meta / created_at
-/ updated_at / score` (COSINE distance).
+/ updated_at / score / score_type`.
 
 ### POST `/v1/vectors/query`
 

@@ -1245,10 +1245,10 @@ async fn db_vectors_dense_semantic_search() {
     let s = Srv::new();
     let (vk, ws) = db_ctx(&s).await;
 
-    // The db vectors plane ranks by dense COSINE ANN only — no sparse/hybrid
-    // mode is exposed here (sparse BM25 lives on the fs /v1/search plane).
-    // Prove the dense path matches on MEANING, not lexical overlap: each query
-    // shares no tokens with the stored text it should retrieve.
+    // Pin mode=semantic to exercise the dense COSINE leg specifically (the
+    // plane's default is now hybrid; fulltext/hybrid have their own test).
+    // Prove dense matches on MEANING, not lexical overlap: each query shares no
+    // tokens with the text it should retrieve.
     send(s.post("/v1/vectors/upsert").bearer_auth(&vk).json(&json!({
         "workspace_id": ws,
         "records": [
@@ -1258,14 +1258,14 @@ async fn db_vectors_dense_semantic_search() {
     }))).await;
 
     // "kitten napping" ≈ pet record (feline/dozed) with zero shared tokens.
-    let hit = poll_first_hit(&s, &vk, &ws, "a kitten taking a nap", Duration::from_secs(20)).await
-        .expect("dense search returned nothing");
+    let hits = poll_hits_mode(&s, &vk, &ws, "a kitten taking a nap", "semantic", Duration::from_secs(20)).await;
+    let hit = hits.first().expect("dense search returned nothing");
     assert_eq!(hit["id"], "pet", "dense semantic ranks the cat record first");
-    assert!(hit["score"].is_number(), "cosine score present");
+    assert_eq!(hit["score_type"], "cosine", "semantic score_type");
 
     // "fixing a broken car" ≈ auto record, again no shared tokens.
-    let hit = poll_first_hit(&s, &vk, &ws, "fixing a broken car", Duration::from_secs(20)).await
-        .expect("dense search returned nothing");
+    let hits = poll_hits_mode(&s, &vk, &ws, "fixing a broken car", "semantic", Duration::from_secs(20)).await;
+    let hit = hits.first().expect("dense search returned nothing");
     assert_eq!(hit["id"], "auto", "dense semantic ranks the car record first");
 
     s.drop_ws(&vk, &ws).await;
@@ -1287,6 +1287,130 @@ async fn poll_first_hit(s: &Srv, vk: &str, ws: &str, query: &str, timeout: Durat
         }
         tokio::time::sleep(Duration::from_millis(700)).await;
     }
+}
+
+/// Like `poll_first_hit` but pins an explicit `mode` and returns the full hits
+/// array (empty after timeout). Used by the fulltext/hybrid scenarios.
+async fn poll_hits_mode(
+    s: &Srv,
+    vk: &str,
+    ws: &str,
+    query: &str,
+    mode: &str,
+    timeout: Duration,
+) -> Vec<Value> {
+    let start = Instant::now();
+    loop {
+        let r = send(s.post("/v1/vectors/search").bearer_auth(vk).json(&json!({
+            "workspace_id": ws, "query": query, "mode": mode, "top_k": 10
+        }))).await;
+        let hits = r.data()["hits"].as_array().cloned().unwrap_or_default();
+        if !hits.is_empty() || start.elapsed() >= timeout {
+            return hits;
+        }
+        tokio::time::sleep(Duration::from_millis(700)).await;
+    }
+}
+
+/// db `/v1/vectors/search` now exposes the sparse leg: `mode=fulltext` (BM25)
+/// and `mode=hybrid` (dense+BM25 RRF), on top of the original dense `semantic`.
+/// Mirrors the fs `fs_search_dense_sparse_and_hybrid` proof: two topically
+/// orthogonal records, a rare token isolates each under BM25, and a no-shared-
+/// token paraphrase exercises the dense leg of hybrid. Asserts the `score_type`
+/// contract (`bm25` / `rrf`) end-to-end over the wire.
+#[tokio::test]
+#[ignore]
+async fn db_vectors_fulltext_and_hybrid_search() {
+    let s = Srv::new();
+    let (vk, ws) = db_ctx(&s).await;
+
+    send(s.post("/v1/vectors/upsert").bearer_auth(&vk).json(&json!({
+        "workspace_id": ws,
+        "records": [
+            {"id": "music", "text": "the xylophone quokka performs midnight marshmallow concerts in the grove"},
+            {"id": "finance", "text": "quarterly revenue guidance was revised upward after strong fiscal results"}
+        ]
+    }))).await;
+
+    // ── Fulltext / BM25 ── rare token resolves ONLY its doc (also waits out
+    // Milvus visibility lag). score_type must be bm25.
+    let hits = poll_hits_mode(&s, &vk, &ws, "marshmallow", "fulltext", Duration::from_secs(25)).await;
+    assert!(!hits.is_empty(), "db fulltext never indexed within timeout");
+    let ids: Vec<&str> = hits.iter().filter_map(|h| h["id"].as_str()).collect();
+    assert!(ids.contains(&"music"), "BM25 finds the token doc: {ids:?}");
+    assert!(!ids.contains(&"finance"), "BM25 excludes the doc lacking the term: {ids:?}");
+    assert_eq!(hits[0]["score_type"], "bm25", "fulltext score_type");
+    // the other rare token isolates the other doc
+    let hits = poll_hits_mode(&s, &vk, &ws, "revenue", "fulltext", Duration::from_secs(20)).await;
+    let ids: Vec<&str> = hits.iter().filter_map(|h| h["id"].as_str()).collect();
+    assert!(ids.contains(&"finance") && !ids.contains(&"music"), "BM25 isolates finance: {ids:?}");
+
+    // ── Hybrid / RRF ── fuses dense + BM25; the rare token still ranks its doc
+    // top, and a zero-shared-token paraphrase still retrieves via the dense leg.
+    let hits = poll_hits_mode(&s, &vk, &ws, "marshmallow concerts", "hybrid", Duration::from_secs(20)).await;
+    assert!(!hits.is_empty(), "hybrid returned no hits");
+    assert_eq!(hits[0]["id"], "music", "hybrid ranks the token doc first");
+    assert_eq!(hits[0]["score_type"], "rrf", "hybrid score_type");
+    let hits = poll_hits_mode(&s, &vk, &ws, "corporate profit expectations for the period", "hybrid", Duration::from_secs(20)).await;
+    let ids: Vec<&str> = hits.iter().filter_map(|h| h["id"].as_str()).collect();
+    assert!(ids.contains(&"finance"), "hybrid dense leg retrieves finance via paraphrase: {ids:?}");
+    assert_eq!(hits[0]["score_type"], "rrf", "hybrid score_type (dense-leaning query)");
+
+    s.drop_ws(&vk, &ws).await;
+}
+
+/// `min_score` relevance floor over the wire: prunes the weakly-related doc on
+/// `semantic` (every survivor is above the floor), and `hybrid` + `min_score`
+/// is rejected 400 (RRF score is a rank artifact, not relevance).
+#[tokio::test]
+#[ignore]
+async fn db_vectors_min_score_filter() {
+    let s = Srv::new();
+    let (vk, ws) = db_ctx(&s).await;
+
+    send(s.post("/v1/vectors/upsert").bearer_auth(&vk).json(&json!({
+        "workspace_id": ws,
+        "records": [
+            {"id": "near", "text": "ocean tides rise and fall with the gravitational pull of the moon"},
+            {"id": "far", "text": "the accountant reconciled the quarterly tax spreadsheet"}
+        ]
+    }))).await;
+
+    // Baseline (no floor): wait until BOTH docs are indexed, then derive the
+    // floor as the midpoint of their live scores — model-independent (near
+    // outranks far, so the midpoint always keeps near, drops far). Avoids a
+    // hardcoded threshold that flakes when the embedding model changes.
+    let both = poll(Duration::from_secs(25), || async {
+        let h = poll_hits_mode(&s, &vk, &ws, "ocean tides and waves", "semantic", Duration::from_secs(1)).await;
+        ["near", "far"].iter().all(|id| h.iter().any(|x| x["id"] == *id))
+    })
+    .await;
+    assert!(both, "both docs never indexed within timeout");
+    let hits = poll_hits_mode(&s, &vk, &ws, "ocean tides and waves", "semantic", Duration::from_secs(5)).await;
+    let score_of = |id: &str| hits.iter().find(|h| h["id"] == id).and_then(|h| h["score"].as_f64());
+    let near_s = score_of("near").expect("near present");
+    let far_s = score_of("far").expect("far present");
+    assert!(near_s > far_s, "near must outrank far: near={near_s} far={far_s}");
+    let floor = (near_s + far_s) / 2.0;
+
+    // Floor between the two scores drops the weak doc; survivors all above it.
+    let r = send(s.post("/v1/vectors/search").bearer_auth(&vk).json(&json!({
+        "workspace_id": ws, "query": "ocean tides and waves", "mode": "semantic", "top_k": 10, "min_score": floor
+    }))).await;
+    want(&r, 200, "semantic min_score");
+    let hits = r.data()["hits"].as_array().unwrap().clone();
+    let ids: Vec<&str> = hits.iter().filter_map(|h| h["id"].as_str()).collect();
+    assert!(ids.contains(&"near"), "strong doc survives floor: {ids:?}");
+    assert!(!ids.contains(&"far"), "weak doc filtered by floor: {ids:?}");
+    assert!(hits.iter().all(|h| h["score"].as_f64().unwrap_or(0.0) >= floor), "all hits >= floor");
+
+    // hybrid + min_score → 400.
+    let r = send(s.post("/v1/vectors/search").bearer_auth(&vk).json(&json!({
+        "workspace_id": ws, "query": "ocean", "mode": "hybrid", "min_score": 0.4
+    }))).await;
+    want_err(&r, 400, "INVALID_INPUT", "hybrid + min_score rejected");
+
+    s.drop_ws(&vk, &ws).await;
 }
 
 #[tokio::test]

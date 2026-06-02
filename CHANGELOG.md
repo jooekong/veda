@@ -9,6 +9,25 @@ that matters.
 
 ## [Unreleased]
 
+### Added
+- db-workspace `/v1/vectors/search` now supports `mode`: `hybrid` (dense +
+  BM25 fused by RRF), `semantic` (dense ANN), and `fulltext` (BM25 only,
+  skips embedding). The per-collection sparse/BM25 schema was already built;
+  this lights up the query path. Verified against real Milvus 2.6.14.
+- `VectorSearchHit` gains `score_type` (`cosine` / `bm25` / `rrf`) so callers
+  can tell which ranker produced `score` — the three are not comparable.
+- `/v1/vectors/search` accepts an optional `min_score` relevance floor (drops
+  hits below it). Valid only for `semantic` / `fulltext`; rejected with `400`
+  for `hybrid` (incl. the default), whose RRF score is a rank artifact, not a
+  relevance value. Applied after `top_k`, so the result may be shorter.
+
+### Changed
+- **Wire (additive):** `/v1/vectors/search` hits include a new `score_type`
+  field. Deserializes with a `cosine` default, so older payloads keep their
+  (semantic-only) meaning; SDK/clients should surface it.
+- **Default search mode is now `hybrid`** (was implicitly semantic). `hybrid`
+  failures surface as errors — no silent fallback to semantic.
+
 ## [0.1.9] — 2026-05-19
 
 ### Added

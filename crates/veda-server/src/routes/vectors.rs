@@ -15,7 +15,7 @@ use veda_types::api::{
     NewRecord, UpsertRequest, UpsertResponse, VectorDeleteRequest, VectorDeleteResponse,
     VectorQueryRequest, VectorQueryResponse, VectorSearchRequest, VectorSearchResponse,
 };
-use veda_types::{validate, ApiResponse, UpsertRecord, VedaError, Workspace};
+use veda_types::{validate, ApiResponse, SearchMode, UpsertRecord, VectorSearchQuery, VedaError, Workspace};
 
 use crate::auth::AuthAccount;
 use crate::error::AppError;
@@ -300,11 +300,44 @@ async fn search_vectors(
     )
     .await?;
 
-    // Embed the query (single text — batched API but one item is fine).
-    let vectors = state.vector_embedding.embed(&[req.query.clone()]).await?;
-    let query_vector = vectors.into_iter().next().ok_or_else(|| {
-        VedaError::EmbeddingFailed("embedded 0 vectors for query".into())
-    })?;
+    // Default is explicit (NOT `unwrap_or_default()`): even though
+    // SearchMode::default() also happens to be Hybrid, db's default must not
+    // silently couple to the fs enum's default — they're independent contracts.
+    // Hybrid gives the best out-of-box recall (dense + BM25 fused); callers
+    // opt into `semantic` / `fulltext` explicitly.
+    let mode = req.mode.unwrap_or(SearchMode::Hybrid);
+
+    // min_score is a relevance floor; validate before the (paid) embed so we
+    // fail fast. It only applies where `score` is an interpretable similarity
+    // (semantic=cosine, fulltext=bm25). On hybrid the score is an RRF rank
+    // artifact, not relevance — reject rather than silently apply a
+    // meaningless threshold. Default mode is hybrid, so a caller must
+    // explicitly pick semantic/fulltext to use min_score.
+    if let Some(ms) = req.min_score {
+        if !ms.is_finite() {
+            return Err(VedaError::InvalidInput("min_score must be a finite number".into()).into());
+        }
+        if mode == SearchMode::Hybrid {
+            return Err(VedaError::InvalidInput(
+                "min_score is only supported for mode=semantic or fulltext; hybrid ranks by RRF \
+                 (not a relevance score) — use top_k, or set mode=semantic for a relevance gate"
+                    .into(),
+            )
+            .into());
+        }
+    }
+
+    // Embed only for modes that need a dense vector. Fulltext (BM25) skips the
+    // paid embed entirely — mirrors the fs `search_full` template.
+    let query_vector: Option<Vec<f32>> = if matches!(mode, SearchMode::Semantic | SearchMode::Hybrid)
+    {
+        let vectors = state.vector_embedding.embed(&[req.query.clone()]).await?;
+        Some(vectors.into_iter().next().ok_or_else(|| {
+            VedaError::EmbeddingFailed("embedded 0 vectors for query".into())
+        })?)
+    } else {
+        None
+    };
 
     // Parse caller's Filter DSL (Stage 4.4) into a Milvus expr string.
     // None → no extra filter; trait merges with base on its own.
@@ -313,17 +346,33 @@ async fn search_vectors(
         None => None,
     };
 
-    let hits = state
+    let search_query = match mode {
+        SearchMode::Semantic => VectorSearchQuery::Semantic {
+            vector: query_vector.as_deref().expect("semantic embeds above"),
+        },
+        SearchMode::Hybrid => VectorSearchQuery::Hybrid {
+            vector: query_vector.as_deref().expect("hybrid embeds above"),
+            text: &req.query,
+        },
+        SearchMode::Fulltext => VectorSearchQuery::Fulltext { text: &req.query },
+    };
+
+    let mut hits = state
         .vector_workspace_store
         .search_vectors(
             &ws.id,
             &dataset_name,
-            &query_vector,
+            search_query,
             top_k,
             extra_filter.as_deref(),
             req.output_fields.as_deref(),
         )
         .await?;
+    // Relevance floor (semantic/fulltext only — hybrid already rejected above).
+    // Post-filter the top_k set, so the response may carry fewer than top_k.
+    if let Some(ms) = req.min_score {
+        hits.retain(|h| h.score >= ms);
+    }
     Ok(Json(ApiResponse::ok(VectorSearchResponse { hits })))
 }
 

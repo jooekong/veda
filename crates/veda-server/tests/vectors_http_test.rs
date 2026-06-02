@@ -301,7 +301,219 @@ async fn vectors_http_e2e_suite() {
     sub_accounts_auth(&state, &mysql, router.clone()).await;
 
     // Sub-test 10: output_fields projection whitelist (search/query).
-    sub_projection(&state, &mysql, router).await;
+    sub_projection(&state, &mysql, router.clone()).await;
+
+    // Sub-test 11: search mode passthrough + score_type contract (sparse work).
+    sub_search_modes(&state, &mysql, router.clone()).await;
+
+    // Sub-test 12: min_score relevance floor (semantic/fulltext) + hybrid reject.
+    sub_min_score(&state, &mysql, router).await;
+}
+
+/// Mode passthrough + `score_type` contract over the full HTTP stack.
+/// Asserts semantic→`cosine`, fulltext→`bm25`, hybrid→`rrf`, and that an
+/// omitted `mode` defaults to hybrid. Fulltext must match a lexical token
+/// while excluding a purely-semantic doc, proving mode is routed end-to-end
+/// (not just echoed) and that BM25 actually drives the fulltext branch.
+async fn sub_search_modes(state: &Arc<AppState>, mysql: &MysqlStore, router: axum::Router) {
+    let setup = provision_test_account(state).await;
+
+    let do_post = |uri: &str, body: serde_json::Value| {
+        let req = Request::builder()
+            .method("POST")
+            .uri(uri)
+            .header("authorization", format!("Bearer {}", setup.token))
+            .header("content-type", "application/json")
+            .body(Body::from(serde_json::to_vec(&body).unwrap()))
+            .unwrap();
+        router.clone().oneshot(req)
+    };
+
+    // One semantic doc + one lexical-token doc.
+    let resp = do_post(
+        "/v1/vectors/upsert",
+        json!({
+            "workspace_id": setup.ws_id,
+            "records": [
+                { "id": "sem", "text": "the weather is sunny warm and pleasant today" },
+                { "id": "tok", "text": "internal identifier zqxwprodcode reference sheet" },
+            ],
+        }),
+    )
+    .await
+    .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK, "modes upsert status");
+    tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+
+    // Helper: run a search and return (status, hits array).
+    async fn search_hits(
+        resp: axum::response::Response,
+    ) -> (StatusCode, Vec<serde_json::Value>) {
+        let status = resp.status();
+        let v = body_json(resp.into_body()).await;
+        let hits = v["data"]["hits"].as_array().cloned().unwrap_or_default();
+        (status, hits)
+    }
+
+    // semantic → cosine
+    let (st, hits) = search_hits(
+        do_post(
+            "/v1/vectors/search",
+            json!({ "workspace_id": setup.ws_id, "query": "sunny warm weather", "mode": "semantic", "top_k": 5 }),
+        )
+        .await
+        .unwrap(),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "semantic status");
+    assert!(!hits.is_empty(), "semantic returned no hits");
+    assert_eq!(hits[0]["score_type"], "cosine", "semantic score_type");
+
+    // fulltext → bm25, matches the token doc, excludes the no-token doc
+    let (st, hits) = search_hits(
+        do_post(
+            "/v1/vectors/search",
+            json!({ "workspace_id": setup.ws_id, "query": "zqxwprodcode", "mode": "fulltext", "top_k": 5 }),
+        )
+        .await
+        .unwrap(),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "fulltext status");
+    assert!(!hits.is_empty(), "fulltext returned no hits");
+    assert_eq!(hits[0]["score_type"], "bm25", "fulltext score_type");
+    let ids: std::collections::HashSet<String> = hits
+        .iter()
+        .filter_map(|h| h["id"].as_str().map(String::from))
+        .collect();
+    assert!(ids.contains("tok"), "fulltext must match the token doc: {ids:?}");
+    assert!(!ids.contains("sem"), "fulltext must not match the no-token doc: {ids:?}");
+
+    // hybrid → rrf
+    let (st, hits) = search_hits(
+        do_post(
+            "/v1/vectors/search",
+            json!({ "workspace_id": setup.ws_id, "query": "zqxwprodcode", "mode": "hybrid", "top_k": 5 }),
+        )
+        .await
+        .unwrap(),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "hybrid status");
+    assert!(!hits.is_empty(), "hybrid returned no hits");
+    assert_eq!(hits[0]["score_type"], "rrf", "hybrid score_type");
+
+    // omitted mode → defaults to hybrid (score_type=rrf)
+    let (st, hits) = search_hits(
+        do_post(
+            "/v1/vectors/search",
+            json!({ "workspace_id": setup.ws_id, "query": "zqxwprodcode", "top_k": 5 }),
+        )
+        .await
+        .unwrap(),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "default-mode status");
+    assert!(!hits.is_empty(), "default-mode returned no hits");
+    assert_eq!(hits[0]["score_type"], "rrf", "omitted mode must default to hybrid");
+
+    cleanup(state, mysql, &setup).await;
+}
+
+/// `min_score` relevance floor: prunes the top_k set on semantic/fulltext
+/// (every survivor is above the floor), and is rejected (400) on hybrid —
+/// including the default mode — because RRF score is a rank artifact.
+async fn sub_min_score(state: &Arc<AppState>, mysql: &MysqlStore, router: axum::Router) {
+    let setup = provision_test_account(state).await;
+
+    let do_post = |uri: &str, body: serde_json::Value| {
+        let req = Request::builder()
+            .method("POST")
+            .uri(uri)
+            .header("authorization", format!("Bearer {}", setup.token))
+            .header("content-type", "application/json")
+            .body(Body::from(serde_json::to_vec(&body).unwrap()))
+            .unwrap();
+        router.clone().oneshot(req)
+    };
+
+    // A strongly-relevant and a weakly-relevant doc for the ocean query.
+    let resp = do_post(
+        "/v1/vectors/upsert",
+        json!({
+            "workspace_id": setup.ws_id,
+            "records": [
+                {"id": "near", "text": "ocean tides rise and fall with the gravitational pull of the moon"},
+                {"id": "far", "text": "the accountant reconciled the quarterly tax spreadsheet"}
+            ],
+        }),
+    )
+    .await
+    .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK, "min_score upsert");
+    tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+
+    let ids_of = |v: &serde_json::Value| -> std::collections::HashSet<String> {
+        v["data"]["hits"]
+            .as_array()
+            .map(|a| a.iter().filter_map(|h| h["id"].as_str().map(String::from)).collect())
+            .unwrap_or_default()
+    };
+
+    let q = "ocean tides and waves";
+
+    // Baseline (no floor): both docs present. Read their LIVE scores and derive
+    // the floor as the midpoint — model-independent (near always outranks far
+    // semantically, so the midpoint always keeps near and drops far). Avoids a
+    // hardcoded threshold that would flake when the embedding model changes.
+    let resp = do_post("/v1/vectors/search", json!({
+        "workspace_id": setup.ws_id, "query": q, "mode": "semantic", "top_k": 10, "min_score": 0.0
+    })).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK, "semantic baseline status");
+    let v = body_json(resp.into_body()).await;
+    let hits = v["data"]["hits"].as_array().unwrap();
+    let score_of = |id: &str| hits.iter().find(|h| h["id"] == id).and_then(|h| h["score"].as_f64());
+    let near_s = score_of("near").expect("near present at baseline");
+    let far_s = score_of("far").expect("far present at baseline");
+    assert!(near_s > far_s, "strong doc must outrank weak doc: near={near_s} far={far_s}");
+    let floor = (near_s + far_s) / 2.0;
+
+    // Floor between the two scores → weak doc dropped; survivors all above floor.
+    let resp = do_post("/v1/vectors/search", json!({
+        "workspace_id": setup.ws_id, "query": q, "mode": "semantic", "top_k": 10, "min_score": floor
+    })).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK, "semantic min_score status");
+    let v = body_json(resp.into_body()).await;
+    let hits = v["data"]["hits"].as_array().unwrap();
+    assert!(hits.iter().all(|h| h["score"].as_f64().unwrap() >= floor), "all hits >= floor: {hits:?}");
+    let ids = ids_of(&v);
+    assert!(ids.contains("near"), "strong doc survives floor: {ids:?}");
+    assert!(!ids.contains("far"), "weak doc filtered by floor: {ids:?}");
+
+    // fulltext: floor=0 keeps the lexical match; a floor above any BM25 score empties it.
+    let resp = do_post("/v1/vectors/search", json!({
+        "workspace_id": setup.ws_id, "query": "moon", "mode": "fulltext", "top_k": 10, "min_score": 0.0
+    })).await.unwrap();
+    assert!(ids_of(&body_json(resp.into_body()).await).contains("near"), "fulltext floor=0 keeps the match");
+    let resp = do_post("/v1/vectors/search", json!({
+        "workspace_id": setup.ws_id, "query": "moon", "mode": "fulltext", "top_k": 10, "min_score": 1.0e9
+    })).await.unwrap();
+    assert!(
+        body_json(resp.into_body()).await["data"]["hits"].as_array().unwrap().is_empty(),
+        "fulltext floor above all bm25 → empty"
+    );
+
+    // hybrid + min_score → 400; omitted mode (default hybrid) + min_score → 400.
+    let resp = do_post("/v1/vectors/search", json!({
+        "workspace_id": setup.ws_id, "query": q, "mode": "hybrid", "min_score": 0.4
+    })).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST, "hybrid + min_score rejected");
+    let resp = do_post("/v1/vectors/search", json!({
+        "workspace_id": setup.ws_id, "query": q, "min_score": 0.4
+    })).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST, "default-mode + min_score rejected");
+
+    cleanup(state, mysql, &setup).await;
 }
 
 /// `output_fields` projection: id/score always returned, selected fields

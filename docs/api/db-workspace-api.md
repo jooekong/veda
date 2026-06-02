@@ -171,7 +171,8 @@ curl -sX POST $BASE/v1/vectors/upsert \
 | `text` | string | 原文 |
 | `meta` | object | 自定义 JSON（技术上接受任意 JSON value；v0 建议用 object —— filter 仅能按 `meta.<key>` 过滤，非 object 无法被过滤） |
 | `created_at` / `updated_at` | int64 | 毫秒 epoch |
-| `score` | float | COSINE 相似度，**越大越相似** |
+| `score` | float | 相关性分数，**越大越相关**；含义由 `score_type` 决定 |
+| `score_type` | string | `cosine`（语义 ANN，~[0,1]）/ `bm25`（全文，~[0,30+]）/ `rrf`（hybrid 融合，~[0,0.033]）。**跨 type 不可比**，读分数前先看本字段 |
 
 ### VectorRecordHit（`/v1/vectors/query` 命中项）
 同 `VectorSearchHit`，但**没有 `score`**（直接按 id 查，非排序匹配）。
@@ -314,14 +315,24 @@ curl -sX POST $BASE/v1/vectors/upsert \
 - 错误：`400 INVALID_INPUT`（字段校验，含 **text/meta/tags/category/id/dataset 等单字段长度或字符集超限**，`error` 形如 `<field>: <reason>`）、`413 PAYLOAD_TOO_LARGE`（**仅** `records` 条数 >500）、`500 EMBEDDING_FAILED`。
 
 #### POST `/v1/vectors/search` ✅
-对 `query`（服务端嵌入）做稠密 ANN，**隐式锁定目标 dataset**（v0 不支持跨 dataset）。
+检索目标 dataset，**隐式锁定**（v0 不支持跨 dataset）。`mode` 选择 ranker：
+
+| `mode` | 行为 | 嵌入 query？ | `score_type` | 分数范围 |
+|---|---|---|---|---|
+| `hybrid`（**默认**） | 稠密 ANN + BM25，RRF 融合 | 是 | `rrf` | ~[0, 0.033] |
+| `semantic` | 对嵌入后的 query 做稠密 ANN | 是 | `cosine` | ~[0, 1] |
+| `fulltext` | 对分词后的 `text` 做 BM25 全文 | 否 | `bm25` | ~[0, 30+] |
+
+分数**跨 mode 不可比**，读分数前先看 `score_type`。`fulltext` 完全跳过嵌入调用（更便宜，也是唯一不依赖 embedding model 的 mode）。`hybrid` 失败直接报错，**不静默降级到 semantic**。
 - 请求：
 ```json
 {
   "workspace_id": "<ws_id>",
   "dataset": "products",
   "query": "sneakers under 1500",
+  "mode": "hybrid",
   "top_k": 10,
+  "min_score": 0.4,
   "filter": {
     "must": [
       { "field": "meta.price", "op": "lt", "value": 1500 },
@@ -330,9 +341,10 @@ curl -sX POST $BASE/v1/vectors/upsert \
   }
 }
 ```
-  `top_k` 默认 10，最大 100；`filter` 可选，见 §7。
-- 响应 200：`{ "hits": VectorSearchHit[] }`
-- 错误：`400 INVALID_INPUT`（query 为空或 >65535 字节 / top_k=0 / filter 非法）、`413 PAYLOAD_TOO_LARGE`（top_k>100）、`500 EMBEDDING_FAILED`。
+  `mode` 可选，默认 `hybrid`（可选 `semantic` / `fulltext`）；`top_k` 默认 10，最大 100；`filter` 可选，见 §7。
+  `min_score` 可选，**相关度下限**：丢掉低于它的命中。**仅 `semantic`(cosine)/`fulltext`(bm25) 生效**；`hybrid`（含默认 mode）传入即 `400`——RRF 是排名不是相关度，要门槛请用 `top_k` 或显式 `mode=semantic`。在 `top_k` 之后裁剪，故结果可能 **少于 `top_k`**（要更多过线就调大 `top_k`）。需按模型校准：dense 下无关文本也 ~0.15–0.25，有效的 cosine 门槛要明显高于此（如 0.4–0.6），没有通用的"0.5"。
+- 响应 200：`{ "hits": VectorSearchHit[] }`（每个 hit 含 `score` + `score_type`）。
+- 错误：`400 INVALID_INPUT`（query 为空或 >65535 字节 / top_k=0 / filter 非法 / `min_score` 非有限值或与 `mode=hybrid` 同用）、`413 PAYLOAD_TOO_LARGE`（top_k>100）、`500 EMBEDDING_FAILED`（semantic/hybrid 嵌入失败）/ `500`（hybrid 后端失败，不降级）。
 
 #### POST `/v1/vectors/query` ✅
 按 id 直查。**不保证顺序；不存在的 id 静默跳过（不报错）**。单次最多 **500** 个 id。

@@ -257,7 +257,17 @@ pub struct VectorSearchRequest {
     pub workspace_id: Option<String>,
     pub dataset: Option<String>,
     pub query: String,
+    /// Search mode. Omitted → handler-defined default (see
+    /// `routes/vectors.rs`). `semantic` = dense ANN only, `fulltext` = BM25
+    /// only (skips embedding), `hybrid` = dense + BM25 fused by RRF.
+    pub mode: Option<SearchMode>,
     pub top_k: Option<usize>,
+    /// Relevance floor: drop hits whose `score` is below this. Only valid for
+    /// `mode=semantic` (cosine) / `fulltext` (bm25) — where `score` is an
+    /// interpretable similarity. Rejected (400) for `hybrid` (incl. the
+    /// default), whose RRF score is a rank artifact, not relevance. Applied
+    /// AFTER `top_k`, so the result may contain fewer than `top_k` hits.
+    pub min_score: Option<f32>,
     pub filter: Option<VectorFilter>,
     /// Projection whitelist. `None` → all fields; `Some([...])` → only the
     /// listed projectable fields (`id`/`score` always returned). Validated

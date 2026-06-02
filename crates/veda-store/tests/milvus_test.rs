@@ -11,6 +11,7 @@ use veda_core::store::{CollectionVectorStore, VectorStore, VectorWorkspaceStore}
 use veda_store::MilvusStore;
 use veda_types::{
     ChunkWithEmbedding, FieldDefinition, SearchMode, SearchRequest, UpsertRecord,
+    VectorSearchQuery,
 };
 
 #[derive(Debug, Deserialize)]
@@ -321,7 +322,13 @@ async fn milvus_vector_data_plane_roundtrip() {
 
     // 2. Search using the first record's vector — top hit should be pk1.
     let hits = VectorWorkspaceStore::search_vectors(
-        &store, &ws_id, "default", &mk_vector(0.1), 2, None, None,
+        &store,
+        &ws_id,
+        "default",
+        VectorSearchQuery::Semantic { vector: &mk_vector(0.1) },
+        2,
+        None,
+        None,
     )
     .await
     .expect("search");
@@ -443,7 +450,7 @@ async fn milvus_search_with_filter_dsl_eq_and_range() {
         &store,
         &ws_id,
         "default",
-        &query,
+        VectorSearchQuery::Semantic { vector: &query },
         10,
         Some(r#"meta["price"] < 100"#),
         None,
@@ -461,7 +468,7 @@ async fn milvus_search_with_filter_dsl_eq_and_range() {
         &store,
         &ws_id,
         "default",
-        &query,
+        VectorSearchQuery::Semantic { vector: &query },
         10,
         Some(r#"meta["category"] == "shoes""#),
         None,
@@ -510,7 +517,7 @@ async fn milvus_search_with_in_or_expansion() {
         &store,
         &ws_id,
         "default",
-        &query,
+        VectorSearchQuery::Semantic { vector: &query },
         10,
         Some(r#"(meta["brand"] == "nike" || meta["brand"] == "adidas")"#),
         None,
@@ -550,9 +557,17 @@ async fn milvus_multi_dataset_isolation() {
     .await;
 
     let query = (0..dim).map(|i| (i as f32) * 0.001).collect::<Vec<_>>();
-    let hits = VectorWorkspaceStore::search_vectors(&store, &ws_id, "ds_a", &query, 10, None, None)
-        .await
-        .expect("search ds_a");
+    let hits = VectorWorkspaceStore::search_vectors(
+        &store,
+        &ws_id,
+        "ds_a",
+        VectorSearchQuery::Semantic { vector: &query },
+        10,
+        None,
+        None,
+    )
+    .await
+    .expect("search ds_a");
     assert!(hits.iter().all(|h| h.dataset.as_deref() == Some("ds_a")),
             "ds_a search returned cross-dataset hits: {:?}",
             hits.iter().map(|h| &h.dataset).collect::<Vec<_>>());
@@ -564,4 +579,384 @@ async fn milvus_multi_dataset_isolation() {
     assert!(!ds_a_keys.contains("rk4"));
 
     store.drop_collection(&collection_name).await.unwrap();
+}
+
+/// Proves db Fulltext mode actually queries the BM25 inverted index rather than
+/// some degraded path. Two records share the SAME dense vector (so ANN cannot
+/// tell them apart); only one contains a distinctive token. A fulltext query
+/// for that token must return that record and NOT the other (BM25 sparse search
+/// only returns docs sharing query terms). A correct result is therefore
+/// attributable to BM25 alone — closing the F1 blind spot for the db path.
+#[tokio::test]
+#[ignore]
+async fn db_fulltext_finds_lexical_only_hit() {
+    let (url, token, db) = load_milvus();
+    let store = MilvusStore::new(&url, token, db);
+    let dim = load_embedding_dim();
+    let ws_id = Uuid::new_v4().to_string();
+    let collection_name = store
+        .create_vector_collection(&ws_id, dim)
+        .await
+        .expect("create");
+
+    let noise: Vec<f32> = (0..dim).map(|i| (i as f32) * 0.001).collect();
+    let now_ms = chrono::Utc::now().timestamp_millis();
+    let records = vec![
+        UpsertRecord {
+            pk: "default:has-token".into(),
+            id: "has-token".into(),
+            dataset: "default".into(),
+            category: "default".into(),
+            tags: vec![],
+            text: "the quarterly invoice zqxwprodcode was approved by finance".into(),
+            vector: noise.clone(),
+            meta: json!({}),
+            created_at: now_ms,
+            updated_at: now_ms,
+        },
+        UpsertRecord {
+            pk: "default:no-token".into(),
+            id: "no-token".into(),
+            dataset: "default".into(),
+            category: "default".into(),
+            tags: vec![],
+            text: "a totally different sentence about weather and rivers".into(),
+            vector: noise.clone(),
+            meta: json!({}),
+            created_at: now_ms,
+            updated_at: now_ms,
+        },
+    ];
+    VectorWorkspaceStore::upsert_records(&store, &ws_id, &records)
+        .await
+        .expect("upsert");
+
+    // Poll: distinguish "BM25 index still loading" from "BM25 path broken".
+    let mut hits = Vec::new();
+    for _ in 0..15 {
+        hits = VectorWorkspaceStore::search_vectors(
+            &store,
+            &ws_id,
+            "default",
+            VectorSearchQuery::Fulltext { text: "zqxwprodcode" },
+            10,
+            None,
+            None,
+        )
+        .await
+        .expect("fulltext search");
+        if !hits.is_empty() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(400)).await;
+    }
+
+    assert!(
+        !hits.is_empty(),
+        "fulltext returned no hits — BM25 path not working"
+    );
+    assert_eq!(
+        hits[0].id, "has-token",
+        "top hit should be the doc containing the token"
+    );
+    assert_eq!(hits[0].score_type, "bm25", "score_type must mark this as bm25");
+    assert!(
+        !hits.iter().any(|h| h.id == "no-token"),
+        "doc without the token must not match a BM25 query (proves inverted-index semantics, not substring/degraded)"
+    );
+
+    store.drop_collection(&collection_name).await.unwrap();
+}
+
+/// Falsification test for the fs (veda_chunks) BM25 path — review findings
+/// F1/F2. The existing `query_fulltext` puts `metricType` at the body top level
+/// (not the Milvus 2.6 official REST shape), and no test ever asserted it
+/// returns real lexical hits (hybrid silently falls back to ANN, so a broken
+/// BM25 path stays green). This asserts a token-bearing chunk is found by
+/// fulltext and a token-free one is not. If fs's REST shape is wrong, this
+/// fails — surfacing the latent bug instead of hiding it.
+#[tokio::test]
+#[ignore]
+async fn fs_fulltext_finds_lexical_only_hit() {
+    let (url, token, db) = load_milvus();
+    let store = MilvusStore::new(&url, token, db);
+    let dim = load_embedding_dim();
+    store.init_collections(dim).await.expect("init");
+
+    let ws = format!("ws_{}", Uuid::new_v4());
+    let noise: Vec<f32> = (0..dim).map(|i| (i as f32) * 0.001).collect();
+    let fid_hit = Uuid::new_v4().to_string();
+    let fid_miss = Uuid::new_v4().to_string();
+    store
+        .upsert_chunks_only(&[
+            ChunkWithEmbedding {
+                id: Uuid::new_v4().to_string(),
+                workspace_id: ws.clone(),
+                file_id: fid_hit.clone(),
+                chunk_index: 0,
+                content: "release notes mention zqxwprodcode shipping next week".into(),
+                vector: noise.clone(),
+            },
+            ChunkWithEmbedding {
+                id: Uuid::new_v4().to_string(),
+                workspace_id: ws.clone(),
+                file_id: fid_miss.clone(),
+                chunk_index: 0,
+                content: "unrelated paragraph about gardening and soil".into(),
+                vector: noise.clone(),
+            },
+        ])
+        .await
+        .expect("upsert chunks");
+
+    let req = SearchRequest {
+        workspace_id: ws.clone(),
+        query: "zqxwprodcode".into(),
+        mode: SearchMode::Fulltext,
+        limit: 10,
+        path_prefix: None,
+        query_vector: None,
+    };
+    let mut hits = Vec::new();
+    for _ in 0..15 {
+        hits = store.search(&req).await.expect("fs fulltext search");
+        if !hits.is_empty() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(400)).await;
+    }
+
+    assert!(
+        !hits.is_empty(),
+        "fs fulltext returned no hits — F1/F2 confirmed (BM25 path broken)"
+    );
+    assert_eq!(
+        hits[0].file_id, fid_hit,
+        "top hit should be the chunk containing the token"
+    );
+    assert_eq!(hits[0].score_type, "bm25");
+    assert!(
+        !hits.iter().any(|h| h.file_id == fid_miss),
+        "token-free chunk must not match BM25 query"
+    );
+
+    store.delete_chunks(&ws, &fid_hit).await.ok();
+    store.delete_chunks(&ws, &fid_miss).await.ok();
+}
+
+/// Proves db Hybrid genuinely FUSES dense + BM25 (not just runs one ranker) and
+/// that the `entities/hybrid_search` response parses the complex columns
+/// (`tags` Array, `meta` JSON) the same way `entities/search` does.
+///
+/// Setup: a token-bearing record `T` is placed FAR in dense space (behind 3
+/// distractors), so pure-dense top-3 would exclude it. A fulltext query token
+/// + a query vector near the non-token docs are issued together. If hybrid
+/// fuses, BM25 pulls `T` into the top-3; pure dense never could. Also asserts
+/// `T`'s tags/meta round-trip and every hit is `score_type == "rrf"`.
+#[tokio::test]
+#[ignore]
+async fn db_hybrid_fuses_and_returns_complex_fields() {
+    let (url, token, db) = load_milvus();
+    let store = MilvusStore::new(&url, token, db);
+    let dim = load_embedding_dim();
+    let ws_id = Uuid::new_v4().to_string();
+    let collection_name = store
+        .create_vector_collection(&ws_id, dim)
+        .await
+        .expect("create");
+
+    let mk = |s: f32| -> Vec<f32> { (0..dim).map(|i| s + (i as f32) * 0.001).collect() };
+    let now_ms = chrono::Utc::now().timestamp_millis();
+    let rec = |id: &str, seed: f32, text: &str, tags: Vec<String>, meta: serde_json::Value| {
+        UpsertRecord {
+            pk: format!("default:{id}"),
+            id: id.to_string(),
+            dataset: "default".into(),
+            category: "default".into(),
+            tags,
+            text: text.into(),
+            vector: mk(seed),
+            meta,
+            created_at: now_ms,
+            updated_at: now_ms,
+        }
+    };
+    // V + 3 distractors are all closer to the query vector (seed 0.10) than the
+    // token doc T (seed 0.90); pure-dense top-3 = {V, d1, d2}, T is rank 5.
+    let records = vec![
+        rec("vmatch", 0.10, "alpha beta gamma no special token", vec![], json!({})),
+        rec("d1", 0.11, "filler one", vec![], json!({})),
+        rec("d2", 0.12, "filler two", vec![], json!({})),
+        rec("d3", 0.13, "filler three", vec![], json!({})),
+        rec(
+            "tmatch",
+            0.90,
+            "this record mentions zqxwprodcode explicitly",
+            vec!["ttag".into(), "sale".into()],
+            json!({ "kind": "t", "n": 7 }),
+        ),
+    ];
+    VectorWorkspaceStore::upsert_records(&store, &ws_id, &records)
+        .await
+        .expect("upsert");
+
+    let mut hits = Vec::new();
+    for _ in 0..15 {
+        hits = VectorWorkspaceStore::search_vectors(
+            &store,
+            &ws_id,
+            "default",
+            VectorSearchQuery::Hybrid {
+                vector: &mk(0.10),
+                text: "zqxwprodcode",
+            },
+            3,
+            None,
+            None,
+        )
+        .await
+        .expect("hybrid search");
+        // Wait until the token doc is fused in (index may lag right after upsert).
+        if hits.iter().any(|h| h.id == "tmatch") {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(400)).await;
+    }
+
+    assert!(!hits.is_empty(), "hybrid returned no hits");
+    assert!(
+        hits.iter().all(|h| h.score_type == "rrf"),
+        "every hybrid hit must be score_type=rrf, got {:?}",
+        hits.iter().map(|h| &h.score_type).collect::<Vec<_>>()
+    );
+    // Two-way fusion proof: `tmatch` can only come from BM25 (dense-far), and
+    // `vmatch` can only come from dense (no token, so BM25 ignores it). Both in
+    // top-3 ⇒ both rankers contributed — not a sparse-only or dense-only path.
+    assert!(
+        hits.iter().any(|h| h.id == "vmatch"),
+        "dense-near doc must be present (proves dense ranker contributes to the fusion)"
+    );
+    let t = hits
+        .iter()
+        .find(|h| h.id == "tmatch")
+        .expect("BM25 must fuse the dense-far token doc into top-3 (proves BM25 ranker contributes)");
+    // Complex columns must parse from the hybrid_search response shape.
+    assert_eq!(
+        t.tags,
+        Some(vec!["ttag".to_string(), "sale".to_string()]),
+        "tags Array must parse from hybrid response"
+    );
+    let meta = t.meta.as_ref().expect("meta present");
+    assert_eq!(meta["kind"], "t", "meta JSON must parse from hybrid response");
+    assert_eq!(meta["n"], 7);
+
+    store.drop_collection(&collection_name).await.unwrap();
+}
+
+/// Hybrid must surface backend errors rather than swallow them into an empty
+/// `Ok` (and per decision D4 there is NO silent fallback to semantic — that
+/// is structural: the Hybrid arm has no fallback branch). Querying a workspace
+/// whose collection was never provisioned makes Milvus error; we assert that
+/// propagates as `Err`.
+#[tokio::test]
+#[ignore]
+async fn db_hybrid_surfaces_error() {
+    let (url, token, db) = load_milvus();
+    let store = MilvusStore::new(&url, token, db);
+    let dim = load_embedding_dim();
+    let ws_id = Uuid::new_v4().to_string(); // never provisioned → no collection
+    let vector: Vec<f32> = (0..dim).map(|i| (i as f32) * 0.001).collect();
+
+    let result = VectorWorkspaceStore::search_vectors(
+        &store,
+        &ws_id,
+        "default",
+        VectorSearchQuery::Hybrid {
+            vector: &vector,
+            text: "anything",
+        },
+        5,
+        None,
+        None,
+    )
+    .await;
+
+    assert!(
+        result.is_err(),
+        "hybrid against a missing collection must Err, not return empty Ok (got {:?})",
+        result.map(|h| h.len())
+    );
+}
+
+/// Falsification test for the fs (veda_chunks) hybrid path — review finding F1.
+/// fs defaults to Hybrid in production, but the only existing test merely
+/// `expect()`ed no error, and `hybrid_search_remote` SILENTLY falls back to ANN
+/// on failure (`score_type` becomes "cosine"). So a broken BM25 fusion would
+/// have shipped unnoticed. Here a token doc is placed FAR in dense space; if
+/// hybrid truly fuses, BM25 pulls it into top-3 AND `score_type == "rrf"`. If
+/// fs silently fell back to ANN, `score_type` would be "cosine" → this fails,
+/// surfacing the latent bug instead of hiding it.
+#[tokio::test]
+#[ignore]
+async fn fs_hybrid_fuses_not_fallback() {
+    let (url, token, db) = load_milvus();
+    let store = MilvusStore::new(&url, token, db);
+    let dim = load_embedding_dim();
+    store.init_collections(dim).await.expect("init");
+
+    let ws = format!("ws_{}", Uuid::new_v4());
+    let mk = |s: f32| -> Vec<f32> { (0..dim).map(|i| s + (i as f32) * 0.001).collect() };
+    let chunk = |fid: &str, seed: f32, content: &str| ChunkWithEmbedding {
+        id: Uuid::new_v4().to_string(),
+        workspace_id: ws.clone(),
+        file_id: fid.to_string(),
+        chunk_index: 0,
+        content: content.into(),
+        vector: mk(seed),
+    };
+    let fid_t = Uuid::new_v4().to_string();
+    store
+        .upsert_chunks_only(&[
+            chunk("fv", 0.10, "alpha beta gamma no token"),
+            chunk("fd1", 0.11, "filler one"),
+            chunk("fd2", 0.12, "filler two"),
+            chunk("fd3", 0.13, "filler three"),
+            chunk(&fid_t, 0.90, "release notes mention zqxwprodcode here"),
+        ])
+        .await
+        .expect("upsert chunks");
+
+    let req = SearchRequest {
+        workspace_id: ws.clone(),
+        query: "zqxwprodcode".into(),
+        mode: SearchMode::Hybrid,
+        limit: 3,
+        path_prefix: None,
+        query_vector: Some(mk(0.10)),
+    };
+    let mut hits = Vec::new();
+    for _ in 0..15 {
+        hits = store.search(&req).await.expect("fs hybrid search");
+        if hits.iter().any(|h| h.file_id == fid_t) {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(400)).await;
+    }
+
+    assert!(!hits.is_empty(), "fs hybrid returned no hits");
+    assert!(
+        hits.iter().all(|h| h.score_type == "rrf"),
+        "fs hybrid must report score_type=rrf; \"cosine\" would mean it silently fell back to ANN (F1). got {:?}",
+        hits.iter().map(|h| &h.score_type).collect::<Vec<_>>()
+    );
+    assert!(
+        hits.iter().any(|h| h.file_id == fid_t),
+        "BM25 fusion must pull the dense-far token chunk into top-3 (else fusion is not happening)"
+    );
+
+    // cleanup
+    for fid in ["fv", "fd1", "fd2", "fd3"] {
+        store.delete_chunks(&ws, fid).await.ok();
+    }
+    store.delete_chunks(&ws, &fid_t).await.ok();
 }
