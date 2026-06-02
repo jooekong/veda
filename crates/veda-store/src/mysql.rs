@@ -519,8 +519,13 @@ impl MysqlStore {
         // under strict sql_mode. Guarded by information_schema so the
         // table-rebuilding MODIFY runs only on a not-yet-migrated schema,
         // not on every boot.
-        let chunk_content_mediumtext: Option<(String,)> = sqlx::query_as(
-            "SELECT DATA_TYPE FROM information_schema.COLUMNS \
+        // Select a literal `1`, NOT `DATA_TYPE`: MySQL information_schema
+        // text columns are backed by binary/LONGBLOB, which sqlx refuses to
+        // decode into `String`. We only need the row's existence (the
+        // `DATA_TYPE = 'mediumtext'` predicate runs server-side), so never
+        // pull the text column over the wire.
+        let chunk_content_mediumtext: Option<(i64,)> = sqlx::query_as(
+            "SELECT 1 FROM information_schema.COLUMNS \
              WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'veda_file_chunks' \
                AND COLUMN_NAME = 'content' AND DATA_TYPE = 'mediumtext'",
         )
