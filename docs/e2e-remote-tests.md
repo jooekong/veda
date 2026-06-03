@@ -20,7 +20,7 @@ VEDA_BASE_URL=https://veda.dbpaas.dingdongxiaoqu.com \
 ## 设计要点
 
 - **bootstrap**：`Srv::account()` 建账号拿 `vk_`；`workspace(kind)` 建 fs/db 库（名字随机，因为同账号 workspace 名唯一）；`wk(perm)` 建 `wk_` 工作区密钥。
-- **认证模型**：fs 类端点（fs/grep/search/sql/collections/events）用 `wk_`；db 向量面（vectors/datasets）用账号级 `vk_` + body/path 里的 `workspace_id`。
+- **认证模型**：数据面（fs 端点 + db 向量面 `/v1/vectors/*`）一律用 `wk_`——`wk_` 绑定到单个 workspace，所以 vectors 请求 body **不再带 `workspace_id`**（带了也被忽略）。控制面（datasets `/v1/workspaces/{ws}/datasets`、admin `/admin/v1/tokens`）用账号级 `vk_`，workspace 在 path 里；scoped `vk_` 的 `allowed_workspaces` 由 `load_db_workspace` 在控制面强制（越权 → 403）。JWT/账号 token 解析 workspace 的旧机制已删除。
 - **最终一致**：`/v1/search` 与 summary 走异步 outbox→worker(Milvus/LLM)，用 `poll()` 轮询；`/v1/grep` 读 MySQL 同步可立即断言。db 向量 upsert 后用轻量轮询应对 Milvus 可见性延迟。
 
 ## 覆盖范围
@@ -28,7 +28,7 @@ VEDA_BASE_URL=https://veda.dbpaas.dingdongxiaoqu.com \
 | 分组 | 用例 | 触及端点 |
 |---|---|---|
 | 健康/元信息 | `health_and_meta_endpoints` | `/healthz` `/v1/ready` `/capabilities` `/install.sh` `/v1/metrics` |
-| 账号/认证 | `account_create_login_and_duplicate` `anonymous_onboard_claim_login` `workspace_jwt_token_used_on_fs` `auth_missing_or_garbage_rejected` | accounts(create/anonymous/claim/login)、workspace token(JWT)、401 路径 |
+| 账号/认证 | `account_create_login_and_duplicate` `anonymous_onboard_claim_login` `workspace_jwt_endpoint_removed` `auth_missing_or_garbage_rejected` | accounts(create/anonymous/claim/login)、JWT 端点已移除(404)、401 路径 |
 | Workspace 管理 | `workspace_create_list_paginate_delete` `workspace_duplicate_name_rejected` | create/list(分页)/delete/keys、重名 409 |
 | FS 数据面 | `fs_file_put_get_stat_head_delete` `fs_mkdir_copy_rename` `fs_conditional_writes` `fs_append_bumps_revision` `fs_partial_reads_lines_and_range` `fs_root_cannot_be_deleted` `fs_readonly_key_enforced` `fs_grep_variants` `fs_events_stream_and_cursor` | fs CRUD/stat/head、mkdir/copy/rename、If-Match(412)/If-None-Match、append、lines/Range(206/416)、根保护、只读 403、grep、SSE(回放/410/400) |
 | FS 搜索/摘要 | `fs_search_dense_sparse_and_hybrid` `fs_summaries_abstract_and_overview` | search 三信号(fulltext=BM25稀疏 / semantic=cosine稠密 / hybrid=rrf融合)、path_prefix、abstract/overview(202→200) |

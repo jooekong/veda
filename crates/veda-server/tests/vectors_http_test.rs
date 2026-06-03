@@ -156,7 +156,11 @@ async fn build_test_app() -> (Arc<AppState>, Arc<MysqlStore>, axum::Router) {
 struct TestSetup {
     acct_id: String,
     ws_id: String,
+    /// db workspace key (`wk_`) — authenticates the vectors data plane.
     token: String,
+    /// account key (`vk_`) — authenticates the control plane (datasets,
+    /// workspace/key management via AuthAccount).
+    vk: String,
 }
 
 async fn provision_test_account(state: &AppState) -> TestSetup {
@@ -229,10 +233,31 @@ async fn provision_test_account(state: &AppState) -> TestSetup {
         .await
         .unwrap();
 
+    // Account key (vk_) for the control plane (datasets / workspace mgmt).
+    // Unrestricted scope so it can manage this account's workspaces; the
+    // data plane uses the wk_ above.
+    let raw_acct_key = format!("vk_{}", Uuid::new_v4().simple());
+    state
+        .auth_store
+        .create_api_key(&ApiKeyRecord {
+            id: Uuid::new_v4().to_string(),
+            account_id: acct_id.clone(),
+            name: "test-vk".into(),
+            key_hash: sha256_hex(raw_acct_key.as_bytes()),
+            status: KeyStatus::Active,
+            app_id: None,
+            allowed_workspaces: None,
+            expires_at: None,
+            created_at: now,
+        })
+        .await
+        .unwrap();
+
     TestSetup {
         acct_id,
         ws_id,
         token: raw_ws_key,
+        vk: raw_acct_key,
     }
 }
 
@@ -1117,7 +1142,8 @@ async fn sub_dataset_pagination(
     router: axum::Router,
 ) {
     let setup = provision_test_account(state).await;
-    let token = setup.token.clone();
+    // Datasets are control-plane (AuthAccount) — use the account vk_, not wk_.
+    let token = setup.vk.clone();
     let ws_id = setup.ws_id.clone();
 
     let do_post = |uri: String, body: serde_json::Value| {
@@ -1357,7 +1383,8 @@ async fn sub_upsert_idempotency_and_delete_semantics(
 /// otherwise let `Default` archive the `default` row), and missing → 404.
 async fn sub_dataset_delete_guard(state: &Arc<AppState>, mysql: &MysqlStore, router: axum::Router) {
     let setup = provision_test_account(state).await;
-    let token = setup.token.clone();
+    // Datasets are control-plane (AuthAccount) — use the account vk_, not wk_.
+    let token = setup.vk.clone();
     let ws_id = setup.ws_id.clone();
 
     let do_post = |uri: String, body: serde_json::Value| {

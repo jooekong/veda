@@ -135,7 +135,10 @@ async fn events_path_prefix_filters_at_query_layer() {
         .query_events_filtered(&ws, 0, Some("/docs"), 100)
         .await
         .unwrap();
-    assert_eq!(docs.len(), 2);
+    // ensure_parents emits a Create event for the auto-created /docs dir, so
+    // the prefix matches /docs itself + the two file events = 3 (mirrors the
+    // veda-core query_events_filtered_by_path_prefix expectation).
+    assert_eq!(docs.len(), 3);
     assert!(docs.iter().all(|e| e.path.starts_with("/docs")));
 
     // Underscore must not slip through MySQL's LIKE wildcard semantics.
@@ -146,7 +149,7 @@ async fn events_path_prefix_filters_at_query_layer() {
         .unwrap();
     assert_eq!(
         docs_only.len(),
-        2,
+        3,
         "/docs/ prefix must not match /docs_alt/* — got {} events",
         docs_only.len()
     );

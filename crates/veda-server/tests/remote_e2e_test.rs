@@ -362,29 +362,24 @@ async fn anonymous_onboard_claim_login() {
 
 #[tokio::test]
 #[ignore]
-async fn workspace_jwt_token_used_on_fs() {
+async fn workspace_jwt_endpoint_removed() {
     let s = Srv::new();
     let vk = s.account().await;
     let ws = s.workspace(&vk, "fs").await;
 
-    // Mint a 24h JWT scoped to the workspace.
+    // JWT support was removed (fa7f91c): the workspace-token mint endpoint no
+    // longer exists — the data plane is wk_-only now.
     let r = send(s.post(&format!("/v1/workspaces/{ws}/token")).bearer_auth(&vk)).await;
-    want(&r, 200, "mint workspace jwt");
-    let jwt = r.data()["token"].as_str().unwrap().to_string();
-    assert!(r.data()["expires_at"].is_string(), "expires_at present");
+    want(&r, 404, "workspace token (JWT) endpoint removed");
 
-    // JWT authenticates an fs read.
-    let r = send(s.get("/v1/fs").query(&[("list", "1")]).bearer_auth(&jwt)).await;
-    want(&r, 200, "fs list with jwt");
-
-    // A malformed JWT is rejected.
+    // A non-wk_ bearer on an fs endpoint is rejected (401), not honored.
     let r = send(
         s.get("/v1/fs")
             .query(&[("list", "1")])
             .bearer_auth("eyJ.not.a.jwt"),
     )
     .await;
-    assert_eq!(r.status, 401, "garbage jwt must 401, got {}", r.status);
+    assert_eq!(r.status, 401, "garbage bearer must 401, got {}", r.status);
 
     s.drop_ws(&vk, &ws).await;
 }
@@ -1161,20 +1156,25 @@ async fn fs_collections_raw_and_duplicate() {
 // ════════════════════════════════════════════════════════════════════════
 
 /// Bootstrap a db workspace; returns (account_key, workspace_id).
-async fn db_ctx(s: &Srv) -> (String, String) {
+/// Bootstrap a db workspace. Returns (account_key `vk_`, workspace_id, db
+/// workspace key `wk_`). The data plane (`/v1/vectors/*`) authenticates with
+/// the `wk_` (one key = one workspace); `vk_` is still needed for the account
+/// plane (dataset CRUD, workspace teardown).
+async fn db_ctx(s: &Srv) -> (String, String, String) {
     let vk = s.account().await;
     let ws = s.workspace(&vk, "db").await;
-    (vk, ws)
+    let wk = s.wk(&vk, &ws, "readwrite").await;
+    (vk, ws, wk)
 }
 
 #[tokio::test]
 #[ignore]
 async fn db_vectors_roundtrip() {
     let s = Srv::new();
-    let (vk, ws) = db_ctx(&s).await;
+    let (vk, ws, wk) = db_ctx(&s).await;
 
     // Upsert: two explicit ids + one server-generated.
-    let r = send(s.post("/v1/vectors/upsert").bearer_auth(&vk).json(&json!({
+    let r = send(s.post("/v1/vectors/upsert").bearer_auth(&wk).json(&json!({
         "workspace_id": ws,
         "records": [
             {"id": "r1", "text": "the quick brown fox jumps", "category": "animals", "tags": ["fox"], "meta": {"legs": 4}},
@@ -1187,7 +1187,7 @@ async fn db_vectors_roundtrip() {
     assert!(r.data()["commit_ts"].is_number(), "commit_ts present");
 
     // Search ranks the fox record first.
-    let hit = poll_first_hit(&s, &vk, &ws, "quick brown fox", Duration::from_secs(15)).await
+    let hit = poll_first_hit(&s, &wk, &ws, "quick brown fox", Duration::from_secs(15)).await
         .expect("search returned no hits");
     assert_eq!(hit["id"], "r1", "fox ranks first");
     assert!(hit["score"].is_number(), "score present");
@@ -1199,7 +1199,7 @@ async fn db_vectors_roundtrip() {
     assert!(hit["created_at"].is_number() && hit["updated_at"].is_number());
 
     // Query by id: direct lookup, no score field.
-    let r = send(s.post("/v1/vectors/query").bearer_auth(&vk)
+    let r = send(s.post("/v1/vectors/query").bearer_auth(&wk)
         .json(&json!({"workspace_id": ws, "ids": ["r1", "r2"]}))).await;
     want(&r, 200, "query by id");
     let hits = r.data()["hits"].as_array().unwrap().clone();
@@ -1209,27 +1209,27 @@ async fn db_vectors_roundtrip() {
     assert!(hits.iter().all(|h| h.get("score").is_none()), "query hits carry no score");
 
     // Query for a non-existent id returns no error, just no hits for it.
-    let r = send(s.post("/v1/vectors/query").bearer_auth(&vk)
+    let r = send(s.post("/v1/vectors/query").bearer_auth(&wk)
         .json(&json!({"workspace_id": ws, "ids": ["does-not-exist"]}))).await;
     want(&r, 200, "query missing id");
     assert!(r.data()["hits"].as_array().unwrap().is_empty(), "no hit for missing id");
 
     // Delete r1; delete_count mirrors the id list.
-    let r = send(s.post("/v1/vectors/delete").bearer_auth(&vk)
+    let r = send(s.post("/v1/vectors/delete").bearer_auth(&wk)
         .json(&json!({"workspace_id": ws, "ids": ["r1"]}))).await;
     want(&r, 200, "delete");
     assert_eq!(r.data()["delete_count"], 1);
 
     // delete_count counts id-expression terms, not rows that existed: deleting
     // an id that was never present still reports 1 (Milvus tombstone model).
-    let r = send(s.post("/v1/vectors/delete").bearer_auth(&vk)
+    let r = send(s.post("/v1/vectors/delete").bearer_auth(&wk)
         .json(&json!({"workspace_id": ws, "ids": ["never-existed"]}))).await;
     want(&r, 200, "delete nonexistent");
     assert_eq!(r.data()["delete_count"], 1, "delete_count == len(ids) regardless of existence");
 
     // After the tombstone is visible, r1 is gone.
     let gone = poll(Duration::from_secs(15), || async {
-        let r = send(s.post("/v1/vectors/query").bearer_auth(&vk)
+        let r = send(s.post("/v1/vectors/query").bearer_auth(&wk)
             .json(&json!({"workspace_id": ws, "ids": ["r1"]}))).await;
         r.data()["hits"].as_array().map(|a| a.is_empty()).unwrap_or(false)
     })
@@ -1243,13 +1243,13 @@ async fn db_vectors_roundtrip() {
 #[ignore]
 async fn db_vectors_dense_semantic_search() {
     let s = Srv::new();
-    let (vk, ws) = db_ctx(&s).await;
+    let (vk, ws, wk) = db_ctx(&s).await;
 
     // Pin mode=semantic to exercise the dense COSINE leg specifically (the
     // plane's default is now hybrid; fulltext/hybrid have their own test).
     // Prove dense matches on MEANING, not lexical overlap: each query shares no
     // tokens with the text it should retrieve.
-    send(s.post("/v1/vectors/upsert").bearer_auth(&vk).json(&json!({
+    send(s.post("/v1/vectors/upsert").bearer_auth(&wk).json(&json!({
         "workspace_id": ws,
         "records": [
             {"id": "pet", "text": "a domestic feline dozed on the warm windowsill"},
@@ -1258,13 +1258,13 @@ async fn db_vectors_dense_semantic_search() {
     }))).await;
 
     // "kitten napping" ≈ pet record (feline/dozed) with zero shared tokens.
-    let hits = poll_hits_mode(&s, &vk, &ws, "a kitten taking a nap", "semantic", Duration::from_secs(20)).await;
+    let hits = poll_hits_mode(&s, &wk, &ws, "a kitten taking a nap", "semantic", Duration::from_secs(20)).await;
     let hit = hits.first().expect("dense search returned nothing");
     assert_eq!(hit["id"], "pet", "dense semantic ranks the cat record first");
     assert_eq!(hit["score_type"], "cosine", "semantic score_type");
 
     // "fixing a broken car" ≈ auto record, again no shared tokens.
-    let hits = poll_hits_mode(&s, &vk, &ws, "fixing a broken car", "semantic", Duration::from_secs(20)).await;
+    let hits = poll_hits_mode(&s, &wk, &ws, "fixing a broken car", "semantic", Duration::from_secs(20)).await;
     let hit = hits.first().expect("dense search returned nothing");
     assert_eq!(hit["id"], "auto", "dense semantic ranks the car record first");
 
@@ -1322,9 +1322,9 @@ async fn poll_hits_mode(
 #[ignore]
 async fn db_vectors_fulltext_and_hybrid_search() {
     let s = Srv::new();
-    let (vk, ws) = db_ctx(&s).await;
+    let (vk, ws, wk) = db_ctx(&s).await;
 
-    send(s.post("/v1/vectors/upsert").bearer_auth(&vk).json(&json!({
+    send(s.post("/v1/vectors/upsert").bearer_auth(&wk).json(&json!({
         "workspace_id": ws,
         "records": [
             {"id": "music", "text": "the xylophone quokka performs midnight marshmallow concerts in the grove"},
@@ -1334,24 +1334,24 @@ async fn db_vectors_fulltext_and_hybrid_search() {
 
     // ── Fulltext / BM25 ── rare token resolves ONLY its doc (also waits out
     // Milvus visibility lag). score_type must be bm25.
-    let hits = poll_hits_mode(&s, &vk, &ws, "marshmallow", "fulltext", Duration::from_secs(25)).await;
+    let hits = poll_hits_mode(&s, &wk, &ws, "marshmallow", "fulltext", Duration::from_secs(25)).await;
     assert!(!hits.is_empty(), "db fulltext never indexed within timeout");
     let ids: Vec<&str> = hits.iter().filter_map(|h| h["id"].as_str()).collect();
     assert!(ids.contains(&"music"), "BM25 finds the token doc: {ids:?}");
     assert!(!ids.contains(&"finance"), "BM25 excludes the doc lacking the term: {ids:?}");
     assert_eq!(hits[0]["score_type"], "bm25", "fulltext score_type");
     // the other rare token isolates the other doc
-    let hits = poll_hits_mode(&s, &vk, &ws, "revenue", "fulltext", Duration::from_secs(20)).await;
+    let hits = poll_hits_mode(&s, &wk, &ws, "revenue", "fulltext", Duration::from_secs(20)).await;
     let ids: Vec<&str> = hits.iter().filter_map(|h| h["id"].as_str()).collect();
     assert!(ids.contains(&"finance") && !ids.contains(&"music"), "BM25 isolates finance: {ids:?}");
 
     // ── Hybrid / RRF ── fuses dense + BM25; the rare token still ranks its doc
     // top, and a zero-shared-token paraphrase still retrieves via the dense leg.
-    let hits = poll_hits_mode(&s, &vk, &ws, "marshmallow concerts", "hybrid", Duration::from_secs(20)).await;
+    let hits = poll_hits_mode(&s, &wk, &ws, "marshmallow concerts", "hybrid", Duration::from_secs(20)).await;
     assert!(!hits.is_empty(), "hybrid returned no hits");
     assert_eq!(hits[0]["id"], "music", "hybrid ranks the token doc first");
     assert_eq!(hits[0]["score_type"], "rrf", "hybrid score_type");
-    let hits = poll_hits_mode(&s, &vk, &ws, "corporate profit expectations for the period", "hybrid", Duration::from_secs(20)).await;
+    let hits = poll_hits_mode(&s, &wk, &ws, "corporate profit expectations for the period", "hybrid", Duration::from_secs(20)).await;
     let ids: Vec<&str> = hits.iter().filter_map(|h| h["id"].as_str()).collect();
     assert!(ids.contains(&"finance"), "hybrid dense leg retrieves finance via paraphrase: {ids:?}");
     assert_eq!(hits[0]["score_type"], "rrf", "hybrid score_type (dense-leaning query)");
@@ -1366,9 +1366,9 @@ async fn db_vectors_fulltext_and_hybrid_search() {
 #[ignore]
 async fn db_vectors_min_score_filter() {
     let s = Srv::new();
-    let (vk, ws) = db_ctx(&s).await;
+    let (vk, ws, wk) = db_ctx(&s).await;
 
-    send(s.post("/v1/vectors/upsert").bearer_auth(&vk).json(&json!({
+    send(s.post("/v1/vectors/upsert").bearer_auth(&wk).json(&json!({
         "workspace_id": ws,
         "records": [
             {"id": "near", "text": "ocean tides rise and fall with the gravitational pull of the moon"},
@@ -1381,12 +1381,12 @@ async fn db_vectors_min_score_filter() {
     // outranks far, so the midpoint always keeps near, drops far). Avoids a
     // hardcoded threshold that flakes when the embedding model changes.
     let both = poll(Duration::from_secs(25), || async {
-        let h = poll_hits_mode(&s, &vk, &ws, "ocean tides and waves", "semantic", Duration::from_secs(1)).await;
+        let h = poll_hits_mode(&s, &wk, &ws, "ocean tides and waves", "semantic", Duration::from_secs(1)).await;
         ["near", "far"].iter().all(|id| h.iter().any(|x| x["id"] == *id))
     })
     .await;
     assert!(both, "both docs never indexed within timeout");
-    let hits = poll_hits_mode(&s, &vk, &ws, "ocean tides and waves", "semantic", Duration::from_secs(5)).await;
+    let hits = poll_hits_mode(&s, &wk, &ws, "ocean tides and waves", "semantic", Duration::from_secs(5)).await;
     let score_of = |id: &str| hits.iter().find(|h| h["id"] == id).and_then(|h| h["score"].as_f64());
     let near_s = score_of("near").expect("near present");
     let far_s = score_of("far").expect("far present");
@@ -1394,7 +1394,7 @@ async fn db_vectors_min_score_filter() {
     let floor = (near_s + far_s) / 2.0;
 
     // Floor between the two scores drops the weak doc; survivors all above it.
-    let r = send(s.post("/v1/vectors/search").bearer_auth(&vk).json(&json!({
+    let r = send(s.post("/v1/vectors/search").bearer_auth(&wk).json(&json!({
         "workspace_id": ws, "query": "ocean tides and waves", "mode": "semantic", "top_k": 10, "min_score": floor
     }))).await;
     want(&r, 200, "semantic min_score");
@@ -1405,7 +1405,7 @@ async fn db_vectors_min_score_filter() {
     assert!(hits.iter().all(|h| h["score"].as_f64().unwrap_or(0.0) >= floor), "all hits >= floor");
 
     // hybrid + min_score → 400.
-    let r = send(s.post("/v1/vectors/search").bearer_auth(&vk).json(&json!({
+    let r = send(s.post("/v1/vectors/search").bearer_auth(&wk).json(&json!({
         "workspace_id": ws, "query": "ocean", "mode": "hybrid", "min_score": 0.4
     }))).await;
     want_err(&r, 400, "INVALID_INPUT", "hybrid + min_score rejected");
@@ -1417,10 +1417,10 @@ async fn db_vectors_min_score_filter() {
 #[ignore]
 async fn db_vectors_dedup_defaults_and_autoid() {
     let s = Srv::new();
-    let (vk, ws) = db_ctx(&s).await;
+    let (vk, ws, wk) = db_ctx(&s).await;
 
     // Duplicate id within one batch → last-wins, ids deduped.
-    let r = send(s.post("/v1/vectors/upsert").bearer_auth(&vk).json(&json!({
+    let r = send(s.post("/v1/vectors/upsert").bearer_auth(&wk).json(&json!({
         "workspace_id": ws,
         "records": [
             {"id": "dup", "text": "first version"},
@@ -1432,7 +1432,7 @@ async fn db_vectors_dedup_defaults_and_autoid() {
     assert_eq!(r.data()["ids"][0], "dup");
     // Last write wins: the surviving record carries the second text.
     let won = poll(Duration::from_secs(15), || async {
-        let r = send(s.post("/v1/vectors/query").bearer_auth(&vk)
+        let r = send(s.post("/v1/vectors/query").bearer_auth(&wk)
             .json(&json!({"workspace_id": ws, "ids": ["dup"]}))).await;
         r.data()["hits"][0]["text"] == "second version wins"
     })
@@ -1440,7 +1440,7 @@ async fn db_vectors_dedup_defaults_and_autoid() {
     assert!(won, "duplicate id did not resolve to the last write");
 
     // Omitted id → server fills a UUID, surfaced in the response.
-    let r = send(s.post("/v1/vectors/upsert").bearer_auth(&vk).json(&json!({
+    let r = send(s.post("/v1/vectors/upsert").bearer_auth(&wk).json(&json!({
         "workspace_id": ws,
         "records": [{"text": "no id provided here"}]
     }))).await;
@@ -1449,18 +1449,18 @@ async fn db_vectors_dedup_defaults_and_autoid() {
     assert!(auto.len() >= 20 && auto != "dup", "server-generated id: {auto}");
 
     // Defaults applied for omitted category/tags/meta.
-    send(s.post("/v1/vectors/upsert").bearer_auth(&vk).json(&json!({
+    send(s.post("/v1/vectors/upsert").bearer_auth(&wk).json(&json!({
         "workspace_id": ws,
         "records": [{"id": "d1", "text": "bare record"}]
     }))).await;
     let hit = poll(Duration::from_secs(15), || async {
-        let r = send(s.post("/v1/vectors/query").bearer_auth(&vk)
+        let r = send(s.post("/v1/vectors/query").bearer_auth(&wk)
             .json(&json!({"workspace_id": ws, "ids": ["d1"]}))).await;
         !r.data()["hits"].as_array().map(|a| a.is_empty()).unwrap_or(true)
     })
     .await;
     assert!(hit, "d1 not queryable");
-    let r = send(s.post("/v1/vectors/query").bearer_auth(&vk)
+    let r = send(s.post("/v1/vectors/query").bearer_auth(&wk)
         .json(&json!({"workspace_id": ws, "ids": ["d1"]}))).await;
     let rec = &r.data()["hits"][0].clone();
     assert_eq!(rec["category"], "default", "default category");
@@ -1474,9 +1474,9 @@ async fn db_vectors_dedup_defaults_and_autoid() {
 #[ignore]
 async fn db_vectors_filter_and_projection() {
     let s = Srv::new();
-    let (vk, ws) = db_ctx(&s).await;
+    let (vk, ws, wk) = db_ctx(&s).await;
 
-    send(s.post("/v1/vectors/upsert").bearer_auth(&vk).json(&json!({
+    send(s.post("/v1/vectors/upsert").bearer_auth(&wk).json(&json!({
         "workspace_id": ws,
         "records": [
             {"id": "a", "text": "apple fruit", "meta": {"price": 10, "color": "red"}},
@@ -1487,7 +1487,7 @@ async fn db_vectors_filter_and_projection() {
 
     // Wait for visibility.
     let ready = poll(Duration::from_secs(15), || async {
-        let r = send(s.post("/v1/vectors/search").bearer_auth(&vk)
+        let r = send(s.post("/v1/vectors/search").bearer_auth(&wk)
             .json(&json!({"workspace_id": ws, "query": "fruit", "top_k": 10}))).await;
         r.data()["hits"].as_array().map(|a| a.len() >= 3).unwrap_or(false)
     })
@@ -1499,7 +1499,7 @@ async fn db_vectors_filter_and_projection() {
     };
 
     // eq filter on a meta field.
-    let r = send(s.post("/v1/vectors/search").bearer_auth(&vk).json(&json!({
+    let r = send(s.post("/v1/vectors/search").bearer_auth(&wk).json(&json!({
         "workspace_id": ws, "query": "fruit", "top_k": 10,
         "filter": {"must": [{"field": "meta.color", "op": "eq", "value": "red"}]}
     }))).await;
@@ -1508,7 +1508,7 @@ async fn db_vectors_filter_and_projection() {
     assert!(got.contains(&"a".into()) && got.contains(&"c".into()) && !got.contains(&"b".into()), "eq red: {got:?}");
 
     // range filter.
-    let r = send(s.post("/v1/vectors/search").bearer_auth(&vk).json(&json!({
+    let r = send(s.post("/v1/vectors/search").bearer_auth(&wk).json(&json!({
         "workspace_id": ws, "query": "fruit", "top_k": 10,
         "filter": {"must": [{"field": "meta.price", "op": "gte", "value": 20}]}
     }))).await;
@@ -1516,14 +1516,14 @@ async fn db_vectors_filter_and_projection() {
     assert!(got.contains(&"b".into()) && got.contains(&"c".into()) && !got.contains(&"a".into()), "price>=20: {got:?}");
 
     // in filter.
-    let r = send(s.post("/v1/vectors/search").bearer_auth(&vk).json(&json!({
+    let r = send(s.post("/v1/vectors/search").bearer_auth(&wk).json(&json!({
         "workspace_id": ws, "query": "fruit", "top_k": 10,
         "filter": {"must": [{"field": "meta.color", "op": "in", "value": ["yellow"]}]}
     }))).await;
     assert_eq!(ids(&r), vec!["b".to_string()], "in yellow");
 
     // Projection: only requested fields (plus id/score) come back.
-    let r = send(s.post("/v1/vectors/search").bearer_auth(&vk).json(&json!({
+    let r = send(s.post("/v1/vectors/search").bearer_auth(&wk).json(&json!({
         "workspace_id": ws, "query": "fruit", "top_k": 1, "output_fields": ["text"]
     }))).await;
     want(&r, 200, "projection");
@@ -1534,14 +1534,14 @@ async fn db_vectors_filter_and_projection() {
 
     // Invalid projections are rejected.
     for bad in [json!(["vector"]), json!(["id"]), json!(["bogus"])] {
-        let r = send(s.post("/v1/vectors/search").bearer_auth(&vk).json(&json!({
+        let r = send(s.post("/v1/vectors/search").bearer_auth(&wk).json(&json!({
             "workspace_id": ws, "query": "fruit", "output_fields": bad
         }))).await;
         want(&r, 400, "invalid output_fields");
     }
 
     // The filter DSL only addresses meta.* fields; a platform field is rejected.
-    let r = send(s.post("/v1/vectors/search").bearer_auth(&vk).json(&json!({
+    let r = send(s.post("/v1/vectors/search").bearer_auth(&wk).json(&json!({
         "workspace_id": ws, "query": "fruit",
         "filter": {"must": [{"field": "category", "op": "eq", "value": "x"}]}
     }))).await;
@@ -1554,7 +1554,7 @@ async fn db_vectors_filter_and_projection() {
 #[ignore]
 async fn db_datasets_lifecycle() {
     let s = Srv::new();
-    let (vk, ws) = db_ctx(&s).await;
+    let (vk, ws, wk) = db_ctx(&s).await;
 
     // Create a second dataset (the "default" one is bootstrapped).
     let r = send(s.post(&format!("/v1/workspaces/{ws}/datasets")).bearer_auth(&vk)
@@ -1575,12 +1575,12 @@ async fn db_datasets_lifecycle() {
     want(&r, 409, "duplicate dataset");
 
     // Upsert scoped to the new dataset, then confirm dataset isolation.
-    send(s.post("/v1/vectors/upsert").bearer_auth(&vk).json(&json!({
+    send(s.post("/v1/vectors/upsert").bearer_auth(&wk).json(&json!({
         "workspace_id": ws, "dataset": "docs",
         "records": [{"id": "only-in-docs", "text": "a document about quarterly planning"}]
     }))).await;
     let in_docs = poll(Duration::from_secs(15), || async {
-        let r = send(s.post("/v1/vectors/search").bearer_auth(&vk).json(&json!({
+        let r = send(s.post("/v1/vectors/search").bearer_auth(&wk).json(&json!({
             "workspace_id": ws, "dataset": "docs", "query": "quarterly planning", "top_k": 5
         }))).await;
         r.data()["hits"].as_array().map(|a| a.iter().any(|h| h["id"] == "only-in-docs")).unwrap_or(false)
@@ -1588,7 +1588,7 @@ async fn db_datasets_lifecycle() {
     .await;
     assert!(in_docs, "record not found in its own dataset");
     // The default dataset must NOT see the docs record.
-    let r = send(s.post("/v1/vectors/search").bearer_auth(&vk).json(&json!({
+    let r = send(s.post("/v1/vectors/search").bearer_auth(&wk).json(&json!({
         "workspace_id": ws, "query": "quarterly planning", "top_k": 5
     }))).await;
     let d = r.data();
@@ -1611,11 +1611,11 @@ async fn db_datasets_lifecycle() {
 #[ignore]
 async fn db_vectors_validation_limits() {
     let s = Srv::new();
-    let (vk, ws) = db_ctx(&s).await;
+    let (vk, ws, wk) = db_ctx(&s).await;
     let up = |body: Value| {
         let s = s.clone();
-        let vk = vk.clone();
-        async move { send(s.post("/v1/vectors/upsert").bearer_auth(&vk).json(&body)).await }
+        let wk = wk.clone();
+        async move { send(s.post("/v1/vectors/upsert").bearer_auth(&wk).json(&body)).await }
     };
 
     // Bad input → 400 INVALID_INPUT (error_code checked, not just status, so a
@@ -1635,16 +1635,16 @@ async fn db_vectors_validation_limits() {
     // Search bounds.
     let search = |body: Value| {
         let s = s.clone();
-        let vk = vk.clone();
-        async move { send(s.post("/v1/vectors/search").bearer_auth(&vk).json(&body)).await }
+        let wk = wk.clone();
+        async move { send(s.post("/v1/vectors/search").bearer_auth(&wk).json(&body)).await }
     };
     want_err(&search(json!({"workspace_id": ws, "query": "x", "top_k": 0})).await, 400, bad, "top_k 0");
     want_err(&search(json!({"workspace_id": ws, "query": "x", "top_k": 101})).await, 413, "PAYLOAD_TOO_LARGE", "top_k over 100");
     want_err(&search(json!({"workspace_id": ws, "query": ""})).await, 400, bad, "empty query");
 
     // Query/delete empty id lists.
-    want_err(&send(s.post("/v1/vectors/query").bearer_auth(&vk).json(&json!({"workspace_id": ws, "ids": []}))).await, 400, bad, "empty query ids");
-    want_err(&send(s.post("/v1/vectors/delete").bearer_auth(&vk).json(&json!({"workspace_id": ws, "ids": []}))).await, 400, bad, "empty delete ids");
+    want_err(&send(s.post("/v1/vectors/query").bearer_auth(&wk).json(&json!({"workspace_id": ws, "ids": []}))).await, 400, bad, "empty query ids");
+    want_err(&send(s.post("/v1/vectors/delete").bearer_auth(&wk).json(&json!({"workspace_id": ws, "ids": []}))).await, 400, bad, "empty delete ids");
 
     s.drop_ws(&vk, &ws).await;
 }
@@ -1656,10 +1656,17 @@ async fn db_workspace_resolution_and_admin_tokens() {
     let vk = s.account().await;
     let ws1 = s.workspace(&vk, "db").await;
 
-    // Account-wide token + omitted workspace_id → ambiguous → 400.
-    let r = send(s.post("/v1/vectors/upsert").bearer_auth(&vk)
-        .json(&json!({"records": [{"text": "no workspace"}]}))).await;
-    want(&r, 400, "omitted workspace_id with account-wide token");
+    // The db data plane is wk_-only: an account token (vk_) is not a workspace
+    // key, so the vectors plane rejects it outright (401). Workspace is no
+    // longer resolved from the body — it is implied by the wk_ itself.
+    // (Written multi-line so the vk→wk sweep below leaves this intentional vk_.)
+    let r = send(
+        s.post("/v1/vectors/upsert")
+            .bearer_auth(&vk)
+            .json(&json!({"records": [{"text": "vk is not a workspace key"}]})),
+    )
+    .await;
+    want(&r, 401, "account token (vk_) rejected by the wk_-only vectors plane");
 
     // The /admin/* plane is not part of the public API surface — on this
     // deployment it is firewalled at the ingress (nginx 405). Probe once and
@@ -1679,21 +1686,18 @@ async fn db_workspace_resolution_and_admin_tokens() {
     let scoped = probe.data()["token"].as_str().unwrap().to_string();
     let ws2 = s.workspace(&vk, "db").await;
 
-    // Single-workspace scope makes workspace_id implicit → resolves to ws1.
-    let r = send(s.post("/v1/vectors/upsert").bearer_auth(&scoped)
-        .json(&json!({"records": [{"id": "imp", "text": "implicit workspace works"}]}))).await;
-    want(&r, 200, "implicit workspace resolution");
-
-    // The scoped token cannot reach ws2 (out of scope) → 403.
-    let r = send(s.post("/v1/vectors/upsert").bearer_auth(&scoped)
-        .json(&json!({"workspace_id": ws2, "records": [{"text": "denied"}]}))).await;
-    want(&r, 403, "out-of-scope workspace");
+    // A scoped vk_ governs the account plane (workspace + dataset management),
+    // not the wk_-only data plane. Its allowed_workspaces is enforced by
+    // load_db_workspace: in-scope ws1 resolves, out-of-scope ws2 is denied.
+    let r = send(s.get(&format!("/v1/workspaces/{ws1}/datasets")).bearer_auth(&scoped)).await;
+    want(&r, 200, "scoped token reaches an in-scope workspace");
+    let r = send(s.get(&format!("/v1/workspaces/{ws2}/datasets")).bearer_auth(&scoped)).await;
+    want(&r, 403, "scoped token denied on an out-of-scope workspace");
 
     // Disable the token → it stops working (401).
     let r = send(s.post(&format!("/admin/v1/tokens/{tok_id}/disable")).bearer_auth(&vk)).await;
     want(&r, 204, "disable token");
-    let r = send(s.post("/v1/vectors/upsert").bearer_auth(&scoped)
-        .json(&json!({"records": [{"text": "after disable"}]}))).await;
+    let r = send(s.get(&format!("/v1/workspaces/{ws1}/datasets")).bearer_auth(&scoped)).await;
     want(&r, 401, "disabled token rejected");
 
     s.drop_ws(&vk, &ws1).await;
@@ -1710,15 +1714,18 @@ async fn isolation_fs_workspace_rejects_db_apis() {
     let s = Srv::new();
     let vk = s.account().await;
     let fs_ws = s.workspace(&vk, "fs").await;
+    // A real wk_ on the fs workspace — the db data plane must reject it on
+    // kind, not auth (AuthDbWorkspace resolves the key, then sees kind == Fs).
+    let wk = s.wk(&vk, &fs_ws, "readwrite").await;
 
     // Every vector endpoint rejects an fs workspace with a kind mismatch.
     for (path, body) in [
-        ("/v1/vectors/upsert", json!({"workspace_id": fs_ws, "records": [{"text": "x"}]})),
-        ("/v1/vectors/search", json!({"workspace_id": fs_ws, "query": "x"})),
-        ("/v1/vectors/query", json!({"workspace_id": fs_ws, "ids": ["x"]})),
-        ("/v1/vectors/delete", json!({"workspace_id": fs_ws, "ids": ["x"]})),
+        ("/v1/vectors/upsert", json!({"records": [{"text": "x"}]})),
+        ("/v1/vectors/search", json!({"query": "x"})),
+        ("/v1/vectors/query", json!({"ids": ["x"]})),
+        ("/v1/vectors/delete", json!({"ids": ["x"]})),
     ] {
-        let r = send(s.post(path).bearer_auth(&vk).json(&body)).await;
+        let r = send(s.post(path).bearer_auth(&wk).json(&body)).await;
         want(&r, 400, path);
         assert_eq!(r.ecode(), "WORKSPACE_KIND_MISMATCH", "{path} kind mismatch");
     }
