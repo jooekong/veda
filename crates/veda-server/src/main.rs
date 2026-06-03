@@ -1,4 +1,4 @@
-use veda_server::{auth, config, obs, reconciler, routes, state, worker};
+use veda_server::{config, obs, reconciler, routes, state, worker};
 
 use std::sync::Arc;
 
@@ -47,7 +47,6 @@ async fn main() -> anyhow::Result<()> {
         }
     }
     let cfg = ServerConfig::load(&config_path)?;
-    auth::validate_jwt_secret(&cfg.jwt_secret)?;
     info!(listen = %cfg.listen, "starting veda-server");
 
     let mysql = Arc::new(
@@ -115,7 +114,6 @@ async fn main() -> anyhow::Result<()> {
         vector_embedding,
         embedding_dim: cfg.embedding.dimension,
         sql_engine,
-        jwt_secret: cfg.jwt_secret.clone(),
         metrics: metrics.clone(),
         metrics_token: cfg.metrics_token.clone(),
         summary_enabled: cfg.llm.is_some(),

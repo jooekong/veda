@@ -133,6 +133,7 @@ fn account_password_hash_not_serialized() {
         name: "joe".into(),
         email: Some("joe@test.com".into()),
         password_hash: Some("secret_hash".into()),
+        app_id: None,
         status: AccountStatus::Active,
         created_at: chrono::Utc::now(),
         updated_at: chrono::Utc::now(),

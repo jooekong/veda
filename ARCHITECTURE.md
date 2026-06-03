@@ -60,15 +60,22 @@ veda-fuse       FUSE 挂载                           (已实现)
 | `fs`（默认） | `veda_dentries / files / chunks / summaries` (MySQL) + `veda_chunks / veda_summaries` (Milvus) + `veda_collection_schemas` (structured collections) | `/v1/files/*`, `/v1/search`, `/v1/grep`, `/v1/sql`, `/v1/abstract`, `/v1/overview`, `/v1/collections/*`, FUSE | 文件知识库（既有能力） |
 | `db` | `veda_datasets` (MySQL) + per-ws Milvus collection `ws_<hash16>_default` | `/v1/vectors/{upsert,search,query,delete}`, `/v1/workspaces/{ws}/datasets` | Pinecone-style 裸向量服务（公司 app 共享） |
 
-**强制隔离**：
-- fs API 路径（`AuthWorkspace` extractor）拒绝 db workspace，返 400 `workspace_kind_mismatch`
-- 数据面 vectors API（`AuthAccount.load_db_workspace`）拒绝 fs workspace，同 400
+**认证与隔离**（2026-06 起统一 `wk_`）：
+- **数据面统一用 workspace key `wk_`**：`AuthWorkspace`（fs：files/search/sql/...）与 `AuthDbWorkspace`（db：vectors）各自校验 `kind`，不匹配返 400 `workspace_kind_mismatch`。`wk_` 绑定单 workspace，所以 vectors 请求体不再带 `workspace_id`；read-only `wk_` 可 search/query，不可 upsert/delete。
+- **控制面用账号 key `vk_`**（`AuthAccount`）：账号 / workspace / dataset / key 生命周期、`/admin/v1/tokens`。`vk_` 不进数据面、不外发；业务方只拿可吊销、分读写的 `wk_`。
+- JWT 已移除（无 `POST /v1/workspaces/{id}/token`、无 `jwt_secret`），鉴权全部为纯 key 校验。
+- key 生命周期：`POST/GET/DELETE /v1/workspaces/{id}/keys`（list 仅回元数据，明文只在创建时显示一次）。
 
 **三类数据集合在 fs workspace 下并存**：dentry/files、structured collections、L0/L1 summaries。**db workspace 只承载** Pinecone-style 裸向量记录，不允许建 file 或 structured collection。
 
 Vector dataset 是 db workspace 内的逻辑分组（内部物理 pk = `{dataset}:{id}`，全 collection 共享 PK 空间；API 只暴露 `id`，pk 不出 wire）。每个 db workspace 创建时自动 bootstrap 一个 `default` dataset，业务方可不指定 dataset 直接 upsert。
 
 完整设计：`docs/vectors-merge-plan.md`；未修待办：`docs/vectors-merge-backlog.md`。
+
+### 客户端 SDK
+
+- **Java SDK**（`sdk/java`，独立 Maven 项目，不在 Cargo workspace）：db 数据面 4 端点（upsert/search/query/delete）的 Java 8 封装。Jackson + OkHttp，fluent filter builder，`error_code`→类型化异常（未知码归 `UNKNOWN`），幂等感知重试（id-less upsert 不自动重试），响应前向兼容（`ignoreUnknown`）。单测绿；真实 server 契约测试走 `mvn -P integration verify`（发版 gate，非 CI）。内部 Nexus 发布坐标待定（仅 `mvn deploy` 受阻）。设计：`docs/plans/java-sdk-db-plan.md`。**⚠ 待适配**：db 数据面 2026-06 已从 `vk_` 改 `wk_`、请求体去掉 `workspace_id`，SDK 的 `apiKey`→`workspaceKey` 改造 + e2e 重测尚未做（见 `docs/plans/platform-admin-api-plan.md`）。
+- **Python 示例**：`examples/python_pinecone_demo.py`（无 SDK，裸 HTTP）。
 
 ## 测试策略
 

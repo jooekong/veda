@@ -166,8 +166,9 @@ async fn h_create_account(
     use argon2::password_hash::{rand_core::OsRng, SaltString};
     use argon2::{Argon2, PasswordHasher};
     let salt = SaltString::generate(&mut OsRng);
+    let password = req.password.clone().unwrap_or_default();
     let hash = Argon2::default()
-        .hash_password(req.password.as_bytes(), &salt)
+        .hash_password(password.as_bytes(), &salt)
         .unwrap()
         .to_string();
     let id = uuid::Uuid::new_v4().to_string();
@@ -176,8 +177,9 @@ async fn h_create_account(
         .create_account(&veda_types::Account {
             id: id.clone(),
             name: req.name,
-            email: Some(req.email),
+            email: req.email,
             password_hash: Some(hash),
+            app_id: None,
             status: veda_types::AccountStatus::Active,
             created_at: now,
             updated_at: now,
@@ -204,6 +206,7 @@ async fn h_create_account(
         veda_types::api::CreateAccountResponse {
             account_id: id,
             api_key: raw,
+            app_id: None,
         },
     ))
     .into_response()
@@ -226,6 +229,7 @@ async fn h_create_ws(
         status: veda_types::WorkspaceStatus::Active,
         kind: veda_types::WorkspaceKind::Fs,
         app_id: None,
+        description: None,
         created_at: now,
         updated_at: now,
     };

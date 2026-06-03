@@ -73,7 +73,6 @@ const S = {
     forgetConfirm: "清除本浏览器的 key？账号还在服务器上 —— 重新导入 vk_ 即可恢复。",
     noWs: "还没有 workspace，去上面创建一个。",
     btnNewKey: "+ Key",
-    btnJwt: "JWT 24h",
     btnDelete: "删除",
     newWsTitle: "新建 workspace",
     wsNamePlaceholder: "workspace 名称（如 notes）",
@@ -89,10 +88,6 @@ const S = {
     mountCmdLabel: "挂载到本地目录",
     mountCmdHint: "复制到终端执行。",
     done: "完成",
-    jwtTitle: "JWT 已签发（24h）",
-    jwtLabel: "workspace JWT",
-    jwtHint: "用作数据面 endpoint 的 Bearer token。仅在内存，不会持久化。",
-    expires: "过期：",
     deleteConfirm: "删除这个 workspace 和它所有数据？操作不可恢复。",
     claimTitle: "升级账号",
     claimIntro: "把当前匿名账号升级为邮箱 + 密码。现有 key 继续可用。",
@@ -114,6 +109,11 @@ const S = {
     datasetsTitle: "数据集",
     datasetsEmpty: "还没有额外数据集（只有默认的 default）。",
     datasetsLoadFail: "加载数据集失败：",
+    btnKeys: "Keys",
+    keysTitle: "Workspace Keys",
+    keysEmpty: "还没有 key，点下面新建一个。",
+    deleteKeyConfirm: "删除（吊销）这个 key？正在用它的客户端会立即失效。",
+    wsDescPlaceholder: "描述（可选）",
   },
   en: {
     tagline: "A programmable knowledge store.",
@@ -155,7 +155,6 @@ const S = {
     forgetConfirm: "Forget your keys from this browser? Your account stays on the server — you can re-import the vk_ to come back.",
     noWs: "No workspaces yet. Create one above.",
     btnNewKey: "+ Key",
-    btnJwt: "JWT 24h",
     btnDelete: "Delete",
     newWsTitle: "New workspace",
     wsNamePlaceholder: "workspace name (e.g. notes)",
@@ -171,10 +170,6 @@ const S = {
     mountCmdLabel: "Mount as a local directory",
     mountCmdHint: "Paste into a terminal.",
     done: "Done",
-    jwtTitle: "JWT minted (24h)",
-    jwtLabel: "Workspace JWT",
-    jwtHint: "Use as Bearer for data-plane endpoints. Memory-only — not stored.",
-    expires: "Expires: ",
     deleteConfirm: "Delete this workspace and all its data? This cannot be undone.",
     claimTitle: "Claim account",
     claimIntro: "Upgrade this anonymous account to email + password. Your existing keys keep working.",
@@ -196,6 +191,11 @@ const S = {
     datasetsTitle: "Datasets",
     datasetsEmpty: "No extra datasets yet (only the bootstrapped default).",
     datasetsLoadFail: "Failed to load datasets: ",
+    btnKeys: "Keys",
+    keysTitle: "Workspace Keys",
+    keysEmpty: "No keys yet — create one below.",
+    deleteKeyConfirm: "Delete (revoke) this key? Clients using it stop working immediately.",
+    wsDescPlaceholder: "description (optional)",
   },
 } as const;
 
@@ -254,6 +254,15 @@ type Workspace = {
   account_id: string;
   status: string;
   kind: string; // "fs" | "db"
+  description?: string | null;
+  created_at: string;
+};
+
+type WorkspaceKeyInfo = {
+  id: string;
+  name: string;
+  permission: string;
+  status: string;
   created_at: string;
 };
 
@@ -271,10 +280,13 @@ type Page<T> = { items: T[]; has_more: boolean; next_cursor?: string };
 const workspaces = {
   list: (vk: string) =>
     api<Page<Workspace>>("/v1/workspaces", {}, vk).then((p) => p.items),
-  create: (vk: string, name: string, kind: string) =>
+  create: (vk: string, name: string, kind: string, description: string) =>
     api<Workspace>(
       "/v1/workspaces",
-      { method: "POST", body: JSON.stringify({ name, kind }) },
+      {
+        method: "POST",
+        body: JSON.stringify({ name, kind, description: description || null }),
+      },
       vk,
     ),
   remove: (vk: string, id: string) =>
@@ -285,12 +297,10 @@ const workspaces = {
       { method: "POST", body: JSON.stringify({ name, permission }) },
       vk,
     ),
-  mintToken: (vk: string, id: string) =>
-    api<{ token: string; expires_at: string }>(
-      `/v1/workspaces/${id}/token`,
-      { method: "POST" },
-      vk,
-    ),
+  listKeys: (vk: string, id: string) =>
+    api<WorkspaceKeyInfo[]>(`/v1/workspaces/${id}/keys`, {}, vk),
+  deleteKey: (vk: string, id: string, keyId: string) =>
+    api<void>(`/v1/workspaces/${id}/keys/${keyId}`, { method: "DELETE" }, vk),
 };
 
 const datasetsApi = {
@@ -542,15 +552,18 @@ function renderWsList(list: Workspace[], vk: string) {
       const badge = isVector
         ? `<span class="text-xs px-1.5 py-0.5 rounded bg-violet-100 text-violet-700 font-medium">${esc(L.badgeVector)}</span>`
         : `<span class="text-xs px-1.5 py-0.5 rounded bg-sky-100 text-sky-700 font-medium">${esc(L.badgeFile)}</span>`;
-      // Vector Workspaces use vk_ + REST API; wk_ / JWT / FUSE don't apply,
-      // so they get a different action set (datasets + API docs).
+      // Both fs and db workspaces issue wk_ keys now (the db data plane moved
+      // from vk_ to wk_). db adds dataset + API-docs shortcuts on top.
+      const keyBtns = `<button data-act="new-key" data-id="${attr(w.id)}" class="text-sm border border-slate-300 px-3 py-1.5 rounded hover:bg-slate-50">${esc(L.btnNewKey)}</button>
+        <button data-act="keys" data-id="${attr(w.id)}" class="text-sm border border-slate-300 px-3 py-1.5 rounded hover:bg-slate-50">${esc(L.btnKeys)}</button>`;
+      const delBtn = `<button data-act="delete" data-id="${attr(w.id)}" class="text-sm border border-red-300 text-red-700 px-3 py-1.5 rounded hover:bg-red-50">${esc(L.btnDelete)}</button>`;
       const actions = isVector
-        ? `<button data-act="datasets" data-id="${attr(w.id)}" class="text-sm border border-slate-300 px-3 py-1.5 rounded hover:bg-slate-50">${esc(L.btnDatasets)}</button>
+        ? `${keyBtns}
+        <button data-act="datasets" data-id="${attr(w.id)}" class="text-sm border border-slate-300 px-3 py-1.5 rounded hover:bg-slate-50">${esc(L.btnDatasets)}</button>
         <a href="#/docs/vectors" class="text-sm border border-slate-300 px-3 py-1.5 rounded hover:bg-slate-50">${esc(L.btnApiDocs)}</a>
-        <button data-act="delete" data-id="${attr(w.id)}" class="text-sm border border-red-300 text-red-700 px-3 py-1.5 rounded hover:bg-red-50">${esc(L.btnDelete)}</button>`
-        : `<button data-act="new-key" data-id="${attr(w.id)}" class="text-sm border border-slate-300 px-3 py-1.5 rounded hover:bg-slate-50">${esc(L.btnNewKey)}</button>
-        <button data-act="token" data-id="${attr(w.id)}" class="text-sm border border-slate-300 px-3 py-1.5 rounded hover:bg-slate-50">${esc(L.btnJwt)}</button>
-        <button data-act="delete" data-id="${attr(w.id)}" class="text-sm border border-red-300 text-red-700 px-3 py-1.5 rounded hover:bg-red-50">${esc(L.btnDelete)}</button>`;
+        ${delBtn}`
+        : `${keyBtns}
+        ${delBtn}`;
       return `
     <div class="bg-white border border-slate-200 rounded-lg p-4 flex justify-between items-center gap-4">
       <div class="min-w-0">
@@ -570,7 +583,7 @@ function renderWsList(list: Workspace[], vk: string) {
       const act = t.dataset.act!;
       const id = t.dataset.id!;
       if (act === "new-key") newKeyModal(vk, id);
-      else if (act === "token") mintTokenModal(vk, id);
+      else if (act === "keys") keysModal(vk, id);
       else if (act === "datasets") datasetsModal(vk, id);
       else if (act === "delete") deleteWs(vk, id);
     });
@@ -583,6 +596,7 @@ function createWsModal(vk: string) {
     L.newWsTitle,
     `
     <input id="ws-name" placeholder="${attr(L.wsNamePlaceholder)}" class="w-full border border-slate-300 rounded px-3 py-2 mb-3 focus:outline-none focus:border-slate-500">
+    <input id="ws-desc" placeholder="${attr(L.wsDescPlaceholder)}" class="w-full border border-slate-300 rounded px-3 py-2 mb-3 focus:outline-none focus:border-slate-500">
     <p class="text-xs uppercase tracking-wide text-slate-500 font-semibold mb-1.5">${esc(L.wsType)}</p>
     <div class="space-y-2 mb-4">
       <label class="flex items-start gap-2 border border-slate-300 rounded px-3 py-2 cursor-pointer hover:bg-slate-50">
@@ -605,8 +619,9 @@ function createWsModal(vk: string) {
     const name = (document.getElementById("ws-name") as HTMLInputElement).value.trim();
     if (!name) return;
     const kind = (document.querySelector('input[name="ws-kind"]:checked') as HTMLInputElement).value;
+    const description = (document.getElementById("ws-desc") as HTMLInputElement).value.trim();
     try {
-      await workspaces.create(vk, name, kind);
+      await workspaces.create(vk, name, kind, description);
       closeModal();
       render();
     } catch (e: any) {
@@ -664,24 +679,58 @@ function newKeyModal(vk: string, wsId: string) {
   });
 }
 
-function mintTokenModal(vk: string, wsId: string) {
+function keysModal(vk: string, wsId: string) {
   const L = t();
+  modal(L.keysTitle, `<p class="text-sm text-slate-500">${esc(L.loading)}</p>`);
   workspaces
-    .mintToken(vk, wsId)
-    .then((res) => {
+    .listKeys(vk, wsId)
+    .then((keys) => {
+      const rows = keys.length
+        ? `<div class="space-y-2 mb-4">${keys
+            .map(
+              (k) => `<div class="flex justify-between items-center bg-slate-50 border border-slate-200 rounded px-3 py-2 gap-2">
+            <div class="min-w-0">
+              <div class="text-sm font-medium truncate">${esc(k.name)} <span class="text-xs text-slate-400">(${esc(k.permission)})</span></div>
+              <div class="text-xs text-slate-400 font-mono truncate">${esc(k.id)} · ${esc(k.status)}</div>
+            </div>
+            <button data-del-key="${attr(k.id)}" class="text-xs border border-red-300 text-red-700 px-2 py-1 rounded hover:bg-red-50 shrink-0">${esc(L.btnDelete)}</button>
+          </div>`,
+            )
+            .join("")}</div>`
+        : `<p class="text-sm text-slate-500 mb-4">${esc(L.keysEmpty)}</p>`;
       modal(
-        L.jwtTitle,
-        `
-        ${kv(L.jwtLabel, res.token, L.jwtHint)}
-        <p class="text-xs text-slate-500 mt-2">${esc(L.expires)}${esc(new Date(res.expires_at).toLocaleString())}</p>
-        <div class="flex justify-end mt-4">
+        L.keysTitle,
+        `${rows}
+        <div class="flex justify-between">
+          <button id="keys-new" class="text-sm border border-slate-300 px-3 py-1.5 rounded hover:bg-slate-50">${esc(L.btnNewKey)}</button>
           <button data-close class="text-sm bg-slate-900 text-white px-3 py-1.5 rounded hover:bg-slate-700">${esc(L.done)}</button>
-        </div>
-      `,
+        </div>`,
       );
       document.querySelector("[data-close]")!.addEventListener("click", closeModal);
+      document
+        .getElementById("keys-new")!
+        .addEventListener("click", () => newKeyModal(vk, wsId));
+      document.querySelectorAll("[data-del-key]").forEach((el) => {
+        el.addEventListener("click", async () => {
+          const keyId = (el as HTMLElement).dataset.delKey!;
+          if (!confirm(L.deleteKeyConfirm)) return;
+          try {
+            await workspaces.deleteKey(vk, wsId, keyId);
+            keysModal(vk, wsId);
+          } catch (e: any) {
+            alert(L.failed + e.message);
+          }
+        });
+      });
     })
-    .catch((e) => alert(L.failed + e.message));
+    .catch((e) => {
+      modal(
+        L.keysTitle,
+        `<p class="text-red-600 text-sm">${esc(L.failed + e.message)}</p>
+        <div class="flex justify-end mt-4"><button data-close class="text-sm bg-slate-900 text-white px-3 py-1.5 rounded hover:bg-slate-700">${esc(L.done)}</button></div>`,
+      );
+      document.querySelector("[data-close]")!.addEventListener("click", closeModal);
+    });
 }
 
 function datasetsModal(vk: string, wsId: string) {

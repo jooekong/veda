@@ -15,9 +15,9 @@ use veda_types::api::{
     NewRecord, UpsertRequest, UpsertResponse, VectorDeleteRequest, VectorDeleteResponse,
     VectorQueryRequest, VectorQueryResponse, VectorSearchRequest, VectorSearchResponse,
 };
-use veda_types::{validate, ApiResponse, SearchMode, UpsertRecord, VectorSearchQuery, VedaError, Workspace};
+use veda_types::{validate, ApiResponse, SearchMode, UpsertRecord, VectorSearchQuery, VedaError};
 
-use crate::auth::AuthAccount;
+use crate::auth::AuthDbWorkspace;
 use crate::error::AppError;
 use crate::state::AppState;
 
@@ -50,9 +50,10 @@ const MAX_BODY_MB: usize = 64;
 
 async fn upsert_vectors(
     State(state): State<Arc<AppState>>,
-    auth: AuthAccount,
+    auth: AuthDbWorkspace,
     Json(req): Json<UpsertRequest>,
 ) -> Result<Json<ApiResponse<UpsertResponse>>, AppError> {
+    auth.require_write()?;
     if req.records.is_empty() {
         return Err(VedaError::InvalidInput("records must not be empty".into()).into());
     }
@@ -64,30 +65,9 @@ async fn upsert_vectors(
         .into());
     }
 
-    // 1. Resolve workspace_id.
-    let ws_id = resolve_workspace_id(&auth, req.workspace_id.as_deref())?;
-
-    // 2. load_db_workspace: ownership + kind=Db + token scope.
-    let ws: Workspace = auth.load_db_workspace(&state, &ws_id).await?;
-
-    // 3. Resolve dataset (body or implicit default), then verify the
-    //    veda_datasets row exists and is active. Without this check, an
-    //    upsert to a typo'd dataset would silently land in Milvus with no
-    //    corresponding control-plane row.
-    let dataset_name = req
-        .dataset
-        .as_deref()
-        .unwrap_or(validate::DEFAULT_DATASET)
-        .to_string();
-    validate::validate_dataset_name(&dataset_name)?;
-    // Canonicalize from DB — see resolve_db_target rationale (case-insensitive
-    // MySQL collation vs case-preserving Milvus rows would split state).
-    let ds = state
-        .auth_store
-        .get_active_dataset_by_name(&ws.id, &dataset_name)
-        .await?
-        .ok_or_else(|| VedaError::NotFound(format!("dataset {dataset_name}")))?;
-    let dataset_name = ds.name;
+    // Workspace comes from the wk_ bearer; resolve + verify the dataset.
+    let dataset_name =
+        resolve_dataset(&state, &auth.workspace_id, req.dataset.as_deref()).await?;
 
     // 4. Validate every record and resolve defaults BEFORE the embedding
     //    call — embedding is the expensive step, no point spending it on
@@ -160,7 +140,7 @@ async fn upsert_vectors(
     //    surface a real one; see VectorWorkspaceStore::upsert_records doc).
     let commit_ts = state
         .vector_workspace_store
-        .upsert_records(&ws.id, &to_insert)
+        .upsert_records(&auth.workspace_id, &to_insert)
         .await?;
 
     Ok(Json(ApiResponse::ok(UpsertResponse { ids, commit_ts })))
@@ -209,36 +189,9 @@ fn normalize_record(rec: &NewRecord, dataset: &str) -> Result<NormalizedRecord, 
     })
 }
 
-/// Resolves the target workspace_id from the body (explicit) or the
-/// token's `allowed_workspaces`.
-///
-/// **Implicit default is only allowed when the token's scope is exactly one
-/// workspace** — that's the single case where there's no ambiguity. With
-/// `allowed_workspaces = [a, b]` and no body field, silently picking `a`
-/// is a footgun (caller may have meant `b`); reject with 400 instead and
-/// force the caller to specify.
-fn resolve_workspace_id(auth: &AuthAccount, from_body: Option<&str>) -> Result<String, AppError> {
-    if let Some(s) = from_body {
-        return Ok(s.to_string());
-    }
-    match auth.allowed_workspaces.as_deref() {
-        Some([only]) => Ok(only.clone()),
-        Some(many) if many.len() > 1 => Err(VedaError::InvalidInput(format!(
-            "workspace_id required: token has {} allowed_workspaces, omitted body field is ambiguous",
-            many.len()
-        ))
-        .into()),
-        // Empty list (deny-all) or unrestricted (None): no implicit default available.
-        _ => Err(VedaError::InvalidInput(
-            "workspace_id required when token has no single-workspace default".into(),
-        )
-        .into()),
-    }
-}
-
-/// Common preamble for all data-plane handlers: resolve workspace_id,
-/// load+authorize the db-kind workspace, resolve dataset (body or
-/// implicit default), verify it's active.
+/// Resolve + verify the active dataset for a vectors call. The target
+/// workspace now comes from the `wk_` bearer (AuthDbWorkspace), so only the
+/// dataset is resolved here.
 ///
 /// **Returns DB-canonical `ds.name`** (not the caller-supplied string).
 /// The MySQL collation `utf8mb4_0900_ai_ci` is case-insensitive, so a
@@ -247,29 +200,26 @@ fn resolve_workspace_id(auth: &AuthAccount, from_body: Option<&str>) -> Result<S
 /// MySQL holds `"default"`, Milvus rows say `"Default"`, and search by
 /// `"default"` (the implicit fallback) would miss those rows entirely.
 /// Returning `ds.name` propagates the canonical case forward.
-async fn resolve_db_target(
+async fn resolve_dataset(
     state: &AppState,
-    auth: &AuthAccount,
-    body_workspace_id: Option<&str>,
+    workspace_id: &str,
     body_dataset: Option<&str>,
-) -> Result<(Workspace, String), AppError> {
-    let ws_id = resolve_workspace_id(auth, body_workspace_id)?;
-    let ws = auth.load_db_workspace(state, &ws_id).await?;
+) -> Result<String, AppError> {
     let dataset_name = body_dataset
         .unwrap_or(validate::DEFAULT_DATASET)
         .to_string();
     validate::validate_dataset_name(&dataset_name)?;
     let ds = state
         .auth_store
-        .get_active_dataset_by_name(&ws.id, &dataset_name)
+        .get_active_dataset_by_name(workspace_id, &dataset_name)
         .await?
         .ok_or_else(|| VedaError::NotFound(format!("dataset {dataset_name}")))?;
-    Ok((ws, ds.name))
+    Ok(ds.name)
 }
 
 async fn search_vectors(
     State(state): State<Arc<AppState>>,
-    auth: AuthAccount,
+    auth: AuthDbWorkspace,
     Json(req): Json<VectorSearchRequest>,
 ) -> Result<Json<ApiResponse<VectorSearchResponse>>, AppError> {
     validate::validate_text(&req.query)?;
@@ -292,13 +242,8 @@ async fn search_vectors(
         Some(n) => n,
     };
 
-    let (ws, dataset_name) = resolve_db_target(
-        &state,
-        &auth,
-        req.workspace_id.as_deref(),
-        req.dataset.as_deref(),
-    )
-    .await?;
+    let dataset_name =
+        resolve_dataset(&state, &auth.workspace_id, req.dataset.as_deref()).await?;
 
     // Default is explicit (NOT `unwrap_or_default()`): even though
     // SearchMode::default() also happens to be Hybrid, db's default must not
@@ -360,7 +305,7 @@ async fn search_vectors(
     let mut hits = state
         .vector_workspace_store
         .search_vectors(
-            &ws.id,
+            &auth.workspace_id,
             &dataset_name,
             search_query,
             top_k,
@@ -382,7 +327,7 @@ const MAX_PK_BATCH: usize = 500;
 
 async fn query_vectors(
     State(state): State<Arc<AppState>>,
-    auth: AuthAccount,
+    auth: AuthDbWorkspace,
     Json(req): Json<VectorQueryRequest>,
 ) -> Result<Json<ApiResponse<VectorQueryResponse>>, AppError> {
     if req.ids.is_empty() {
@@ -395,29 +340,25 @@ async fn query_vectors(
         ))
         .into());
     }
-    let (ws, dataset_name) = resolve_db_target(
-        &state,
-        &auth,
-        req.workspace_id.as_deref(),
-        req.dataset.as_deref(),
-    )
-    .await?;
+    let dataset_name =
+        resolve_dataset(&state, &auth.workspace_id, req.dataset.as_deref()).await?;
     if let Some(fields) = req.output_fields.as_deref() {
         validate::validate_output_fields(fields)?;
     }
     let pks = build_pks(&dataset_name, &req.ids)?;
     let hits = state
         .vector_workspace_store
-        .query_vectors_by_pk(&ws.id, &pks, req.output_fields.as_deref())
+        .query_vectors_by_pk(&auth.workspace_id, &pks, req.output_fields.as_deref())
         .await?;
     Ok(Json(ApiResponse::ok(VectorQueryResponse { hits })))
 }
 
 async fn delete_vectors(
     State(state): State<Arc<AppState>>,
-    auth: AuthAccount,
+    auth: AuthDbWorkspace,
     Json(req): Json<VectorDeleteRequest>,
 ) -> Result<Json<ApiResponse<VectorDeleteResponse>>, AppError> {
+    auth.require_write()?;
     if req.ids.is_empty() {
         return Err(VedaError::InvalidInput("ids must not be empty".into()).into());
     }
@@ -428,17 +369,12 @@ async fn delete_vectors(
         ))
         .into());
     }
-    let (ws, dataset_name) = resolve_db_target(
-        &state,
-        &auth,
-        req.workspace_id.as_deref(),
-        req.dataset.as_deref(),
-    )
-    .await?;
+    let dataset_name =
+        resolve_dataset(&state, &auth.workspace_id, req.dataset.as_deref()).await?;
     let pks = build_pks(&dataset_name, &req.ids)?;
     let delete_count = state
         .vector_workspace_store
-        .delete_vectors_by_pk(&ws.id, &pks)
+        .delete_vectors_by_pk(&auth.workspace_id, &pks)
         .await?;
     Ok(Json(ApiResponse::ok(VectorDeleteResponse { delete_count })))
 }

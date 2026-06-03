@@ -159,6 +159,7 @@ async fn create_workspace(mysql: &MysqlStore, ws: &str) {
             status: WorkspaceStatus::Active,
             kind: WorkspaceKind::Fs,
             app_id: None,
+            description: None,
             created_at: now,
             updated_at: now,
         })
@@ -393,6 +394,7 @@ async fn reconciler_skips_disabled_or_archived_workspaces() {
             status: WorkspaceStatus::Archived,
             kind: WorkspaceKind::Fs,
             app_id: None,
+            description: None,
             created_at: now,
             updated_at: now,
         })

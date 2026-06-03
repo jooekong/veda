@@ -30,17 +30,27 @@ pub struct PaginatedResponse<T: Serialize> {
 
 // ── Account ────────────────────────────────────────────
 
+/// Two creation modes:
+///   - app_id mode (platform): set `app_id`, omit email/password.
+///   - email mode (console/CLI): set `email` + `password`, omit app_id.
 #[derive(Debug, Deserialize)]
 pub struct CreateAccountRequest {
     pub name: String,
-    pub email: String,
-    pub password: String,
+    #[serde(default)]
+    pub app_id: Option<String>,
+    #[serde(default)]
+    pub email: Option<String>,
+    #[serde(default)]
+    pub password: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
 pub struct CreateAccountResponse {
     pub account_id: String,
     pub api_key: String,
+    /// Echoed back for app_id-mode accounts; absent for email-mode.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub app_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -93,6 +103,8 @@ pub struct CreateWorkspaceRequest {
     pub kind: crate::WorkspaceKind,
     #[serde(default)]
     pub app_id: Option<String>,
+    #[serde(default)]
+    pub description: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -206,14 +218,12 @@ pub struct GrepHit {
 
 // ── Vectors (db-kind workspace) ───────────────────────
 
-/// Body for `POST /v1/vectors/upsert`. `workspace_id` is optional: if
-/// omitted, the server resolves to the first entry of the token's
-/// `allowed_workspaces` (per docs/vectors-merge-plan.md §0). `dataset`
-/// is optional: if omitted, the implicit `validate::DEFAULT_DATASET` is
-/// used (the dataset bootstrapped at workspace creation).
+/// Body for `POST /v1/vectors/upsert`. The target workspace comes from the
+/// `wk_` bearer (AuthDbWorkspace). `dataset` is optional: if omitted, the
+/// implicit `validate::DEFAULT_DATASET` is used (the dataset bootstrapped
+/// at workspace creation).
 #[derive(Debug, Deserialize)]
 pub struct UpsertRequest {
-    pub workspace_id: Option<String>,
     pub dataset: Option<String>,
     pub records: Vec<NewRecord>,
 }
@@ -254,7 +264,6 @@ pub struct UpsertResponse {
 
 #[derive(Debug, Deserialize)]
 pub struct VectorSearchRequest {
-    pub workspace_id: Option<String>,
     pub dataset: Option<String>,
     pub query: String,
     /// Search mode. Omitted → handler-defined default (see
@@ -311,7 +320,6 @@ pub enum FilterOp {
 
 #[derive(Debug, Deserialize)]
 pub struct VectorQueryRequest {
-    pub workspace_id: Option<String>,
     pub dataset: Option<String>,
     pub ids: Vec<String>,
     /// Projection whitelist; same semantics as `VectorSearchRequest`
@@ -322,7 +330,6 @@ pub struct VectorQueryRequest {
 
 #[derive(Debug, Deserialize)]
 pub struct VectorDeleteRequest {
-    pub workspace_id: Option<String>,
     pub dataset: Option<String>,
     pub ids: Vec<String>,
 }

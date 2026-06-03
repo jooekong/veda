@@ -38,6 +38,8 @@ pub fn routes() -> Router<Arc<AppState>> {
 #[derive(Debug, Deserialize)]
 struct CreateDatasetRequest {
     name: String,
+    #[serde(default)]
+    description: Option<String>,
 }
 
 async fn create_dataset(
@@ -56,6 +58,7 @@ async fn create_dataset(
         workspace_id: ws.id,
         name: req.name,
         status: DatasetStatus::Active,
+        description: req.description,
         created_at: now,
         updated_at: now,
     };

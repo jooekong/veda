@@ -148,6 +148,10 @@ pub struct Account {
     pub email: Option<String>,
     #[serde(skip_serializing)]
     pub password_hash: Option<String>,
+    /// Platform business-app id. `Some` for app_id-mode accounts (platform
+    /// creates them with no email/password); `None` for email/anonymous
+    /// accounts. Unique when set.
+    pub app_id: Option<String>,
     pub status: AccountStatus,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
@@ -161,6 +165,7 @@ pub struct Workspace {
     pub status: WorkspaceStatus,
     pub kind: WorkspaceKind,
     pub app_id: Option<String>,
+    pub description: Option<String>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -171,6 +176,7 @@ pub struct Dataset {
     pub workspace_id: String,
     pub name: String,
     pub status: DatasetStatus,
+    pub description: Option<String>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }

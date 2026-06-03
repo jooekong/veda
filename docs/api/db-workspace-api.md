@@ -2,10 +2,13 @@
 
 面向业务方接入的完整 HTTP API 参考。目标读者：写 SDK / 集成的工程师，以及阅读本文生成代码的 coding agent。
 
+> **⚠ 部分过时（2026-06）**：db 数据面认证已从账号 key `vk_` 改为 **workspace key `wk_`**（内部 `AuthDbWorkspace`），`/v1/vectors/*` 请求体去掉了 `workspace_id`（由 `wk_` 绑定的 workspace 推导），read-only `wk_` 不可 upsert/delete。下文 §2 认证模型及各 curl 示例仍是旧的 `vk_` + `workspace_id` 写法，**待随 Java SDK 适配一并重写**。改动见 `docs/plans/platform-admin-api-plan.md` 与 `CHANGELOG`。
+
 - 协议：HTTP/1.1，JSON over UTF-8，`Content-Type: application/json`。
 - 风格：Pinecone 式向量数据面 + 轻量控制面。v0 契约，设计锁定于
   [`docs/vectors-merge-plan.md`](../vectors-merge-plan.md)；向量数据面的语义细节（幂等、filter DSL）另见 [`docs/api/vectors.md`](./vectors.md)，本文为完整接口参考、与之同源。
 - 本文**只覆盖 db workspace（向量服务）**。fs workspace 的文件 / 全文检索 / SQL / 摘要接口（`/v1/fs/*`、`/v1/search`、`/v1/sql`、`/v1/abstract`、`/v1/overview`）走另一套 workspace 级鉴权，**不属于本 API**，见 [§9 不属于本 API 的端点](#9-不属于本-api-的端点)。
+- **Java SDK**：数据面 4 端点（upsert/search/query/delete）的官方 Java 封装见 [`sdk/java`](../../sdk/java/README.md)（Java 8 + Jackson + OkHttp）。Python 示例见 [`examples/python_pinecone_demo.py`](../../examples/python_pinecone_demo.py)，Java 示例见 [`examples/java`](../../examples/java)。
 
 ---
 

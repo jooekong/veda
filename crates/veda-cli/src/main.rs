@@ -239,9 +239,10 @@ enum WorkspaceCmd {
     },
     /// List configured workspace profiles. Active one is marked with ★.
     List,
-    /// Remove a local workspace profile (alias-only, does NOT revoke
-    /// the wk_ key on the server — there is no server endpoint for
-    /// that yet). The active profile cannot be removed; switch first.
+    /// Remove a local workspace profile (alias-only, does NOT revoke the
+    /// wk_ key on the server — revoke it from the console or
+    /// `DELETE /v1/workspaces/{id}/keys/{key_id}`). The active profile
+    /// cannot be removed; switch first.
     Rm {
         alias: String,
     },
@@ -1346,7 +1347,8 @@ async fn main() -> anyhow::Result<()> {
                 cfg.save()?;
                 println!(
                     "removed workspace profile '{alias}' \
-                     (server-side wk_ key is not revoked — no endpoint yet)"
+                     (local alias only; server-side wk_ not revoked — \
+                     revoke it from the console if needed)"
                 );
             }
         },

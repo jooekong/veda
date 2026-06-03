@@ -28,7 +28,6 @@ pub struct AppState {
     /// vector field on db workspace collection creation.
     pub embedding_dim: u32,
     pub sql_engine: VedaSqlEngine,
-    pub jwt_secret: String,
     pub metrics: MetricsHandle,
     /// Bearer token required to read `/v1/metrics`. `None` disables the
     /// endpoint entirely (returns 404). See `ServerConfig::metrics_token`.

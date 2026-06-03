@@ -70,6 +70,7 @@ async fn make_workspace(mysql: &Arc<MysqlStore>) -> String {
             status: WorkspaceStatus::Active,
             kind: WorkspaceKind::Fs,
             app_id: None,
+            description: None,
             created_at: now,
             updated_at: now,
         })

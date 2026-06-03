@@ -9,7 +9,34 @@ that matters.
 
 ## [Unreleased]
 
+### Changed
+- **BREAKING (db data-plane auth)**: `/v1/vectors/*` now authenticates with a
+  workspace key `wk_` (`AuthDbWorkspace`), not the account key `vk_`. A `wk_` is
+  bound to one workspace, so the request body no longer accepts `workspace_id`
+  (dropped from upsert/search/query/delete). A read-only `wk_` may search/query
+  but not upsert/delete. The account `vk_` is control-plane only now. Existing
+  db workspaces must mint a `wk_` to keep using the data plane; the Java SDK
+  must switch `vk_`→`wk_` (not yet done).
+
+### Removed
+- **BREAKING**: JWT workspace tokens. `POST /v1/workspaces/{id}/token` is gone,
+  `AuthWorkspace` (fs data plane) now accepts only `wk_`, and `jwt_secret` config
+  is dropped. All auth is a plain key check (no JWT mint/verify).
+
 ### Added
+- **Platform account model**: accounts can be created by `app_id` —
+  `POST /v1/accounts {name, app_id}` with no email/password — so the AI platform
+  provisions one veda account per business app. `Account` gains a unique `app_id`;
+  the `vk_` is returned once and the platform keeps it (no email login, no v0
+  re-issue path). Email+password creation (console/CLI) still works;
+  `CreateAccountRequest` email/password are now optional. `POST /v1/accounts`
+  stays public in v0 — **trusted-network only** (any caller can squat an
+  `app_id`); add a platform credential before any public exposure. app_id
+  accounts are passwordless and cannot be `claim`ed into email/password login.
+- Workspace key lifecycle: `GET /v1/workspaces/{id}/keys` (list — metadata only,
+  never the plaintext) and `DELETE /v1/workspaces/{id}/keys/{key_id}` (revoke),
+  for managing keys from the console / AI platform.
+- `workspace` and `dataset` creation accept an optional `description`.
 - db-workspace `/v1/vectors/search` now supports `mode`: `hybrid` (dense +
   BM25 fused by RRF), `semantic` (dense ANN), and `fulltext` (BM25 only,
   skips embedding). The per-collection sparse/BM25 schema was already built;
@@ -20,6 +47,13 @@ that matters.
   hits below it). Valid only for `semantic` / `fulltext`; rejected with `400`
   for `hybrid` (incl. the default), whose RRF score is a rank artifact, not a
   relevance value. Applied after `top_k`, so the result may be shorter.
+- **Java SDK** (`sdk/java`, `com.veda:veda-sdk-java`): hand-written Java 8 client
+  for the db-workspace vector data-plane (`upsert`/`search`/`query`/`delete`).
+  Jackson + OkHttp, fluent filter builder, `error_code` → typed exceptions with
+  `UNKNOWN` fallback, idempotency-aware retry (id-less upsert is never
+  auto-retried), and forward-compatible deserialization. Builds + unit-tests in
+  CI; real-server contract tests run via `mvn -P integration verify`.
+  (Internal Nexus coordinates pending; only `mvn deploy` is blocked.)
 
 ### Changed
 - **Wire (additive):** `/v1/vectors/search` hits include a new `score_type`

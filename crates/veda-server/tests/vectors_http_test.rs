@@ -30,8 +30,8 @@ use veda_server::routes::build_router;
 use veda_server::state::AppState;
 use veda_store::{MilvusStore, MysqlStore, PoolConfig};
 use veda_types::{
-    Account, AccountStatus, ApiKeyRecord, Dataset, DatasetStatus, KeyStatus, Workspace,
-    WorkspaceKind, WorkspaceStatus,
+    Account, AccountStatus, ApiKeyRecord, Dataset, DatasetStatus, KeyPermission, KeyStatus,
+    Workspace, WorkspaceKey, WorkspaceKind, WorkspaceStatus,
 };
 
 #[derive(Debug, Deserialize)]
@@ -142,7 +142,6 @@ async fn build_test_app() -> (Arc<AppState>, Arc<MysqlStore>, axum::Router) {
         vector_embedding,
         embedding_dim: cfg.embedding.dimension,
         sql_engine,
-        jwt_secret: "test-jwt-secret-not-used-for-vk-tokens-32+chars".into(),
         // `install()` registers the global Prometheus recorder. Each
         // integration test file runs in its own binary, so this is safe
         // here (would panic if called twice in the same process).
@@ -170,27 +169,10 @@ async fn provision_test_account(state: &AppState) -> TestSetup {
             name: "vec-http-test".into(),
             email: Some(format!("{}@test.com", &acct_id[..8])),
             password_hash: None,
+            app_id: None,
             status: AccountStatus::Active,
             created_at: now,
             updated_at: now,
-        })
-        .await
-        .unwrap();
-
-    let raw_token = format!("vk_{}", Uuid::new_v4().simple());
-    let key_hash = sha256_hex(raw_token.as_bytes());
-    state
-        .auth_store
-        .create_api_key(&ApiKeyRecord {
-            id: Uuid::new_v4().to_string(),
-            account_id: acct_id.clone(),
-            name: "test-token".into(),
-            key_hash,
-            status: KeyStatus::Active,
-            app_id: Some("test-app".into()),
-            allowed_workspaces: None,
-            expires_at: None,
-            created_at: now,
         })
         .await
         .unwrap();
@@ -205,6 +187,7 @@ async fn provision_test_account(state: &AppState) -> TestSetup {
             status: WorkspaceStatus::Active,
             kind: WorkspaceKind::Db,
             app_id: Some("test-app".into()),
+            description: None,
             created_at: now,
             updated_at: now,
         })
@@ -217,6 +200,7 @@ async fn provision_test_account(state: &AppState) -> TestSetup {
             workspace_id: ws_id.clone(),
             name: "default".into(),
             status: DatasetStatus::Active,
+            description: None,
             created_at: now,
             updated_at: now,
         })
@@ -228,10 +212,27 @@ async fn provision_test_account(state: &AppState) -> TestSetup {
         .await
         .unwrap();
 
+    // Data plane now authenticates with a wk_ bound to this db workspace
+    // (vectors moved from vk_/AuthAccount to wk_/AuthDbWorkspace).
+    let raw_ws_key = format!("wk_{}", Uuid::new_v4().simple());
+    state
+        .auth_store
+        .create_workspace_key(&WorkspaceKey {
+            id: Uuid::new_v4().to_string(),
+            workspace_id: ws_id.clone(),
+            name: "test-wk".into(),
+            key_hash: sha256_hex(raw_ws_key.as_bytes()),
+            permission: KeyPermission::ReadWrite,
+            status: KeyStatus::Active,
+            created_at: now,
+        })
+        .await
+        .unwrap();
+
     TestSetup {
         acct_id,
         ws_id,
-        token: raw_token,
+        token: raw_ws_key,
     }
 }
 
@@ -291,8 +292,6 @@ async fn vectors_http_e2e_suite() {
     // Sub-test 6: upsert idempotency + delete semantics (task #7).
     sub_upsert_idempotency_and_delete_semantics(&state, &mysql, router.clone()).await;
 
-    // Sub-test 7: admin token minting + allowed_workspaces scope + disable.
-    sub_admin_tokens_scope(&state, &mysql, router.clone()).await;
 
     // Sub-test 8: dataset delete guard incl. case-insensitive default (S5).
     sub_dataset_delete_guard(&state, &mysql, router.clone()).await;
@@ -808,6 +807,7 @@ async fn provision_account_only(state: &AppState) -> (String, String) {
             name: "stage-5-1".into(),
             email: Some(format!("{}@test.com", &acct_id[..8])),
             password_hash: None,
+            app_id: None,
             status: AccountStatus::Active,
             created_at: now,
             updated_at: now,
@@ -894,16 +894,34 @@ async fn sub_provisioning_http_e2e(
 
     // Upsert against the newly-provisioned workspace — verifies Milvus
     // collection + default dataset row were both created during the
-    // HTTP POST above.
-    let resp = do_post(
-        "/v1/vectors/upsert",
-        json!({
-            "workspace_id": ws_id,
-            "records": [{ "id": "rk-e2e-prov", "text": "provisioning end to end" }],
-        }),
-    )
-    .await
-    .unwrap();
+    // HTTP POST above. Data plane uses a wk_ bound to the workspace.
+    let raw_wk = format!("wk_{}", Uuid::new_v4().simple());
+    state
+        .auth_store
+        .create_workspace_key(&WorkspaceKey {
+            id: Uuid::new_v4().to_string(),
+            workspace_id: ws_id.clone(),
+            name: "prov-wk".into(),
+            key_hash: sha256_hex(raw_wk.as_bytes()),
+            permission: KeyPermission::ReadWrite,
+            status: KeyStatus::Active,
+            created_at: Utc::now(),
+        })
+        .await
+        .unwrap();
+    let req = Request::builder()
+        .method("POST")
+        .uri("/v1/vectors/upsert")
+        .header("authorization", format!("Bearer {raw_wk}"))
+        .header("content-type", "application/json")
+        .body(Body::from(
+            serde_json::to_vec(&json!({
+                "records": [{ "id": "rk-e2e-prov", "text": "provisioning end to end" }],
+            }))
+            .unwrap(),
+        ))
+        .unwrap();
+    let resp = router.clone().oneshot(req).await.unwrap();
     assert_eq!(resp.status(), StatusCode::OK, "upsert post-provisioning");
 
     // Cleanup.
@@ -956,16 +974,35 @@ async fn sub_vectors_api_rejects_fs(
     let v = body_json(resp.into_body()).await;
     let fs_ws_id = v["data"]["id"].as_str().unwrap().to_string();
 
-    // Try /v1/vectors/upsert with the fs workspace — expect 400.
-    let resp = do_post(
-        "/v1/vectors/upsert",
-        json!({
-            "workspace_id": fs_ws_id,
-            "records": [{ "text": "should be rejected" }],
-        }),
-    )
-    .await
-    .unwrap();
+    // Mint a wk_ for the fs workspace, then hit /v1/vectors/upsert with it —
+    // AuthDbWorkspace must reject the fs-kind workspace with 400.
+    let raw_wk = format!("wk_{}", Uuid::new_v4().simple());
+    state
+        .auth_store
+        .create_workspace_key(&WorkspaceKey {
+            id: Uuid::new_v4().to_string(),
+            workspace_id: fs_ws_id.clone(),
+            name: "fs-wk".into(),
+            key_hash: sha256_hex(raw_wk.as_bytes()),
+            permission: KeyPermission::ReadWrite,
+            status: KeyStatus::Active,
+            created_at: Utc::now(),
+        })
+        .await
+        .unwrap();
+    let req = Request::builder()
+        .method("POST")
+        .uri("/v1/vectors/upsert")
+        .header("authorization", format!("Bearer {raw_wk}"))
+        .header("content-type", "application/json")
+        .body(Body::from(
+            serde_json::to_vec(&json!({
+                "records": [{ "text": "should be rejected" }],
+            }))
+            .unwrap(),
+        ))
+        .unwrap();
+    let resp = router.clone().oneshot(req).await.unwrap();
     assert_eq!(
         resp.status(),
         StatusCode::BAD_REQUEST,
@@ -1313,117 +1350,6 @@ async fn sub_upsert_idempotency_and_delete_semantics(
     cleanup(state, mysql, &setup).await;
 }
 
-/// Task #8 — `POST /admin/v1/tokens` minting + `allowed_workspaces` scope
-/// enforcement + disable. The auth-critical token path had no HTTP e2e: the
-/// other sub-tests mint tokens by inserting `veda_api_keys` rows directly,
-/// bypassing the production handler entirely. This drives the real flow.
-async fn sub_admin_tokens_scope(state: &Arc<AppState>, mysql: &MysqlStore, router: axum::Router) {
-    // setup: unrestricted account token + a db workspace WITH a real Milvus
-    // collection (so an in-scope query reaches the data plane and returns 200).
-    let setup = provision_test_account(state).await;
-
-    // A second db workspace under the SAME account = the out-of-scope target.
-    // No collection needed: load_db_workspace runs check_workspace_allowed
-    // BEFORE touching Milvus, so the 403 fires first. Same-account ownership
-    // isolates the allowed_workspaces check from the ownership check.
-    let other_ws_id = Uuid::new_v4().to_string();
-    let now = Utc::now();
-    state
-        .auth_store
-        .create_workspace(&Workspace {
-            id: other_ws_id.clone(),
-            account_id: setup.acct_id.clone(),
-            name: "out-of-scope-ws".into(),
-            status: WorkspaceStatus::Active,
-            kind: WorkspaceKind::Db,
-            app_id: None,
-            created_at: now,
-            updated_at: now,
-        })
-        .await
-        .unwrap();
-
-    let do_post = |uri: &str, body: serde_json::Value, bearer: &str| {
-        let req = Request::builder()
-            .method("POST")
-            .uri(uri)
-            .header("authorization", format!("Bearer {bearer}"))
-            .header("content-type", "application/json")
-            .body(Body::from(serde_json::to_vec(&body).unwrap()))
-            .unwrap();
-        router.clone().oneshot(req)
-    };
-
-    // 1. Mint a service token scoped to ONLY setup.ws_id (caller = account token).
-    let resp = do_post(
-        "/admin/v1/tokens",
-        json!({ "app_id": "scoped-app", "name": "prod", "allowed_workspaces": [setup.ws_id] }),
-        &setup.token,
-    )
-    .await
-    .unwrap();
-    assert_eq!(resp.status(), StatusCode::CREATED, "mint token status");
-    let v = body_json(resp.into_body()).await;
-    let token_id = v["data"]["id"].as_str().unwrap().to_string();
-    let scoped = v["data"]["token"].as_str().unwrap().to_string();
-    assert!(scoped.starts_with("vk_"), "minted token must be vk_: {scoped}");
-
-    // 2. Scoped token reaches the in-scope workspace (200; empty hits is fine).
-    let resp = do_post(
-        "/v1/vectors/query",
-        json!({ "workspace_id": setup.ws_id, "ids": ["nope"] }),
-        &scoped,
-    )
-    .await
-    .unwrap();
-    assert_eq!(
-        resp.status(),
-        StatusCode::OK,
-        "scoped token must reach in-scope workspace"
-    );
-
-    // 3. Scoped token is denied the out-of-scope workspace → 403.
-    let resp = do_post(
-        "/v1/vectors/query",
-        json!({ "workspace_id": other_ws_id, "ids": ["nope"] }),
-        &scoped,
-    )
-    .await
-    .unwrap();
-    assert_eq!(
-        resp.status(),
-        StatusCode::FORBIDDEN,
-        "out-of-scope workspace must be denied"
-    );
-    let v = body_json(resp.into_body()).await;
-    assert_eq!(v["error_code"].as_str(), Some("PERMISSION_DENIED"), "{v:?}");
-
-    // 4. Disable → 204; afterwards the token no longer authenticates (401).
-    let resp = do_post(
-        &format!("/admin/v1/tokens/{token_id}/disable"),
-        json!({}),
-        &setup.token,
-    )
-    .await
-    .unwrap();
-    assert_eq!(resp.status(), StatusCode::NO_CONTENT, "disable status");
-
-    let resp = do_post(
-        "/v1/vectors/query",
-        json!({ "workspace_id": setup.ws_id, "ids": ["nope"] }),
-        &scoped,
-    )
-    .await
-    .unwrap();
-    assert_eq!(
-        resp.status(),
-        StatusCode::UNAUTHORIZED,
-        "disabled token must stop authenticating"
-    );
-
-    let _ = state.auth_store.hard_delete_workspace(&other_ws_id).await;
-    cleanup(state, mysql, &setup).await;
-}
 
 /// S5 — `DELETE /v1/workspaces/{ws}/datasets/{name}`, the only delete path
 /// with no prior e2e. Covers normal archive (204), the `default` guard, the

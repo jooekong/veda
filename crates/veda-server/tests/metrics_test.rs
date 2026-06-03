@@ -95,6 +95,7 @@ async fn metrics_render_contains_expected_series() {
             status: WorkspaceStatus::Active,
             kind: WorkspaceKind::Fs,
             app_id: None,
+            description: None,
             created_at: now,
             updated_at: now,
         })

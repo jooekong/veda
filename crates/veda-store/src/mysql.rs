@@ -33,11 +33,19 @@ fn storage_err(e: impl std::fmt::Display) -> VedaError {
 /// the unique index can fire on a race. Maps MySQL 1062 (ER_DUP_ENTRY)
 /// to a typed `AlreadyExists`; everything else falls through to the
 /// generic translator.
+/// True if the error is a MySQL UNIQUE/duplicate-key violation (errno 1062).
+/// Uses `number()`, NOT `code()`: sqlx's `code()` returns the SQLSTATE
+/// ("23000" for a dup key), never "1062", so a `code()=="1062"` check is dead.
+fn is_mysql_duplicate(e: &sqlx::Error) -> bool {
+    matches!(e, sqlx::Error::Database(db)
+        if db.try_downcast_ref::<sqlx::mysql::MySqlDatabaseError>()
+            .map(|me| me.number() == 1062)
+            .unwrap_or(false))
+}
+
 fn translate_account_email_conflict(e: sqlx::Error) -> VedaError {
-    if let sqlx::Error::Database(db) = &e {
-        if db.code().as_deref() == Some("1062") {
-            return VedaError::AlreadyExists("email already registered".into());
-        }
+    if is_mysql_duplicate(&e) {
+        return VedaError::AlreadyExists("email already registered".into());
     }
     storage_err(e)
 }
@@ -99,6 +107,7 @@ fn row_to_account(row: &sqlx::mysql::MySqlRow) -> Result<Account> {
         name: row.try_get("name").map_err(storage_err)?,
         email: row.try_get("email").map_err(storage_err)?,
         password_hash: row.try_get("password_hash").map_err(storage_err)?,
+        app_id: row.try_get("app_id").map_err(storage_err)?,
         status: db_enum("account_status", &st)?,
         created_at: row.try_get("created_at").map_err(storage_err)?,
         updated_at: row.try_get("updated_at").map_err(storage_err)?,
@@ -112,6 +121,7 @@ fn row_to_dataset(row: &sqlx::mysql::MySqlRow) -> Result<Dataset> {
         workspace_id: row.try_get("workspace_id").map_err(storage_err)?,
         name: row.try_get("name").map_err(storage_err)?,
         status: db_enum("dataset_status", &st)?,
+        description: row.try_get("description").map_err(storage_err)?,
         created_at: row.try_get("created_at").map_err(storage_err)?,
         updated_at: row.try_get("updated_at").map_err(storage_err)?,
     })
@@ -127,6 +137,7 @@ fn row_to_workspace(row: &sqlx::mysql::MySqlRow) -> Result<Workspace> {
         status: db_enum("workspace_status", &st)?,
         kind: db_enum("workspace_kind", &kd)?,
         app_id: row.try_get("app_id").map_err(storage_err)?,
+        description: row.try_get("description").map_err(storage_err)?,
         created_at: row.try_get("created_at").map_err(storage_err)?,
         updated_at: row.try_get("updated_at").map_err(storage_err)?,
     })
@@ -494,10 +505,14 @@ impl MysqlStore {
             "ALTER TABLE veda_workspaces ADD COLUMN kind VARCHAR(16) NOT NULL DEFAULT 'fs'",
             "ALTER TABLE veda_workspaces ADD COLUMN app_id VARCHAR(64) NULL",
             "ALTER TABLE veda_workspaces ADD INDEX idx_app (app_id)",
+            "ALTER TABLE veda_workspaces ADD COLUMN description TEXT NULL",
+            "ALTER TABLE veda_datasets ADD COLUMN description TEXT NULL",
             "ALTER TABLE veda_api_keys ADD COLUMN app_id VARCHAR(64) NULL",
             "ALTER TABLE veda_api_keys ADD COLUMN allowed_workspaces JSON NULL",
             "ALTER TABLE veda_api_keys ADD COLUMN expires_at DATETIME NULL",
             "ALTER TABLE veda_api_keys ADD INDEX idx_app (app_id)",
+            "ALTER TABLE veda_accounts ADD COLUMN app_id VARCHAR(64) NULL",
+            "ALTER TABLE veda_accounts ADD UNIQUE INDEX idx_account_app (app_id)",
         ];
         for s in alters {
             if let Err(e) = sqlx::query(s).execute(&self.pool).await {
@@ -2047,26 +2062,33 @@ impl TaskQueue for MysqlStore {
 #[async_trait]
 impl AuthStore for MysqlStore {
     async fn create_account(&self, account: &Account) -> Result<()> {
-        sqlx::query(
-            r#"INSERT INTO veda_accounts (id, name, email, password_hash, status, created_at, updated_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?)"#,
+        let res = sqlx::query(
+            r#"INSERT INTO veda_accounts (id, name, email, password_hash, app_id, status, created_at, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?)"#,
         )
         .bind(&account.id)
         .bind(&account.name)
         .bind(&account.email)
         .bind(&account.password_hash)
+        .bind(&account.app_id)
         .bind(db_enum_str(&account.status))
         .bind(account.created_at.naive_utc())
         .bind(account.updated_at.naive_utc())
         .execute(&self.pool)
-        .await
-        .map_err(storage_err)?;
-        Ok(())
+        .await;
+        // UNIQUE(email) or UNIQUE(app_id) collision → MySQL 1062 → 409.
+        match res {
+            Ok(_) => Ok(()),
+            Err(e) if is_mysql_duplicate(&e) => Err(VedaError::AlreadyExists(
+                "account email or app_id already exists".into(),
+            )),
+            Err(e) => Err(storage_err(e)),
+        }
     }
 
     async fn get_account(&self, id: &str) -> Result<Option<Account>> {
         let row = sqlx::query(
-            r#"SELECT id, name, email, password_hash, status, created_at, updated_at
+            r#"SELECT id, name, email, password_hash, app_id, status, created_at, updated_at
                FROM veda_accounts WHERE id = ?"#,
         )
         .bind(id)
@@ -2078,7 +2100,7 @@ impl AuthStore for MysqlStore {
 
     async fn get_account_by_email(&self, email: &str) -> Result<Option<Account>> {
         let row = sqlx::query(
-            r#"SELECT id, name, email, password_hash, status, created_at, updated_at
+            r#"SELECT id, name, email, password_hash, app_id, status, created_at, updated_at
                FROM veda_accounts WHERE email = ?"#,
         )
         .bind(email)
@@ -2105,7 +2127,7 @@ impl AuthStore for MysqlStore {
                    password_hash = ?,
                    name = COALESCE(?, name),
                    updated_at = ?
-               WHERE id = ? AND email IS NULL"#,
+               WHERE id = ? AND email IS NULL AND app_id IS NULL"#,
         )
         .bind(email)
         .bind(password_hash)
@@ -2137,13 +2159,14 @@ impl AuthStore for MysqlStore {
         let mut tx = self.pool.begin().await.map_err(storage_err)?;
 
         sqlx::query(
-            r#"INSERT INTO veda_accounts (id, name, email, password_hash, status, created_at, updated_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?)"#,
+            r#"INSERT INTO veda_accounts (id, name, email, password_hash, app_id, status, created_at, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?)"#,
         )
         .bind(&account.id)
         .bind(&account.name)
         .bind(&account.email)
         .bind(&account.password_hash)
+        .bind(&account.app_id)
         .bind(db_enum_str(&account.status))
         .bind(account.created_at.naive_utc())
         .bind(account.updated_at.naive_utc())
@@ -2170,8 +2193,8 @@ impl AuthStore for MysqlStore {
         .map_err(storage_err)?;
 
         sqlx::query(
-            r#"INSERT INTO veda_workspaces (id, account_id, name, status, kind, app_id, created_at, updated_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?)"#,
+            r#"INSERT INTO veda_workspaces (id, account_id, name, status, kind, app_id, description, created_at, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)"#,
         )
         .bind(&workspace.id)
         .bind(&workspace.account_id)
@@ -2179,6 +2202,7 @@ impl AuthStore for MysqlStore {
         .bind(db_enum_str(&workspace.status))
         .bind(db_enum_str(&workspace.kind))
         .bind(&workspace.app_id)
+        .bind(&workspace.description)
         .bind(workspace.created_at.naive_utc())
         .bind(workspace.updated_at.naive_utc())
         .execute(&mut *tx)
@@ -2283,8 +2307,8 @@ impl AuthStore for MysqlStore {
 
     async fn create_workspace(&self, workspace: &Workspace) -> Result<()> {
         sqlx::query(
-            r#"INSERT INTO veda_workspaces (id, account_id, name, status, kind, app_id, created_at, updated_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?)"#,
+            r#"INSERT INTO veda_workspaces (id, account_id, name, status, kind, app_id, description, created_at, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)"#,
         )
         .bind(&workspace.id)
         .bind(&workspace.account_id)
@@ -2292,6 +2316,7 @@ impl AuthStore for MysqlStore {
         .bind(db_enum_str(&workspace.status))
         .bind(db_enum_str(&workspace.kind))
         .bind(&workspace.app_id)
+        .bind(&workspace.description)
         .bind(workspace.created_at.naive_utc())
         .bind(workspace.updated_at.naive_utc())
         .execute(&self.pool)
@@ -2319,8 +2344,8 @@ impl AuthStore for MysqlStore {
         let mut tx = self.pool.begin().await.map_err(storage_err)?;
 
         if let Err(e) = sqlx::query(
-            r#"INSERT INTO veda_workspaces (id, account_id, name, status, kind, app_id, created_at, updated_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?)"#,
+            r#"INSERT INTO veda_workspaces (id, account_id, name, status, kind, app_id, description, created_at, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)"#,
         )
         .bind(&workspace.id)
         .bind(&workspace.account_id)
@@ -2328,6 +2353,7 @@ impl AuthStore for MysqlStore {
         .bind(db_enum_str(&workspace.status))
         .bind(db_enum_str(&workspace.kind))
         .bind(&workspace.app_id)
+        .bind(&workspace.description)
         .bind(workspace.created_at.naive_utc())
         .bind(workspace.updated_at.naive_utc())
         .execute(&mut *tx)
@@ -2343,13 +2369,14 @@ impl AuthStore for MysqlStore {
         }
 
         if let Err(e) = sqlx::query(
-            r#"INSERT INTO veda_datasets (id, workspace_id, name, status, created_at, updated_at)
-               VALUES (?, ?, ?, ?, ?, ?)"#,
+            r#"INSERT INTO veda_datasets (id, workspace_id, name, status, description, created_at, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?)"#,
         )
         .bind(&dataset.id)
         .bind(&dataset.workspace_id)
         .bind(&dataset.name)
         .bind(db_enum_str(&dataset.status))
+        .bind(&dataset.description)
         .bind(dataset.created_at.naive_utc())
         .bind(dataset.updated_at.naive_utc())
         .execute(&mut *tx)
@@ -2368,7 +2395,7 @@ impl AuthStore for MysqlStore {
 
     async fn get_workspace(&self, id: &str) -> Result<Option<Workspace>> {
         let row = sqlx::query(
-            r#"SELECT id, account_id, name, status, kind, app_id, created_at, updated_at
+            r#"SELECT id, account_id, name, status, kind, app_id, description, created_at, updated_at
                FROM veda_workspaces WHERE id = ?"#,
         )
         .bind(id)
@@ -2388,7 +2415,7 @@ impl AuthStore for MysqlStore {
         let fetch_n = (limit as i64) + 1;
         let rows = match after {
             Some(cursor) => sqlx::query(
-                r#"SELECT id, account_id, name, status, kind, app_id, created_at, updated_at
+                r#"SELECT id, account_id, name, status, kind, app_id, description, created_at, updated_at
                    FROM veda_workspaces
                    WHERE account_id = ? AND status = 'active' AND id > ?
                    ORDER BY id LIMIT ?"#,
@@ -2397,7 +2424,7 @@ impl AuthStore for MysqlStore {
             .bind(cursor)
             .bind(fetch_n),
             None => sqlx::query(
-                r#"SELECT id, account_id, name, status, kind, app_id, created_at, updated_at
+                r#"SELECT id, account_id, name, status, kind, app_id, description, created_at, updated_at
                    FROM veda_workspaces
                    WHERE account_id = ? AND status = 'active'
                    ORDER BY id LIMIT ?"#,
@@ -2450,13 +2477,14 @@ impl AuthStore for MysqlStore {
         // Map to `AlreadyExists` so the route layer can return 409 cleanly
         // (instead of an opaque 500 from a generic Storage error).
         let res = sqlx::query(
-            r#"INSERT INTO veda_datasets (id, workspace_id, name, status, created_at, updated_at)
-               VALUES (?, ?, ?, ?, ?, ?)"#,
+            r#"INSERT INTO veda_datasets (id, workspace_id, name, status, description, created_at, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?)"#,
         )
         .bind(&dataset.id)
         .bind(&dataset.workspace_id)
         .bind(&dataset.name)
         .bind(db_enum_str(&dataset.status))
+        .bind(&dataset.description)
         .bind(dataset.created_at.naive_utc())
         .bind(dataset.updated_at.naive_utc())
         .execute(&self.pool)
@@ -2485,7 +2513,7 @@ impl AuthStore for MysqlStore {
         let fetch_n = (limit as i64) + 1;
         let rows = match after {
             Some(cursor) => sqlx::query(
-                r#"SELECT id, workspace_id, name, status, created_at, updated_at
+                r#"SELECT id, workspace_id, name, status, description, created_at, updated_at
                    FROM veda_datasets
                    WHERE workspace_id = ? AND status = 'active' AND id > ?
                    ORDER BY id LIMIT ?"#,
@@ -2494,7 +2522,7 @@ impl AuthStore for MysqlStore {
             .bind(cursor)
             .bind(fetch_n),
             None => sqlx::query(
-                r#"SELECT id, workspace_id, name, status, created_at, updated_at
+                r#"SELECT id, workspace_id, name, status, description, created_at, updated_at
                    FROM veda_datasets
                    WHERE workspace_id = ? AND status = 'active'
                    ORDER BY id LIMIT ?"#,
@@ -2516,7 +2544,7 @@ impl AuthStore for MysqlStore {
         name: &str,
     ) -> Result<Option<Dataset>> {
         let row = sqlx::query(
-            r#"SELECT id, workspace_id, name, status, created_at, updated_at
+            r#"SELECT id, workspace_id, name, status, description, created_at, updated_at
                FROM veda_datasets
                WHERE workspace_id = ? AND name = ? AND status = 'active'"#,
         )

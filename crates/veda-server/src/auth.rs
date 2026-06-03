@@ -3,66 +3,11 @@ use axum::http::request::Parts;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
-use chrono::{Duration, Utc};
-use jsonwebtoken::{decode, encode, Algorithm, DecodingKey, EncodingKey, Header, Validation};
-use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tracing::error;
 use veda_types::ApiResponse;
 
 use crate::state::AppState;
-
-const JWT_ISSUER: &str = "veda";
-
-#[derive(Debug, Serialize, Deserialize)]
-pub struct JwtClaims {
-    pub sub: String,
-    pub iss: String,
-    pub workspace_id: String,
-    pub account_id: String,
-    pub exp: i64,
-}
-
-pub fn create_jwt(
-    secret: &str,
-    workspace_id: &str,
-    account_id: &str,
-    ttl_hours: i64,
-) -> anyhow::Result<(String, chrono::DateTime<Utc>)> {
-    let expires_at = Utc::now() + Duration::hours(ttl_hours);
-    let claims = JwtClaims {
-        sub: workspace_id.to_string(),
-        iss: JWT_ISSUER.to_string(),
-        workspace_id: workspace_id.to_string(),
-        account_id: account_id.to_string(),
-        exp: expires_at.timestamp(),
-    };
-    let token = encode(
-        &Header::default(),
-        &claims,
-        &EncodingKey::from_secret(secret.as_bytes()),
-    )?;
-    Ok((token, expires_at))
-}
-
-pub fn verify_jwt(secret: &str, token: &str) -> Option<JwtClaims> {
-    let mut validation = Validation::new(Algorithm::HS256);
-    validation.set_issuer(&[JWT_ISSUER]);
-    decode::<JwtClaims>(
-        token,
-        &DecodingKey::from_secret(secret.as_bytes()),
-        &validation,
-    )
-    .ok()
-    .map(|d| d.claims)
-}
-
-pub fn validate_jwt_secret(secret: &str) -> anyhow::Result<()> {
-    if secret.len() < 32 {
-        anyhow::bail!("jwt_secret must be at least 32 bytes");
-    }
-    Ok(())
-}
 
 pub struct AuthAccount {
     pub account_id: String,
@@ -151,6 +96,24 @@ impl AuthWorkspace {
     }
 }
 
+/// Workspace-scoped auth for the **db** data plane (`/v1/vectors/*`).
+/// Same `wk_` bearer as AuthWorkspace, but requires `kind == Db`. The
+/// `wk_` is bound to a single workspace, so vectors handlers no longer
+/// resolve workspace_id from the body or run ownership/scope checks.
+pub struct AuthDbWorkspace {
+    pub workspace_id: String,
+    pub read_only: bool,
+}
+
+impl AuthDbWorkspace {
+    pub fn require_write(&self) -> Result<(), crate::error::AppError> {
+        if self.read_only {
+            return Err(veda_types::VedaError::PermissionDenied.into());
+        }
+        Ok(())
+    }
+}
+
 impl AuthAccount {
     pub async fn load_owned_workspace(
         &self,
@@ -191,6 +154,44 @@ impl AuthAccount {
     }
 }
 
+/// Resolve a `wk_` bearer to its active workspace + read-only flag. Shared
+/// by AuthWorkspace (fs) and AuthDbWorkspace (db); each caller then checks
+/// `kind`. JWT support was removed — all data-plane auth is now a plain
+/// `wk_` key check.
+async fn resolve_ws_key(
+    auth_header: Option<String>,
+    state: Arc<AppState>,
+) -> Result<(veda_types::Workspace, bool), Response> {
+    let token = auth_header
+        .as_deref()
+        .and_then(|s| s.strip_prefix("Bearer "))
+        .ok_or_else(auth_err)?;
+    let key_hash = veda_core::checksum::sha256_hex(token.as_bytes());
+    let wk = state
+        .auth_store
+        .get_workspace_key_by_hash(&key_hash)
+        .await
+        .map_err(|e| {
+            error!(err = %e, "auth store error");
+            internal_err()
+        })?
+        .ok_or_else(auth_err)?;
+    let read_only = wk.permission == veda_types::KeyPermission::Read;
+    let ws = state
+        .auth_store
+        .get_workspace(&wk.workspace_id)
+        .await
+        .map_err(|e| {
+            error!(err = %e, "auth store error");
+            internal_err()
+        })?
+        .ok_or_else(auth_err)?;
+    if ws.status != veda_types::WorkspaceStatus::Active {
+        return Err(auth_err());
+    }
+    Ok((ws, read_only))
+}
+
 impl FromRequestParts<Arc<AppState>> for AuthWorkspace {
     type Rejection = Response;
 
@@ -205,67 +206,39 @@ impl FromRequestParts<Arc<AppState>> for AuthWorkspace {
             .and_then(|v| v.to_str().ok())
             .map(|s| s.to_string());
         async move {
-            let token = auth_header
-                .as_deref()
-                .and_then(|s| s.strip_prefix("Bearer "))
-                .ok_or_else(auth_err)?;
-
-            let (workspace_id, mut account_id, read_only) =
-                if let Some(claims) = verify_jwt(&state.jwt_secret, token) {
-                    // JWT carries no DB-validated state. Verify the bearer's
-                    // account is still active — the workspace_key path
-                    // enforces this via SQL JOIN, but JWT must check explicitly.
-                    let account = state
-                        .auth_store
-                        .get_account(&claims.account_id)
-                        .await
-                        .map_err(|e| {
-                            error!(err = %e, "auth store error");
-                            internal_err()
-                        })?
-                        .ok_or_else(auth_err)?;
-                    if account.status != veda_types::AccountStatus::Active {
-                        return Err(auth_err());
-                    }
-                    (claims.workspace_id, claims.account_id, false)
-                } else {
-                    let key_hash = veda_core::checksum::sha256_hex(token.as_bytes());
-                    let wk = state
-                        .auth_store
-                        .get_workspace_key_by_hash(&key_hash)
-                        .await
-                        .map_err(|e| {
-                            error!(err = %e, "auth store error");
-                            internal_err()
-                        })?
-                        .ok_or_else(auth_err)?;
-                    let read_only = wk.permission == veda_types::KeyPermission::Read;
-                    (wk.workspace_id, String::new(), read_only)
-                };
-
-            let ws = state
-                .auth_store
-                .get_workspace(&workspace_id)
-                .await
-                .map_err(|e| {
-                    error!(err = %e, "auth store error");
-                    internal_err()
-                })?
-                .ok_or_else(auth_err)?;
-            if ws.status != veda_types::WorkspaceStatus::Active {
-                return Err(auth_err());
-            }
+            let (ws, read_only) = resolve_ws_key(auth_header, state).await?;
             if ws.kind != veda_types::WorkspaceKind::Fs {
                 return Err(kind_mismatch_err());
             }
-
-            if account_id.is_empty() {
-                account_id = ws.account_id.clone();
-            }
-
             Ok(AuthWorkspace {
-                workspace_id,
-                _account_id: account_id,
+                workspace_id: ws.id,
+                _account_id: ws.account_id,
+                read_only,
+            })
+        }
+    }
+}
+
+impl FromRequestParts<Arc<AppState>> for AuthDbWorkspace {
+    type Rejection = Response;
+
+    fn from_request_parts(
+        parts: &mut Parts,
+        state: &Arc<AppState>,
+    ) -> impl std::future::Future<Output = Result<Self, Self::Rejection>> + Send {
+        let state = state.clone();
+        let auth_header = parts
+            .headers
+            .get("authorization")
+            .and_then(|v| v.to_str().ok())
+            .map(|s| s.to_string());
+        async move {
+            let (ws, read_only) = resolve_ws_key(auth_header, state).await?;
+            if ws.kind != veda_types::WorkspaceKind::Db {
+                return Err(kind_mismatch_err());
+            }
+            Ok(AuthDbWorkspace {
+                workspace_id: ws.id,
                 read_only,
             })
         }

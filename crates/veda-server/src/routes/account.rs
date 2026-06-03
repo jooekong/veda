@@ -4,6 +4,7 @@ use argon2::password_hash::rand_core::OsRng;
 use argon2::password_hash::SaltString;
 use argon2::{Argon2, PasswordHash, PasswordHasher, PasswordVerifier};
 use axum::extract::{Path, Query, State};
+use axum::http::StatusCode;
 use axum::routing::{delete, post};
 use axum::{Json, Router};
 use chrono::Utc;
@@ -13,14 +14,14 @@ use veda_core::checksum::sha256_hex;
 use veda_types::api::{
     AnonymousOnboardResponse, ClaimAccountRequest, ClaimAccountResponse, CreateAccountRequest,
     CreateAccountResponse, CreateWorkspaceRequest, LoginRequest, LoginResponse, PaginatedResponse,
-    PaginationQuery, WorkspaceTokenResponse,
+    PaginationQuery,
 };
 use veda_types::{
     Account, AccountStatus, ApiKeyRecord, ApiResponse, Dataset, DatasetStatus, KeyPermission,
     KeyStatus, VedaError, Workspace, WorkspaceKey, WorkspaceKind, WorkspaceStatus,
 };
 
-use crate::auth::{create_jwt, AuthAccount};
+use crate::auth::AuthAccount;
 use crate::error::AppError;
 use crate::state::AppState;
 
@@ -35,32 +36,68 @@ pub fn routes() -> Router<Arc<AppState>> {
             post(create_workspace).get(list_workspaces),
         )
         .route("/v1/workspaces/{id}", delete(delete_workspace))
-        .route("/v1/workspaces/{id}/keys", post(create_workspace_key))
-        .route("/v1/workspaces/{id}/token", post(create_token))
+        .route(
+            "/v1/workspaces/{id}/keys",
+            post(create_workspace_key).get(list_workspace_keys),
+        )
+        .route(
+            "/v1/workspaces/{id}/keys/{key_id}",
+            delete(delete_workspace_key),
+        )
 }
 
 async fn create_account(
     State(state): State<Arc<AppState>>,
     Json(req): Json<CreateAccountRequest>,
 ) -> Result<Json<ApiResponse<CreateAccountResponse>>, AppError> {
-    let existing = state.auth_store.get_account_by_email(&req.email).await?;
-    if existing.is_some() {
-        return Err(VedaError::AlreadyExists("email already registered".into()).into());
-    }
-
-    let salt = SaltString::generate(&mut OsRng);
-    let password_hash = Argon2::default()
-        .hash_password(req.password.as_bytes(), &salt)
-        .map_err(|e| VedaError::Internal(e.to_string()))?
-        .to_string();
-
-    let account_id = Uuid::new_v4().to_string();
     let now = Utc::now();
+    let account_id = Uuid::new_v4().to_string();
+
+    // Two creation modes:
+    //   - app_id mode (platform): app_id set, no email/password. The vk_ is
+    //     returned once here and the platform keeps it (no email login, no v0
+    //     re-issue path). app_id uniqueness is enforced by the DB (→ 409).
+    //   - email mode (console/CLI): email + password, no app_id.
+    let (email, password_hash, app_id) = match (&req.app_id, &req.email, &req.password) {
+        // app_id mode (platform): app_id only. Reject mixed input rather than
+        // silently dropping email/password into a passwordless account.
+        (Some(app_id), None, None) => {
+            let app_id = app_id.trim();
+            if app_id.is_empty() {
+                return Err(VedaError::InvalidInput("app_id must not be empty".into()).into());
+            }
+            (None, None, Some(app_id.to_string()))
+        }
+        (Some(_), _, _) => {
+            return Err(
+                VedaError::InvalidInput("app_id mode must omit email/password".into()).into(),
+            )
+        }
+        (None, Some(email), Some(password)) => {
+            if state.auth_store.get_account_by_email(email).await?.is_some() {
+                return Err(VedaError::AlreadyExists("email already registered".into()).into());
+            }
+            let salt = SaltString::generate(&mut OsRng);
+            let hash = Argon2::default()
+                .hash_password(password.as_bytes(), &salt)
+                .map_err(|e| VedaError::Internal(e.to_string()))?
+                .to_string();
+            (Some(email.clone()), Some(hash), None)
+        }
+        _ => {
+            return Err(VedaError::InvalidInput(
+                "provide either app_id (platform) or email + password".into(),
+            )
+            .into())
+        }
+    };
+
     let account = Account {
         id: account_id.clone(),
         name: req.name,
-        email: Some(req.email),
-        password_hash: Some(password_hash),
+        email,
+        password_hash,
+        app_id: app_id.clone(),
         status: AccountStatus::Active,
         created_at: now,
         updated_at: now,
@@ -75,7 +112,8 @@ async fn create_account(
         name: "default".into(),
         key_hash,
         status: KeyStatus::Active,
-        app_id: None,
+        // Stamp app_id on the token too (governance label for ops traceability).
+        app_id: app_id.clone(),
         allowed_workspaces: None,
         expires_at: None,
         created_at: now,
@@ -85,6 +123,7 @@ async fn create_account(
     Ok(Json(ApiResponse::ok(CreateAccountResponse {
         account_id,
         api_key: raw_key,
+        app_id,
     })))
 }
 
@@ -162,6 +201,7 @@ async fn create_anonymous_account(
         name,
         email: None,
         password_hash: None,
+        app_id: None,
         status: AccountStatus::Active,
         created_at: now,
         updated_at: now,
@@ -188,6 +228,7 @@ async fn create_anonymous_account(
         status: WorkspaceStatus::Active,
         kind: WorkspaceKind::Fs,
         app_id: None,
+        description: None,
         created_at: now,
         updated_at: now,
     };
@@ -265,6 +306,12 @@ async fn claim_account(
         )
         .into());
     }
+    // app_id accounts belong to the platform — passwordless by design. Claim
+    // must not convert one into an email/password login (that would let a
+    // leaked vk_ hijack the account and break the platform's control).
+    if account.app_id.is_some() {
+        return Err(VedaError::InvalidInput("app_id accounts cannot be claimed".into()).into());
+    }
     // Pre-check email collision for a friendly 409, but the store's
     // `WHERE email IS NULL` guard + 1062 translation also covers the
     // race where two clients claim the same email concurrently.
@@ -307,6 +354,7 @@ async fn create_workspace(
         status: WorkspaceStatus::Active,
         kind: req.kind,
         app_id: req.app_id,
+        description: req.description,
         created_at: now,
         updated_at: now,
     };
@@ -319,6 +367,7 @@ async fn create_workspace(
             workspace_id: ws.id.clone(),
             name: veda_types::validate::DEFAULT_DATASET.to_string(),
             status: DatasetStatus::Active,
+            description: None,
             created_at: ws.created_at,
             updated_at: ws.updated_at,
         };
@@ -482,19 +531,36 @@ async fn create_workspace_key(
     }))))
 }
 
-async fn create_token(
+/// List a workspace's keys (metadata only — `key_hash` is `#[serde(skip)]`,
+/// so the plaintext is never re-surfaced; it's shown once at creation).
+async fn list_workspace_keys(
     State(state): State<Arc<AppState>>,
     auth: AuthAccount,
     Path(ws_id): Path<String>,
-) -> Result<Json<ApiResponse<WorkspaceTokenResponse>>, AppError> {
+) -> Result<Json<ApiResponse<Vec<WorkspaceKey>>>, AppError> {
     let _ws = auth.load_owned_workspace(&state, &ws_id).await?;
-    let (token, expires_at) = create_jwt(&state.jwt_secret, &ws_id, &auth.account_id, 24)
-        .map_err(|e| VedaError::Internal(e.to_string()))?;
-    Ok(Json(ApiResponse::ok(WorkspaceTokenResponse {
-        token,
-        expires_at,
-    })))
+    let keys = state.auth_store.list_workspace_keys(&ws_id).await?;
+    Ok(Json(ApiResponse::ok(keys)))
 }
+
+/// Revoke a workspace key. `revoke_workspace_key` is unconditional by id, so
+/// confirm the key belongs to THIS workspace (which the caller's account
+/// owns) first — otherwise knowing a key id would let any account revoke it.
+/// Mirrors the ownership guard on admin token disable.
+async fn delete_workspace_key(
+    State(state): State<Arc<AppState>>,
+    auth: AuthAccount,
+    Path((ws_id, key_id)): Path<(String, String)>,
+) -> Result<StatusCode, AppError> {
+    let _ws = auth.load_owned_workspace(&state, &ws_id).await?;
+    let keys = state.auth_store.list_workspace_keys(&ws_id).await?;
+    if !keys.iter().any(|k| k.id == key_id) {
+        return Err(VedaError::NotFound(format!("workspace key {key_id}")).into());
+    }
+    state.auth_store.revoke_workspace_key(&key_id).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
 
 #[cfg(test)]
 mod tests {

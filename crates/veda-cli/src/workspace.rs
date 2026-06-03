@@ -161,8 +161,9 @@ pub fn run_workspace_switch(cfg: &mut CliConfig, alias: String) -> Result<String
     Ok(prev)
 }
 
-/// `veda workspace rm <alias>`. Alias-only deletion — the server-side
-/// wk_ stays valid because there's no revoke endpoint yet. Rejects
+/// `veda workspace rm <alias>`. Alias-only deletion — removes the local
+/// profile only; does NOT revoke the server-side wk_ (revoke it from the
+/// console, or `DELETE /v1/workspaces/{id}/keys/{key_id}`). Rejects
 /// removing the active profile (user would lose every data command
 /// until they switched).
 pub fn run_workspace_rm(cfg: &mut CliConfig, alias: &str) -> Result<()> {

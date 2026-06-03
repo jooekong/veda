@@ -4,7 +4,6 @@ use serde::Deserialize;
 pub struct ServerConfig {
     #[serde(default = "default_listen")]
     pub listen: String,
-    pub jwt_secret: String,
     pub mysql: MysqlConfig,
     pub milvus: MilvusConfig,
     pub embedding: EmbeddingConfig,
@@ -224,7 +223,6 @@ impl ServerConfig {
 
     fn apply_env_overrides(&mut self) {
         env_str("VEDA_LISTEN", &mut self.listen);
-        env_str("VEDA_JWT_SECRET", &mut self.jwt_secret);
 
         env_str("VEDA_MYSQL_URL", &mut self.mysql.database_url);
         env_parse("VEDA_MYSQL_MAX_CONNECTIONS", &mut self.mysql.max_connections);
@@ -318,8 +316,6 @@ mod tests {
     static ENV_MUTEX: Mutex<()> = Mutex::new(());
 
     const MINIMAL_TOML: &str = r#"
-jwt_secret = "test-secret-that-is-long-enough-32chars!"
-
 [mysql]
 database_url = "mysql://localhost/veda"
 
@@ -338,7 +334,6 @@ dimension = 768
         let _lock = ENV_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
         let cfg = ServerConfig::from_toml(MINIMAL_TOML).unwrap();
         assert_eq!(cfg.listen, "0.0.0.0:3000");
-        assert_eq!(cfg.jwt_secret, "test-secret-that-is-long-enough-32chars!");
         assert_eq!(cfg.mysql.database_url, "mysql://localhost/veda");
         assert_eq!(cfg.mysql.max_connections, 50);
         assert!(cfg.llm.is_none());
@@ -349,7 +344,6 @@ dimension = 768
     fn env_overrides_toml_values() {
         let _lock = ENV_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
 
-        std::env::set_var("VEDA_JWT_SECRET", "env-secret-override-32chars-long!");
         std::env::set_var("VEDA_MYSQL_URL", "mysql://prod/veda");
         std::env::set_var("VEDA_LISTEN", "0.0.0.0:8080");
         std::env::set_var("VEDA_EMBEDDING_API_KEY", "sk-env");
@@ -358,14 +352,12 @@ dimension = 768
 
         let cfg = ServerConfig::from_toml(MINIMAL_TOML).unwrap();
 
-        std::env::remove_var("VEDA_JWT_SECRET");
         std::env::remove_var("VEDA_MYSQL_URL");
         std::env::remove_var("VEDA_LISTEN");
         std::env::remove_var("VEDA_EMBEDDING_API_KEY");
         std::env::remove_var("VEDA_MYSQL_MAX_CONNECTIONS");
         std::env::remove_var("VEDA_ALLOWED_ORIGINS");
 
-        assert_eq!(cfg.jwt_secret, "env-secret-override-32chars-long!");
         assert_eq!(cfg.mysql.database_url, "mysql://prod/veda");
         assert_eq!(cfg.listen, "0.0.0.0:8080");
         assert_eq!(cfg.embedding.api_key, "sk-env");
