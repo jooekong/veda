@@ -753,6 +753,42 @@ async fn fs_readonly_key_enforced() {
     s.drop_ws(&vk, &ws).await;
 }
 
+/// `fa7f91c` added GET (list — metadata only) and DELETE (revoke) for workspace
+/// keys; before, only `create` was exercised. Asserts list never re-surfaces the
+/// plaintext, and a revoked `wk_` stops authenticating on the data plane.
+#[tokio::test]
+#[ignore]
+async fn workspace_keys_list_and_revoke() {
+    let s = Srv::new();
+    let vk = s.account().await;
+    let ws = s.workspace(&vk, "fs").await;
+    let wk = s.wk(&vk, &ws, "readwrite").await;
+
+    // Key works on the data plane before revoke.
+    send(s.put("/v1/fs/k.txt").bearer_auth(&wk).body("seed")).await;
+    want(&send(s.get("/v1/fs/k.txt").bearer_auth(&wk)).await, 200, "wk_ works pre-revoke");
+
+    // List is metadata-only; never re-surfaces plaintext; carries the id.
+    let r = send(s.get(&format!("/v1/workspaces/{ws}/keys")).bearer_auth(&vk)).await;
+    want(&r, 200, "list keys");
+    assert!(!r.body.contains(&wk), "list must not leak plaintext key");
+    let keys = r.data();
+    let keys = keys.as_array().expect("keys is an array");
+    assert_eq!(keys.len(), 1, "exactly the one minted key");
+    let key_id = keys[0]["id"].as_str().expect("key id present").to_string();
+
+    // Revoke → 204; then the wk_ no longer authenticates.
+    want(&send(s.delete(&format!("/v1/workspaces/{ws}/keys/{key_id}")).bearer_auth(&vk)).await,
+         204, "revoke key");
+    want(&send(s.get("/v1/fs/k.txt").bearer_auth(&wk)).await, 401, "revoked wk_ rejected");
+
+    // Unknown key id under an owned workspace → 404 (ownership guard).
+    want(&send(s.delete(&format!("/v1/workspaces/{ws}/keys/does-not-exist")).bearer_auth(&vk)).await,
+         404, "revoke unknown id");
+
+    s.drop_ws(&vk, &ws).await;
+}
+
 #[tokio::test]
 #[ignore]
 async fn fs_grep_variants() {
