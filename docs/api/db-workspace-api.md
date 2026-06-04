@@ -2,12 +2,10 @@
 
 面向业务方接入的完整 HTTP API 参考。目标读者：写 SDK / 集成的工程师，以及阅读本文生成代码的 coding agent。
 
-> **⚠ 部分过时（2026-06）**：db 数据面认证已从账号 key `vk_` 改为 **workspace key `wk_`**（内部 `AuthDbWorkspace`），`/v1/vectors/*` 请求体去掉了 `workspace_id`（由 `wk_` 绑定的 workspace 推导），read-only `wk_` 不可 upsert/delete。下文 §2 认证模型及各 curl 示例仍是旧的 `vk_` + `workspace_id` 写法，**待随 Java SDK 适配一并重写**。改动见 `docs/plans/platform-admin-api-plan.md` 与 `CHANGELOG`。
-
 - 协议：HTTP/1.1，JSON over UTF-8，`Content-Type: application/json`。
 - 风格：Pinecone 式向量数据面 + 轻量控制面。v0 契约，设计锁定于
   [`docs/vectors-merge-plan.md`](../vectors-merge-plan.md)；向量数据面的语义细节（幂等、filter DSL）另见 [`docs/api/vectors.md`](./vectors.md)，本文为完整接口参考、与之同源。
-- 本文**只覆盖 db workspace（向量服务）**。fs workspace 的文件 / 全文检索 / SQL / 摘要接口（`/v1/fs/*`、`/v1/search`、`/v1/sql`、`/v1/abstract`、`/v1/overview`）走另一套 workspace 级鉴权，**不属于本 API**，见 [§9 不属于本 API 的端点](#9-不属于本-api-的端点)。
+- 本文**只覆盖 db workspace（向量服务）**。fs workspace 的文件 / 全文检索 / SQL / 摘要接口（`/v1/fs/*`、`/v1/search`、`/v1/sql`、`/v1/abstract`、`/v1/overview`）见 [§9 不属于本 API 的端点](#9-不属于本-api-的端点)。
 - **Java SDK**：数据面 4 端点（upsert/search/query/delete）的官方 Java 封装见 [`sdk/java`](../../sdk/java/README.md)（Java 8 + Jackson + OkHttp）。Python 示例见 [`examples/python_pinecone_demo.py`](../../examples/python_pinecone_demo.py)，Java 示例见 [`examples/java`](../../examples/java)。
 
 ---
@@ -74,61 +72,55 @@ SDK 生成类型时不要把这两类统一成一个时间类型。
 
 ## 2. 认证模型（务必先读）
 
-凭证通过 `Authorization: Bearer <token>` 头携带。系统里有几种凭证，**db workspace 只用其中一种**：
+凭证通过 `Authorization: Bearer <token>` 头携带。db workspace 分**两个面**，各用一种 key：
 
-| 凭证 | 前缀 | 作用域 | 用于本 API？ |
-|---|---|---|---|
-| **Account key** | `vk_` | 账号级（可访问该账号下所有 workspace） | ✅ **是** |
-| **Scoped service token** | `vk_` | 账号级 + 可选 `allowed_workspaces` 限定 | ✅ **是**（推荐给业务 app 用） |
-| Workspace key | `wk_` | 单个 workspace，读 / 读写 | ❌ 否，仅 fs workspace |
-| Workspace JWT | （无前缀） | 单个 workspace，24h | ❌ 否，仅 fs workspace |
+| 面 | 端点 | 凭证 | 前缀 | 作用域 |
+|---|---|---|---|---|
+| **数据面** | `/v1/vectors/*` | **Workspace key** | `wk_` | 绑定单个 db workspace，分 `read` / `readwrite` |
+| **控制面** | `/v1/workspaces*`、`/v1/workspaces/{ws}/datasets*`、`/v1/workspaces/{id}/keys*` | **Account key** | `vk_` | 账号级（该账号下所有 workspace） |
 
-> **关键**：本 API 所有需要鉴权的端点都走账号级鉴权（内部 `AuthAccount`），**只认 `vk_`**。把 `wk_` 或 JWT 用在 db 端点上会被当成无效 token，返回 `401 UNAUTHORIZED`。`wk_` / JWT 是 fs workspace 的东西，db 业务方完全用不到。
+> **数据面只认 `wk_`**（内部 `AuthDbWorkspace`）：目标 workspace 由 key 绑定，所以 `/v1/vectors/*` 请求体**不带 `workspace_id`**。read-only `wk_` 可 `search` / `query`，不可 `upsert` / `delete`（→ `403 PERMISSION_DENIED`）。
+> **控制面只认 `vk_`**（内部 `AuthAccount`）：建 workspace、管 dataset、签发 `wk_`。`vk_` 由平台 / 控制台持有，**不下发给数据面业务方**。
+>
+> 把 `vk_` 用到 `/v1/vectors/*`、或把 `wk_` 用到控制面，都会按无效凭证 `401 UNAUTHORIZED` 拒绝。
 
-### 作用域字段
+### 业务 app 的标准持有物
 
-服务令牌（`POST /admin/v1/tokens`）可带两个治理字段：
+业务 app 通常**只拿到一把 `wk_`**（平台为某个 db workspace 签发）。建 workspace / dataset、签 `wk_` 都是平台侧用 `vk_` 完成的控制面动作，业务 app 不接触 `vk_`。
 
-- `allowed_workspaces`：`["ws-id", ...]` 限定该 token 只能操作列表内的 workspace；`null` = 账号内不限。
-  - 向量 / dataset 端点的 `workspace_id` 若**省略**，仅当 token 的 `allowed_workspaces` 恰好是 **1 个** workspace 时才会隐式取它；为 0 个或 >1 个时省略会报 `INVALID_INPUT`，必须显式传。
-- `app_id`：标识业务 app 的审计标签，**不是安全边界**（访问控制由 `allowed_workspaces` + workspace 归属决定）。
+> **平台接入**：公司 AI Platform 走另一套按 `app_id` 的控制面（`/v1/apps/{app_id}/...`，鉴权外移到平台网关），详见平台管理 API 文档。本文描述的 `vk_` 控制面是当前直连形态。
 
 ---
 
 ## 3. 接入流程
 
-业务方标准链路（全程只用 `vk_`）：
+控制面（建 workspace + 签 `wk_`）用 `vk_`，由平台 / 控制台完成；业务 app 用拿到的 `wk_` 跑数据面。
 
 ```bash
-# 1) 注册账号，拿到账号级 vk_（或用已有账号 /v1/accounts/login）
-curl -sX POST $BASE/v1/accounts \
-  -H 'content-type: application/json' \
-  -d '{"name":"acme","email":"ops@acme.com","password":"<pw>"}'
-# → { "success": true, "data": { "account_id": "...", "api_key": "vk_..." } }
+# —— 控制面（平台侧，持账号 vk_）——
+ACCOUNT_KEY=vk_...   # 平台持有的账号 key（注册见 §6.1）
 
-ACCOUNT_KEY=vk_...
-
-# 2) 建一个 db workspace（服务端会自动 bootstrap 一个 default dataset + Milvus collection）
+# 1) 建一个 db workspace（服务端自动 bootstrap 一个 default dataset + Milvus collection）
 curl -sX POST $BASE/v1/workspaces \
   -H "authorization: Bearer $ACCOUNT_KEY" -H 'content-type: application/json' \
   -d '{"name":"prod-index","kind":"db"}'
 # → data: { "id": "<ws_id>", "kind": "db", "status": "active", ... }
-
 WS=<ws_id>
 
-# 3)（可选）为具体业务 app 铸一个限定到该 workspace 的服务令牌
-curl -sX POST $BASE/admin/v1/tokens \
+# 2) 为该 workspace 签一把数据面 wk_，交给业务 app
+curl -sX POST $BASE/v1/workspaces/$WS/keys \
   -H "authorization: Bearer $ACCOUNT_KEY" -H 'content-type: application/json' \
-  -d "{\"app_id\":\"search-svc\",\"name\":\"prod\",\"allowed_workspaces\":[\"$WS\"]}"
-# → data: { "id": "...", "token": "vk_..." }   # token 只此一次可见，请妥存
+  -d '{"name":"search-svc","permission":"readwrite"}'
+# → data: { "key": "wk_...", "permission": "readwrite" }   # 明文只此一次，请妥存
 
-# 4) 写入 / 检索（用账号 key 或上一步的服务令牌）
+# —— 数据面（业务 app，只持 wk_；请求体不带 workspace_id）——
+WK=wk_...
 curl -sX POST $BASE/v1/vectors/upsert \
-  -H "authorization: Bearer $ACCOUNT_KEY" -H 'content-type: application/json' \
-  -d "{\"workspace_id\":\"$WS\",\"records\":[{\"id\":\"sku-1\",\"text\":\"Air Jordan 1\"}]}"
+  -H "authorization: Bearer $WK" -H 'content-type: application/json' \
+  -d '{"records":[{"id":"sku-1","text":"Air Jordan 1"}]}'
 ```
 
-> ⚠️ **不要用匿名 onboarding 接 db**：`POST /v1/accounts/anonymous` 一步发账号 + workspace，但它建的是 **`kind=fs`** workspace，向量端点用不了。db 业务方必须显式走上面第 2 步。
+> ⚠️ **不要用匿名 onboarding 接 db**：`POST /v1/accounts/anonymous` 一步发账号 + workspace，但它建的是 **`kind=fs`** workspace，向量端点用不了。db 必须显式走上面第 1 步建 `kind=db`。
 
 ---
 
@@ -164,6 +156,18 @@ curl -sX POST $BASE/v1/vectors/upsert \
 | `status` | enum | `active` \| `archived` |
 | `created_at` / `updated_at` | string | RFC3339 |
 
+### WorkspaceKey（`POST /v1/workspaces/{id}/keys` 的列表项）
+| 字段 | 类型 | 说明 |
+|---|---|---|
+| `id` | string | key id（撤销时用） |
+| `workspace_id` | string | 绑定的 workspace |
+| `name` | string | key 名称 |
+| `permission` | enum | `read` \| `readwrite` |
+| `status` | enum | `active` \| `revoked` |
+| `created_at` | string | RFC3339 |
+
+> 明文 `wk_` 仅在创建响应里出现一次（字段 `key`）；列表接口只回元数据，不含明文。
+
 ### VectorSearchHit（`/v1/vectors/search` 命中项）
 | 字段 | 类型 | 说明 |
 |---|---|---|
@@ -191,28 +195,31 @@ curl -sX POST $BASE/v1/vectors/upsert \
 
 ## 6. 端点参考
 
-汇总（✅=需 `vk_` 鉴权，🔓=无需鉴权）：
+汇总（🔑 `vk_`=控制面账号鉴权，🟦 `wk_`=数据面 workspace 鉴权，🔓=无需鉴权）：
 
 | 方法 | 路径 | 鉴权 | 用途 |
 |---|---|:--:|---|
 | POST | `/v1/accounts` | 🔓 | 注册账号 |
 | POST | `/v1/accounts/login` | 🔓 | 登录换新 `vk_` |
 | POST | `/v1/accounts/anonymous` | 🔓 | 匿名 onboarding（建 **fs** workspace，db 勿用） |
-| POST | `/v1/accounts/claim` | ✅ | 认领匿名账号 |
-| POST | `/v1/workspaces` | ✅ | 建 workspace（`kind:"db"`） |
-| GET | `/v1/workspaces` | ✅ | 列 workspace（分页） |
-| DELETE | `/v1/workspaces/{id}` | ✅ | 软删 workspace |
-| POST | `/v1/workspaces/{ws}/datasets` | ✅ | 建 dataset |
-| GET | `/v1/workspaces/{ws}/datasets` | ✅ | 列 dataset（分页） |
-| DELETE | `/v1/workspaces/{ws}/datasets/{name}` | ✅ | 软删 dataset（不能删 `default`） |
-| POST | `/v1/vectors/upsert` | ✅ | 写入 / 覆盖记录 |
-| POST | `/v1/vectors/search` | ✅ | 向量检索 |
-| POST | `/v1/vectors/query` | ✅ | 按 id 查 |
-| POST | `/v1/vectors/delete` | ✅ | 按 id 删 |
-| POST | `/admin/v1/tokens` | ✅ | 铸服务令牌 |
-| POST | `/admin/v1/tokens/{id}/disable` | ✅ | 撤销令牌 |
+| POST | `/v1/accounts/claim` | 🔑 | 认领匿名账号 |
+| POST | `/v1/workspaces` | 🔑 | 建 workspace（`kind:"db"`） |
+| GET | `/v1/workspaces` | 🔑 | 列 workspace（分页） |
+| DELETE | `/v1/workspaces/{id}` | 🔑 | 软删 workspace |
+| POST | `/v1/workspaces/{id}/keys` | 🔑 | 签发数据面 `wk_`（`read` / `readwrite`） |
+| GET | `/v1/workspaces/{id}/keys` | 🔑 | 列 `wk_` 元数据（无明文） |
+| DELETE | `/v1/workspaces/{id}/keys/{key_id}` | 🔑 | 撤销 `wk_` |
+| POST | `/v1/workspaces/{ws}/datasets` | 🔑 | 建 dataset |
+| GET | `/v1/workspaces/{ws}/datasets` | 🔑 | 列 dataset（分页） |
+| DELETE | `/v1/workspaces/{ws}/datasets/{name}` | 🔑 | 软删 dataset（不能删 `default`） |
+| POST | `/v1/vectors/upsert` | 🟦 | 写入 / 覆盖记录（read-only `wk_` → 403） |
+| POST | `/v1/vectors/search` | 🟦 | 向量检索 |
+| POST | `/v1/vectors/query` | 🟦 | 按 id 查 |
+| POST | `/v1/vectors/delete` | 🟦 | 按 id 删（read-only `wk_` → 403） |
+| POST | `/admin/v1/tokens` | 🔑 | 铸账号级 scoped `vk_` 服务令牌 |
+| POST | `/admin/v1/tokens/{id}/disable` | 🔑 | 撤销令牌 |
 
-> `POST /v1/workspaces/{id}/keys`（建 `wk_`）和 `POST /v1/workspaces/{id}/token`（建 JWT）也存在，但产出的是 **fs workspace 凭证**，db 业务方用不到，故不在上表展开。
+> 平台接入按 `app_id` 走 `/v1/apps/{app_id}/...`（鉴权外移，见平台管理 API 文档）；上表 `vk_` 控制面是当前直连形态。
 
 ---
 
@@ -235,67 +242,87 @@ curl -sX POST $BASE/v1/vectors/upsert \
 - 请求：无
 - 响应 200：`{ "account_id", "api_key": "vk_...", "workspace_id", "workspace_key": "wk_..." }`
 
-#### POST `/v1/accounts/claim` ✅
+#### POST `/v1/accounts/claim` 🔑
 把当前匿名账号升级为命名账号（补 email + 密码），原 `vk_` 继续有效。
 - 请求：`{ "email": string, "password": string, "name"?: string }`
 - 响应 200：`{ "account_id": string }`
-- 错误：`400 INVALID_INPUT`（已认领 / 字段为空）、`409 ALREADY_EXISTS`（邮箱被占）。
+- 错误：`400 INVALID_INPUT`（已认领 / 字段为空 / app_id 账号不可认领）、`409 ALREADY_EXISTS`（邮箱被占）。
 
 ---
 
-### 6.2 Workspace
+### 6.2 Workspace（控制面，🔑 `vk_`）
 
-#### POST `/v1/workspaces` ✅
+#### POST `/v1/workspaces` 🔑
 建 workspace。`kind:"db"` 时服务端额外 bootstrap `default` dataset + Milvus collection（单事务，provision 失败自动回滚，不留僵尸 workspace）。
-- 请求：`{ "name": string, "kind"?: "fs"|"db", "app_id"?: string }`（`kind` 省略默认 `fs`，**做向量服务必须显式 `"db"`**）
+- 请求：`{ "name": string, "kind"?: "fs"|"db", "description"?: string }`（`kind` 省略默认 `fs`，**做向量服务必须显式 `"db"`**）
 - 响应 200：`Workspace` 对象
-- 错误：`500 INTERNAL`（Milvus provision 失败，已回滚）。
+- 错误：`409 ALREADY_EXISTS`（同账号下同名 workspace）、`500 INTERNAL`（Milvus provision 失败，已回滚）。
 
-#### GET `/v1/workspaces` ✅
+#### GET `/v1/workspaces` 🔑
 列出账号下 workspace（含 fs 与 db），分页（见 §12）。
 - Query：`limit`?（默认 100，最大 200）、`after`?（游标）
 - 响应 200：`PaginatedResponse<Workspace>`
 
-#### DELETE `/v1/workspaces/{id}` ✅
+#### DELETE `/v1/workspaces/{id}` 🔑
 软删（`status=archived`）。归档后再 load 该 workspace 的 dataset / 向量调用都返回 404。
 - 响应 **200**：`{ "success": true, "data": null }`
 - 错误：`403 PERMISSION_DENIED`（非本账号）、`404 NOT_FOUND`。
-- ⚠️ 当前为软删，**不回收 Milvus 向量**（存储泄漏，见 followups H1）。
+- ⚠️ 当前为软删，**不回收 Milvus 向量**（存储泄漏，见 followups H1）；唯一约束仍在，名称暂不可复用。
 
 ---
 
-### 6.3 Dataset
+### 6.3 Workspace Key（控制面，🔑 `vk_`）
+
+> 数据面凭证 `wk_` 的生命周期。明文只在创建时返回一次。
+
+#### POST `/v1/workspaces/{id}/keys` 🔑
+为 workspace 签发一把数据面 `wk_`。
+- 请求：`{ "name"?: string, "permission"?: "read"|"readwrite" }`（`permission` 默认 `readwrite`）
+- 响应 200：`{ "key": "wk_...", "permission": "read"|"readwrite" }` —— **明文仅此一次**。
+- 错误：`400 INVALID_INPUT`（`permission` 非法）、`403 PERMISSION_DENIED` / `404 NOT_FOUND`（workspace 非本账号 / 不存在）。
+
+#### GET `/v1/workspaces/{id}/keys` 🔑
+列出该 workspace 的 key（仅元数据，无明文）。
+- 响应 200：`WorkspaceKey[]`（直接数组，**不分页**）。
+
+#### DELETE `/v1/workspaces/{id}/keys/{key_id}` 🔑
+撤销 key（`status=revoked`，立即失效）。
+- 响应 **204**：无响应体
+- 错误：`404 NOT_FOUND`（key 不存在或不属于该 workspace）。
+
+---
+
+### 6.4 Dataset（控制面，🔑 `vk_`）
 
 > 三个端点都要求目标 workspace 必须是 `kind=db` 且 active，否则 `400 WORKSPACE_KIND_MISMATCH` / `404`。
 
-#### POST `/v1/workspaces/{ws}/datasets` ✅
-- 请求：`{ "name": string }`（charset `[a-zA-Z0-9_-]+`，≤64 字节，不含 `:`）
+#### POST `/v1/workspaces/{ws}/datasets` 🔑
+- 请求：`{ "name": string, "description"?: string }`（`name` charset `[a-zA-Z0-9_-]+`，≤64 字节，不含 `:`）
 - 响应 **201**：`Dataset` 对象
 - 错误：`409 ALREADY_EXISTS`（同名，大小写不敏感）、`400 INVALID_INPUT`。
 
-#### GET `/v1/workspaces/{ws}/datasets` ✅
+#### GET `/v1/workspaces/{ws}/datasets` 🔑
 列出 active dataset，分页。
 - Query：`limit`? / `after`?
 - 响应 200：`PaginatedResponse<Dataset>`
 
-#### DELETE `/v1/workspaces/{ws}/datasets/{name}` ✅
+#### DELETE `/v1/workspaces/{ws}/datasets/{name}` 🔑
 软删 dataset（`status=archived`）。
 - 响应 **204**：无响应体
-- 错误：`400 CANNOT_DELETE_DEFAULT_DATASET`（`default` 不可删）、`404 NOT_FOUND`。
+- 错误：`400 CANNOT_DELETE_DEFAULT_DATASET`（`default` 不可删，大小写不敏感）、`404 NOT_FOUND`。
 - ⚠️ 软删不回收 Milvus 向量（同 followups H1）。
 
 ---
 
-### 6.4 向量数据面
+### 6.5 向量数据面（🟦 `wk_`）
 
-> 四个端点的公共参数：`workspace_id`?（省略规则见 §2 作用域）、`dataset`?（省略取 `default`）。目标 workspace 必须 `kind=db`。
+> 四个端点的目标 workspace 由 `wk_` 绑定，请求体**不带 `workspace_id`**。公共参数仅 `dataset`?（省略取 `default`）。`upsert` / `delete` 需 `readwrite` 权限的 `wk_`（read-only → `403 PERMISSION_DENIED`）。
 
-#### POST `/v1/vectors/upsert` ✅
+#### POST `/v1/vectors/upsert` 🟦
 按 `(dataset, id)` 插入或整行替换。单次最多 **500** 条。
 - 请求：
 ```json
 {
-  "workspace_id": "<ws_id>",
   "dataset": "products",
   "records": [
     {
@@ -315,9 +342,9 @@ curl -sX POST $BASE/v1/vectors/upsert \
 ```
   - `ids`：实际写入的 id，**按请求顺序、且已对同批重复 id 去重**（last-wins，见 §11），所以可能比 `records` 短。省略 `id` 的记录在这里**首次也是唯一一次**暴露服务端生成的 UUID，务必客户端留存。
   - `commit_ts`：服务端写完时刻（毫秒 epoch）。Milvus REST 不返回真 commit ts，此值用于同机 read-your-writes 足够。
-- 错误：`400 INVALID_INPUT`（字段校验，含 **text/meta/tags/category/id/dataset 等单字段长度或字符集超限**，`error` 形如 `<field>: <reason>`）、`413 PAYLOAD_TOO_LARGE`（**仅** `records` 条数 >500）、`500 EMBEDDING_FAILED`。
+- 错误：`400 INVALID_INPUT`（字段校验，含 **text/meta/tags/category/id/dataset 等单字段长度或字符集超限**，`error` 形如 `<field>: <reason>`）、`403 PERMISSION_DENIED`（read-only `wk_`）、`413 PAYLOAD_TOO_LARGE`（**仅** `records` 条数 >500）、`500 EMBEDDING_FAILED`。
 
-#### POST `/v1/vectors/search` ✅
+#### POST `/v1/vectors/search` 🟦
 检索目标 dataset，**隐式锁定**（v0 不支持跨 dataset）。`mode` 选择 ranker：
 
 | `mode` | 行为 | 嵌入 query？ | `score_type` | 分数范围 |
@@ -330,10 +357,9 @@ curl -sX POST $BASE/v1/vectors/upsert \
 - 请求：
 ```json
 {
-  "workspace_id": "<ws_id>",
   "dataset": "products",
   "query": "sneakers under 1500",
-  "mode": "hybrid",
+  "mode": "semantic",
   "top_k": 10,
   "min_score": 0.4,
   "filter": {
@@ -349,25 +375,25 @@ curl -sX POST $BASE/v1/vectors/upsert \
 - 响应 200：`{ "hits": VectorSearchHit[] }`（每个 hit 含 `score` + `score_type`）。
 - 错误：`400 INVALID_INPUT`（query 为空或 >65535 字节 / top_k=0 / filter 非法 / `min_score` 非有限值或与 `mode=hybrid` 同用）、`413 PAYLOAD_TOO_LARGE`（top_k>100）、`500 EMBEDDING_FAILED`（semantic/hybrid 嵌入失败）/ `500`（hybrid 后端失败，不降级）。
 
-#### POST `/v1/vectors/query` ✅
+#### POST `/v1/vectors/query` 🟦
 按 id 直查。**不保证顺序；不存在的 id 静默跳过（不报错）**。单次最多 **500** 个 id。
-- 请求：`{ "workspace_id": "<ws_id>", "dataset": "products", "ids": ["sku-1","sku-2"] }`
+- 请求：`{ "dataset": "products", "ids": ["sku-1","sku-2"] }`
 - 响应 200：`{ "hits": VectorRecordHit[] }`
 - 错误：`400 INVALID_INPUT`（ids 为空）、`413 PAYLOAD_TOO_LARGE`（>500）。
 
-#### POST `/v1/vectors/delete` ✅
+#### POST `/v1/vectors/delete` 🟦
 按 id 硬删。单次最多 **500** 个 id。
-- 请求：`{ "workspace_id": "<ws_id>", "dataset": "products", "ids": ["sku-1","sku-2"] }`
+- 请求：`{ "dataset": "products", "ids": ["sku-1","sku-2"] }`
 - 响应 200：`{ "delete_count": 2 }`
 - ⚠️ `delete_count` 是 Milvus 创建的 **tombstone 数 = `len(ids)`**，与「实际存在并被删的行数」**无关**。要区分请先 `query`。
-- 错误：`400 INVALID_INPUT`（ids 为空）、`413 PAYLOAD_TOO_LARGE`（>500）。
+- 错误：`400 INVALID_INPUT`（ids 为空）、`403 PERMISSION_DENIED`（read-only `wk_`）、`413 PAYLOAD_TOO_LARGE`（>500）。
 
 ---
 
-### 6.5 服务令牌
+### 6.6 服务令牌（控制面，🔑 `vk_`）
 
-#### POST `/admin/v1/tokens` ✅
-铸一把 `vk_` 服务令牌，归属调用者账号。v0 无独立 admin 网关：任何登录账号都可为**自己的**账号铸令牌。
+#### POST `/admin/v1/tokens` 🔑
+铸一把账号级 scoped `vk_` 服务令牌，归属调用者账号。v0 无独立 admin 网关：任何持账号 `vk_` 者都可为**自己的**账号铸令牌。**注意：这是控制面 `vk_`，不是数据面 `wk_`**——数据面凭证请用 §6.3 的 `wk_`。
 - 请求：
 ```json
 {
@@ -381,7 +407,7 @@ curl -sX POST $BASE/v1/vectors/upsert \
 - 响应 **201**：`{ "id": string, "token": "vk_..." }` —— `token` **仅此一次返回**，之后无法再取。
 - 错误：`400 INVALID_INPUT`（`app_id`/`name` 空、`expires_at` 非法）、`403 PERMISSION_DENIED`（`allowed_workspaces` 含他人 workspace）、`404 NOT_FOUND`。
 
-#### POST `/admin/v1/tokens/{id}/disable` ✅
+#### POST `/admin/v1/tokens/{id}/disable` 🔑
 撤销令牌（先校验归属本账号）。
 - 响应 **204**：无响应体
 - 错误：`404 NOT_FOUND`（不存在 **或** 属于他账号——不泄露存在性）。
@@ -430,11 +456,11 @@ Qdrant 风格的严格子集，仅用于 `/v1/vectors/search` 的 `filter`：
 
 ## 9. 不属于本 API 的端点
 
-以下端点走 **workspace 级鉴权**（`wk_` 或 JWT），且服务端强制目标 workspace 为 `kind=fs`——**db workspace 调用会失败**，不要在 db SDK 里暴露：
+以下端点属于 **fs workspace**（个人知识库 / FUSE）能力面，服务端强制目标 workspace 为 `kind=fs`——用 db workspace 的 `wk_` 调用会 `400 WORKSPACE_KIND_MISMATCH`，不要在 db SDK 里暴露：
 
-- `POST /v1/search`、`POST /v1/sql`、`GET /v1/abstract/{path}`、`GET /v1/overview/{path}`、`/v1/fs/*`、`/v1/events/*`、`/v1/collections/*`
+- `POST /v1/search`、`POST /v1/sql`、`GET /v1/abstract/{path}`、`GET /v1/overview/{path}`、`/v1/fs/*`、`/v1/events`、`/v1/collections/*`
 
-它们属于 fs workspace（个人知识库 / FUSE）能力面，与向量服务是两条独立产品线。
+它们与向量服务是两条独立产品线。fs 数据面同样以 `wk_` 鉴权，但绑定的是 `kind=fs` 的 workspace。
 
 ---
 
@@ -447,10 +473,10 @@ Qdrant 风格的严格子集，仅用于 `/v1/vectors/search` 的 `filter`：
 | `INVALID_INPUT` | 400 | 通用校验失败（字符集 / 长度 / 缺字段）。`error` 携带 `<field>: <reason>` |
 | `WORKSPACE_KIND_MISMATCH` | 400 | 向量 API 打到了 fs workspace（或反之） |
 | `CANNOT_DELETE_DEFAULT_DATASET` | 400 | 拒绝删除 `default` dataset |
-| `UNAUTHORIZED` | 401 | 缺失 / 无效 / 过期的 bearer token（过期 token 也表现为此，不泄露存在性） |
-| `PERMISSION_DENIED` | 403 | 已认证，但 token 的 `allowed_workspaces` 不覆盖目标，或操作了他账号资源 |
-| `NOT_FOUND` | 404 | workspace / dataset / token 不存在或已归档 |
-| `ALREADY_EXISTS` | 409 | dataset 同名冲突（大小写不敏感）/ 邮箱已注册 |
+| `UNAUTHORIZED` | 401 | 缺失 / 无效 / 过期 / 用错面的 bearer token（如 `wk_` 打控制面、`vk_` 打数据面） |
+| `PERMISSION_DENIED` | 403 | read-only `wk_` 调 `upsert`/`delete`；或 `vk_` 操作了他账号资源 |
+| `NOT_FOUND` | 404 | workspace / dataset / key / token 不存在或已归档 |
+| `ALREADY_EXISTS` | 409 | workspace / dataset 同名冲突（大小写不敏感）/ 邮箱已注册 |
 | `PAYLOAD_TOO_LARGE` | 413 | **仅**批量条数超限（`records` / `ids` >500、`top_k` >100）；单字段长度超限走 `INVALID_INPUT` |
 | `QUOTA_EXCEEDED` | 429 | 向量 API 当前不返回；保留 |
 | `EMBEDDING_FAILED` | 500 | 服务端嵌入上游错误 |
@@ -471,7 +497,7 @@ Qdrant 风格的严格子集，仅用于 `/v1/vectors/search` 的 `filter`：
 
 **同一次 upsert 内重复 `id`**：服务端去重，**last-wins**（取最后一次出现的值，但保留该 id 首次出现的位置），重复项在嵌入前丢弃。无报错，响应 `ids` 反映去重后结果，可能短于请求 `records`。
 
-**delete**：`delete_count` 是 tombstone 数 = `len(ids)`，不代表实际删除行数（见 §6.4）。
+**delete**：`delete_count` 是 tombstone 数 = `len(ids)`，不代表实际删除行数（见 §6.5）。
 
 **commit_ts**：服务端本地时间近似，仅用于同机 read-your-writes，不是分布式可比的逻辑时钟。
 
@@ -479,7 +505,7 @@ Qdrant 风格的严格子集，仅用于 `/v1/vectors/search` 的 `filter`：
 
 ## 12. 分页
 
-`GET /v1/workspaces` 与 `GET /v1/workspaces/{ws}/datasets` 用游标分页：
+`GET /v1/workspaces` 与 `GET /v1/workspaces/{ws}/datasets` 用游标分页（`GET /v1/workspaces/{id}/keys` 不分页，直接返数组）：
 
 - `limit`：每页条数，默认 100，最大 200（超出静默截断）。
 - `after`：上一页 `next_cursor`，不透明字符串。

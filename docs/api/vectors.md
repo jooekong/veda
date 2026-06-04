@@ -20,9 +20,14 @@ tracked in [`docs/vectors-merge-backlog.md`](../vectors-merge-backlog.md).
 
 ## Auth
 
-All endpoints take `Authorization: Bearer <vk_…>`. Tokens scope to an
-account; `allowed_workspaces` on the token restricts which db workspaces
-the bearer can touch. Issue tokens via `POST /admin/v1/tokens`.
+All four data-plane endpoints take `Authorization: Bearer <wk_…>` — a
+**workspace key** bound to exactly one db workspace (internal
+`AuthDbWorkspace`). The target workspace is derived from the key, so request
+bodies do **not** carry `workspace_id`. A read-only `wk_` may `search` /
+`query` but not `upsert` / `delete` (→ `403 PERMISSION_DENIED`). Keys are
+issued by the control plane (`POST /v1/workspaces/{id}/keys`) and handed to
+the app by the platform; the account key `vk_` is **not** used on the data
+plane.
 
 ## Defaults
 
@@ -48,7 +53,6 @@ Same-batch duplicate `id` is server-side deduped (last entry wins) — see
 
 ```json
 {
-  "workspace_id": "...",         // optional if token scope = exactly 1 ws
   "dataset": "products",         // optional, default "default"
   "records": [
     {"id": "sku-1", "text": "Air Jordan 1",
@@ -136,10 +140,9 @@ cosine floor sits well above that (e.g. 0.4–0.6) — there is no universal "0.
 
 ```json
 {
-  "workspace_id": "...",
   "dataset": "products",       // optional
   "query": "sneakers under 1500",
-  "mode": "hybrid",            // optional: hybrid (default) | semantic | fulltext
+  "mode": "semantic",          // hybrid (default) | semantic | fulltext
   "top_k": 10,                 // default 10, max 100
   "min_score": 0.4,            // optional; semantic/fulltext only (400 on hybrid)
   "filter": {                  // optional
@@ -160,8 +163,7 @@ Direct lookup by `id`. Order not preserved; missing ids silently absent
 (no error). Max 500 ids per call.
 
 ```json
-{"workspace_id": "...", "dataset": "products",
- "ids": ["sku-1", "sku-2"]}
+{"dataset": "products", "ids": ["sku-1", "sku-2"]}
 ```
 
 ### POST `/v1/vectors/delete`
@@ -173,8 +175,7 @@ physically existed; it is **not** "rows that existed and were removed".
 Use `query` first if you need to distinguish. Max 500 per call.
 
 ```json
-{"workspace_id": "...", "dataset": "products",
- "ids": ["sku-1", "sku-2"]}
+{"dataset": "products", "ids": ["sku-1", "sku-2"]}
 ```
 
 Response:
@@ -196,15 +197,26 @@ Strict subset of Qdrant-style:
 
 ## Control plane
 
+Workspace / dataset / key management uses the account key `vk_`
+(`AuthAccount`) — held by the platform/console, not the data-plane app. Mint
+a data-plane `wk_` with `POST /v1/workspaces/{id}/keys` and hand it to the app.
+
 | Method | Path | Purpose |
 |---|---|---|
 | POST | `/v1/workspaces` | Create workspace (`kind=db` for vector workspaces). For `kind=db` the server also bootstraps a `default` dataset and the Milvus collection. |
 | GET | `/v1/workspaces` | List active workspaces (paginated) |
+| POST | `/v1/workspaces/{id}/keys` | Issue a `wk_` data-plane key; `permission` = `read` \| `readwrite` (plaintext shown once) |
+| GET | `/v1/workspaces/{id}/keys` | List `wk_` metadata (no plaintext) |
+| DELETE | `/v1/workspaces/{id}/keys/{key_id}` | Revoke a `wk_` |
 | POST | `/v1/workspaces/{ws}/datasets` | Create a new dataset in a db workspace |
 | GET | `/v1/workspaces/{ws}/datasets` | List active datasets (paginated) |
 | DELETE | `/v1/workspaces/{ws}/datasets/{name}` | Soft-delete (`status='archived'`). Cannot delete `default`. |
-| POST | `/admin/v1/tokens` | Mint a `vk_` token scoped to the caller's account |
-| POST | `/admin/v1/tokens/{id}/disable` | Revoke a token (ownership-checked) |
+
+> Platform integration drives the control plane by `app_id`
+> (`/v1/apps/{app_id}/...`, auth externalized) instead of `vk_` — see the
+> platform management API docs. The `vk_` plane above is the current
+> direct-access form; `/admin/v1/tokens` (scoped `vk_` minting) still exists
+> for account-level service tokens.
 
 ### Pagination (GET list endpoints)
 
@@ -251,12 +263,12 @@ are not.
 | `WORKSPACE_KIND_MISMATCH` | 400 | Vector API called on an fs workspace, or fs API called on a db workspace |
 | `CANNOT_DELETE_DEFAULT_DATASET` | 400 | `DELETE /v1/workspaces/{ws}/datasets/default` is refused; the implicit-fallback dataset is reserved |
 | `INVALID_PATH` | 400 | Path-shaped input failed (fs-side only) |
-| `UNAUTHORIZED` | 401 | Missing / invalid bearer token |
-| `PERMISSION_DENIED` | 403 | Authenticated but the token's `allowed_workspaces` doesn't cover the target |
+| `UNAUTHORIZED` | 401 | Missing / invalid `wk_`, or wrong plane (`vk_` on the data plane) |
+| `PERMISSION_DENIED` | 403 | Read-only `wk_` used for `upsert` / `delete` |
 | `NOT_FOUND` | 404 | Workspace / dataset / record / token doesn't exist |
 | `ALREADY_EXISTS` | 409 | Dataset name collision (case-insensitive per MySQL collation) |
 | `PRECONDITION_FAILED` | 412 | Conditional request lost the race (fs-side only) |
-| `PAYLOAD_TOO_LARGE` | 413 | Batch / field exceeds documented limit |
+| `PAYLOAD_TOO_LARGE` | 413 | Batch count exceeds limit (`records`/`ids` >500, `top_k` >100); single-field size overruns return `INVALID_INPUT` |
 | `QUOTA_EXCEEDED` | 429 | Vectors API does not return this currently; fs and SQL paths may (workspace storage cap / scan limit) |
 | `EMBEDDING_FAILED` | 500 | Server-side embedding upstream error |
 | `INTERNAL` | 500 | Catch-all for storage / deadlock / unexpected — opaque on purpose |

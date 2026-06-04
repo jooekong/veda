@@ -35,3 +35,12 @@
 - **不做**：不替换对外接口为 gRPC。若将来出现高 QPS 服务间内部调用（profile 证明 JSON 是瓶颈）或流式需求，再考虑**对外 REST + 对内 gRPC 双协议**，而非换掉业务方 SDK 接口。
 - **触发**：正式对业务方发 SDK 时。alpha 自用 / curl 直连不阻塞。
 - **关联**：完整接口参考见 `docs/api/db-workspace-api.md`。
+
+## S1. Scoped `vk_` 越权签发 out-of-scope `wk_`（控制面 scope 未 enforce）
+
+- **来源**：2026-06-04 Codex review（A 迁移第一步 app_id 自动开通 review 时顺带发现，**非该次引入**，是 `fa7f91c` 引入 key 端点时的既有遗漏）。
+- **现状**：workspace key 端点 create / list / delete（`account.rs:507` / `:556` / `:570`）只调 `load_owned_workspace`（仅校验 workspace 归属本账号），**不校验** token 的 `allowed_workspaces` scope；而 dataset 路径 `load_db_workspace`（`auth.rs:152`）已正确 `check_workspace_allowed`（scope 定义见 `auth.rs:17`）。
+- **真问题**：一个 `allowed_workspaces` 限定到 `ws1` 的 scoped `vk_`，可对 `ws2` 调 `POST /v1/workspaces/{ws2}/keys` 拿到 `ws2` 的 readwrite `wk_`，绕过 scope 拿到越权数据面凭证。dataset 与 key 两条路径行为不一致。
+- **修法**（约 3 行 × 3 处）：key 创建 / 列表 / 删除在 `load_owned_workspace` 后补 `auth.check_workspace_allowed(&ws_id)?`，对齐 dataset 路径。
+- **决策（2026-06-04 Joe）**：v0 暂不修，记入待办。A 迁移用 `app_id` 控制面（鉴权外移）取代 `vk_` 控制面后，scoped `vk_` 这条路径随之消失、问题自然消解；若决定让 `vk_` 控制面长期并存，则必须补这个校验再对外。
+- **关联**：`platform-admin-api-plan.md` §7（"`vk_` 仍是账号根权限、无能力分级"风险的具体实例）。
