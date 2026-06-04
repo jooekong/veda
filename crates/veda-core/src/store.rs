@@ -497,6 +497,10 @@ pub trait AuthStore: Send + Sync {
     async fn create_account(&self, account: &Account) -> Result<()>;
     async fn get_account(&self, id: &str) -> Result<Option<Account>>;
     async fn get_account_by_email(&self, email: &str) -> Result<Option<Account>>;
+    /// Look up an account by its platform `app_id` (unique when set). Used by
+    /// the app_id-scoped control plane (`/v1/apps/{app_id}/...`) to resolve or
+    /// auto-provision the tenant without a `vk_` token.
+    async fn get_account_by_app_id(&self, app_id: &str) -> Result<Option<Account>>;
     /// Attach an email + password hash to an existing anonymous
     /// account (rows with `email IS NULL`), optionally renaming it.
     /// Used by `veda init --upgrade` to turn anon identities into recoverable

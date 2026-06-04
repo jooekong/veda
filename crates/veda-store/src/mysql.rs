@@ -2110,6 +2110,18 @@ impl AuthStore for MysqlStore {
         row.map(|r| row_to_account(&r)).transpose()
     }
 
+    async fn get_account_by_app_id(&self, app_id: &str) -> Result<Option<Account>> {
+        let row = sqlx::query(
+            r#"SELECT id, name, email, password_hash, app_id, status, created_at, updated_at
+               FROM veda_accounts WHERE app_id = ?"#,
+        )
+        .bind(app_id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(storage_err)?;
+        row.map(|r| row_to_account(&r)).transpose()
+    }
+
     async fn claim_account(
         &self,
         id: &str,
@@ -2306,7 +2318,7 @@ impl AuthStore for MysqlStore {
     }
 
     async fn create_workspace(&self, workspace: &Workspace) -> Result<()> {
-        sqlx::query(
+        let res = sqlx::query(
             r#"INSERT INTO veda_workspaces (id, account_id, name, status, kind, app_id, description, created_at, updated_at)
                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)"#,
         )
@@ -2320,9 +2332,17 @@ impl AuthStore for MysqlStore {
         .bind(workspace.created_at.naive_utc())
         .bind(workspace.updated_at.naive_utc())
         .execute(&self.pool)
-        .await
-        .map_err(storage_err)?;
-        Ok(())
+        .await;
+        // UNIQUE(account_id, name) collision → 1062 → 409, mirroring
+        // create_db_workspace so an fs workspace name clash returns a clean
+        // 409 instead of an opaque 500 INTERNAL.
+        match res {
+            Ok(_) => Ok(()),
+            Err(e) if is_mysql_duplicate(&e) => {
+                Err(VedaError::AlreadyExists("workspace name already exists".into()))
+            }
+            Err(e) => Err(storage_err(e)),
+        }
     }
 
     async fn create_db_workspace(

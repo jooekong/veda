@@ -345,11 +345,26 @@ async fn create_workspace(
     auth: AuthAccount,
     Json(req): Json<CreateWorkspaceRequest>,
 ) -> Result<Json<ApiResponse<Workspace>>, AppError> {
-    let ws_id = Uuid::new_v4().to_string();
+    let ws = create_workspace_under(&state, auth.account_id, req).await?;
+    Ok(Json(ApiResponse::ok(ws)))
+}
+
+/// Build a workspace (fs or db) under an already-resolved `account_id`. Shared
+/// by the `vk_` control plane (`POST /v1/workspaces`, account from the bearer)
+/// and the `app_id` control plane (`POST /v1/apps/{app_id}/workspaces`, account
+/// auto-provisioned from the path). For `kind=db`, commits the workspace +
+/// bootstrap `default` dataset in one tx, then provisions the Milvus collection
+/// with rollback on failure. `req.app_id` is the workspace's governance label;
+/// the app_id-plane handler sets it to the path `app_id`.
+pub(crate) async fn create_workspace_under(
+    state: &AppState,
+    account_id: String,
+    req: CreateWorkspaceRequest,
+) -> Result<Workspace, AppError> {
     let now = Utc::now();
     let ws = Workspace {
-        id: ws_id,
-        account_id: auth.account_id,
+        id: Uuid::new_v4().to_string(),
+        account_id,
         name: req.name,
         status: WorkspaceStatus::Active,
         kind: req.kind,
@@ -375,12 +390,12 @@ async fn create_workspace(
             .auth_store
             .create_db_workspace(&ws, &default_dataset)
             .await?;
-        provision_db_collection(&state, &ws).await?;
+        provision_db_collection(state, &ws).await?;
     } else {
         state.auth_store.create_workspace(&ws).await?;
     }
 
-    Ok(Json(ApiResponse::ok(ws)))
+    Ok(ws)
 }
 
 /// Create the Milvus collection for an already-persisted db workspace (its

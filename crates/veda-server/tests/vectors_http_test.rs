@@ -331,7 +331,171 @@ async fn vectors_http_e2e_suite() {
     sub_search_modes(&state, &mysql, router.clone()).await;
 
     // Sub-test 12: min_score relevance floor (semantic/fulltext) + hybrid reject.
-    sub_min_score(&state, &mysql, router).await;
+    sub_min_score(&state, &mysql, router.clone()).await;
+
+    // Sub-test 13: app_id-scoped control plane auto-provisioning (A migration).
+    sub_app_auto_provision(&state, &mysql, router).await;
+}
+
+/// app_id-scoped control plane (`/v1/apps/{app_id}/workspaces`) with NO bearer
+/// — auth is externalized to the platform. Asserts: first POST auto-provisions
+/// the tenant account (and mints NO `vk_`) and returns 201; a second POST under
+/// the same app_id reuses the account (no 409); list scopes to the app; an
+/// unknown app_id lists empty WITHOUT provisioning (GET has no side effects);
+/// a different tenant cannot delete this app's workspace (cross-tenant → 404).
+async fn sub_app_auto_provision(state: &Arc<AppState>, mysql: &MysqlStore, router: axum::Router) {
+    let app_id = format!("apps-it-{}", &Uuid::new_v4().simple().to_string()[..8]);
+    let other_app = format!("apps-it-{}", &Uuid::new_v4().simple().to_string()[..8]);
+    let rival_app = format!("apps-it-{}", &Uuid::new_v4().simple().to_string()[..8]);
+
+    let post_ws = |app: String, body: serde_json::Value| {
+        let router = router.clone();
+        async move {
+            let req = Request::builder()
+                .method("POST")
+                .uri(format!("/v1/apps/{app}/workspaces"))
+                .header("content-type", "application/json")
+                .body(Body::from(body.to_string()))
+                .unwrap();
+            router.oneshot(req).await.unwrap()
+        }
+    };
+    let get_ws = |app: String| {
+        let router = router.clone();
+        async move {
+            let req = Request::builder()
+                .method("GET")
+                .uri(format!("/v1/apps/{app}/workspaces"))
+                .body(Body::empty())
+                .unwrap();
+            router.oneshot(req).await.unwrap()
+        }
+    };
+    let delete_ws = |app: String, ws: String| {
+        let router = router.clone();
+        async move {
+            let req = Request::builder()
+                .method("DELETE")
+                .uri(format!("/v1/apps/{app}/workspaces/{ws}"))
+                .body(Body::empty())
+                .unwrap();
+            router.oneshot(req).await.unwrap()
+        }
+    };
+
+    // 1. First POST auto-provisions the account + creates a db workspace (201).
+    let resp = post_ws(app_id.clone(), json!({"name": "idx-a", "kind": "db"})).await;
+    assert_eq!(resp.status(), StatusCode::CREATED, "first app workspace → 201");
+    let j = body_json(resp.into_body()).await;
+    assert_eq!(j["success"], true);
+    assert_eq!(j["data"]["kind"], "db");
+    assert_eq!(j["data"]["app_id"], app_id);
+    let ws_db = j["data"]["id"].as_str().unwrap().to_string();
+
+    // Account auto-created for the app_id, with NO vk_ minted (A drops account keys).
+    let acct = state
+        .auth_store
+        .get_account_by_app_id(&app_id)
+        .await
+        .unwrap()
+        .expect("account auto-provisioned");
+    let keys = state.auth_store.list_api_keys(&acct.id).await.unwrap();
+    assert!(keys.is_empty(), "auto-provision must not mint a vk_");
+
+    // 2. Second POST under the SAME app_id reuses the account (no 409).
+    let resp = post_ws(app_id.clone(), json!({"name": "idx-b", "kind": "fs"})).await;
+    assert_eq!(resp.status(), StatusCode::CREATED, "second create reuses tenant");
+    let j = body_json(resp.into_body()).await;
+    let ws_fs = j["data"]["id"].as_str().unwrap().to_string();
+    let acct2 = state
+        .auth_store
+        .get_account_by_app_id(&app_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(acct.id, acct2.id, "same app_id → same account");
+
+    // 3. List scopes to the app (both workspaces).
+    let resp = get_ws(app_id.clone()).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let j = body_json(resp.into_body()).await;
+    assert_eq!(
+        j["data"]["items"].as_array().unwrap().len(),
+        2,
+        "list scoped to app"
+    );
+
+    // 4. Unknown app_id lists empty WITHOUT provisioning a tenant.
+    let resp = get_ws(other_app.clone()).await;
+    let j = body_json(resp.into_body()).await;
+    assert_eq!(j["data"]["items"].as_array().unwrap().len(), 0);
+    assert!(
+        state
+            .auth_store
+            .get_account_by_app_id(&other_app)
+            .await
+            .unwrap()
+            .is_none(),
+        "GET must not auto-provision a tenant"
+    );
+
+    // 5. A different real tenant cannot delete this app's workspace → 404
+    //    (cross-tenant id is hidden, not 403, so it can't be used as a probe).
+    let resp = post_ws(rival_app.clone(), json!({"name": "rival", "kind": "fs"})).await;
+    assert_eq!(resp.status(), StatusCode::CREATED);
+    let rival_ws = body_json(resp.into_body()).await["data"]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let rival_acct = state
+        .auth_store
+        .get_account_by_app_id(&rival_app)
+        .await
+        .unwrap()
+        .unwrap();
+    let resp = delete_ws(rival_app.clone(), ws_fs.clone()).await;
+    assert_eq!(
+        resp.status(),
+        StatusCode::NOT_FOUND,
+        "cross-tenant delete hidden as 404"
+    );
+    let resp = get_ws(app_id.clone()).await;
+    let j = body_json(resp.into_body()).await;
+    assert_eq!(
+        j["data"]["items"].as_array().unwrap().len(),
+        2,
+        "cross-tenant delete must be a no-op"
+    );
+
+    // 6. Owner deletes its own fs workspace → 200, list drops to 1.
+    let resp = delete_ws(app_id.clone(), ws_fs.clone()).await;
+    assert_eq!(resp.status(), StatusCode::OK, "owner delete → 200");
+    let resp = get_ws(app_id.clone()).await;
+    let j = body_json(resp.into_body()).await;
+    assert_eq!(
+        j["data"]["items"].as_array().unwrap().len(),
+        1,
+        "list drops to 1 after delete"
+    );
+
+    // cleanup: drop the db collection + hard-delete ws/datasets/accounts.
+    let _ = state
+        .vector_workspace_store
+        .drop_collection(&veda_store::vector_collection_name(&ws_db))
+        .await;
+    let _ = state
+        .auth_store
+        .hard_delete_datasets_for_workspace(&ws_db)
+        .await;
+    let _ = state.auth_store.hard_delete_workspace(&ws_db).await;
+    let _ = state.auth_store.hard_delete_workspace(&ws_fs).await;
+    let _ = state.auth_store.hard_delete_workspace(&rival_ws).await;
+    for id in [&acct.id, &rival_acct.id] {
+        let _ = sqlx::query("DELETE FROM veda_accounts WHERE id = ?")
+            .bind(id)
+            .execute(mysql.pool())
+            .await;
+    }
 }
 
 /// Mode passthrough + `score_type` contract over the full HTTP stack.
