@@ -14,3 +14,8 @@ deploy/.env
 web/node_modules/
 web/dist/
 web/*.tsbuildinfo
+
+# Java IDE (sdk/java, examples/java — Eclipse/m2e)
+.classpath
+.project
+.settings/

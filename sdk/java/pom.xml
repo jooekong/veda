@@ -1,0 +1,131 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+  <modelVersion>4.0.0</modelVersion>
+
+  <!-- D-b resolved (2026-06-04): csoss.veda:veda-sdk-java, published to the
+       internal ddxq Nexus (see <distributionManagement> below). Credentials
+       come from ~/.m2/settings.xml <server> entries (ddmc-repo / snapshots). -->
+  <groupId>csoss.veda</groupId>
+  <artifactId>veda-sdk-java</artifactId>
+  <version>0.0.1-SNAPSHOT</version>
+  <packaging>jar</packaging>
+
+  <name>Veda Java SDK</name>
+  <description>Java client for the Veda db-workspace vector data-plane API (upsert/search/query/delete).</description>
+
+  <properties>
+    <maven.compiler.source>1.8</maven.compiler.source>
+    <maven.compiler.target>1.8</maven.compiler.target>
+    <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+    <jackson.version>2.17.2</jackson.version>
+    <okhttp.version>4.12.0</okhttp.version>
+    <monitor.version>1.1.5-RELEASE</monitor.version>
+    <junit.version>5.10.2</junit.version>
+  </properties>
+
+  <!-- Internal ddxq Nexus, needed to resolve com.csoss:* (the monitor stack)
+       and its company transitive deps. Public read; no auth required. -->
+  <repositories>
+    <repository>
+      <id>ddmc-public</id>
+      <url>https://nexus.ddxq.mobi/repository/maven-public/</url>
+    </repository>
+  </repositories>
+
+  <dependencies>
+    <dependency>
+      <groupId>com.fasterxml.jackson.core</groupId>
+      <artifactId>jackson-databind</artifactId>
+      <version>${jackson.version}</version>
+    </dependency>
+    <dependency>
+      <groupId>com.squareup.okhttp3</groupId>
+      <artifactId>okhttp</artifactId>
+      <version>${okhttp.version}</version>
+    </dependency>
+    <!-- Company observability (trace + metric over OTLP). Hard dependency: pulls
+         the full monitor stack so emission works even if the host app hasn't
+         initialized monitoring. The SDK only emits, never initializes. -->
+    <dependency>
+      <groupId>com.csoss</groupId>
+      <artifactId>monitor-instrumentation</artifactId>
+      <version>${monitor.version}</version>
+    </dependency>
+
+    <dependency>
+      <groupId>org.junit.jupiter</groupId>
+      <artifactId>junit-jupiter</artifactId>
+      <version>${junit.version}</version>
+      <scope>test</scope>
+    </dependency>
+  </dependencies>
+
+  <build>
+    <plugins>
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-compiler-plugin</artifactId>
+        <version>3.13.0</version>
+      </plugin>
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-surefire-plugin</artifactId>
+        <version>3.2.5</version>
+        <!-- Default `mvn test` runs unit tests only (pure logic, no network).
+             Integration tests are named *IT and only run via failsafe under
+             the `integration` profile below. -->
+        <configuration>
+          <excludes>
+            <exclude>**/*IT.java</exclude>
+          </excludes>
+        </configuration>
+      </plugin>
+    </plugins>
+  </build>
+
+  <profiles>
+    <profile>
+      <!-- Manual release gate (NOT in default CI — matches the repo convention
+           that integration tests need internal Milvus/MySQL/embedding):
+               mvn verify -P integration
+           with VEDA_URL / VEDA_API_KEY / VEDA_WS_ID set. Auto-skips each test
+           when those env vars are absent (see VedaClientIT). -->
+      <id>integration</id>
+      <build>
+        <plugins>
+          <plugin>
+            <groupId>org.apache.maven.plugins</groupId>
+            <artifactId>maven-failsafe-plugin</artifactId>
+            <version>3.2.5</version>
+            <executions>
+              <execution>
+                <goals>
+                  <goal>integration-test</goal>
+                  <goal>verify</goal>
+                </goals>
+              </execution>
+            </executions>
+          </plugin>
+        </plugins>
+      </build>
+    </profile>
+  </profiles>
+
+  <!-- Internal ddxq Nexus. Repo ids match the <server> ids in ~/.m2/settings.xml
+       so credentials are picked up automatically. A -SNAPSHOT version routes to
+       the snapshot repo; any other version goes to the release repo. -->
+  <distributionManagement>
+    <repository>
+      <id>ddmc-repo</id>
+      <name>ddxq nexus releases</name>
+      <url>https://nexus.ddxq.mobi/repository/maven-releases/</url>
+    </repository>
+    <snapshotRepository>
+      <id>snapshots</id>
+      <name>ddxq nexus snapshots</name>
+      <url>https://nexus.ddxq.mobi/repository/maven-snapshots/</url>
+    </snapshotRepository>
+  </distributionManagement>
+</project>
