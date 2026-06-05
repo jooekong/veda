@@ -18,12 +18,11 @@ import csoss.veda.sdk.model.UpsertResult;
  * Pinecone-style usage of Veda's /v1/vectors/* endpoints — the Java twin of
  * examples/python_pinecone_demo.py.
  *
- * Run against a Veda server with a db-kind workspace already created and a vk_
- * API key scoped to (at minimum) that workspace. Env vars:
+ * Run against a Veda server with a db-kind workspace already created and a wk_
+ * workspace key for it (the wk_ binds the workspace). Env vars:
  *
  *   VEDA_URL       e.g. http://localhost:9009
- *   VEDA_API_KEY   vk_... token
- *   VEDA_WS_ID     UUID of the db-kind workspace
+ *   VEDA_API_KEY   wk_... workspace key (data-plane; not an account vk_)
  *
  * First install the SDK locally:  (cd sdk/java && mvn install)
  * Then run:  mvn -f examples/java/pom.xml -q compile exec:java
@@ -33,12 +32,10 @@ public final class Demo {
     public static void main(String[] args) {
         String base = requireEnv("VEDA_URL");
         String apiKey = requireEnv("VEDA_API_KEY");
-        String ws = requireEnv("VEDA_WS_ID");
 
         try (VedaClient veda = VedaClient.builder()
                 .baseUrl(base)
                 .apiKey(apiKey)
-                .workspaceId(ws)
                 .build()) {
 
             // 1. Upsert two records into the bootstrapped "default" dataset.

@@ -181,27 +181,29 @@ for company apps that need cheap raw-vector storage without the file abstraction
 Schema, defaults, and contracts: [`docs/api/vectors.md`](docs/api/vectors.md).
 
 ```bash
-# Create a db-kind workspace (one-time; server provisions Milvus collection
-# and bootstraps a `default` dataset).
+# Control plane — account key (vk_, held by the platform/console): create a
+# db-kind workspace, then mint a workspace key (wk_) for it. Your app only ever
+# holds the wk_; vk_ stays on the platform side.
 curl -sS -X POST http://localhost:9009/v1/workspaces \
-  -H "Authorization: Bearer $VEDA_API_KEY" \
+  -H "Authorization: Bearer $VK" \
   -H "Content-Type: application/json" \
   -d '{"name":"my-vectors","kind":"db","app_id":"my-app"}'
 
-# Upsert records. text is required; everything else has a friendly default.
+# Data plane — workspace key (wk_). The target workspace is bound to the key, so
+# the request body carries NO workspace_id. text is required; rest has defaults.
 curl -sS -X POST http://localhost:9009/v1/vectors/upsert \
-  -H "Authorization: Bearer $VEDA_API_KEY" \
+  -H "Authorization: Bearer $WK" \
   -H "Content-Type: application/json" \
-  -d '{"workspace_id":"'$WS_ID'","records":[
+  -d '{"records":[
         {"id":"sku-1","text":"Air Jordan 1","meta":{"price":1299}},
         {"id":"sku-2","text":"Yeezy 350","meta":{"price":1599}}]}'
 
-# Semantic search with a meta-field filter
+# Search — mode defaults to hybrid; pick semantic/fulltext explicitly. No
+# workspace_id in the body.
 curl -sS -X POST http://localhost:9009/v1/vectors/search \
-  -H "Authorization: Bearer $VEDA_API_KEY" \
+  -H "Authorization: Bearer $WK" \
   -H "Content-Type: application/json" \
-  -d '{"workspace_id":"'$WS_ID'","query":"sneakers under 1500",
-       "top_k":5,
+  -d '{"query":"sneakers under 1500","mode":"semantic","top_k":5,
        "filter":{"must":[{"field":"meta.price","op":"lt","value":1500}]}}'
 ```
 
@@ -229,11 +231,18 @@ veda/
 
 ## Search Modes
 
-| Mode | How it works | Best for |
-|------|-------------|----------|
-| **hybrid** (default) | Vector + BM25, fused with RRF | General purpose |
-| **semantic** | Cosine similarity | Conceptual search |
-| **fulltext** | BM25 keyword | Exact terms, identifiers |
+`POST /v1/vectors/search` (db workspaces) and `veda search` (fs) take a `mode`:
+
+| Mode | How it works | `score_type` | Best for |
+|------|-------------|------------|----------|
+| **hybrid** (default) | Vector + BM25, fused with RRF | `rrf` | General purpose |
+| **semantic** | Cosine similarity | `cosine` | Conceptual search |
+| **fulltext** | BM25 keyword | `bm25` | Exact terms, identifiers |
+
+Scores aren't comparable across `score_type`. `min_score` (a relevance floor)
+applies only to `semantic`/`fulltext`; passing it with `hybrid` returns 400
+(RRF rank isn't a relevance score). Full contract:
+[`docs/api/db-workspace-api.md`](docs/api/db-workspace-api.md).
 
 ## License
 

@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-"""Pinecone-style usage of Veda's /v1/vectors/* endpoints.
+"""Pinecone-style usage of Veda's /v1/vectors/* data-plane endpoints.
 
 Run against a Veda server with a db-kind workspace already created and a
-vk_ API key scoped to (at minimum) that workspace. Env vars:
+`wk_` workspace key for it. The target workspace is bound to the `wk_` key, so
+requests carry NO workspace_id. Env vars:
 
     VEDA_URL       e.g. http://localhost:9009
-    VEDA_API_KEY   vk_... token
-    VEDA_WS_ID     UUID of the db-kind workspace
+    VEDA_API_KEY   wk_... workspace key (data-plane; NOT an account vk_)
 
 Demonstrates: upsert with defaults, search with a meta-field filter,
 query by id, delete.
@@ -32,11 +32,10 @@ def request(method: str, url: str, body: dict[str, Any] | None = None) -> dict[s
 
 def main() -> int:
     base = os.environ["VEDA_URL"].rstrip("/")
-    ws = os.environ["VEDA_WS_ID"]
 
     # 1. Upsert two records into the bootstrapped "default" dataset.
+    #    The workspace is bound to the wk_ key — no workspace_id in the body.
     upserted = request("POST", f"{base}/v1/vectors/upsert", {
-        "workspace_id": ws,
         "records": [
             {"id": "sku-1", "text": "Air Jordan 1", "meta": {"price": 1299}},
             {"id": "sku-2", "text": "Yeezy 350",    "meta": {"price": 1599}},
@@ -44,10 +43,11 @@ def main() -> int:
     })
     print("upsert ids:", upserted["data"]["ids"])
 
-    # 2. Semantic search with a meta-field filter (price < 1500).
+    # 2. Semantic search with a meta-field filter (price < 1500). mode defaults
+    #    to hybrid; pick semantic/fulltext explicitly.
     found = request("POST", f"{base}/v1/vectors/search", {
-        "workspace_id": ws,
         "query": "sneakers under 1500",
+        "mode": "semantic",
         "top_k": 5,
         "filter": {"must": [{"field": "meta.price", "op": "lt", "value": 1500}]},
     })
@@ -56,14 +56,12 @@ def main() -> int:
 
     # 3. Query by id (no semantic search; direct lookup).
     queried = request("POST", f"{base}/v1/vectors/query", {
-        "workspace_id": ws,
         "ids": ["sku-1", "sku-2"],
     })
     print("query hits:", [h["id"] for h in queried["data"]["hits"]])
 
     # 4. Delete both records.
     deleted = request("POST", f"{base}/v1/vectors/delete", {
-        "workspace_id": ws,
         "ids": ["sku-1", "sku-2"],
     })
     print("delete:", deleted["data"])

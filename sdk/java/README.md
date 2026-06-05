@@ -5,9 +5,10 @@ the Pinecone-style `/v1/vectors/*` API. Four operations: `upsert`, `search`,
 `query`, `delete`.
 
 - **Scope**: data-plane only. Control-plane (workspace/dataset/token admin) and
-  fs-workspace features are out of scope — provision your workspace + `vk_`
-  token via the console or `curl` first (see
-  [`docs/api/db-workspace-api.md`](../../docs/api/db-workspace-api.md)).
+  fs-workspace features are out of scope — provision your db workspace and get a
+  `wk_` workspace key for it first (the platform/console does this with a `vk_`
+  account key; your app only ever holds the `wk_`). See
+  [`docs/api/db-workspace-api.md`](../../docs/api/db-workspace-api.md).
 - **Baseline**: Java 8, Maven. Dependencies: Jackson (`jackson-databind`),
   OkHttp, and `com.csoss:monitor-instrumentation` for observability (pulls
   grpc / protobuf / snappy transitively — see [Observability](#observability)).
@@ -48,8 +49,8 @@ import csoss.veda.sdk.model.*;
 
 try (VedaClient veda = VedaClient.builder()
         .baseUrl("http://10.79.51.161:9009")
-        .apiKey("vk_...")            // account-level vk_ token (NOT wk_/JWT)
-        .workspaceId("ws-...")       // recommended; see "Scope" below
+        .apiKey("wk_...")            // workspace key (data-plane), not an account vk_
+        .workspaceId("ws-...")       // optional now — the wk_ already binds the workspace
         .dataset("products")         // optional; default = server's "default"
         .build()) {
 
@@ -230,7 +231,7 @@ of this SDK).
   embedding stack (no mocks) — the release gate. Run manually before tagging:
 
 ```bash
-VEDA_URL=http://10.79.51.161:9009 VEDA_API_KEY=vk_... VEDA_WS_ID=ws-... \
+VEDA_URL=http://10.79.51.161:9009 VEDA_API_KEY=wk_... VEDA_WS_ID=ws-... \
   mvn -P integration verify
 ```
 
