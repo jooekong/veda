@@ -53,6 +53,12 @@ async fn upsert_vectors(
     auth: AuthDbWorkspace,
     Json(req): Json<UpsertRequest>,
 ) -> Result<Json<ApiResponse<UpsertResponse>>, AppError> {
+    let mut timer = VectorReqTimer::start(
+        "upsert",
+        &auth.workspace_id,
+        req.dataset.as_deref().unwrap_or(validate::DEFAULT_DATASET),
+        "none",
+    );
     auth.require_write()?;
     if req.records.is_empty() {
         return Err(VedaError::InvalidInput("records must not be empty".into()).into());
@@ -68,6 +74,7 @@ async fn upsert_vectors(
     // Workspace comes from the wk_ bearer; resolve + verify the dataset.
     let dataset_name =
         resolve_dataset(&state, &auth.workspace_id, req.dataset.as_deref()).await?;
+    timer.set_dataset(&dataset_name);
 
     // 4. Validate every record and resolve defaults BEFORE the embedding
     //    call — embedding is the expensive step, no point spending it on
@@ -143,6 +150,7 @@ async fn upsert_vectors(
         .upsert_records(&auth.workspace_id, &to_insert)
         .await?;
 
+    timer.success();
     Ok(Json(ApiResponse::ok(UpsertResponse { ids, commit_ts })))
 }
 
@@ -222,6 +230,12 @@ async fn search_vectors(
     auth: AuthDbWorkspace,
     Json(req): Json<VectorSearchRequest>,
 ) -> Result<Json<ApiResponse<VectorSearchResponse>>, AppError> {
+    let mut timer = VectorReqTimer::start(
+        "search",
+        &auth.workspace_id,
+        req.dataset.as_deref().unwrap_or(validate::DEFAULT_DATASET),
+        req.mode.map(search_mode_label).unwrap_or("hybrid"),
+    );
     validate::validate_text(&req.query)?;
     // Validate projection before the (paid) embedding call — fail fast on a
     // bad output_fields instead of spending an embed we'll reject.
@@ -244,6 +258,7 @@ async fn search_vectors(
 
     let dataset_name =
         resolve_dataset(&state, &auth.workspace_id, req.dataset.as_deref()).await?;
+    timer.set_dataset(&dataset_name);
 
     // Default is explicit (NOT `unwrap_or_default()`): even though
     // SearchMode::default() also happens to be Hybrid, db's default must not
@@ -318,6 +333,7 @@ async fn search_vectors(
     if let Some(ms) = req.min_score {
         hits.retain(|h| h.score >= ms);
     }
+    timer.success();
     Ok(Json(ApiResponse::ok(VectorSearchResponse { hits })))
 }
 
@@ -330,6 +346,12 @@ async fn query_vectors(
     auth: AuthDbWorkspace,
     Json(req): Json<VectorQueryRequest>,
 ) -> Result<Json<ApiResponse<VectorQueryResponse>>, AppError> {
+    let mut timer = VectorReqTimer::start(
+        "query",
+        &auth.workspace_id,
+        req.dataset.as_deref().unwrap_or(validate::DEFAULT_DATASET),
+        "none",
+    );
     if req.ids.is_empty() {
         return Err(VedaError::InvalidInput("ids must not be empty".into()).into());
     }
@@ -342,6 +364,7 @@ async fn query_vectors(
     }
     let dataset_name =
         resolve_dataset(&state, &auth.workspace_id, req.dataset.as_deref()).await?;
+    timer.set_dataset(&dataset_name);
     if let Some(fields) = req.output_fields.as_deref() {
         validate::validate_output_fields(fields)?;
     }
@@ -350,6 +373,7 @@ async fn query_vectors(
         .vector_workspace_store
         .query_vectors_by_pk(&auth.workspace_id, &pks, req.output_fields.as_deref())
         .await?;
+    timer.success();
     Ok(Json(ApiResponse::ok(VectorQueryResponse { hits })))
 }
 
@@ -358,6 +382,12 @@ async fn delete_vectors(
     auth: AuthDbWorkspace,
     Json(req): Json<VectorDeleteRequest>,
 ) -> Result<Json<ApiResponse<VectorDeleteResponse>>, AppError> {
+    let mut timer = VectorReqTimer::start(
+        "delete",
+        &auth.workspace_id,
+        req.dataset.as_deref().unwrap_or(validate::DEFAULT_DATASET),
+        "none",
+    );
     auth.require_write()?;
     if req.ids.is_empty() {
         return Err(VedaError::InvalidInput("ids must not be empty".into()).into());
@@ -371,11 +401,13 @@ async fn delete_vectors(
     }
     let dataset_name =
         resolve_dataset(&state, &auth.workspace_id, req.dataset.as_deref()).await?;
+    timer.set_dataset(&dataset_name);
     let pks = build_pks(&dataset_name, &req.ids)?;
     let delete_count = state
         .vector_workspace_store
         .delete_vectors_by_pk(&auth.workspace_id, &pks)
         .await?;
+    timer.success();
     Ok(Json(ApiResponse::ok(VectorDeleteResponse { delete_count })))
 }
 
@@ -385,4 +417,67 @@ fn build_pks(dataset: &str, ids: &[String]) -> Result<Vec<String>, AppError> {
         out.push(validate::build_pk(dataset, id)?);
     }
     Ok(out)
+}
+
+/// RAII timer for the end-to-end vector request histogram
+/// `veda_vector_request_seconds` (includes embedding + store + assembly — the
+/// user-perceived latency). Drops with `outcome=err` unless `success()` is
+/// called, so `?` early returns are recorded as errors automatically. Labels:
+/// operation, workspace_id, dataset (request value), mode (search only), outcome.
+struct VectorReqTimer {
+    operation: &'static str,
+    workspace_id: String,
+    dataset: String,
+    mode: &'static str,
+    started: std::time::Instant,
+    ok: bool,
+}
+
+impl VectorReqTimer {
+    fn start(operation: &'static str, workspace_id: &str, dataset: &str, mode: &'static str) -> Self {
+        Self {
+            operation,
+            workspace_id: workspace_id.to_string(),
+            // Raw request dataset, truncated to bound label cardinality against
+            // a malicious/oversized input. Replaced with the DB-canonical name
+            // via set_dataset once resolve_dataset succeeds.
+            dataset: dataset.chars().take(64).collect(),
+            mode,
+            started: std::time::Instant::now(),
+            ok: false,
+        }
+    }
+
+    /// Replace the dataset label with the DB-canonical name (post-resolve) so
+    /// the end-to-end layer matches the store layer's dataset for three-layer
+    /// comparison (avoids e.g. "Default" vs canonical "default" splitting).
+    fn set_dataset(&mut self, dataset: &str) {
+        self.dataset = dataset.to_string();
+    }
+
+    fn success(&mut self) {
+        self.ok = true;
+    }
+}
+
+impl Drop for VectorReqTimer {
+    fn drop(&mut self) {
+        ::metrics::histogram!(
+            "veda_vector_request_seconds",
+            "operation" => self.operation,
+            "workspace_id" => self.workspace_id.clone(),
+            "dataset" => self.dataset.clone(),
+            "mode" => self.mode,
+            "outcome" => if self.ok { "ok" } else { "err" },
+        )
+        .record(self.started.elapsed().as_secs_f64());
+    }
+}
+
+fn search_mode_label(m: SearchMode) -> &'static str {
+    match m {
+        SearchMode::Semantic => "semantic",
+        SearchMode::Hybrid => "hybrid",
+        SearchMode::Fulltext => "fulltext",
+    }
 }

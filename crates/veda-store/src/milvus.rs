@@ -141,7 +141,22 @@ impl MilvusStore {
         self.post_once(path, body).await.map_err(|(e, _)| e)
     }
 
-    async fn post_once(&self, path: &str, mut body: Value) -> std::result::Result<Value, (VedaError, bool)> {
+    /// Wraps the physical Milvus request with a `veda_milvus_request_seconds`
+    /// histogram (operation parsed from path, outcome ok/err). `post`'s retries
+    /// call this once per attempt, so this is the physical-request view.
+    async fn post_once(&self, path: &str, body: Value) -> std::result::Result<Value, (VedaError, bool)> {
+        let started = std::time::Instant::now();
+        let result = self.post_once_inner(path, body).await;
+        ::metrics::histogram!(
+            "veda_milvus_request_seconds",
+            "operation" => milvus_operation(path),
+            "outcome" => if result.is_ok() { "ok" } else { "err" },
+        )
+        .record(started.elapsed().as_secs_f64());
+        result
+    }
+
+    async fn post_once_inner(&self, path: &str, mut body: Value) -> std::result::Result<Value, (VedaError, bool)> {
         self.inject_db(&mut body);
         let resp = self
             .http
@@ -1364,7 +1379,10 @@ impl VectorWorkspaceStore for MilvusStore {
         workspace_id: &str,
         records: &[veda_types::UpsertRecord],
     ) -> Result<i64> {
-        MilvusStore::upsert_vector_records(self, workspace_id, records).await?;
+        let started = std::time::Instant::now();
+        let result = MilvusStore::upsert_vector_records(self, workspace_id, records).await;
+        record_vector_store_op("upsert", workspace_id, "none", "none", result.is_ok(), started);
+        result?;
         // Milvus REST `/v2/vectordb/entities/upsert` doesn't return a true
         // commit_ts. Under synchronous semantics (no outbox), the call
         // returns after Milvus acked → server-now is a valid stand-in for
@@ -1381,7 +1399,9 @@ impl VectorWorkspaceStore for MilvusStore {
         extra_filter: Option<&str>,
         output_fields: Option<&[String]>,
     ) -> Result<Vec<VectorSearchHit>> {
-        MilvusStore::search_vector_collection(
+        let started = std::time::Instant::now();
+        let mode = vector_query_mode(&query);
+        let result = MilvusStore::search_vector_collection(
             self,
             workspace_id,
             dataset,
@@ -1390,7 +1410,9 @@ impl VectorWorkspaceStore for MilvusStore {
             extra_filter,
             output_fields,
         )
-        .await
+        .await;
+        record_vector_store_op("search", workspace_id, dataset, mode, result.is_ok(), started);
+        result
     }
 
     async fn query_vectors_by_pk(
@@ -1399,7 +1421,11 @@ impl VectorWorkspaceStore for MilvusStore {
         pks: &[String],
         output_fields: Option<&[String]>,
     ) -> Result<Vec<VectorRecordHit>> {
-        MilvusStore::query_vector_records_by_pk(self, workspace_id, pks, output_fields).await
+        let started = std::time::Instant::now();
+        let result =
+            MilvusStore::query_vector_records_by_pk(self, workspace_id, pks, output_fields).await;
+        record_vector_store_op("query", workspace_id, "none", "none", result.is_ok(), started);
+        result
     }
 
     async fn delete_vectors_by_pk(
@@ -1407,8 +1433,52 @@ impl VectorWorkspaceStore for MilvusStore {
         workspace_id: &str,
         pks: &[String],
     ) -> Result<usize> {
-        MilvusStore::delete_vector_records_by_pk(self, workspace_id, pks).await
+        let started = std::time::Instant::now();
+        let result = MilvusStore::delete_vector_records_by_pk(self, workspace_id, pks).await;
+        record_vector_store_op("delete", workspace_id, "none", "none", result.is_ok(), started);
+        result
     }
+}
+
+/// Map a Milvus v2 REST path to a low-cardinality operation label, e.g.
+/// `/v2/vectordb/entities/search` -> `entities_search`. Paths are code literals
+/// (a fixed finite set), so this never emits unbounded labels.
+fn milvus_operation(path: &str) -> String {
+    path.strip_prefix("/v2/vectordb/")
+        .unwrap_or("other")
+        .replace('/', "_")
+}
+
+fn vector_query_mode(query: &VectorSearchQuery<'_>) -> &'static str {
+    match query {
+        VectorSearchQuery::Semantic { .. } => "semantic",
+        VectorSearchQuery::Hybrid { .. } => "hybrid",
+        VectorSearchQuery::Fulltext { .. } => "fulltext",
+    }
+}
+
+/// `veda_vector_store_op_seconds` — store-level (Milvus logical op) latency,
+/// excludes embedding. `workspace_id` always present; `dataset`/`mode` only
+/// meaningful for search (others pass "none"). High-cardinality labels are
+/// acceptable: the company metric backend handles it; this is the
+/// per-workspace/dataset breakdown at the store layer.
+fn record_vector_store_op(
+    operation: &str,
+    workspace_id: &str,
+    dataset: &str,
+    mode: &str,
+    ok: bool,
+    started: std::time::Instant,
+) {
+    ::metrics::histogram!(
+        "veda_vector_store_op_seconds",
+        "operation" => operation.to_string(),
+        "workspace_id" => workspace_id.to_string(),
+        "dataset" => dataset.to_string(),
+        "mode" => mode.to_string(),
+        "outcome" => if ok { "ok" } else { "err" },
+    )
+    .record(started.elapsed().as_secs_f64());
 }
 
 #[async_trait]
@@ -1573,5 +1643,33 @@ impl CollectionVectorStore for MilvusStore {
         });
         let v = self.post("/v2/vectordb/entities/query", body).await?;
         Ok(flatten_entity_rows(v.get("data")))
+    }
+}
+
+#[cfg(test)]
+mod metric_tests {
+    use super::milvus_operation;
+
+    #[test]
+    fn milvus_operation_maps_v2_paths_to_fixed_enum() {
+        assert_eq!(
+            milvus_operation("/v2/vectordb/entities/search"),
+            "entities_search"
+        );
+        assert_eq!(
+            milvus_operation("/v2/vectordb/entities/hybrid_search"),
+            "entities_hybrid_search"
+        );
+        assert_eq!(
+            milvus_operation("/v2/vectordb/entities/upsert"),
+            "entities_upsert"
+        );
+        assert_eq!(
+            milvus_operation("/v2/vectordb/collections/create"),
+            "collections_create"
+        );
+        // Unknown / unexpected paths collapse to one low-cardinality bucket
+        // instead of leaking a raw path as a label.
+        assert_eq!(milvus_operation("/something/else"), "other");
     }
 }

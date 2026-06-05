@@ -286,6 +286,33 @@ async fn body_json(body: Body) -> serde_json::Value {
     serde_json::from_slice(&bytes).unwrap()
 }
 
+/// Verify the three-layer vector metrics are wired (operation/dataset/mode/
+/// milvus-op labels present after the roundtrip sub-tests). Real OTLP export is
+/// verified separately by the `otlp_dump` diagnostic — kept out of this suite so
+/// it stays fast and collector-independent.
+fn sub_vector_metrics(state: &AppState) {
+    let render = state.metrics.render();
+    for metric in [
+        "veda_vector_request_seconds",  // end-to-end (handler, incl. embedding)
+        "veda_vector_store_op_seconds", // store layer (no embedding)
+        "veda_milvus_request_seconds",  // milvus physical request
+    ] {
+        assert!(render.contains(metric), "render missing {metric}");
+    }
+    assert!(
+        render.contains("operation=\"search\""),
+        "missing operation=search label"
+    );
+    assert!(
+        render.contains("dataset=\"default\""),
+        "missing dataset label"
+    );
+    assert!(
+        render.contains("operation=\"entities_search\""),
+        "missing milvus operation enum label"
+    );
+}
+
 /// Mega-test: drives all 4 vectors HTTP scenarios in a single tokio
 /// runtime. Reason: sqlx connection pools are tied to the runtime that
 /// created them; multiple `#[tokio::test]` functions in the same binary
@@ -335,6 +362,10 @@ async fn vectors_http_e2e_suite() {
 
     // Sub-test 13: app_id-scoped control plane auto-provisioning (A migration).
     sub_app_auto_provision(&state, &mysql, router).await;
+
+    // Sub-test 14: three-layer vector metrics wired (operation/dataset/mode/
+    // milvus-op labels present). Real export is the otlp_dump diagnostic's job.
+    sub_vector_metrics(&state);
 }
 
 /// app_id-scoped control plane (`/v1/apps/{app_id}/workspaces`) with NO bearer
