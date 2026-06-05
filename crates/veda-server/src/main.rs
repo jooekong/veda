@@ -247,6 +247,31 @@ async fn main() -> anyhow::Result<()> {
         None
     };
 
+    // OTLP metrics exporter: periodically push Prometheus metrics to the company
+    // Monitor Collector. Off by default (gray rollout via [otlp] enabled). Never
+    // affects the main service — errors only warn.
+    let otlp_handle = if cfg.otlp.enabled {
+        match obs::otlp::OtlpExporter::from_config(&cfg.otlp) {
+            Some(exporter) => {
+                let metrics_handle = metrics.clone();
+                let rx = shutdown_rx.clone();
+                let interval = cfg.otlp.interval_secs;
+                info!(
+                    interval_secs = interval,
+                    endpoint = %cfg.otlp.endpoint,
+                    "OTLP metrics exporter enabled"
+                );
+                Some(tokio::spawn(async move {
+                    exporter.run(metrics_handle, rx, interval).await;
+                }))
+            }
+            None => None, // from_config already warned about why it's disabled
+        }
+    } else {
+        info!("OTLP metrics exporter disabled");
+        None
+    };
+
     let cors = if !cfg.allowed_origins.is_empty() {
         let origins: Vec<HeaderValue> = cfg
             .allowed_origins
@@ -303,6 +328,9 @@ async fn main() -> anyhow::Result<()> {
         let _ = handle.await;
     }
     if let Some(handle) = retention_handle {
+        let _ = handle.await;
+    }
+    if let Some(handle) = otlp_handle {
         let _ = handle.await;
     }
 

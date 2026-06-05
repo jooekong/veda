@@ -9,6 +9,8 @@
 //! Histogram buckets are tuned to common latency / size shapes seen in this
 //! codebase (embed RTT ~50ms-30s, LLM RTT ~500ms-120s, fs op ~1ms-500ms).
 
+pub mod otlp;
+
 use axum::body::Body;
 use axum::extract::MatchedPath;
 use axum::http::Request;

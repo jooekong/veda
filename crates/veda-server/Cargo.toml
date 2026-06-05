@@ -35,11 +35,28 @@ arrow = { version = "58", features = ["json"] }
 metrics = "0.24"
 metrics-exporter-prometheus = "0.16"
 
+# OTLP metrics bridge → company Monitor Collector (gRPC). See proto/PROVENANCE.md.
+# Hand-rolled exporter (no opentelemetry-rust): the Collector needs the legacy
+# proto (InstrumentationLibraryMetrics + deprecated labels) the official crates
+# dropped. veda otherwise has zero gRPC deps (Milvus is REST).
+tonic = { version = "0.12", default-features = false, features = ["transport", "codegen", "prost"] }
+prost = "0.13"
+prometheus-parse = "0.2"
+serde_yaml = "0.9"
+# Promoted from dev-dependencies: OTLP collector discovery hits the company
+# config service over HTTP at runtime.
+reqwest = { workspace = true }
+
 [dev-dependencies]
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 toml = "0.8"
 sqlx = { version = "0.8", features = ["mysql", "chrono", "json", "runtime-tokio-rustls"] }
 chrono = { workspace = true }
 tracing-subscriber = { workspace = true }
 serde_urlencoded = "0.7"
 http-body-util = "0.1"
+
+[build-dependencies]
+# Generates the OTLP gRPC client from vendored proto. protoc-bin-vendored ships
+# a protoc binary so build hosts (.161 dogfood, CI) need no system protoc.
+tonic-build = { version = "0.12", default-features = false, features = ["prost"] }
+protoc-bin-vendored = "3"

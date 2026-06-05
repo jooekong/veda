@@ -15,6 +15,8 @@ pub struct ServerConfig {
     #[serde(default)]
     pub retention: RetentionConfig,
     #[serde(default)]
+    pub otlp: OtlpConfig,
+    #[serde(default)]
     pub allowed_origins: Vec<String>,
     /// Bearer token gating `/v1/metrics`. When `None`, the endpoint returns
     /// 404 — making metrics opt-in via explicit configuration. Prometheus
@@ -180,6 +182,55 @@ fn default_outbox_retention_days() -> i64 {
     1
 }
 
+/// OTLP metrics push to the company Monitor Collector. Off by default (gray
+/// rollout). When `endpoint` is empty, collectors are discovered from the
+/// config service via the `monitor` host; identity (`appname`/`env_name`/
+/// `monitor`) falls back to env.yaml when the field here is empty.
+#[derive(Debug, Deserialize, Clone)]
+pub struct OtlpConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default = "default_otlp_interval_secs")]
+    pub interval_secs: u64,
+    /// Direct "host:port" override; empty = discover via the config service.
+    #[serde(default)]
+    pub endpoint: String,
+    /// Source of resource identity + the `monitor` discovery host.
+    #[serde(default = "default_env_yaml_path")]
+    pub env_yaml_path: String,
+    /// Override env.yaml `appname` (empty = use env.yaml).
+    #[serde(default)]
+    pub appname: String,
+    /// Override env.yaml `env_name` (empty = use env.yaml).
+    #[serde(default)]
+    pub env_name: String,
+    /// Override env.yaml `monitor` config-service host (empty = use env.yaml).
+    #[serde(default)]
+    pub monitor: String,
+}
+
+impl Default for OtlpConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            interval_secs: default_otlp_interval_secs(),
+            endpoint: String::new(),
+            env_yaml_path: default_env_yaml_path(),
+            appname: String::new(),
+            env_name: String::new(),
+            monitor: String::new(),
+        }
+    }
+}
+
+fn default_otlp_interval_secs() -> u64 {
+    5
+}
+
+fn default_env_yaml_path() -> String {
+    "/etc/ddmc/env.yaml".to_string()
+}
+
 #[derive(Debug, Deserialize)]
 pub struct LlmConfig {
     pub api_url: String,
@@ -280,6 +331,14 @@ impl ServerConfig {
         env_parse("VEDA_RETENTION_EVENTS_DAYS", &mut self.retention.events_retention_days);
         env_parse("VEDA_RETENTION_OUTBOX_DAYS", &mut self.retention.outbox_retention_days);
         env_parse("VEDA_DEV_MODE", &mut self.dev_mode);
+
+        env_parse("VEDA_OTLP_ENABLED", &mut self.otlp.enabled);
+        env_parse("VEDA_OTLP_INTERVAL_SECS", &mut self.otlp.interval_secs);
+        env_str("VEDA_OTLP_ENDPOINT", &mut self.otlp.endpoint);
+        env_str("VEDA_OTLP_ENV_YAML_PATH", &mut self.otlp.env_yaml_path);
+        env_str("VEDA_OTLP_APPNAME", &mut self.otlp.appname);
+        env_str("VEDA_OTLP_ENV_NAME", &mut self.otlp.env_name);
+        env_str("VEDA_OTLP_MONITOR", &mut self.otlp.monitor);
 
         if let Ok(v) = std::env::var("VEDA_METRICS_TOKEN") {
             // An explicitly empty env var means "disable metrics auth", which
@@ -464,6 +523,30 @@ dimension = 768
         std::env::remove_var("VEDA_RECONCILER_INTERVAL_SECS");
         assert!(!cfg.reconciler.enabled);
         assert_eq!(cfg.reconciler.interval_secs, 300);
+    }
+
+    #[test]
+    fn otlp_defaults_off_and_env_overrides() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
+        let cfg = ServerConfig::from_toml(MINIMAL_TOML).unwrap();
+        assert!(!cfg.otlp.enabled, "OTLP must default off (gray rollout)");
+        assert_eq!(cfg.otlp.interval_secs, 5);
+        assert_eq!(cfg.otlp.env_yaml_path, "/etc/ddmc/env.yaml");
+        assert!(cfg.otlp.endpoint.is_empty());
+
+        std::env::set_var("VEDA_OTLP_ENABLED", "true");
+        std::env::set_var("VEDA_OTLP_INTERVAL_SECS", "10");
+        std::env::set_var("VEDA_OTLP_ENDPOINT", "127.0.0.1:5318");
+        std::env::set_var("VEDA_OTLP_APPNAME", "veda-test");
+        let cfg = ServerConfig::from_toml(MINIMAL_TOML).unwrap();
+        std::env::remove_var("VEDA_OTLP_ENABLED");
+        std::env::remove_var("VEDA_OTLP_INTERVAL_SECS");
+        std::env::remove_var("VEDA_OTLP_ENDPOINT");
+        std::env::remove_var("VEDA_OTLP_APPNAME");
+        assert!(cfg.otlp.enabled);
+        assert_eq!(cfg.otlp.interval_secs, 10);
+        assert_eq!(cfg.otlp.endpoint, "127.0.0.1:5318");
+        assert_eq!(cfg.otlp.appname, "veda-test");
     }
 
     #[test]
