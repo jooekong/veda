@@ -225,6 +225,11 @@ pub struct GrepHit {
 #[derive(Debug, Deserialize)]
 pub struct UpsertRequest {
     pub dataset: Option<String>,
+    /// Write semantics, default `upsert` (idempotent dedup-by-id). `insert`
+    /// takes the fast path (skips Milvus dedup) — caller guarantees id
+    /// uniqueness; a repeated id inserts a duplicate row.
+    #[serde(default)]
+    pub write_mode: crate::WriteMode,
     pub records: Vec<NewRecord>,
 }
 

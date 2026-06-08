@@ -54,6 +54,7 @@ Same-batch duplicate `id` is server-side deduped (last entry wins) — see
 ```json
 {
   "dataset": "products",         // optional, default "default"
+  "write_mode": "upsert",        // optional, "upsert"(default) | "insert"
   "records": [
     {"id": "sku-1", "text": "Air Jordan 1",
      "category": "shoes", "tags": ["sale","new"],
@@ -79,19 +80,25 @@ capture them client-side before they're needed for query/delete.
 Under synchronous semantics, this is sufficient for read-your-writes on the
 same server.
 
-#### Idempotency
+#### Write mode & idempotency
 
-The upsert handler has two modes depending on whether `id` is supplied:
+`write_mode` (default `upsert`) and whether `id` is supplied together decide the semantics:
 
-| Mode | `id` field | On retry of the same request |
-|---|---|---|
-| **Supplied** | caller provides `id` | **Idempotent**: same `(workspace, dataset, id)` → row is replaced in place. `created_at`/`updated_at` reset on every replay; meta/tags/etc fully overwritten by the latest payload. |
-| **Omitted** | server generates a UUID | **Not idempotent**: each retry creates a fresh record with a different UUID. Network-level retries (proxy timeouts, client reconnects) will duplicate writes. |
+| `write_mode` | `id` | Behavior | Idempotent |
+|---|---|---|---|
+| `upsert` (default) | supplied | insert-or-replace by `(workspace,dataset,id)` — replaced in place; `created_at`/`updated_at` reset, meta/tags/text fully overwritten | ✅ |
+| `upsert` (default) | omitted | server UUID → internally takes the **insert** fast path (a UUID can't collide) | ❌ (new UUID each retry) |
+| `insert` | supplied | direct insert, **dedup skipped** — ~3× faster (Milvus upsert pays a ~400ms dedup+delete cost; see `docs/loadtest-2026-06-05.md`). **Caller guarantees `id` uniqueness.** | ❌ |
+| `insert` | omitted | server UUID → insert | ❌ |
 
-**Retry-prone callers MUST supply their own `id`.** This is the only way
-to get idempotent semantics. If the client cannot stably derive an id at
-write time, generate a content-hash or UUIDv7 client-side and pass it
-explicitly — server-generated UUIDs are for one-shot ingestion only.
+**`write_mode=insert` trades safety for speed.** Milvus does NOT check pk
+uniqueness on insert: a repeated `pk` is **undefined behavior** — it physically
+accumulates rows that compaction does NOT auto-reclaim (no tombstone; only a
+later delete/upsert on that pk lets compaction remove old rows, so the bloat
+persists), and `query`/`search` return an **unspecified copy**. Use it
+ONLY when ids are inherently unique (autoincrement / UUID / one-shot import).
+**Retry-prone or re-imported pipelines MUST use the default `upsert`** — only
+upsert has deterministic last-write-wins (insert new + delete old).
 
 Within a single upsert call, duplicate `id` is **server-side deduped,
 last-wins**: the later record in the `records` array overrides earlier

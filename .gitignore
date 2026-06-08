@@ -4,6 +4,7 @@ target/
 *~
 .DS_Store
 .env
+scripts/loadtest/.env.loadtest
 veda-server.toml
 config/test.toml
 config/server.toml

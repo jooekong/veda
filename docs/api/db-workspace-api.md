@@ -324,6 +324,7 @@ curl -sX POST $BASE/v1/vectors/upsert \
 ```json
 {
   "dataset": "products",
+  "write_mode": "upsert",
   "records": [
     {
       "id": "sku-1",
@@ -336,6 +337,7 @@ curl -sX POST $BASE/v1/vectors/upsert \
 }
 ```
   每条 record 除 `text` 外都有默认值：`id`→服务端 UUID（**insert-only，非幂等**，见 §11）、`category`→`"default"`、`tags`→`[]`、`meta`→`{}`。
+  顶层可选 `write_mode`：`"upsert"`（默认，幂等安全）| `"insert"`（跳过查重，~3x 速，**调用方必须保证 pk 唯一**；重复 pk 是 Milvus 未定义行为，见 §11）。
 - 响应 200：
 ```json
 { "success": true, "data": { "ids": ["sku-1"], "commit_ts": 1735689600000 } }
@@ -486,14 +488,16 @@ Qdrant 风格的严格子集，仅用于 `/v1/vectors/search` 的 `filter`：
 
 ## 11. 幂等性与重试
 
-**upsert 的幂等性取决于是否自带 `id`：**
+**写入语义由 `write_mode`（默认 `upsert`）+ 是否自带 `id` 共同决定：**
 
-| 模式 | `id` | 重试同一请求的效果 |
-|---|---|---|
-| **自带 id** | 调用方提供 | **幂等**：同 `(workspace, dataset, id)` 原地整行替换；`created_at`/`updated_at` 每次重置，`meta`/`tags`/`text` 全量覆盖为最新值 |
-| **省略 id** | 服务端生成 UUID | **非幂等**：每次重试都新建一条不同 UUID 的记录。网络层重试（代理超时、客户端重连）会重复写入 |
+| `write_mode` | `id` | 行为 | 幂等 |
+|---|---|---|---|
+| `upsert`（默认） | 自带 | 按 `(workspace,dataset,id)` 原地整行替换；`created_at`/`updated_at` 重置，`meta`/`tags`/`text` 全量覆盖 | ✅ |
+| `upsert`（默认） | 省略 | 服务端 UUID → 内部走 **insert** 快路径（UUID 不可能撞） | ❌（每次新 UUID） |
+| `insert` | 自带 | 直接 insert、**跳过查重**，~3x 速；**调用方保证 `id` 唯一** | ❌ |
+| `insert` | 省略 | 服务端 UUID → insert | ❌ |
 
-> **怕重试的调用方必须自带 `id`**（内容哈希或 UUIDv7 客户端生成）。服务端 UUID 仅适合一次性导入。
+> **`write_mode=insert` 拿安全换速度**：Milvus insert 不检查 pk 唯一性，重复 `pk` 是 **Milvus 未定义行为**——物理累积多行且 compaction **不自动清**（纯 insert 无 tombstone，要后续 delete/upsert 才会清，膨胀持久），`query`/`search` 返回哪条 unknown。仅用于 id 天然唯一的场景（自增 / UUID / 一次性导入）。**怕重试或会重导的管道必须用默认 `upsert`**——只有它有确定的「最新覆盖」（insert 新 + delete 旧）。
 
 **同一次 upsert 内重复 `id`**：服务端去重，**last-wins**（取最后一次出现的值，但保留该 id 首次出现的位置），重复项在嵌入前丢弃。无报错，响应 `ids` 反映去重后结果，可能短于请求 `records`。
 

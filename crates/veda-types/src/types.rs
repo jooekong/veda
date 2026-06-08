@@ -125,6 +125,23 @@ impl Default for SearchMode {
     }
 }
 
+/// Write semantics for `POST /v1/vectors/upsert`. Default `Upsert` is the
+/// idempotent dedup-by-id path; `Insert` skips Milvus's dedup+delete for ~3x
+/// throughput but does NOT dedup — a repeated id inserts a duplicate row
+/// (caller guarantees id uniqueness). See docs/plans/vector-write-mode-plan.md.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WriteMode {
+    Upsert,
+    Insert,
+}
+
+impl Default for WriteMode {
+    fn default() -> Self {
+        Self::Upsert
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CollectionType {

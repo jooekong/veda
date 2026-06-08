@@ -344,6 +344,8 @@ async fn vectors_http_e2e_suite() {
     // Sub-test 6: upsert idempotency + delete semantics (task #7).
     sub_upsert_idempotency_and_delete_semantics(&state, &mysql, router.clone()).await;
 
+    // Sub-test 7: write_mode routing (insert multi-row, id-less fast path, mixed batch).
+    sub_write_mode_routing(&state, &mysql, router.clone()).await;
 
     // Sub-test 8: dataset delete guard incl. case-insensitive default (S5).
     sub_dataset_delete_guard(&state, &mysql, router.clone()).await;
@@ -1566,6 +1568,119 @@ async fn sub_upsert_idempotency_and_delete_semantics(
         v["data"]["delete_count"].as_u64(),
         Some(5),
         "delete_count must equal len(ids) (Milvus tombstone marker count, NOT physical-existence count)"
+    );
+
+    cleanup(state, mysql, &setup).await;
+}
+
+/// write_mode routing (plan 方案1/4):
+///   - write_mode=insert + UNIQUE id → insert fast path, queryable + deletable.
+///   - default upsert + id-less → server UUID takes the insert fast path,
+///     surfaced in `ids` and queryable.
+///   - mixed batch (explicit id + id-less) → both land.
+/// NOTE: insert with a DUPLICATE pk is Milvus UNDEFINED behavior (which copy
+/// query returns is unspecified, varies with segment/compaction) — the
+/// contract requires unique ids under write_mode=insert, so it is deliberately
+/// NOT asserted here.
+async fn sub_write_mode_routing(state: &Arc<AppState>, mysql: &MysqlStore, router: axum::Router) {
+    let setup = provision_test_account(state).await;
+    let token = setup.token.clone();
+
+    let do_post = |uri: &str, body: serde_json::Value| {
+        let req = Request::builder()
+            .method("POST")
+            .uri(uri)
+            .header("authorization", format!("Bearer {token}"))
+            .header("content-type", "application/json")
+            .body(Body::from(body.to_string()))
+            .unwrap();
+        router.clone().oneshot(req)
+    };
+
+    // 1. write_mode=insert + UNIQUE id → fast path; queryable then deletable.
+    //    (Duplicate-pk insert is Milvus undefined behavior — query returns an
+    //    unspecified copy — so the contract requires unique ids and we do NOT
+    //    assert duplicate-pk return shape here.)
+    let resp = do_post(
+        "/v1/vectors/upsert",
+        json!({ "write_mode": "insert", "records": [{ "id": "ins-uniq", "text": "inserted" }] }),
+    )
+    .await
+    .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK, "insert-mode (unique id) ok");
+    tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+
+    let resp = do_post("/v1/vectors/query", json!({ "ids": ["ins-uniq"] }))
+        .await
+        .unwrap();
+    let v = body_json(resp.into_body()).await;
+    let hits = v["data"]["hits"].as_array().unwrap();
+    assert_eq!(hits.len(), 1, "insert unique id → one queryable row");
+    assert_eq!(hits[0]["text"].as_str(), Some("inserted"));
+
+    let resp = do_post("/v1/vectors/delete", json!({ "ids": ["ins-uniq"] }))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+    let resp = do_post("/v1/vectors/query", json!({ "ids": ["ins-uniq"] }))
+        .await
+        .unwrap();
+    let v = body_json(resp.into_body()).await;
+    assert_eq!(
+        v["data"]["hits"].as_array().unwrap().len(),
+        0,
+        "delete by id removes the inserted row"
+    );
+
+    // 2. Default upsert + id-less → insert fast path; UUID surfaced + queryable.
+    let resp = do_post(
+        "/v1/vectors/upsert",
+        json!({ "records": [{ "text": "no-id record" }] }),
+    )
+    .await
+    .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let v = body_json(resp.into_body()).await;
+    let gen_id = v["data"]["ids"][0].as_str().unwrap().to_string();
+    assert!(!gen_id.is_empty(), "id-less upsert surfaces a server UUID");
+    tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+    let resp = do_post("/v1/vectors/query", json!({ "ids": [gen_id] }))
+        .await
+        .unwrap();
+    let v = body_json(resp.into_body()).await;
+    assert_eq!(
+        v["data"]["hits"].as_array().unwrap().len(),
+        1,
+        "id-less record queryable by generated UUID (insert fast path)"
+    );
+
+    // 3. Mixed batch (default upsert): explicit id + id-less → both land.
+    let resp = do_post(
+        "/v1/vectors/upsert",
+        json!({ "records": [
+            { "id": "mix-explicit", "text": "explicit" },
+            { "text": "mixed id-less" },
+        ]}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let v = body_json(resp.into_body()).await;
+    assert_eq!(
+        v["data"]["ids"].as_array().unwrap().len(),
+        2,
+        "mixed batch returns both ids"
+    );
+    tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+    let resp = do_post("/v1/vectors/query", json!({ "ids": ["mix-explicit"] }))
+        .await
+        .unwrap();
+    let v = body_json(resp.into_body()).await;
+    assert_eq!(
+        v["data"]["hits"].as_array().unwrap().len(),
+        1,
+        "explicit-id half of mixed batch landed"
     );
 
     cleanup(state, mysql, &setup).await;

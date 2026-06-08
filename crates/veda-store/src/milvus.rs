@@ -645,6 +645,42 @@ impl MilvusStore {
         Ok(())
     }
 
+    /// Insert a batch WITHOUT dedup — Milvus `/entities/insert`. Same payload
+    /// shape as `upsert_vector_records`, but uses `post_no_retry`: insert is
+    /// non-idempotent, so a transport retry after a committed write would
+    /// duplicate rows (see the `post` / `post_no_retry` doc).
+    pub async fn insert_vector_records(
+        &self,
+        workspace_id: &str,
+        records: &[veda_types::UpsertRecord],
+    ) -> Result<()> {
+        if records.is_empty() {
+            return Ok(());
+        }
+        let name = vector_collection_name(workspace_id);
+        let data: Vec<Value> = records
+            .iter()
+            .map(|r| {
+                json!({
+                    "pk": r.pk,
+                    "id": r.id,
+                    "dataset": r.dataset,
+                    "category": r.category,
+                    "tags": r.tags,
+                    "status": "active",
+                    "created_at": r.created_at,
+                    "updated_at": r.updated_at,
+                    "text": r.text,
+                    "vector": r.vector,
+                    "meta": r.meta,
+                })
+            })
+            .collect();
+        let body = json!({ "collectionName": &name, "data": data });
+        self.post_no_retry("/v2/vectordb/entities/insert", body).await?;
+        Ok(())
+    }
+
     /// Map one Milvus row (from search/get response `data`) to a record hit
     /// without score. Caller of search adds the distance separately.
     ///
@@ -852,8 +888,10 @@ impl MilvusStore {
         // Use entities/query with `pk in [...]` instead of entities/get:
         // get doesn't carry a consistencyLevel, and we need Strong here so a
         // query right after upsert sees the write (read-your-writes, matching
-        // the commit_ts contract). `limit` must cover the whole pk batch
-        // (caller caps it at MAX_PK_BATCH = 500).
+        // the commit_ts contract). Veda's API models one logical row per pk
+        // (write_mode=insert requires unique pks; duplicate physical pks are
+        // outside the contract / undefined), so `limit` only needs to cover the
+        // pk batch (caller caps it at MAX_PK_BATCH = 500).
         let pk_list = pks
             .iter()
             .map(|p| milvus_quote(p))
@@ -1387,6 +1425,19 @@ impl VectorWorkspaceStore for MilvusStore {
         // commit_ts. Under synchronous semantics (no outbox), the call
         // returns after Milvus acked → server-now is a valid stand-in for
         // read-your-writes on the same instance.
+        Ok(chrono::Utc::now().timestamp_millis())
+    }
+
+    async fn insert_records(
+        &self,
+        workspace_id: &str,
+        records: &[veda_types::UpsertRecord],
+    ) -> Result<i64> {
+        let started = std::time::Instant::now();
+        let result = MilvusStore::insert_vector_records(self, workspace_id, records).await;
+        record_vector_store_op("insert", workspace_id, "none", "none", result.is_ok(), started);
+        result?;
+        // Same server-now commit_ts stand-in as upsert_records.
         Ok(chrono::Utc::now().timestamp_millis())
     }
 

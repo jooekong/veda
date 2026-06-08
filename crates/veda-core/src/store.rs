@@ -654,6 +654,17 @@ pub trait VectorWorkspaceStore: Send + Sync {
         records: &[UpsertRecord],
     ) -> Result<i64>;
 
+    /// Insert a batch WITHOUT dedup (Milvus `/entities/insert`). Unlike
+    /// `upsert_records`, a repeated PK inserts a duplicate row — caller must
+    /// guarantee uniqueness (id-less UUID, or the `write_mode=insert`
+    /// contract). Non-idempotent: the impl MUST NOT auto-retry (a replay
+    /// after commit-then-timeout duplicates). Returns server-now `commit_ts`.
+    async fn insert_records(
+        &self,
+        workspace_id: &str,
+        records: &[UpsertRecord],
+    ) -> Result<i64>;
+
     /// Search within a single dataset of one workspace. `query` selects the
     /// mode and carries its data (`Semantic`/`Hybrid` need the dense vector,
     /// `Fulltext` the raw text). The impl auto-appends `status == "active"`

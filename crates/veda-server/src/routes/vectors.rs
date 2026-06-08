@@ -15,7 +15,9 @@ use veda_types::api::{
     NewRecord, UpsertRequest, UpsertResponse, VectorDeleteRequest, VectorDeleteResponse,
     VectorQueryRequest, VectorQueryResponse, VectorSearchRequest, VectorSearchResponse,
 };
-use veda_types::{validate, ApiResponse, SearchMode, UpsertRecord, VectorSearchQuery, VedaError};
+use veda_types::{
+    validate, ApiResponse, SearchMode, UpsertRecord, VectorSearchQuery, VedaError, WriteMode,
+};
 
 use crate::auth::AuthDbWorkspace;
 use crate::error::AppError;
@@ -124,12 +126,18 @@ async fn upsert_vectors(
         .into());
     }
 
-    // 7. Build Milvus payload records.
-    let mut to_insert: Vec<UpsertRecord> = Vec::with_capacity(deduped.len());
+    // 7. Build Milvus payload records, routing each to the upsert or insert
+    //    batch. write_mode=insert → all insert; write_mode=upsert (default)
+    //    → explicit-id records upsert (idempotent), id-less records take the
+    //    insert fast path (a UUID can't collide; skips Milvus's ~400ms dedup).
+    let write_mode = req.write_mode;
+    let mut upsert_batch: Vec<UpsertRecord> = Vec::new();
+    let mut insert_batch: Vec<UpsertRecord> = Vec::new();
     let mut ids: Vec<String> = Vec::with_capacity(deduped.len());
     for (nr, vec) in deduped.into_iter().zip(vectors.into_iter()) {
         ids.push(nr.id.clone());
-        to_insert.push(UpsertRecord {
+        let use_insert = write_mode == WriteMode::Insert || !nr.had_explicit_id;
+        let record = UpsertRecord {
             pk: nr.pk,
             id: nr.id,
             dataset: nr.dataset,
@@ -140,15 +148,30 @@ async fn upsert_vectors(
             meta: nr.meta,
             created_at: now_ms,
             updated_at: now_ms,
-        });
+        };
+        if use_insert {
+            insert_batch.push(record);
+        } else {
+            upsert_batch.push(record);
+        }
     }
 
-    // 8. Synchronous upsert. commit_ts is server-now (Milvus REST doesn't
-    //    surface a real one; see VectorWorkspaceStore::upsert_records doc).
-    let commit_ts = state
-        .vector_workspace_store
-        .upsert_records(&auth.workspace_id, &to_insert)
-        .await?;
+    // 8. Submit. A mixed batch issues two Milvus calls and is NOT atomic
+    //    (see vector-write-mode-plan.md "重试与原子性契约"). commit_ts is
+    //    server-now (Milvus REST doesn't surface a real one).
+    let mut commit_ts = now_ms;
+    if !upsert_batch.is_empty() {
+        commit_ts = state
+            .vector_workspace_store
+            .upsert_records(&auth.workspace_id, &upsert_batch)
+            .await?;
+    }
+    if !insert_batch.is_empty() {
+        commit_ts = state
+            .vector_workspace_store
+            .insert_records(&auth.workspace_id, &insert_batch)
+            .await?;
+    }
 
     timer.success();
     Ok(Json(ApiResponse::ok(UpsertResponse { ids, commit_ts })))
@@ -158,6 +181,9 @@ async fn upsert_vectors(
 struct NormalizedRecord {
     pk: String,
     id: String,
+    /// Whether the caller supplied `id` (vs a server-generated UUID). Drives
+    /// write routing: id-less records always take the insert fast path.
+    had_explicit_id: bool,
     dataset: String,
     category: String,
     tags: Vec<String>,
@@ -167,6 +193,7 @@ struct NormalizedRecord {
 
 fn normalize_record(rec: &NewRecord, dataset: &str) -> Result<NormalizedRecord, AppError> {
     validate::validate_text(&rec.text)?;
+    let had_explicit_id = rec.id.is_some();
     let id = match rec.id.as_deref() {
         Some(rk) => {
             validate::validate_id(rk)?;
@@ -189,6 +216,7 @@ fn normalize_record(rec: &NewRecord, dataset: &str) -> Result<NormalizedRecord, 
     Ok(NormalizedRecord {
         pk,
         id,
+        had_explicit_id,
         dataset: dataset.to_string(),
         category,
         tags,
