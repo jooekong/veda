@@ -138,6 +138,12 @@ async fn build_test_app() -> (Arc<AppState>, Arc<MysqlStore>, axum::Router) {
         auth_store: mysql.clone(),
         meta_store: mysql.clone(),
         vector_store: milvus.clone(),
+        reconciler: Arc::new(veda_server::reconciler::Reconciler::new(
+            mysql.clone(),
+            mysql.clone(),
+            milvus.clone(),
+            mysql.clone(),
+        )),
         vector_workspace_store: milvus.clone(),
         vector_embedding,
         embedding_dim: cfg.embedding.dimension,

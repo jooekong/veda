@@ -261,6 +261,28 @@ impl MysqlStore {
             idle: self.pool.num_idle(),
         }
     }
+
+    /// Outbox row counts grouped by status, for the `veda_outbox_depth` gauge
+    /// sampler. Restricted to the three actionable statuses so the periodic
+    /// sample never counts the (potentially large) `completed` backlog before
+    /// retention prunes it. `status` leads both outbox indexes (`idx_claim`,
+    /// `idx_retention`), so this is an index range scan over those values.
+    pub async fn outbox_status_counts(&self) -> Result<Vec<(String, i64)>> {
+        let rows = sqlx::query(
+            "SELECT status, COUNT(*) AS n FROM veda_outbox \
+             WHERE status IN ('pending','processing','dead') GROUP BY status",
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map_err(storage_err)?;
+        let mut out = Vec::with_capacity(rows.len());
+        for r in &rows {
+            let status: String = r.try_get("status").map_err(storage_err)?;
+            let n: i64 = r.try_get("n").map_err(storage_err)?;
+            out.push((status, n));
+        }
+        Ok(out)
+    }
 }
 
 /// Pool tuning parameters. Values of `0` for the optional knobs mean
@@ -1864,7 +1886,7 @@ impl TaskQueue for MysqlStore {
         .await
         .map_err(storage_err)?;
         let mut events = Vec::new();
-        let mut dead_ids = Vec::new();
+        let mut dead_ids: Vec<(i64, String)> = Vec::new();
         for r in &rows {
             let evt = row_to_outbox(r)?;
             let was_processing = evt.status == OutboxStatus::Processing;
@@ -1874,7 +1896,7 @@ impl TaskQueue for MysqlStore {
                 // claim() won't enter this branch — no double-increment.
                 let next_retry = evt.retry_count + 1;
                 if next_retry >= evt.max_retries {
-                    dead_ids.push(evt.id);
+                    dead_ids.push((evt.id, db_enum_str(&evt.event_type)));
                     continue;
                 }
                 sqlx::query(
@@ -1900,7 +1922,7 @@ impl TaskQueue for MysqlStore {
             }
             events.push(evt);
         }
-        for id in &dead_ids {
+        for (id, _event_type) in &dead_ids {
             sqlx::query(
                 r#"UPDATE veda_outbox SET status = 'dead', lease_until = NULL WHERE id = ?"#,
             )
@@ -1910,6 +1932,18 @@ impl TaskQueue for MysqlStore {
             .map_err(storage_err)?;
         }
         tx.commit().await.map_err(storage_err)?;
+        // Surface dead-letter now that the transition is durable. This
+        // lease-expiry path bypasses fail(), so without this it is fully
+        // silent — no log, no metric (review H4).
+        for (id, event_type) in &dead_ids {
+            tracing::warn!(
+                task_id = *id,
+                event_type = %event_type,
+                "outbox task dead: lease expired past max_retries"
+            );
+            ::metrics::counter!("veda_outbox_dead_total", "event_type" => event_type.clone())
+                .increment(1);
+        }
         Ok(events)
     }
 
@@ -1926,7 +1960,7 @@ impl TaskQueue for MysqlStore {
 
     async fn fail(&self, task_id: i64, error: &str) -> Result<()> {
         let row = sqlx::query(
-            r#"SELECT id, retry_count, max_retries, payload FROM veda_outbox WHERE id = ?"#,
+            r#"SELECT id, retry_count, max_retries, payload, event_type FROM veda_outbox WHERE id = ?"#,
         )
         .bind(task_id)
         .fetch_optional(&self.pool)
@@ -1937,6 +1971,7 @@ impl TaskQueue for MysqlStore {
         };
         let retry: i32 = r.try_get("retry_count").map_err(storage_err)?;
         let max: i32 = r.try_get("max_retries").map_err(storage_err)?;
+        let event_type: String = r.try_get("event_type").map_err(storage_err)?;
         let Json(mut payload): Json<serde_json::Value> =
             r.try_get("payload").map_err(storage_err)?;
         if let serde_json::Value::Object(ref mut m) = payload {
@@ -1949,9 +1984,13 @@ impl TaskQueue for MysqlStore {
             serde_json::to_string(&payload).map_err(|e| storage_err(e.to_string()))?;
         let next_retry = retry + 1;
         if next_retry >= max {
-            sqlx::query(
+            // `AND status <> 'dead'` makes the terminal transition idempotent:
+            // a worker that stalled past its 10-min lease can reach fail()
+            // AFTER another worker's claim() already dead-lettered the row.
+            // Without the guard the dead counter double-counts one death.
+            let res = sqlx::query(
                 r#"UPDATE veda_outbox SET status = 'dead', retry_count = ?, payload = CAST(? AS JSON),
-                   lease_until = NULL WHERE id = ?"#,
+                   lease_until = NULL WHERE id = ? AND status <> 'dead'"#,
             )
             .bind(next_retry)
             .bind(&payload_str)
@@ -1959,6 +1998,15 @@ impl TaskQueue for MysqlStore {
             .execute(&self.pool)
             .await
             .map_err(storage_err)?;
+            // Only count the death THIS call actually performed. worker.rs
+            // already logged + bumped veda_outbox_failed_total for this
+            // attempt; this is the dedicated dead-letter counter ops alert on
+            // (H4).
+            if res.rows_affected() > 0 {
+                tracing::warn!(task_id, event_type = %event_type, "outbox task dead: retries exhausted");
+                ::metrics::counter!("veda_outbox_dead_total", "event_type" => event_type)
+                    .increment(1);
+            }
         } else {
             let backoff_secs: i64 = (30 * (1i64 << next_retry.min(10))).min(3600);
             sqlx::query(

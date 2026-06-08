@@ -11,8 +11,6 @@ pub struct ServerConfig {
     #[serde(default)]
     pub worker: WorkerConfig,
     #[serde(default)]
-    pub reconciler: ReconcilerConfig,
-    #[serde(default)]
     pub retention: RetentionConfig,
     #[serde(default)]
     pub otlp: OtlpConfig,
@@ -107,31 +105,6 @@ impl Default for WorkerConfig {
     }
 }
 
-#[derive(Debug, Deserialize, Clone)]
-pub struct ReconcilerConfig {
-    #[serde(default = "default_reconciler_enabled")]
-    pub enabled: bool,
-    /// Pass interval in seconds. Default: 6 hours. Minimum enforced at 60s.
-    #[serde(default = "default_reconciler_interval_secs")]
-    pub interval_secs: u64,
-}
-
-impl Default for ReconcilerConfig {
-    fn default() -> Self {
-        Self {
-            enabled: default_reconciler_enabled(),
-            interval_secs: default_reconciler_interval_secs(),
-        }
-    }
-}
-
-fn default_reconciler_enabled() -> bool {
-    true
-}
-
-fn default_reconciler_interval_secs() -> u64 {
-    6 * 3600
-}
 
 #[derive(Debug, Deserialize, Clone)]
 pub struct RetentionConfig {
@@ -324,8 +297,6 @@ impl ServerConfig {
             }
         }
 
-        env_parse("VEDA_RECONCILER_ENABLED", &mut self.reconciler.enabled);
-        env_parse("VEDA_RECONCILER_INTERVAL_SECS", &mut self.reconciler.interval_secs);
         env_parse("VEDA_RETENTION_ENABLED", &mut self.retention.enabled);
         env_parse("VEDA_RETENTION_INTERVAL_SECS", &mut self.retention.interval_secs);
         env_parse("VEDA_RETENTION_EVENTS_DAYS", &mut self.retention.events_retention_days);
@@ -507,22 +478,6 @@ dimension = 768
         let toml_with_token = format!("metrics_token = \"toml-token\"\n{MINIMAL_TOML}");
         let cfg = ServerConfig::from_toml(&toml_with_token).unwrap();
         assert_eq!(cfg.metrics_token.as_deref(), Some("toml-token"));
-    }
-
-    #[test]
-    fn reconciler_defaults_and_env_overrides() {
-        let _lock = ENV_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
-        let cfg = ServerConfig::from_toml(MINIMAL_TOML).unwrap();
-        assert!(cfg.reconciler.enabled);
-        assert_eq!(cfg.reconciler.interval_secs, 6 * 3600);
-
-        std::env::set_var("VEDA_RECONCILER_ENABLED", "false");
-        std::env::set_var("VEDA_RECONCILER_INTERVAL_SECS", "300");
-        let cfg = ServerConfig::from_toml(MINIMAL_TOML).unwrap();
-        std::env::remove_var("VEDA_RECONCILER_ENABLED");
-        std::env::remove_var("VEDA_RECONCILER_INTERVAL_SECS");
-        assert!(!cfg.reconciler.enabled);
-        assert_eq!(cfg.reconciler.interval_secs, 300);
     }
 
     #[test]

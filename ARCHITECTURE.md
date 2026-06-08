@@ -97,7 +97,7 @@ Vector dataset 是 db workspace 内的逻辑分组（内部物理 pk = `{dataset
 - Milvus = data plane (向量搜索、structured collection 数据)
 - 文件分层存储：≤256KB inline，>256KB chunked
 - Content-addressed dedup (SHA256)
-- Outbox pattern 实现最终一致性 + reconciler 自愈
+- Outbox pattern 实现最终一致性。文件写入与其 ChunkSync/SummarySync 入队在**同一 MySQL 事务**提交，写路径不会漂移。残余漂移来源只有死信任务（`veda_outbox_dead_total` + `veda_outbox_depth{status}` 暴露，告警在 Monitor 平台配）和 Milvus 侧数据丢失（磁盘/运维/破坏式迁移）。**不再有 6h 后台 reconcile loop**；改为按需 `POST /admin/v1/reconcile/{workspace_id}?dry_run=`（ops `metrics_token` 鉴权，默认 dry_run=true 只报告，失败响亮返回 500）
 - Account → Workspace 多租户，API Key + Workspace Token 认证
 - VedaError::Storage 使用 String（而非 anyhow::Error）避免 lib crate 兼容问题
 - **三层信息模型 (Tiered Context Loading)**：

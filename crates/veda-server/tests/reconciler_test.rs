@@ -199,7 +199,6 @@ fn make_reconciler_immediate(mysql: Arc<MysqlStore>, milvus: Arc<MilvusStore>) -
         mysql.clone(),
         milvus.clone(),
         mysql.clone(),
-        60,
         0,
     )
 }
@@ -213,7 +212,6 @@ fn make_reconciler_with_grace(mysql: Arc<MysqlStore>, milvus: Arc<MilvusStore>) 
         mysql.clone(),
         milvus.clone(),
         mysql.clone(),
-        60,
         1,
     )
 }
@@ -259,7 +257,7 @@ async fn reconciler_clears_orphan_milvus_chunks() {
 
     // Run reconciler. The orphan should be detected and chunks deleted.
     let report = make_reconciler_immediate(mysql.clone(), milvus.clone())
-        .reconcile_workspace(&ws)
+        .reconcile_workspace(&ws, false)
         .await
         .expect("reconcile");
 
@@ -325,7 +323,7 @@ async fn reconciler_reembeds_missing_chunks() {
 
     // Run reconciler. It should enqueue ChunkSync(file_id).
     let report = make_reconciler_immediate(mysql.clone(), milvus.clone())
-        .reconcile_workspace(&ws)
+        .reconcile_workspace(&ws, false)
         .await
         .expect("reconcile");
     let ws_report = &report;
@@ -364,7 +362,7 @@ async fn reconciler_clean_workspace_reports_zero_drift() {
 
     // Reconcile a clean workspace: should report 0 drift.
     let report = make_reconciler_immediate(mysql.clone(), milvus.clone())
-        .reconcile_workspace(&ws)
+        .reconcile_workspace(&ws, false)
         .await
         .expect("reconcile");
     let ws_report = &report;
@@ -459,7 +457,7 @@ async fn reconciler_force_reembeds_when_watermark_intact() {
     );
 
     let report = make_reconciler_immediate(mysql.clone(), milvus.clone())
-        .reconcile_workspace(&ws)
+        .reconcile_workspace(&ws, false)
         .await
         .expect("reconcile");
     let ws_report = &report;
@@ -525,7 +523,7 @@ async fn reconciler_reenqueues_missing_dir_summary() {
     assert!(!summaries_before.contains(&dentry_id));
 
     let report = make_reconciler_immediate(mysql.clone(), milvus.clone())
-        .reconcile_workspace(&ws)
+        .reconcile_workspace(&ws, false)
         .await
         .expect("reconcile");
     let ws_report = &report;
@@ -591,7 +589,7 @@ async fn reconciler_grace_period_defers_first_pass_orphan_delete() {
         .unwrap();
 
     let reconciler = make_reconciler_with_grace(mysql.clone(), milvus.clone());
-    let report1 = reconciler.reconcile_workspace(&ws).await.expect("pass 1");
+    let report1 = reconciler.reconcile_workspace(&ws, false).await.expect("pass 1");
     let ws_report1 = &report1;
     assert_eq!(
         ws_report1.chunk_orphan, 0,
@@ -606,7 +604,7 @@ async fn reconciler_grace_period_defers_first_pass_orphan_delete() {
         "first pass must not have deleted Milvus chunks"
     );
 
-    let report2 = reconciler.reconcile_workspace(&ws).await.expect("pass 2");
+    let report2 = reconciler.reconcile_workspace(&ws, false).await.expect("pass 2");
     let ws_report2 = &report2;
     assert_eq!(ws_report2.chunk_orphan, 1, "second pass must delete");
     assert!(

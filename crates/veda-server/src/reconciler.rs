@@ -1,7 +1,7 @@
 //! MySQL ↔ Milvus drift reconciler.
 //!
-//! Periodically diffs the metadata source-of-truth (MySQL `veda_files` /
-//! `veda_summaries`) against the vector store (Milvus chunk / summary
+//! On-demand diff between the metadata source-of-truth (MySQL `veda_files` /
+//! `veda_summaries`) and the vector store (Milvus chunk / summary
 //! collections), then heals the divergence:
 //!
 //! - MySQL has, Milvus missing → enqueue ChunkSync / SummarySync (worker's
@@ -9,17 +9,20 @@
 //!   the content actually matches).
 //! - Milvus has, MySQL missing → orphan; delete from Milvus.
 //!
-//! Single-replica alpha lives inside the same process as the worker; the
-//! design is intentionally split so a future `veda-reconciler` binary just
-//! re-wires `Reconciler::new` and `run`.
+//! Invoked on demand via `POST /admin/v1/reconcile/{workspace_id}`, NOT on a
+//! timer. The file write and its ChunkSync/SummarySync enqueue commit in one
+//! MySQL transaction (see `fs::FsService`), so the normal write path cannot
+//! drift. The only residual drift sources are dead-letter tasks (surfaced by
+//! `veda_outbox_dead_total`) and Milvus-side data loss (disk / ops / a
+//! destructive schema migration) — rare enough that an operator running this
+//! with `?dry_run=true` to inspect, then `?dry_run=false` to heal, beats a
+//! 6-hourly background scan that silently skipped the largest workspaces.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
 
 use chrono::Utc;
-use tokio::sync::watch;
-use tokio::time::sleep;
+use serde::Serialize;
 use tracing::{debug, info, warn};
 
 use veda_core::store::{AuthStore, MetadataStore, TaskQueue, VectorStore};
@@ -28,7 +31,7 @@ use veda_types::{Dentry, OutboxEventType};
 use crate::outbox::enqueue_dedup;
 
 /// Per-workspace reconciliation outcome.
-#[derive(Debug, Default, Clone)]
+#[derive(Debug, Default, Clone, Serialize)]
 pub struct WorkspaceReport {
     pub workspace_id: String,
     pub chunk_missing: usize,  // MySQL has, Milvus missing — enqueued ChunkSync
@@ -126,7 +129,6 @@ pub struct Reconciler {
     auth: Arc<dyn AuthStore>,
     vector: Arc<dyn VectorStore>,
     task_queue: Arc<dyn TaskQueue>,
-    interval: Duration,
     /// Tracks orphans seen on previous passes. An orphan is only deleted
     /// after being observed on N+1 consecutive passes (where N =
     /// `grace_passes`). This avoids the non-atomic snapshot race: user
@@ -146,9 +148,8 @@ impl Reconciler {
         auth: Arc<dyn AuthStore>,
         vector: Arc<dyn VectorStore>,
         task_queue: Arc<dyn TaskQueue>,
-        interval_secs: u64,
     ) -> Self {
-        Self::with_grace_passes(meta, auth, vector, task_queue, interval_secs, 1)
+        Self::with_grace_passes(meta, auth, vector, task_queue, 1)
     }
 
     pub fn with_grace_passes(
@@ -156,7 +157,6 @@ impl Reconciler {
         auth: Arc<dyn AuthStore>,
         vector: Arc<dyn VectorStore>,
         task_queue: Arc<dyn TaskQueue>,
-        interval_secs: u64,
         grace_passes: usize,
     ) -> Self {
         Self {
@@ -164,37 +164,15 @@ impl Reconciler {
             auth,
             vector,
             task_queue,
-            interval: Duration::from_secs(interval_secs.max(60)),
             orphan_seen: Mutex::new(HashMap::new()),
             grace_passes,
         }
     }
 
-    /// Periodic loop. Runs `run_once` on a fixed cadence; exits when the
-    /// shutdown channel fires.
-    pub async fn run(&self, mut shutdown: watch::Receiver<bool>) {
-        info!(
-            interval_secs = self.interval.as_secs(),
-            "reconciler started"
-        );
-        loop {
-            tokio::select! {
-                _ = shutdown.changed() => {
-                    info!("reconciler shutting down");
-                    break;
-                }
-                _ = sleep(self.interval) => {
-                    if let Err(e) = self.run_once().await {
-                        warn!(err = %e, "reconciler run failed");
-                    }
-                }
-            }
-        }
-    }
-
     /// Run one reconciliation pass over every active workspace. Per-workspace
-    /// errors are logged but do not abort the overall pass.
-    pub async fn run_once(&self) -> veda_types::Result<ReconcileReport> {
+    /// errors are logged but do not abort the overall pass. `dry_run` reports
+    /// drift without enqueuing repairs or deleting orphans.
+    pub async fn run_once(&self, dry_run: bool) -> veda_types::Result<ReconcileReport> {
         let workspace_ids = self.auth.list_active_workspace_ids().await?;
         let mut report = ReconcileReport::default();
         info!(
@@ -202,7 +180,7 @@ impl Reconciler {
             "reconciler pass starting"
         );
         for ws in workspace_ids {
-            match self.reconcile_workspace(&ws).await {
+            match self.reconcile_workspace(&ws, dry_run).await {
                 Ok(r) => {
                     // Per-workspace drift goes to logs, not metrics labels:
                     // workspace_id is high-cardinality and effectively a
@@ -272,13 +250,16 @@ impl Reconciler {
     pub async fn reconcile_workspace(
         &self,
         workspace_id: &str,
+        dry_run: bool,
     ) -> veda_types::Result<WorkspaceReport> {
         let mut report = WorkspaceReport {
             workspace_id: workspace_id.to_string(),
             ..Default::default()
         };
-        self.reconcile_chunks(workspace_id, &mut report).await?;
-        self.reconcile_summaries(workspace_id, &mut report).await?;
+        self.reconcile_chunks(workspace_id, &mut report, dry_run)
+            .await?;
+        self.reconcile_summaries(workspace_id, &mut report, dry_run)
+            .await?;
         Ok(report)
     }
 
@@ -287,6 +268,7 @@ impl Reconciler {
         &self,
         workspace_id: &str,
         report: &mut WorkspaceReport,
+        dry_run: bool,
     ) -> veda_types::Result<()> {
         let mysql_ids: HashSet<String> = self
             .list_mysql_file_ids(workspace_id)
@@ -306,7 +288,11 @@ impl Reconciler {
         // For reconciler-driven repairs we explicitly bypass the watermark
         // so the worker actually rebuilds the chunks.
         for fid in mysql_ids.difference(&milvus_ids) {
-            self.enqueue_chunk_sync_force(workspace_id, fid).await?;
+            if dry_run {
+                info!(workspace_id, file_id = %fid, "dry-run: would enqueue ChunkSync (missing in Milvus)");
+            } else {
+                self.enqueue_chunk_sync_force(workspace_id, fid).await?;
+            }
             report.chunk_missing += 1;
         }
 
@@ -352,14 +338,17 @@ impl Reconciler {
         // Grace period: an orphan must be observed on `grace_passes + 1`
         // consecutive passes before deletion. Entries that no longer appear
         // orphan are dropped (their counter resets if they reappear later).
-        let to_delete = self.advance_orphan_counter(
-            workspace_id,
-            "chunk:",
-            &still_orphan,
-        );
-        for fid in to_delete {
-            self.vector.delete_chunks(workspace_id, &fid).await?;
-            report.chunk_orphan += 1;
+        if dry_run {
+            for fid in &still_orphan {
+                info!(workspace_id, file_id = %fid, "dry-run: would delete chunk orphan (in Milvus, gone from MySQL)");
+            }
+            report.chunk_orphan += still_orphan.len();
+        } else {
+            let to_delete = self.advance_orphan_counter(workspace_id, "chunk:", &still_orphan);
+            for fid in to_delete {
+                self.vector.delete_chunks(workspace_id, &fid).await?;
+                report.chunk_orphan += 1;
+            }
         }
         Ok(())
     }
@@ -410,6 +399,7 @@ impl Reconciler {
         &self,
         workspace_id: &str,
         report: &mut WorkspaceReport,
+        dry_run: bool,
     ) -> veda_types::Result<()> {
         let mysql_entities = self.list_mysql_summary_entities(workspace_id).await?;
         let mysql_id_set: HashSet<String> = mysql_entities
@@ -434,15 +424,23 @@ impl Reconciler {
             }
             match entity {
                 SummaryEntity::File { file_id } => {
-                    self.enqueue_summary_sync(workspace_id, file_id).await?;
+                    if dry_run {
+                        info!(workspace_id, file_id = %file_id, "dry-run: would enqueue SummarySync (missing in Milvus)");
+                    } else {
+                        self.enqueue_summary_sync(workspace_id, file_id).await?;
+                    }
                     report.summary_missing += 1;
                 }
                 SummaryEntity::Dir {
                     dentry_id,
                     dentry_path,
                 } => {
-                    self.enqueue_dir_summary_sync(workspace_id, dentry_id, dentry_path)
-                        .await?;
+                    if dry_run {
+                        info!(workspace_id, dentry_id = %dentry_id, "dry-run: would enqueue DirSummarySync (missing in Milvus)");
+                    } else {
+                        self.enqueue_dir_summary_sync(workspace_id, dentry_id, dentry_path)
+                            .await?;
+                    }
                     report.summary_missing += 1;
                 }
             }
@@ -463,14 +461,17 @@ impl Reconciler {
             }
             still_orphan.insert(id.clone());
         }
-        let to_delete = self.advance_orphan_counter(
-            workspace_id,
-            "summary:",
-            &still_orphan,
-        );
-        for id in to_delete {
-            self.vector.delete_summary(workspace_id, &id).await?;
-            report.summary_orphan += 1;
+        if dry_run {
+            for id in &still_orphan {
+                info!(workspace_id, id = %id, "dry-run: would delete summary orphan (in Milvus, gone from MySQL)");
+            }
+            report.summary_orphan += still_orphan.len();
+        } else {
+            let to_delete = self.advance_orphan_counter(workspace_id, "summary:", &still_orphan);
+            for id in to_delete {
+                self.vector.delete_summary(workspace_id, &id).await?;
+                report.summary_orphan += 1;
+            }
         }
         Ok(())
     }

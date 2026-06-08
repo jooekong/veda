@@ -103,6 +103,18 @@ async fn main() -> anyhow::Result<()> {
         fs_service.clone(),
     );
 
+    // On-demand MySQL↔Milvus reconciler. No background loop — driven by
+    // POST /admin/v1/reconcile/{ws}. grace_passes=0: an operator runs it
+    // attended, and the in-pass get_file/has_pending_event re-checks already
+    // guard the read-skew race within a single pass.
+    let reconciler = Arc::new(reconciler::Reconciler::with_grace_passes(
+        mysql.clone(),
+        mysql.clone(),
+        milvus.clone(),
+        mysql.clone(),
+        0,
+    ));
+
     let app_state = Arc::new(AppState {
         fs_service,
         search_service,
@@ -110,6 +122,7 @@ async fn main() -> anyhow::Result<()> {
         auth_store: mysql.clone(),
         meta_store: mysql.clone(),
         vector_store: milvus.clone(),
+        reconciler,
         vector_workspace_store: milvus.clone(),
         vector_embedding,
         embedding_dim: cfg.embedding.dimension,
@@ -172,6 +185,31 @@ async fn main() -> anyhow::Result<()> {
         }
     });
 
+    // Outbox depth sampler: emits veda_outbox_depth{status} every 30s. Pairs
+    // with veda_outbox_dead_total (emitted at the two death sites in
+    // claim()/fail()) so ops can alert on dead-letter backlog
+    // (status="dead") and queue growth (status="pending"). Always emits the
+    // three actionable statuses so a status that drops back to zero (e.g.
+    // dead-letter drained) reports 0 instead of holding its last gauge value.
+    let outbox_metrics = mysql.clone();
+    tokio::spawn(async move {
+        let mut tick = tokio::time::interval(std::time::Duration::from_secs(30));
+        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        loop {
+            tick.tick().await;
+            match outbox_metrics.outbox_status_counts().await {
+                Ok(counts) => {
+                    let m: std::collections::HashMap<String, i64> = counts.into_iter().collect();
+                    for status in ["pending", "processing", "dead"] {
+                        let n = m.get(status).copied().unwrap_or(0);
+                        ::metrics::gauge!("veda_outbox_depth", "status" => status).set(n as f64);
+                    }
+                }
+                Err(e) => tracing::warn!(err = %e, "outbox depth sample failed"),
+            }
+        }
+    });
+
     let retention_handle = if cfg.retention.enabled {
         let interval = std::time::Duration::from_secs(cfg.retention.interval_secs.max(60));
         let events_days = cfg.retention.events_retention_days.max(1);
@@ -223,27 +261,6 @@ async fn main() -> anyhow::Result<()> {
         }))
     } else {
         info!("retention sweep disabled (fs_events + outbox)");
-        None
-    };
-
-    let reconciler_handle = if cfg.reconciler.enabled {
-        let r = reconciler::Reconciler::new(
-            mysql.clone(),
-            mysql.clone(),
-            milvus.clone(),
-            mysql.clone(),
-            cfg.reconciler.interval_secs,
-        );
-        let rx = shutdown_rx.clone();
-        info!(
-            interval_secs = cfg.reconciler.interval_secs,
-            "reconciler enabled"
-        );
-        Some(tokio::spawn(async move {
-            r.run(rx).await;
-        }))
-    } else {
-        info!("reconciler disabled");
         None
     };
 
@@ -322,9 +339,6 @@ async fn main() -> anyhow::Result<()> {
         .await?;
 
     if let Some(handle) = worker_handle {
-        let _ = handle.await;
-    }
-    if let Some(handle) = reconciler_handle {
         let _ = handle.await;
     }
     if let Some(handle) = retention_handle {

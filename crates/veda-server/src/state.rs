@@ -14,6 +14,9 @@ pub struct AppState {
     pub auth_store: Arc<dyn AuthStore>,
     pub meta_store: Arc<dyn MetadataStore>,
     pub vector_store: Arc<dyn VectorStore>,
+    /// On-demand MySQL↔Milvus reconciler (no background loop). Driven by
+    /// `POST /admin/v1/reconcile/{ws}`. See `crate::reconciler`.
+    pub reconciler: Arc<crate::reconciler::Reconciler>,
     /// db-kind workspace collection lifecycle (create/drop). Separate from
     /// `vector_store` (fs-side chunk/summary ops); both currently happen to
     /// be the same MilvusStore instance, but the trait split lets Stage 4+

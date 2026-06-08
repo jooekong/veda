@@ -10,6 +10,16 @@ that matters.
 ## [Unreleased]
 
 ### Changed
+- **Drift reconcile is now on-demand, not a 6h background loop.** The periodic
+  reconciler (`[reconciler]` config, `VEDA_RECONCILER_*`) is removed. Rationale:
+  the file write and its ChunkSync/SummarySync enqueue commit in one MySQL
+  transaction, so the write path can't drift; the only residual drift is
+  dead-letter tasks and Milvus-side data loss. Reconcile is now triggered by
+  `POST /admin/v1/reconcile/{workspace_id}?dry_run=true|false` (gated by the ops
+  `metrics_token`; default `dry_run=true` reports only). Failures (e.g. the
+  Milvus 16384-window list cliff on a very large workspace) surface as a 500 to
+  the operator instead of a silent per-workspace skip. `[reconciler]` keys in an
+  existing config are ignored.
 - **BREAKING (db data-plane auth)**: `/v1/vectors/*` now authenticates with a
   workspace key `wk_` (`AuthDbWorkspace`), not the account key `vk_`. A `wk_` is
   bound to one workspace, so the request body no longer accepts `workspace_id`
@@ -24,6 +34,15 @@ that matters.
   is dropped. All auth is a plain key check (no JWT mint/verify).
 
 ### Added
+- **Dead-letter visibility (H4)**: `veda_outbox_dead_total{event_type}` counter
+  emitted at both death sites — the `fail()` retries-exhausted path and the
+  previously-silent `claim()` lease-expiry path — plus a `veda_outbox_depth{status}`
+  gauge (pending/processing/dead, sampled every 30s). Lets ops alert on
+  permanently-failing tasks and queue backlog (configure the alert rule on the
+  Monitor platform). Closes the alpha-plan "outbox_depth + outbox_dead 可见" gap.
+- **On-demand reconcile endpoint**: `POST /admin/v1/reconcile/{workspace_id}`
+  (see Changed). `?dry_run=true` logs/returns the drift report without mutating;
+  `?dry_run=false` enqueues repairs and deletes orphans.
 - **Platform account model**: accounts can be created by `app_id` —
   `POST /v1/accounts {name, app_id}` with no email/password — so the AI platform
   provisions one veda account per business app. `Account` gains a unique `app_id`;

@@ -52,10 +52,10 @@ enabled = true
 batch_size = 16
 poll_interval_secs = 1
 
-[reconciler]
-enabled = true
-# 6h pass on a single-node alpha is plenty.
-interval_secs = 21600
+# No [reconciler] section: the background drift-reconcile loop was removed.
+# With a transactional outbox the write path can't drift; residual drift is
+# surfaced by veda_outbox_dead_total / veda_outbox_depth and repaired on
+# demand via `POST /admin/v1/reconcile/{ws}` (see ARCHITECTURE.md).
 
 [retention]
 enabled = true
