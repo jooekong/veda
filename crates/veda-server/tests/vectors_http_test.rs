@@ -230,10 +230,12 @@ async fn provision_test_account(state: &AppState) -> TestSetup {
         .create_workspace_key(&WorkspaceKey {
             id: Uuid::new_v4().to_string(),
             workspace_id: ws_id.clone(),
+            account_id: acct_id.clone(),
             name: "test-wk".into(),
             key_hash: sha256_hex(raw_ws_key.as_bytes()),
             permission: KeyPermission::ReadWrite,
             status: KeyStatus::Active,
+            kind: WorkspaceKind::Db,
             created_at: now,
         })
         .await
@@ -1129,10 +1131,12 @@ async fn sub_provisioning_http_e2e(
         .create_workspace_key(&WorkspaceKey {
             id: Uuid::new_v4().to_string(),
             workspace_id: ws_id.clone(),
+            account_id: acct_id.clone(),
             name: "prov-wk".into(),
             key_hash: sha256_hex(raw_wk.as_bytes()),
             permission: KeyPermission::ReadWrite,
             status: KeyStatus::Active,
+            kind: WorkspaceKind::Db,
             created_at: Utc::now(),
         })
         .await
@@ -1210,10 +1214,12 @@ async fn sub_vectors_api_rejects_fs(
         .create_workspace_key(&WorkspaceKey {
             id: Uuid::new_v4().to_string(),
             workspace_id: fs_ws_id.clone(),
+            account_id: acct_id.clone(),
             name: "fs-wk".into(),
             key_hash: sha256_hex(raw_wk.as_bytes()),
             permission: KeyPermission::ReadWrite,
             status: KeyStatus::Active,
+            kind: WorkspaceKind::Fs,
             created_at: Utc::now(),
         })
         .await

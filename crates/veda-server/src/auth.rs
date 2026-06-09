@@ -128,6 +128,10 @@ impl AuthAccount {
         if ws.account_id != self.account_id {
             return Err(veda_types::VedaError::PermissionDenied.into());
         }
+        // Scope gate at the single ownership choke point: every control-plane
+        // route that loads a workspace inherits the allowed_workspaces check,
+        // so a scoped vk_ can't reach a sibling workspace through any of them.
+        self.check_workspace_allowed(&ws.id)?;
         Ok(ws)
     }
 
@@ -149,7 +153,7 @@ impl AuthAccount {
         if ws.kind != veda_types::WorkspaceKind::Db {
             return Err(veda_types::VedaError::WorkspaceKindMismatch.into());
         }
-        self.check_workspace_allowed(&ws.id)?;
+        // ownership + scope already enforced by load_owned_workspace
         Ok(ws)
     }
 }
@@ -161,12 +165,17 @@ impl AuthAccount {
 async fn resolve_ws_key(
     auth_header: Option<String>,
     state: Arc<AppState>,
-) -> Result<(veda_types::Workspace, bool), Response> {
+) -> Result<(veda_types::WorkspaceKey, bool), Response> {
     let token = auth_header
         .as_deref()
         .and_then(|s| s.strip_prefix("Bearer "))
         .ok_or_else(auth_err)?;
     let key_hash = veda_core::checksum::sha256_hex(token.as_bytes());
+    // Single-query auth: get_workspace_key_by_hash JOINs accounts (suspended
+    // account → immediate reject) and returns the denormalized kind +
+    // workspace_id, so there's no second get_workspace round-trip.
+    // workspace.status is not checked here — delete_workspace cascades a key
+    // revoke instead (see mysql.rs).
     let wk = state
         .auth_store
         .get_workspace_key_by_hash(&key_hash)
@@ -177,19 +186,7 @@ async fn resolve_ws_key(
         })?
         .ok_or_else(auth_err)?;
     let read_only = wk.permission == veda_types::KeyPermission::Read;
-    let ws = state
-        .auth_store
-        .get_workspace(&wk.workspace_id)
-        .await
-        .map_err(|e| {
-            error!(err = %e, "auth store error");
-            internal_err()
-        })?
-        .ok_or_else(auth_err)?;
-    if ws.status != veda_types::WorkspaceStatus::Active {
-        return Err(auth_err());
-    }
-    Ok((ws, read_only))
+    Ok((wk, read_only))
 }
 
 impl FromRequestParts<Arc<AppState>> for AuthWorkspace {
@@ -206,13 +203,13 @@ impl FromRequestParts<Arc<AppState>> for AuthWorkspace {
             .and_then(|v| v.to_str().ok())
             .map(|s| s.to_string());
         async move {
-            let (ws, read_only) = resolve_ws_key(auth_header, state).await?;
-            if ws.kind != veda_types::WorkspaceKind::Fs {
+            let (wk, read_only) = resolve_ws_key(auth_header, state).await?;
+            if wk.kind != veda_types::WorkspaceKind::Fs {
                 return Err(kind_mismatch_err());
             }
             Ok(AuthWorkspace {
-                workspace_id: ws.id,
-                _account_id: ws.account_id,
+                workspace_id: wk.workspace_id,
+                _account_id: wk.account_id,
                 read_only,
             })
         }
@@ -233,12 +230,12 @@ impl FromRequestParts<Arc<AppState>> for AuthDbWorkspace {
             .and_then(|v| v.to_str().ok())
             .map(|s| s.to_string());
         async move {
-            let (ws, read_only) = resolve_ws_key(auth_header, state).await?;
-            if ws.kind != veda_types::WorkspaceKind::Db {
+            let (wk, read_only) = resolve_ws_key(auth_header, state).await?;
+            if wk.kind != veda_types::WorkspaceKind::Db {
                 return Err(kind_mismatch_err());
             }
             Ok(AuthDbWorkspace {
-                workspace_id: ws.id,
+                workspace_id: wk.workspace_id,
                 read_only,
             })
         }

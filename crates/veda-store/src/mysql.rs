@@ -163,13 +163,16 @@ fn row_to_api_key(row: &sqlx::mysql::MySqlRow) -> Result<ApiKeyRecord> {
 fn row_to_workspace_key(row: &sqlx::mysql::MySqlRow) -> Result<WorkspaceKey> {
     let st: String = row.try_get("status").map_err(storage_err)?;
     let perm: String = row.try_get("permission").map_err(storage_err)?;
+    let kd: String = row.try_get("kind").map_err(storage_err)?;
     Ok(WorkspaceKey {
         id: row.try_get("id").map_err(storage_err)?,
         workspace_id: row.try_get("workspace_id").map_err(storage_err)?,
+        account_id: row.try_get("account_id").map_err(storage_err)?,
         name: row.try_get("name").map_err(storage_err)?,
         key_hash: row.try_get("key_hash").map_err(storage_err)?,
         permission: db_enum("key_permission", &perm)?,
         status: db_enum("key_status", &st)?,
+        kind: db_enum("workspace_kind", &kd)?,
         created_at: row.try_get("created_at").map_err(storage_err)?,
     })
 }
@@ -535,6 +538,12 @@ impl MysqlStore {
             "ALTER TABLE veda_api_keys ADD INDEX idx_app (app_id)",
             "ALTER TABLE veda_accounts ADD COLUMN app_id VARCHAR(64) NULL",
             "ALTER TABLE veda_accounts ADD UNIQUE INDEX idx_account_app (app_id)",
+            // Denormalized onto the key so wk_ auth is one query (JOIN
+            // accounts) instead of key-JOIN-workspace-JOIN-account + a
+            // second get_workspace. account_id default '' is the
+            // "needs backfill" sentinel; new keys insert the real value.
+            "ALTER TABLE veda_workspace_keys ADD COLUMN kind VARCHAR(16) NOT NULL DEFAULT 'fs'",
+            "ALTER TABLE veda_workspace_keys ADD COLUMN account_id VARCHAR(36) NOT NULL DEFAULT ''",
         ];
         for s in alters {
             if let Err(e) = sqlx::query(s).execute(&self.pool).await {
@@ -547,6 +556,20 @@ impl MysqlStore {
                 }
             }
         }
+
+        // Backfill kind/account_id onto pre-existing workspace keys (the
+        // columns added above default to 'fs'/''). Idempotent: only rows
+        // still at the '' sentinel are touched, so re-running each boot is a
+        // no-op once filled. New keys are inserted with correct values.
+        sqlx::query(
+            r#"UPDATE veda_workspace_keys k
+               JOIN veda_workspaces w ON w.id = k.workspace_id
+               SET k.account_id = w.account_id, k.kind = w.kind
+               WHERE k.account_id = ''"#,
+        )
+        .execute(&self.pool)
+        .await
+        .map_err(|e| VedaError::Storage(e.to_string()))?;
 
         // One-time widen of veda_file_chunks.content from the original
         // MEDIUMTEXT (16 MB) to LONGTEXT, matching veda_file_contents. A
@@ -2523,11 +2546,24 @@ impl AuthStore for MysqlStore {
     }
 
     async fn delete_workspace(&self, id: &str) -> Result<()> {
-        sqlx::query(r#"UPDATE veda_workspaces SET status = 'archived' WHERE id = ?"#)
+        // Archive the workspace AND revoke its wk_ keys in one transaction.
+        // wk_ auth no longer checks workspace.status (see
+        // get_workspace_key_by_hash), so revoking the keys is what actually
+        // stops the data plane. Atomic: leaving the workspace active with
+        // keys revoked (outage) or archived with keys live (auth bypass)
+        // are both unacceptable — both updates commit or neither does.
+        let mut tx = self.pool.begin().await.map_err(storage_err)?;
+        sqlx::query(r#"UPDATE veda_workspace_keys SET status = 'revoked' WHERE workspace_id = ?"#)
             .bind(id)
-            .execute(&self.pool)
+            .execute(&mut *tx)
             .await
             .map_err(storage_err)?;
+        sqlx::query(r#"UPDATE veda_workspaces SET status = 'archived' WHERE id = ?"#)
+            .bind(id)
+            .execute(&mut *tx)
+            .await
+            .map_err(storage_err)?;
+        tx.commit().await.map_err(storage_err)?;
         Ok(())
     }
 
@@ -2648,15 +2684,17 @@ impl AuthStore for MysqlStore {
 
     async fn create_workspace_key(&self, key: &WorkspaceKey) -> Result<()> {
         sqlx::query(
-            r#"INSERT INTO veda_workspace_keys (id, workspace_id, name, key_hash, permission, status, created_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?)"#,
+            r#"INSERT INTO veda_workspace_keys (id, workspace_id, account_id, name, key_hash, permission, status, kind, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)"#,
         )
         .bind(&key.id)
         .bind(&key.workspace_id)
+        .bind(&key.account_id)
         .bind(&key.name)
         .bind(&key.key_hash)
         .bind(db_enum_str(&key.permission))
         .bind(db_enum_str(&key.status))
+        .bind(db_enum_str(&key.kind))
         .bind(key.created_at.naive_utc())
         .execute(&self.pool)
         .await
@@ -2665,14 +2703,19 @@ impl AuthStore for MysqlStore {
     }
 
     async fn get_workspace_key_by_hash(&self, key_hash: &str) -> Result<Option<WorkspaceKey>> {
-        // JOIN workspace + account so suspending either revokes the key.
+        // JOIN account so a suspended account's keys stop authorizing
+        // immediately (account suspend has no veda write path to cascade
+        // through, so this read-time check is how it takes effect).
+        // workspace.status is NOT checked — archiving a workspace cascades a
+        // key revoke in `delete_workspace`. `kind`/`account_id` are
+        // denormalized onto the key, so this is a single-table lookup + one
+        // PK JOIN, replacing the old 3-table JOIN + a second get_workspace.
         let row = sqlx::query(
-            r#"SELECT k.id, k.workspace_id, k.name, k.key_hash, k.permission, k.status, k.created_at
+            r#"SELECT k.id, k.workspace_id, k.account_id, k.name, k.key_hash,
+                      k.permission, k.status, k.kind, k.created_at
                FROM veda_workspace_keys k
-               INNER JOIN veda_workspaces w ON w.id = k.workspace_id
-               INNER JOIN veda_accounts a ON a.id = w.account_id
-               WHERE k.key_hash = ? AND k.status = 'active'
-                     AND w.status = 'active' AND a.status = 'active'"#,
+               INNER JOIN veda_accounts a ON a.id = k.account_id
+               WHERE k.key_hash = ? AND k.status = 'active' AND a.status = 'active'"#,
         )
         .bind(key_hash)
         .fetch_optional(&self.pool)
@@ -2683,7 +2726,7 @@ impl AuthStore for MysqlStore {
 
     async fn list_workspace_keys(&self, workspace_id: &str) -> Result<Vec<WorkspaceKey>> {
         let rows = sqlx::query(
-            r#"SELECT id, workspace_id, name, key_hash, permission, status, created_at
+            r#"SELECT id, workspace_id, account_id, name, key_hash, permission, status, kind, created_at
                FROM veda_workspace_keys WHERE workspace_id = ? ORDER BY created_at"#,
         )
         .bind(workspace_id)

@@ -238,10 +238,12 @@ async fn create_anonymous_account(
     let ws_key = WorkspaceKey {
         id: Uuid::new_v4().to_string(),
         workspace_id: workspace_id.clone(),
+        account_id: account_id.clone(),
         name: "cli".into(),
         key_hash: ws_key_hash,
         permission: KeyPermission::ReadWrite,
         status: KeyStatus::Active,
+        kind: WorkspaceKind::Fs,
         created_at: now,
     };
 
@@ -504,7 +506,13 @@ async fn create_workspace_key(
     Path(ws_id): Path<String>,
     Json(body): Json<serde_json::Value>,
 ) -> Result<Json<ApiResponse<serde_json::Value>>, AppError> {
-    let _ws = auth.load_owned_workspace(&state, &ws_id).await?;
+    // Must be active: wk_ auth no longer checks workspace.status (the key's
+    // own JOIN only validates the account), so issuing a key against an
+    // archived workspace would silently re-open its data plane (codex H1).
+    let ws = auth.load_owned_workspace(&state, &ws_id).await?;
+    if ws.status != veda_types::WorkspaceStatus::Active {
+        return Err(VedaError::NotFound("workspace".into()).into());
+    }
 
     let name = body
         .get("name")
@@ -532,10 +540,12 @@ async fn create_workspace_key(
     let wk = WorkspaceKey {
         id: Uuid::new_v4().to_string(),
         workspace_id: ws_id,
+        account_id: ws.account_id,
         name,
         key_hash,
         permission,
         status: KeyStatus::Active,
+        kind: ws.kind,
         created_at: now,
     };
     state.auth_store.create_workspace_key(&wk).await?;

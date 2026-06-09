@@ -318,11 +318,19 @@ pub struct ApiKeyRecord {
 pub struct WorkspaceKey {
     pub id: String,
     pub workspace_id: String,
+    /// Denormalized from the owning workspace at key-creation time. Lets db
+    /// data-plane auth verify the account is still active with a single
+    /// `JOIN veda_accounts`, no workspace round-trip.
+    pub account_id: String,
     pub name: String,
     #[serde(skip_serializing)]
     pub key_hash: String,
     pub permission: KeyPermission,
     pub status: KeyStatus,
+    /// Denormalized from the owning workspace at creation. Lets auth route
+    /// fs/db without re-fetching the workspace. Immutable — a workspace's
+    /// kind never changes after creation.
+    pub kind: WorkspaceKind,
     pub created_at: DateTime<Utc>,
 }
 

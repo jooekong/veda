@@ -61,8 +61,9 @@ veda-fuse       FUSE 挂载                           (已实现)
 | `db` | `veda_datasets` (MySQL) + per-ws Milvus collection `ws_<hash16>_default` | `/v1/vectors/{upsert,search,query,delete}`, `/v1/workspaces/{ws}/datasets` | Pinecone-style 裸向量服务（公司 app 共享） |
 
 **认证与隔离**（2026-06 起统一 `wk_`）：
-- **数据面统一用 workspace key `wk_`**：`AuthWorkspace`（fs：files/search/sql/...）与 `AuthDbWorkspace`（db：vectors）各自校验 `kind`，不匹配返 400 `workspace_kind_mismatch`。`wk_` 绑定单 workspace，所以 vectors 请求体不再带 `workspace_id`；read-only `wk_` 可 search/query，不可 upsert/delete。
-- **控制面用账号 key `vk_`**（`AuthAccount`）：账号 / workspace / dataset / key 生命周期、`/admin/v1/tokens`。`vk_` 不进数据面、不外发；业务方只拿可吊销、分读写的 `wk_`。
+- **数据面统一用 workspace key `wk_`**：`AuthWorkspace`（fs：files/search/sql/...）与 `AuthDbWorkspace`（db：vectors）各自校验 `kind`，不匹配返 400 `workspace_kind_mismatch`。`wk_` 绑定单 workspace，所以 vectors 请求体不再带 `workspace_id`；read-only `wk_` 可 search/query，不可 upsert/delete。鉴权是**单次查询**：`veda_workspace_keys` 冗余 `kind`/`account_id`（建 key 时从 workspace 拷贝、之后不可变），`get_workspace_key_by_hash` 只 `JOIN veda_accounts` 验账号 active，**不读 `workspace.status`**——每请求 MySQL 往返从 3 跳（旧 3 表 JOIN + 二次 `get_workspace` + dataset）降到 2 跳（鉴权 1 + dataset 1）。
+- **级联停用**：account suspend 靠上面那条鉴权 JOIN 读时即时拦截；workspace archive 走 `delete_workspace`，在**同一事务**里级联 `UPDATE veda_workspace_keys SET status='revoked'`（鉴权不再读 `workspace.status`，靠这步让 key 失效）。
+- **控制面用账号 key `vk_`**（`AuthAccount`）：账号 / workspace / dataset / key 生命周期、`/admin/v1/tokens`。`vk_` 不进数据面、不外发；业务方只拿可吊销、分读写的 `wk_`。token 的 `allowed_workspaces` scope 在唯一的 ownership 闸 `load_owned_workspace` 统一强制，所有带 `ws_id` 的控制面路由自动继承——scoped `vk_` 不能越权操作同账号其他 workspace。
 - JWT 已移除（无 `POST /v1/workspaces/{id}/token`、无 `jwt_secret`），鉴权全部为纯 key 校验。
 - key 生命周期：`POST/GET/DELETE /v1/workspaces/{id}/keys`（list 仅回元数据，明文只在创建时显示一次）。
 

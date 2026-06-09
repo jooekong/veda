@@ -1069,10 +1069,12 @@ async fn mysql_workspace_key_crud() {
     let wk = WorkspaceKey {
         id: wk_id.clone(),
         workspace_id: ws_id.clone(),
+        account_id: acct_id.clone(),
         name: "ci-key".into(),
         key_hash: wk_hash.into(),
         permission: KeyPermission::ReadWrite,
         status: KeyStatus::Active,
+        kind: WorkspaceKind::Fs,
         created_at: now,
     };
     store.create_workspace_key(&wk).await.unwrap();
@@ -1205,10 +1207,12 @@ async fn mysql_workspace_key_rejected_when_account_suspended() {
         .create_workspace_key(&WorkspaceKey {
             id: Uuid::new_v4().to_string(),
             workspace_id: ws_id.clone(),
+            account_id: acct_id.clone(),
             name: "ci".into(),
             key_hash: wk_hash.clone(),
             permission: KeyPermission::ReadWrite,
             status: KeyStatus::Active,
+            kind: WorkspaceKind::Fs,
             created_at: now,
         })
         .await
@@ -1221,33 +1225,9 @@ async fn mysql_workspace_key_rejected_when_account_suspended() {
         .unwrap()
         .is_some());
 
-    // Suspending the workspace alone must revoke the key.
+    // Suspending the owning account must reject the key: wk_ auth JOINs
+    // veda_accounts, so a suspended account stops authorizing immediately.
     let pool = store.pool();
-    sqlx::query("UPDATE veda_workspaces SET status = 'archived' WHERE id = ?")
-        .bind(&ws_id)
-        .execute(pool)
-        .await
-        .unwrap();
-    assert!(
-        store
-            .get_workspace_key_by_hash(&wk_hash)
-            .await
-            .unwrap()
-            .is_none(),
-        "archived workspace: key must NOT authorize"
-    );
-
-    // Re-activate workspace, suspend the owning account → still rejected.
-    sqlx::query("UPDATE veda_workspaces SET status = 'active' WHERE id = ?")
-        .bind(&ws_id)
-        .execute(pool)
-        .await
-        .unwrap();
-    assert!(store
-        .get_workspace_key_by_hash(&wk_hash)
-        .await
-        .unwrap()
-        .is_some());
     sqlx::query("UPDATE veda_accounts SET status = 'suspended' WHERE id = ?")
         .bind(&acct_id)
         .execute(pool)
@@ -1259,7 +1239,33 @@ async fn mysql_workspace_key_rejected_when_account_suspended() {
             .await
             .unwrap()
             .is_none(),
-        "suspended owner account: workspace key must NOT authorize"
+        "suspended account: workspace key must NOT authorize"
+    );
+
+    // Re-activating the account restores the key — account suspend is a
+    // read-time JOIN check, the key row itself is never mutated.
+    sqlx::query("UPDATE veda_accounts SET status = 'active' WHERE id = ?")
+        .bind(&acct_id)
+        .execute(pool)
+        .await
+        .unwrap();
+    assert!(store
+        .get_workspace_key_by_hash(&wk_hash)
+        .await
+        .unwrap()
+        .is_some());
+
+    // Archiving the workspace must reject the key too. wk_ auth no longer
+    // reads workspace.status, so delete_workspace cascades a key revoke
+    // (irreversible — done last since it mutates the key row to 'revoked').
+    store.delete_workspace(&ws_id).await.unwrap();
+    assert!(
+        store
+            .get_workspace_key_by_hash(&wk_hash)
+            .await
+            .unwrap()
+            .is_none(),
+        "archived workspace: key must NOT authorize (cascade revoke)"
     );
 
     cleanup_account(&store, &acct_id).await;

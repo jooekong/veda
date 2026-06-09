@@ -243,7 +243,7 @@ async fn h_create_wk(
     Path(ws_id): Path<String>,
     Json(body): Json<serde_json::Value>,
 ) -> Response {
-    if resolve_acct(&st, auth_hdr(&headers)).await.is_none() {
+    let Some(account_id) = resolve_acct(&st, auth_hdr(&headers)).await else {
         return unauthorized();
     };
     let permission = match body.get("permission").and_then(|v| v.as_str()) {
@@ -261,10 +261,12 @@ async fn h_create_wk(
         .create_workspace_key(&veda_types::WorkspaceKey {
             id: uuid::Uuid::new_v4().to_string(),
             workspace_id: ws_id,
+            account_id,
             name: "test".into(),
             key_hash: kh,
             permission,
             status: veda_types::KeyStatus::Active,
+            kind: veda_types::WorkspaceKind::Fs,
             created_at: chrono::Utc::now(),
         })
         .await
