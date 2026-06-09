@@ -821,6 +821,7 @@ const DOCS_META: Record<Lang, { sectionLabel: string; items: { id: string; title
     items: [
       { id: "introduction", title: "功能与场景" },
       { id: "quickstart", title: "快速开始" },
+      { id: "reference", title: "详细文档" },
       { id: "cli", title: "CLI 速查" },
       { id: "skill", title: "AI 助手集成" },
       { id: "fuse", title: "FUSE 挂载" },

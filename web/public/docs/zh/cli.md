@@ -26,11 +26,10 @@ veda workspace add my-project
 ## 文件系统
 
 ```bash
-veda cp ./README.md /docs/readme.md          # 上传
-veda cp /docs/readme.md ./readme.md          # 下载（第一个参数以 / 开头即视为远端）
-veda cp /docs/readme.md /backup/readme       # 服务端复制
+veda cp ./README.md /docs/readme.md          # 上传：本地 → 远端
 veda cp ./src /code                          # 目录递归上传（src 是目录时自动 recursive）
 veda cp - /notes/scratch < input.txt         # 从 stdin 上传（src 写 "-"）
+veda cat /docs/readme.md > ./readme.md       # 下载：远端 → 本地（用 cat 重定向，cp 只负责上传）
 veda mv /old.md /archive/old.md
 veda rm /tmp                                 # 删除（目录默认递归，没有 -r 参数；TTY 下有 y/N 确认）
 veda mkdir /new-dir                          # 新建目录

@@ -51,9 +51,30 @@ vim today.md
 
 ## 卸载
 
+跨平台用内置子命令（macOS 走 `umount`，Linux 走 `fusermount3`）：
+
 ```bash
-fusermount -u ~/veda    # Linux
+veda-fuse umount ~/veda
 ```
+
+也可以直接用系统命令：`fusermount -u ~/veda`（Linux）/ `umount ~/veda`（macOS）。
+
+## 进阶选项
+
+`veda-fuse mount` 还有一组可选 flag（`veda-fuse mount --help` 看全）：
+
+```bash
+veda-fuse mount --server … --key wk_… \
+  --write-mode writeback \      # 默认 sync（每次写阻塞上传）；writeback 走本地缓冲 + 防抖批量提交
+  --write-debounce-ms 5000 \    # writeback 静默期，默认 5s
+  --cache-size 128 \            # 读缓存 MB，默认 128
+  --attr-ttl 30 --dir-ttl 60 \  # 属性 / 目录列表缓存 TTL（秒）
+  --read-only \                 # 只读挂载
+  --allow-other \               # 允许其他用户访问挂载点
+  ~/veda
+```
+
+`--server` / `--key` 也可由 `$VEDA_SERVER` / `$VEDA_KEY` 或配置文件的活跃 workspace 提供。
 
 ## 需要知道的几个行为
 

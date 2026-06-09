@@ -12,7 +12,7 @@ Veda 的 workspace 分两种，建库时选定，按场景挑：
 |---|---|---|
 | **kind** | `fs` | `db` |
 | **数据模型** | 文件 / 目录 | 向量记录（text + meta） |
-| **接入方式** | CLI / FUSE / HTTP，`wk_` 或 JWT | REST API / SDK，账号 `vk_` |
+| **接入方式** | CLI / FUSE / HTTP，`wk_` | REST API / SDK，数据面 `wk_`（控制面 `vk_`） |
 | **典型场景** | 个人知识库、Agent 记忆、代码搜索 | 业务应用的托管向量检索（Pinecone 式） |
 | **类比** | 自带搜索的网盘 | 托管向量数据库 |
 
@@ -24,7 +24,7 @@ Veda 的 workspace 分两种，建库时选定，按场景挑：
 
 - **CLI** — `veda` 二进制，脚本和日常 shell 都用它
 - **FUSE 挂载** — `veda-fuse` 把 workspace 挂成本地目录，**vim / VSCode / `make` / `rsync` 不感知背后是云存储**，写文件即同步上传、自动嵌入
-- **HTTP API** — REST + SSE，OpenAPI 风格的 JSON 接口。前端、自建 agent、数据 pipeline 直接接入；官方 SDK（Python / TypeScript / Go）即将推出，进一步降低集成成本
+- **HTTP API** — REST + SSE 的 JSON 接口。前端、自建 agent、数据 pipeline 直接接入；向量库另有 Java SDK 与 Python 示例（见 [向量库 API](#/docs/vectors)）
 
 ---
 
@@ -36,7 +36,7 @@ Veda 的 workspace 分两种，建库时选定，按场景挑：
 | **混合搜索** | 每个文件自动分块、嵌入、入库。默认 hybrid（向量 + BM25 + RRF），也可单独走 semantic / fulltext |
 | **结构化 collection** | 类似 vector-native 数据库：定义 schema + 自动嵌入字段，按字段过滤搜索 |
 | **SQL 查询** | DataFusion 引擎跑在文件和 collection 之上，filter / aggregate / join 都能玩 |
-| **多租户隔离** | Account → Workspace 两层；API key 或 workspace key 鉴权 |
+| **多租户隔离** | Account → Workspace 两层；控制面账号 key `vk_`、数据面 workspace key `wk_` |
 | **FUSE 挂载** | 把 workspace 挂成本地目录，用 vim / IDE / `make` 任意原生工具访问 |
 | **摘要分层** | 每个文件自动生成 L0（一句话）和 L1（约 2k token 的概要），LLM 召回时省 token |
 
@@ -181,6 +181,8 @@ veda grep "TODO(joe)" --limit 200      # 字面 grep，同步 + 行号
 ## 接下来
 
 - [**快速开始**](#/docs/quickstart) — 5 分钟从 onboard 到第一次搜索
+- [**详细文档**](#/docs/reference) — 架构 / 认证 / 全部 API / 错误码 / 边界，一页查全
+- [**向量库 API**](#/docs/vectors) — 面向业务方的托管向量检索
 - [**CLI 速查**](#/docs/cli) — 全部命令在一页
 - [**AI 助手集成**](#/docs/skill) — 把 Veda 接到 Claude Code / Cursor / Codex
 - [**FUSE 挂载**](#/docs/fuse) — 本地目录形态
