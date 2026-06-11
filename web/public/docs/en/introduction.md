@@ -16,7 +16,7 @@ A Veda workspace is one of two kinds, fixed at creation — pick by scenario:
 | **Typical use** | personal knowledge base, agent memory, code search | managed vector retrieval for apps (Pinecone-style) |
 | **Analogy** | a network drive that searches itself | a managed vector database |
 
-**Everything below describes the File Workspace** (file ops, hybrid search, structured collections, SQL, FUSE, tiered summaries). The Vector Workspace is a separate, business-facing data plane — see [Vector Workspace API](#/docs/vectors).
+Below, the **File Workspace comes first** (file ops, hybrid search, structured collections, SQL, FUSE, tiered summaries), **then the Vector Workspace** (managed embedding, hybrid retrieval, meta filtering). If you came here to add vector search to an application, jump straight to "Vector Workspace: capabilities & use cases".
 
 ## Three ways to use it
 
@@ -28,7 +28,7 @@ Same data, three surfaces — pick by scenario:
 
 ---
 
-## Core capabilities
+## File Workspace: core capabilities
 
 | Capability | What it does |
 |---|---|
@@ -86,7 +86,7 @@ cat /mnt/veda/docs/.overview       # current dir L1
 
 ---
 
-## Typical use cases
+## File Workspace: typical use cases
 
 ### 1. Personal knowledge base
 
@@ -167,14 +167,70 @@ One workspace can hand out many keys:
 
 ---
 
+## Vector Workspace: capabilities & use cases
+
+If what you need is not "store files" but **add semantic retrieval to an application**, create a `kind=db` Vector Workspace. It's Pinecone-style managed vector retrieval, and the pitch fits in one sentence: **you write text, never vectors** — the embedding model, the vector index, and the BM25 full-text index all live server-side. Your app needs no embedding service and never cares about models or dimensions.
+
+| Capability | What it does |
+|---|---|
+| **Managed embedding** | Writes carry only `text`; the server embeds and indexes it. Swapping the embedding model is a server concern — application code doesn't change |
+| **Three retrieval modes** | `hybrid` (vector + BM25 + RRF fusion, default) / `semantic` (pure vector, supports a `min_score` relevance floor) / `fulltext` (pure BM25 — no embedding call, the cheapest) |
+| **Meta filtering** | Each record carries `category` / `tags` / arbitrary `meta` JSON; search filters on `meta.<key>` with eq / in / range ops — "filtered RAG" out of the box |
+| **Dataset grouping** | Group records inside one workspace (`products`, `faq`, …) without cross-talk; omitted means `default` |
+| **Two write modes** | Default `upsert` is idempotent and retry-safe; bulk imports can use `insert` to skip dedup for ~3x throughput (caller guarantees id uniqueness) |
+| **Multi-tenant isolation** | One workspace = one dedicated Milvus collection; data-plane `wk_` keys are issued per workspace with read / readwrite scopes — revoke one key without touching the others |
+| **Access** | REST API (plain curl works) + Java SDK; the control plane (creating workspaces, minting keys) is handled by the platform / console — an app just receives its `wk_` and goes |
+
+### The 30-second version
+
+```bash
+WK=wk_...   # data-plane key issued by the platform, bound to your workspace
+
+# Write: just text + business fields; the server embeds
+curl -sX POST $BASE/v1/vectors/upsert \
+  -H "authorization: Bearer $WK" -H 'content-type: application/json' \
+  -d '{"records":[
+        {"id":"sku-1","text":"Air Jordan 1 retro basketball shoes","meta":{"price":1299}},
+        {"id":"sku-2","text":"Stan Smith classic white sneakers","meta":{"price":499}}]}'
+
+# Search: hybrid semantic + full-text recall, with a meta filter
+curl -sX POST $BASE/v1/vectors/search \
+  -H "authorization: Bearer $WK" -H 'content-type: application/json' \
+  -d '{"query":"basketball shoes under 1500","top_k":5,
+       "filter":{"must":[{"field":"meta.price","op":"lt","value":1500}]}}'
+```
+
+### Typical use cases
+
+**1. Semantic search inside an application** — products, FAQ, tickets, content libraries. Queries that keyword search can't serve become semantic recall: for "basketball shoes under 1500", BM25 catches model names, the vector side catches intent, RRF fuses the ranking, and the meta filter enforces the price range.
+
+**2. RAG knowledge backbone** — the application owns its chunking and content; whatever it writes is retrievable. `semantic` + `min_score` puts a relevance floor under recall so low-relevance content doesn't pollute the prompt; cost-sensitive paths can run `fulltext` (no embedding call).
+
+**3. Similar content / recommendations** — "people also viewed", duplicate-ticket merging, near-duplicate detection: use the current item's text as the query in `semantic` mode — no separate similarity service.
+
+**4. Isolating business lines** — one account, many workspaces (or one workspace, many datasets); each consumer gets its own `wk_`. When one integration is retired or a key leaks, revoke that one key — nothing else is affected.
+
+### File Workspace or Vector Workspace?
+
+- Data is **files / documents**, humans read and write it via CLI or editors, you want directories, summaries, SQL → **File Workspace**
+- Data is **business records** (products, FAQ entries, content chunks), written and queried by an application, you want filtering and throughput → **Vector Workspace**
+- Both? One account can hold any mix of the two kinds — they don't interact.
+
+For the field-level contract (all endpoints, limits, error codes, idempotency semantics) see [Vector Workspace API](#/docs/vectors).
+
+---
+
 ## What it's NOT good at / limits
 
 | Use case | Limit |
 |---|---|
-| Binary blobs (PDF / images / video) | ❌ UTF-8 text only |
+| Binary blobs (PDF / images / video) | ❌ UTF-8 text only (both workspace kinds) |
 | Strict ACLs / quotas | ❌ Fine-grained perms not in alpha |
-| High-concurrency OLTP | ❌ It's a knowledge store, not a transactional DB |
+| High-concurrency OLTP | ❌ It's a knowledge / retrieval store, not a transactional DB |
 | Massive small files (>1M chunks) | ⚠️ Alpha is single-replica; scale requires the multi-replica evolution |
+| Bring-your-own vectors | ❌ The Vector Workspace accepts text only (managed embedding) — no pre-computed vectors |
+| Cross-dataset search | ❌ One search call targets one dataset; fan out client-side for more |
+| Very long single records | ⚠️ Vector Workspace caps `text` at 64KB per record — chunk longer content client-side |
 
 ---
 
