@@ -7,7 +7,7 @@
 
 **Alpha 已收尾，db 向量服务作为公司级服务上线推广中**（.85 生产节点已部署）。
 上线前 review 与 open 项见 [`docs/reviews/review-2026-06-10-154815.md`](../reviews/review-2026-06-10-154815.md)；
-零散待办在根目录 `todos.md`。
+零散待办在 `docs/todos.md`。
 
 ## 活跃计划（docs/plans/）
 

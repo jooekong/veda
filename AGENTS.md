@@ -12,7 +12,7 @@
 | `ARCHITECTURE.md`       | 系统现状：模块结构、已实现能力、已知问题    | 每次开始工作前 |
 | `docs/design/plans.md`  | 计划索引：活跃计划 + 归档导航 | 找计划/开新计划前 |
 | `docs/api/db-workspace-api.md` + `web/public/docs/zh/reference.md` | API 契约（repo 内参考 / 对外权威） | 改 API 前 |
-| `todos.md`              | 零散待办（/todo 管理）  | 接小任务前 |
+| `docs/todos.md`         | 零散待办（/todo 管理，注意全局 /todo 命令默认找根目录，本仓库在 docs/） | 接小任务前 |
 
 
 ---
