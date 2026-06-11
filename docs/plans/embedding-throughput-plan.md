@@ -61,6 +61,20 @@ upsert → 写 text+meta 入 pending + 入队 → 立即返回 202
 - **额外好处**:异步后攒批变简单——worker 本就批量 claim,outbox 队列天然是攒批缓冲区,直接 `chunks(10)` 发,不需要同步窗口/oneshot。
 - **代价**:upsert 变**最终一致**(写完不能立即 search);需 backlog 可观测(pending 计数 / 消费延迟)。
 
+**Milvus 能力边界（2026-06-11 查证 2.6 文档，钉死本设计）：**
+
+- **向量字段不可 nullable**（"Vector, JSON, and Array fields do not support nullability"，仅标量可空）
+  → "text 先进 Milvus、embedding 后补"**不可行**，无向量的行写不进 collection。占位零向量绕路
+  也否决：窗口期零向量行会进 semantic/hybrid 结果（垃圾命中）+ 每行写两次，写放大更差。
+  **async 的"先写 text"只能落自己的 MySQL pending 区，Milvus 只接收完整行**——即上图 outbox
+  形态，Milvus 零改动。
+- **可见性语义**：async 模式写完立刻 search 什么都查不到——fulltext 的 BM25 sparse 虽由 Milvus
+  从 text 服务端生成（天然 text-first），但整行没进去就都不可见。202 + 最终一致须写进 API 文档。
+- **2.6 新能力 `partial_update`（merge 模式 upsert，只改指定字段）**：与 async 无关，但解锁
+  "只改 meta 不动 text"的零 embedding 更新——现状整行 upsert 改个 meta 也要重新给向量（不命中
+  cache 就重 embed 烧配额）。列为阶段 2 之外的后续选项；前置：确认公司集群 2.6 小版本 +
+  REST `partialUpdate` 参数支持。
+
 ## 决策(2026-06-08)
 
 | 项 | 决策 |
