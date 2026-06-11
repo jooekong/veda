@@ -332,7 +332,15 @@ async fn main() -> anyhow::Result<()> {
 
     axum::serve(listener, app)
         .with_graceful_shutdown(async move {
-            tokio::signal::ctrl_c().await.ok();
+            // systemd stop sends SIGTERM — ctrl_c() alone (SIGINT) never
+            // fires under it, so production deploys would hard-kill the
+            // worker mid-batch without ever reaching this path.
+            let mut term = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+                .expect("install SIGTERM handler");
+            tokio::select! {
+                _ = tokio::signal::ctrl_c() => {}
+                _ = term.recv() => {}
+            }
             info!("shutdown signal received");
             let _ = shutdown_tx.send(true);
         })

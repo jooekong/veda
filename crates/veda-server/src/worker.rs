@@ -27,6 +27,12 @@ const SUMMARY_DEBOUNCE_SECS: i64 = 30;
 /// file would wait the full debounce delay before showing fresh summary.
 const SUMMARY_BURST_WINDOW_SECS: i64 = 5 * 60;
 
+/// Heartbeat period for renewing the lease on the batch in flight. Must be
+/// well under the 10-minute lease (`OUTBOX_LEASE_MINUTES` in veda-store):
+/// at 3 minutes a worker survives two missed renewals before another server
+/// is allowed to take its tasks over.
+const LEASE_RENEW_INTERVAL: Duration = Duration::from_secs(180);
+
 pub struct Worker {
     meta: Arc<dyn MetadataStore>,
     task_queue: Arc<dyn TaskQueue>,
@@ -36,6 +42,10 @@ pub struct Worker {
     batch_size: usize,
     poll_interval: Duration,
     max_overview_tokens: usize,
+    /// Lease identity for outbox fencing: host distinguishes servers sharing
+    /// one MySQL, pid guards same-host overlap (old process still draining a
+    /// batch while its replacement starts).
+    owner: String,
 }
 
 impl Worker {
@@ -58,72 +68,103 @@ impl Worker {
             batch_size,
             poll_interval: Duration::from_secs(poll_interval_secs),
             max_overview_tokens,
+            owner: format!(
+                "{}:{}",
+                gethostname::gethostname().to_string_lossy(),
+                std::process::id()
+            ),
         }
     }
 
     pub async fn run(&self, mut shutdown: watch::Receiver<bool>) {
-        info!("worker started");
+        info!(owner = %self.owner, "worker started");
         loop {
-            tokio::select! {
-                _ = shutdown.changed() => {
-                    info!("worker shutting down");
-                    break;
+            if *shutdown.borrow() {
+                break;
+            }
+            match self.task_queue.claim(&self.owner, self.batch_size).await {
+                Ok(tasks) if tasks.is_empty() => {
+                    tokio::select! {
+                        _ = shutdown.changed() => {}
+                        _ = sleep(self.poll_interval) => {}
+                    }
                 }
-                _ = self.poll_once() => {}
+                // Deliberately NOT raced against the shutdown signal: a
+                // claimed batch runs to completion so in-flight tasks get a
+                // proper complete()/fail() instead of being cancelled at an
+                // await point with their lease dangling. Shutdown is observed
+                // at the top of the loop, before the next claim.
+                Ok(tasks) => self.process_batch(tasks).await,
+                Err(e) => {
+                    warn!(err = %e, "claim failed");
+                    tokio::select! {
+                        _ = shutdown.changed() => {}
+                        _ = sleep(self.poll_interval) => {}
+                    }
+                }
             }
         }
+        info!("worker shutting down");
     }
 
-    async fn poll_once(&self) {
-        match self.task_queue.claim(self.batch_size).await {
-            Ok(tasks) if tasks.is_empty() => {
-                sleep(self.poll_interval).await;
+    /// Run one claimed batch to completion, heartbeating the lease on every
+    /// task in it while any are still in flight. Already-finished tasks make
+    /// the renew a no-op (it is fenced on owner + `processing`), so no
+    /// per-task bookkeeping is needed. If this process dies mid-batch the
+    /// heartbeat stops with it and the leases expire — the takeover path.
+    async fn process_batch(&self, tasks: Vec<OutboxEvent>) {
+        let ids: Vec<i64> = tasks.iter().map(|t| t.id).collect();
+        let renewer = tokio::spawn({
+            let queue = Arc::clone(&self.task_queue);
+            let owner = self.owner.clone();
+            async move {
+                loop {
+                    sleep(LEASE_RENEW_INTERVAL).await;
+                    if let Err(e) = queue.renew(&ids, &owner).await {
+                        warn!(err = %e, "outbox lease renew failed");
+                    }
+                }
             }
-            Ok(tasks) => {
-                let concurrency = self.batch_size.max(1);
-                stream::iter(tasks)
-                    .for_each_concurrent(concurrency, |task| async move {
-                        let event_type = outbox_event_label(task.event_type);
-                        let started = std::time::Instant::now();
-                        // catch_unwind so a panic in one task (e.g. a malformed
-                        // payload triggering an unreachable! deeper down) marks
-                        // that task as failed instead of killing the worker
-                        // future and leaving lease_until-stuck rows.
-                        let result = AssertUnwindSafe(self.process_task(&task))
-                            .catch_unwind()
-                            .await;
-                        let elapsed = started.elapsed().as_secs_f64();
-                        ::metrics::histogram!(
-                            "veda_outbox_process_seconds",
-                            "event_type" => event_type,
-                        )
-                        .record(elapsed);
-                        let task_outcome = match result {
-                            Ok(Ok(())) => None,
-                            Ok(Err(e)) => Some(e.to_string()),
-                            Err(panic) => {
-                                let msg = panic_message(&panic);
-                                error!(task_id = task.id, %msg, "task panicked");
-                                Some(format!("panic: {msg}"))
-                            }
-                        };
-                        if let Some(err_msg) = task_outcome {
-                            error!(task_id = task.id, err = %err_msg, "task failed");
-                            ::metrics::counter!(
-                                "veda_outbox_failed_total",
-                                "event_type" => event_type,
-                            )
-                            .increment(1);
-                            let _ = self.task_queue.fail(task.id, &err_msg).await;
-                        }
-                    })
+        });
+        let concurrency = self.batch_size.max(1);
+        stream::iter(tasks)
+            .for_each_concurrent(concurrency, |task| async move {
+                let event_type = outbox_event_label(task.event_type);
+                let started = std::time::Instant::now();
+                // catch_unwind so a panic in one task (e.g. a malformed
+                // payload triggering an unreachable! deeper down) marks
+                // that task as failed instead of killing the worker
+                // future and leaving lease_until-stuck rows.
+                let result = AssertUnwindSafe(self.process_task(&task))
+                    .catch_unwind()
                     .await;
-            }
-            Err(e) => {
-                warn!(err = %e, "claim failed");
-                sleep(self.poll_interval).await;
-            }
-        }
+                let elapsed = started.elapsed().as_secs_f64();
+                ::metrics::histogram!(
+                    "veda_outbox_process_seconds",
+                    "event_type" => event_type,
+                )
+                .record(elapsed);
+                let task_outcome = match result {
+                    Ok(Ok(())) => None,
+                    Ok(Err(e)) => Some(e.to_string()),
+                    Err(panic) => {
+                        let msg = panic_message(&panic);
+                        error!(task_id = task.id, %msg, "task panicked");
+                        Some(format!("panic: {msg}"))
+                    }
+                };
+                if let Some(err_msg) = task_outcome {
+                    error!(task_id = task.id, err = %err_msg, "task failed");
+                    ::metrics::counter!(
+                        "veda_outbox_failed_total",
+                        "event_type" => event_type,
+                    )
+                    .increment(1);
+                    let _ = self.task_queue.fail(task.id, &self.owner, &err_msg).await;
+                }
+            })
+            .await;
+        renewer.abort();
     }
 
     async fn process_task(&self, task: &OutboxEvent) -> veda_types::Result<()> {
@@ -164,7 +205,7 @@ impl Worker {
                         .delete_summary(&task.workspace_id, file_id)
                         .await?;
                 }
-                self.task_queue.complete(task.id).await?;
+                self.task_queue.complete(task.id, &self.owner).await?;
             }
             OutboxEventType::ChunkDelete => {
                 self.vector
@@ -174,12 +215,12 @@ impl Worker {
                     .delete_summary(&task.workspace_id, file_id)
                     .await?;
                 self.meta.delete_summary_by_file(file_id).await?;
-                self.task_queue.complete(task.id).await?;
+                self.task_queue.complete(task.id, &self.owner).await?;
             }
             OutboxEventType::SummarySync => {
                 self.handle_summary_sync(&task.workspace_id, file_id)
                     .await?;
-                self.task_queue.complete(task.id).await?;
+                self.task_queue.complete(task.id, &self.owner).await?;
             }
             OutboxEventType::DirSummarySync => {
                 let dentry_id = task
@@ -194,7 +235,7 @@ impl Worker {
                     .unwrap_or("");
                 self.handle_dir_summary_sync(&task.workspace_id, dentry_id, parent_path)
                     .await?;
-                self.task_queue.complete(task.id).await?;
+                self.task_queue.complete(task.id, &self.owner).await?;
             }
         }
         Ok(())
