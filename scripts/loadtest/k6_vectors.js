@@ -38,6 +38,12 @@ const WRITE_MODE = __ENV.WRITE_MODE || '';
 const BASELINE = Number(__ENV.BASELINE || 0);
 const VUS = Number(__ENV.VUS || 50);
 const DURATION = __ENV.DURATION || '30m';
+// Per-run salt in every unique tag. Without it, run N+1 replays run N's
+// `${__VU}-${__ITER}` texts: "unique" queries silently hit the server's
+// embedding cache and upsert ids collide across runs (a dup-PK hazard under
+// WRITE_MODE=insert). Init runs once per VU so Date.now() may differ between
+// VUs — combined with __VU in the tag, ids stay unique.
+const SALT = __ENV.SALT || String(Date.now() % 1e8);
 
 if (!BASE || !WK) throw new Error('BASE and WK env are required (source .env.loadtest)');
 
@@ -110,7 +116,7 @@ function pickMixedOp() {
 
 function buildRequest() {
   const op = OP === 'mixed' ? pickMixedOp() : OP;
-  const tag = `${__VU}-${__ITER}`;
+  const tag = `${SALT}-${__VU}-${__ITER}`;
   switch (op) {
     case 'search':
     case 'search-fulltext':
