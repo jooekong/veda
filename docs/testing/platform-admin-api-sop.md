@@ -1,6 +1,6 @@
 # 手动测试 SOP：platform 管理接口（app_id 账号 / 统一 wk_ / key 端点 / description / 砍 JWT）
 
-> 目标：手动验证 `docs/plans/platform-admin-api-plan.md` 这批改动 + platform app_id 账号模型。
+> 目标：手动验证 `docs/archive/plans/platform-admin-api-plan.md` 这批改动 + platform app_id 账号模型。
 > 这些行为 `cargo check` 和 lib 单测都覆盖不到（SQL 列、真实 auth、kind 隔离、app_id 唯一约束都要真库），**必须连真实 MySQL + Milvus + embedding 跑**。
 > **主线走 platform 真实路径**（非匿名）：`app_id` 建账号(无 email) → `vk_` 建 workspace + key → `wk_` 走数据面。
 > 尤其验证 codex finding 1：db 数据面任何一次成功调用 = `get_active_dataset_by_name` 的 `description` 修复有效（漏列会 500）。
@@ -8,6 +8,9 @@
 ## 0. 前置
 
 ```bash
+# config/test.toml 已 gitignore，新环境必须先从模板复制（缺这步起不来）
+cp config/test.toml.example config/test.toml   # 然后填真实内网 MySQL/Milvus/embedding
+
 # 起 server（本地连内网存储；端口看 config/test.toml 的 listen，默认 3000）
 cargo run -p veda-server -- config/test.toml
 # 或指向已部署实例，下面 BASE 改成它即可
@@ -214,7 +217,57 @@ curl -s -o /dev/null -w "%{http_code}\n" -X POST \
 # 期望: 404（路由已移除）
 ```
 
-## 9. 清理
+## 9. apps 平台面（鉴权外移，无 veda 凭据；🆕 a904e2d）
+
+> `/v1/apps/{app_id}/...` 给 AI Platform 网关用：**不带任何 veda 凭据**，path 里的
+> `app_id` 就是租户边界（由网关负责证明调用方身份）。仅限可信内网暴露。
+
+```bash
+# POST：首次调用自动开通该 app_id 的账号（只建 account 行，不发 vk_），返回 201
+curl -s -o /dev/null -w "%{http_code}\n" -X POST "$BASE/v1/apps/sop-app/workspaces" \
+  -H 'content-type: application/json' \
+  -d '{"name":"plat-ws","kind":"db"}'
+# 期望: 201（注意与 vk_ 控制面 POST /v1/workspaces 的 200 不对称）
+
+# GET：列出该 app 下 active workspace；未知 app_id 返回空页【不】自动开通
+curl -s "$BASE/v1/apps/sop-app/workspaces" | jq '.data.items[] | {id, name, kind}'
+curl -s "$BASE/v1/apps/never-seen-app/workspaces" | jq '.data'
+# 期望: 第二条 items=[] 且 has_more=false（GET 无副作用）
+
+# DELETE：软删本 app 的 workspace；跨租户 / 不存在的 id 一律 404（防探测）
+APP_WS=$(curl -s "$BASE/v1/apps/sop-app/workspaces" | jq -r '.data.items[0].id')
+curl -s -o /dev/null -w "%{http_code}\n" -X DELETE "$BASE/v1/apps/sop-app/workspaces/$APP_WS"
+# 期望: 200；换别的 app_id 删同一个 id → 404
+```
+
+✅ 验证点：POST 201 自动开通；GET 不开通（空页）；DELETE 跨租户 404。
+
+## 10. 删 workspace 级联吊销 wk\_（🆕 6e6d4bf）
+
+```bash
+# 用 §3 的 DB_WK_RW（属于 $DB_WS）。先确认数据面可用，再删 workspace
+curl -s -o /dev/null -w "%{http_code}\n" -X DELETE "$BASE/v1/workspaces/$DB_WS" \
+  -H "authorization: Bearer $VK"
+# 期望: 200（同一事务里把该 workspace 全部 wk_ 置 revoked）
+
+# 旧 wk_ 立即失效（数据面 401，不是 404——鉴权不读 workspace 状态，靠级联吊销）
+curl -s -X POST $BASE/v1/vectors/search \
+  -H "authorization: Bearer $DB_WK_RW" -H 'content-type: application/json' \
+  -d '{"query":"x"}' | jq '{success, error_code}'
+# 期望: success=false, error_code=UNAUTHORIZED
+
+# 归档 workspace 上签新 key → 404
+curl -s -X POST $BASE/v1/workspaces/$DB_WS/keys -H "authorization: Bearer $VK" \
+  -H 'content-type: application/json' -d '{"name":"late","permission":"read"}' \
+  | jq '{success, error_code}'
+# 期望: error_code=NOT_FOUND
+```
+
+✅ 验证点：删 workspace 后旧 `wk_` 立即 401；归档库不可再签 key。
+
+> 注意：跑了本节 $DB_WS 已删，§11 清理只需处理 $FS_WS。
+
+## 11. 清理
 
 ```bash
 curl -s -o /dev/null -w "%{http_code}\n" -X DELETE $BASE/v1/workspaces/$DB_WS -H "authorization: Bearer $VK"
@@ -239,5 +292,7 @@ curl -s -o /dev/null -w "%{http_code}\n" -X DELETE $BASE/v1/workspaces/$FS_WS -H
 | 8 | kind 隔离 | §7 | 两个方向都 WORKSPACE_KIND_MISMATCH |
 | 9 | JWT 已删 | §8 | 404 |
 | 10 | fs `wk_` 仍正常 | §6 | 读写正常 |
+| 11 | apps 平台面 | §9 | POST 201 自动开通；GET 不开通；跨租户 DELETE 404 |
+| 12 | 级联吊销 | §10 | 删 workspace 后旧 wk_ 立即 401；归档库签 key 404 |
 
 任一项不符就是回归。第 1/2 项是这次新增的 app_id 账号模型；第 3 项最关键——它是 codex 抓的上线即崩 bug。

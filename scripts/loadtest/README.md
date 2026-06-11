@@ -92,10 +92,15 @@ k6 run -e OP=upsert -e UNIQUE_TEXT=0 -e BASE=$BASE -e WK=$WK k6_vectors.js   # c
 2. **每请求 `resolve_dataset` 查一次 MySQL + 池上限 50**：高 QPS 下 MySQL 往返 / 连接池 acquire timeout。
 3. **Milvus hybrid（默认 mode）**：dense + BM25 sparse 双路 RRF，比 semantic 重。
 
+## 其他专项脚本
+
+本 README 只覆盖核心压测链路；目录下另有 `write_mode_e2e.mjs`（insert/upsert 语义
+e2e）、`cleanup_test_data.py`（清理压测残留数据）、`milvus_*.py`（Milvus 裸压/分诊
+系列），用法见各脚本顶部注释。
+
 ## 注意
 
 - 本地 mac 非生产配置，**绝对数值不代表线上**，用途是定位瓶颈和相对对比。
 - `delete` 会消耗种子 id；跑完重新 `node seed.mjs`，或用 `SEED_PREFIX` 指向独立 id 段。
 - `UNIQUE_TEXT=1` 走真实 embedding，会烧 airouter 配额；规模大时留意限流。
 - 参数（`MAX_VUS / UPSERT_BATCH / SEED_TOTAL` 等）见各脚本顶部注释。
-```

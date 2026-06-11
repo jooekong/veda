@@ -26,11 +26,10 @@ Config lives at `~/.config/veda/config.toml`. Inspect with `veda config show`.
 ## Filesystem
 
 ```bash
-veda cp ./README.md /docs/readme.md          # upload
-veda cp /docs/readme.md ./readme.md          # download (first arg starts with / → remote)
-veda cp /docs/readme.md /backup/readme       # server-side copy
+veda cp ./README.md /docs/readme.md          # upload: local → remote
 veda cp ./src /code                          # directory upload (recursion auto when src is a dir)
-veda cp - /notes/scratch < input.txt         # from stdin (use "-" as src)
+veda cp - /notes/scratch < input.txt         # upload from stdin (use "-" as src)
+veda cat /docs/readme.md > ./readme.md       # download: remote → local (redirect cat — cp is upload-only)
 veda mv /old.md /archive/old.md
 veda rm /tmp                                 # delete (directories recurse by default — no -r; TTY prompts y/N)
 veda mkdir /new-dir                          # create directory
@@ -45,12 +44,12 @@ veda cat /docs/readme.md --head 10           # first 10 lines
 veda cat /docs/readme.md --tail 5            # last 5 lines
 ```
 
-Server paths are absolute under your workspace root (`/`). Local paths use `./foo` or `/abs/foo`. UTF-8 text only — binaries (PDF / images) are rejected client-side.
+UTF-8 text only — binaries (PDF / images) are rejected client-side.
 
 ## Search
 
 ```bash
-veda search "how does auth work"                  # hybrid (vector + BM25 + RRF)
+veda search "how does auth work"                  # hybrid (vector + BM25 + RRF), the default
 veda search "exact term" --mode fulltext
 veda search "concept" --mode semantic
 veda search "auth" --path /docs                   # scope to a subtree

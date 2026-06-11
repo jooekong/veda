@@ -2,13 +2,11 @@
 # Triggers on tag push (e.g. `git tag 0.1.0 && git push ddxq 0.1.0`).
 #
 # Matrix:
-#   - x86_64-unknown-linux-gnu — docker rust:1.90 on the linux runner
-#   - x86_64-apple-darwin      — shell executor on the intel mac runner
-#
-# Darwin aarch64 is not built yet — adding it requires a working
-# cross-compile of veda-fuse against macFUSE for arm64, which we
-# haven't validated. CLI-only aarch64-darwin is straightforward to
-# add later (just drop the veda-fuse build for that target).
+#   - x86_64-unknown-linux-gnu  — docker rust:1.90 on the linux runner
+#   - x86_64-apple-darwin       — shell executor on the intel mac runner
+#   - aarch64-apple-darwin      — cross-compiled on the same intel mac
+#     runner (veda + veda-fuse, since 0.1.11; macFUSE ships universal
+#     dylibs so PKG_CONFIG_ALLOW_CROSS=1 is sufficient)
 
 stages:
   - build

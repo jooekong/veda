@@ -12,7 +12,7 @@ A Veda workspace is one of two kinds, fixed at creation — pick by scenario:
 |---|---|---|
 | **kind** | `fs` | `db` |
 | **Data model** | files / directories | vector records (text + meta) |
-| **Access** | CLI / FUSE / HTTP, `wk_` or JWT | REST API / SDK, account `vk_` |
+| **Access** | CLI / FUSE / HTTP, `wk_` | REST API / SDK, data-plane `wk_` (control-plane `vk_`) |
 | **Typical use** | personal knowledge base, agent memory, code search | managed vector retrieval for apps (Pinecone-style) |
 | **Analogy** | a network drive that searches itself | a managed vector database |
 
@@ -24,7 +24,7 @@ Same data, three surfaces — pick by scenario:
 
 - **CLI** — the `veda` binary, for scripts and everyday shell
 - **FUSE mount** — `veda-fuse` mounts a workspace as a local directory. **vim / VSCode / `make` / `rsync` don't know it's cloud storage** — every write auto-uploads and re-embeds
-- **HTTP API** — REST + SSE, OpenAPI-style JSON. Direct integration for frontends, custom agents, data pipelines; official SDKs (Python / TypeScript / Go) coming soon to lower integration effort further
+- **HTTP API** — REST + SSE JSON interface. Direct integration for frontends, custom agents, data pipelines; the Vector Workspace also ships a Java SDK and Python examples (see [Vector Workspace API](#/docs/vectors))
 
 ---
 
@@ -36,7 +36,7 @@ Same data, three surfaces — pick by scenario:
 | **Hybrid search** | Every file is auto-chunked, embedded, indexed. Default `hybrid` (vector + BM25 + RRF); also `semantic` / `fulltext` alone |
 | **Structured collections** | Like a vector-native database: define a schema + auto-embedded field, filter & search by other fields |
 | **SQL queries** | DataFusion engine over files and collections — filter, aggregate, join |
-| **Multi-tenant** | Account → Workspace; API key or workspace key auth |
+| **Multi-tenant** | Two tiers: Account → Workspace; control-plane account key `vk_`, data-plane workspace key `wk_` |
 | **FUSE mount** | Mount a workspace as a local directory; use vim / IDE / `make` like any native tree |
 | **Layered summaries** | Auto-generated L0 (one-sentence) and L1 (~2k-token) summaries — saves tokens for LLM recall |
 
@@ -61,7 +61,7 @@ veda cat /docs/readme.md           # raw text
 
 - **Token cost scales with depth, not up front**: 100 L0s ≈ 5k tokens; 100 L1s ≈ 200k tokens; 100 full files ≈ MB-scale. Escalate L0 → L1 → full on demand instead of paying all-in.
 - **Directory exploration is nearly free**: `veda abstract /knowledge/internal/auth` tells you what a subtree is "about" in one sentence — no `ls && cat` loop.
-- **Computed once on the server, shared across clients**: CLI, FUSE, and custom agents all read the same precomputed summaries — no per-client recomputation, no two agents inventing inconsistent summaries.
+- **Computed once on the server, shared across clients**: CLI, FUSE, and custom agents all read the same precomputed summaries — no two agents inventing inconsistent summaries from different prompts.
 - **The model picks the depth**: instead of a fixed top-k cutoff, agents look at L0 hits and decide per-result whether to expand to L1 or accept the one-sentence answer.
 
 ### In search and FUSE
@@ -136,7 +136,7 @@ veda cp -r ~/work/internal-docs /knowledge/internal
 veda search "how is our retry policy defined" --detail-level abstract
 ```
 
-The bundled [skill system](#/docs/skill) teaches Claude Code, Codex, Cursor, etc. to call the `veda` CLI correctly without you writing prompts.
+With the bundled [skill system](#/docs/skill), Claude Code / Codex / Cursor automatically learn to call the `veda` CLI.
 
 ### 3. Search across multiple repos
 
@@ -157,8 +157,8 @@ Filtered RAG. Full schema + commands in [CLI reference — Structured collection
 
 One workspace can hand out many keys:
 
-- Teammates each get a `wk_readwrite`
-- CI/CD gets a `wk_read`
+- Teammates each get a `wk_readwrite` to write notes
+- CI/CD gets a read-only `wk_read`
 - Revoke any one key without touching the account
 
 ### 6. Mount the workspace as a directory
@@ -167,20 +167,22 @@ One workspace can hand out many keys:
 
 ---
 
-## What it's NOT good at
+## What it's NOT good at / limits
 
 | Use case | Limit |
 |---|---|
 | Binary blobs (PDF / images / video) | ❌ UTF-8 text only |
 | Strict ACLs / quotas | ❌ Fine-grained perms not in alpha |
 | High-concurrency OLTP | ❌ It's a knowledge store, not a transactional DB |
-| Massive small files (>1M chunks) | ⚠️ Alpha is single-replica; scale-out is on the roadmap |
+| Massive small files (>1M chunks) | ⚠️ Alpha is single-replica; scale requires the multi-replica evolution |
 
 ---
 
 ## Next
 
 - [**Quickstart**](#/docs/quickstart) — 5 minutes from onboard to first search
+- [**Full reference**](#/docs/reference) — architecture / auth / all APIs / error codes / limits, all on one page
+- [**Vector Workspace API**](#/docs/vectors) — business-facing managed vector retrieval
 - [**CLI reference**](#/docs/cli) — every command on one page
-- [**AI agent skill**](#/docs/skill) — wire Veda into Claude Code / Cursor / Codex
+- [**AI assistant integration**](#/docs/skill) — wire Veda into Claude Code / Cursor / Codex
 - [**FUSE mount**](#/docs/fuse) — workspace as a local directory

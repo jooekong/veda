@@ -29,11 +29,11 @@ VEDA_BASE_URL=https://veda.dbpaas.dingdongxiaoqu.com \
 |---|---|---|
 | 健康/元信息 | `health_and_meta_endpoints` | `/healthz` `/v1/ready` `/capabilities` `/install.sh` `/v1/metrics` |
 | 账号/认证 | `account_create_login_and_duplicate` `anonymous_onboard_claim_login` `workspace_jwt_endpoint_removed` `auth_missing_or_garbage_rejected` | accounts(create/anonymous/claim/login)、JWT 端点已移除(404)、401 路径 |
-| Workspace 管理 | `workspace_create_list_paginate_delete` `workspace_duplicate_name_rejected` | create/list(分页)/delete/keys、重名 409 |
+| Workspace 管理 | `workspace_create_list_paginate_delete` `workspace_duplicate_name_rejected` `workspace_keys_list_and_revoke` | create/list(分页)/delete、重名 409、keys list（仅元数据）/revoke（204 + 立即 401） |
 | FS 数据面 | `fs_file_put_get_stat_head_delete` `fs_mkdir_copy_rename` `fs_conditional_writes` `fs_append_bumps_revision` `fs_partial_reads_lines_and_range` `fs_root_cannot_be_deleted` `fs_readonly_key_enforced` `fs_grep_variants` `fs_events_stream_and_cursor` | fs CRUD/stat/head、mkdir/copy/rename、If-Match(412)/If-None-Match、append、lines/Range(206/416)、根保护、只读 403、grep、SSE(回放/410/400) |
 | FS 搜索/摘要 | `fs_search_dense_sparse_and_hybrid` `fs_summaries_abstract_and_overview` | search 三信号(fulltext=BM25稀疏 / semantic=cosine稠密 / hybrid=rrf融合)、path_prefix、abstract/overview(202→200) |
 | FS SQL/集合 | `fs_sql_files_table_and_udtf` `fs_collections_lifecycle` `fs_collections_raw_and_duplicate` | sql(`files` 表 + `veda_fs()` UDTF)、collections 全生命周期、raw 类型、重名 409 |
-| DB 向量面 | `db_vectors_roundtrip` `db_vectors_dense_semantic_search` `db_vectors_fulltext_and_hybrid_search` `db_vectors_dedup_defaults_and_autoid` `db_vectors_filter_and_projection` `db_datasets_lifecycle` `db_vectors_validation_limits` `db_workspace_resolution_and_admin_tokens` | upsert/search(三 mode：semantic COSINE / fulltext BM25 / hybrid RRF)/query/delete、稠密语义命中、稀疏+融合命中 + `score_type` 契约、去重/默认值/自动 id、meta 过滤(eq/in/range)+投影、datasets CRUD(默认库保护)、校验上限、workspace 解析 + admin token |
+| DB 向量面 | `db_vectors_roundtrip` `db_vectors_dense_semantic_search` `db_vectors_fulltext_and_hybrid_search` `db_vectors_min_score_filter` `db_vectors_dedup_defaults_and_autoid` `db_vectors_filter_and_projection` `db_datasets_lifecycle` `db_vectors_validation_limits` `db_workspace_resolution_and_admin_tokens` | upsert/search(三 mode：semantic COSINE / fulltext BM25 / hybrid RRF)/query/delete、稠密语义命中、稀疏+融合命中 + `score_type` 契约、`min_score` 过滤（hybrid 传入 400）、去重/默认值/自动 id、meta 过滤(eq/in/range)+投影、datasets CRUD(默认库保护)、校验上限、workspace 解析 + admin token |
 | 跨 kind 隔离 | `isolation_fs_workspace_rejects_db_apis` `isolation_db_workspace_rejects_fs_apis` | fs↔db 端点互斥 `WORKSPACE_KIND_MISMATCH` |
 
 ## 向量检索能力：dense / sparse / hybrid
@@ -54,7 +54,7 @@ VEDA_BASE_URL=https://veda.dbpaas.dingdongxiaoqu.com \
 测试在编写/运行过程中暴露了几个真实行为，已在对应用例里做了**容忍处理**并加注释，建议后续修复：
 
 1. **坏 SQL 返回 500 而非 4xx**：`SELECT * FROM veda_fs`（UDTF 缺参数）走到 `INTERNAL`，把"用户输入错误"泄漏成 500。`fs_sql_files_table_and_udtf` 用 `status >= 400` 容忍，理想应是 400。
-2. **重名 workspace 的错误码不一致**：重复 **db** 名 → 干净的 `409 ALREADY_EXISTS`；重复 **fs** 名 → `500 INTERNAL`。同一约束两条路径错误映射不同，`workspace_duplicate_name_rejected` 注释中标注。
+2. ~~**重名 workspace 的错误码不一致**~~ —— **已修复（a904e2d，2026-06-03）**：`create_workspace` 把 MySQL 1062 统一映射为 `409 ALREADY_EXISTS`，fs/db 两条路径现已一致（测试内的容忍注释可顺手删）。
 3. **`/admin/*` 公网不可达**：ingress(nginx) 对 `/admin/v1/tokens` 直接 405。多半是有意（admin API 内网限定）。`db_workspace_resolution_and_admin_tokens` 探测到 405/404 即跳过 scoped-token 段，保证套件对硬化代理仍全绿。
-4. ~~**db collection 的 sparse 索引未被使用**~~ —— **已修复（2026-06-02）**：`/v1/vectors/search` 已接通 `mode=fulltext`（BM25）与 `mode=hybrid`（dense+BM25 RRF，默认），sparse 索引现已被使用。见 `docs/plans/db-sparse-vector-plan.md` + `db_vectors_fulltext_and_hybrid_search`。
+4. ~~**db collection 的 sparse 索引未被使用**~~ —— **已修复（2026-06-02）**：`/v1/vectors/search` 已接通 `mode=fulltext`（BM25）与 `mode=hybrid`（dense+BM25 RRF，默认），sparse 索引现已被使用。见 `docs/archive/plans/db-sparse-vector-plan.md` + `db_vectors_fulltext_and_hybrid_search`。
 

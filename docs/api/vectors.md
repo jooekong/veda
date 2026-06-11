@@ -1,8 +1,15 @@
 # Vectors API (db-kind workspaces)
 
+> **Authoritative external contract:** `web/public/docs/zh/reference.md` +
+> `web/public/docs/zh/vectors.md` (published with the console). This file is an
+> in-repo reference for agents / SDK development; where the two disagree, the
+> web version wins.
+
 Pinecone-style data plane for company apps. v0 contract — designs locked
-in [`docs/vectors-merge-plan.md`](../vectors-merge-plan.md); known gaps
-tracked in [`docs/vectors-merge-backlog.md`](../vectors-merge-backlog.md).
+in [`docs/vectors-merge-plan.md`](../vectors-merge-plan.md); open items live in
+[`docs/plans/db-workspace-followups.md`](../plans/db-workspace-followups.md)
+(the original backlog is archived at
+[`../archive/vectors-merge-backlog.md`](../archive/vectors-merge-backlog.md)).
 
 ## Concepts
 
@@ -212,6 +219,7 @@ a data-plane `wk_` with `POST /v1/workspaces/{id}/keys` and hand it to the app.
 |---|---|---|
 | POST | `/v1/workspaces` | Create workspace (`kind=db` for vector workspaces). For `kind=db` the server also bootstraps a `default` dataset and the Milvus collection. |
 | GET | `/v1/workspaces` | List active workspaces (paginated) |
+| DELETE | `/v1/workspaces/{id}` | Archive (soft-delete, `status='archived'`). Cascade-revokes **all** the workspace's `wk_` keys in the same transaction — subsequent data-plane calls return `401 UNAUTHORIZED` |
 | POST | `/v1/workspaces/{id}/keys` | Issue a `wk_` data-plane key; `permission` = `read` \| `readwrite` (plaintext shown once) |
 | GET | `/v1/workspaces/{id}/keys` | List `wk_` metadata (no plaintext) |
 | DELETE | `/v1/workspaces/{id}/keys/{key_id}` | Revoke a `wk_` |

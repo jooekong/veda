@@ -6,9 +6,6 @@
 # Copy to deploy/config.docker.toml and fill in [embedding] / [llm].
 
 listen = "0.0.0.0:3000"
-# Overridden by VEDA_JWT_SECRET in compose; placeholder here just lets
-# `cargo run` work without env if someone reuses this for dev.
-jwt_secret = "set-via-env"
 metrics_token = "set-via-env"
 
 [mysql]

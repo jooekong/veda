@@ -171,8 +171,9 @@ veda collection list | desc <name> | delete <name>
 veda collection search articles "systems programming" --limit 5
 ```
 
-Raw vector collection: include `{"name":"v","type":"vector","dim":768}` in
-the schema and `--embed-source v`.
+Schema field types: `string` / `int` / `float` / `bool` (unknown types fall
+back to string). There is no raw-vector field type — vectors always come
+from `--embed-source` auto-embedding.
 
 Server strips internal fields (`vector`, `workspace_id`) from search
 output, so results are LLM-ready. Prefer `veda sql` when you need filters,
@@ -214,11 +215,13 @@ of the daemon log file).
 
 | Flag / env                                                | Effect                                                                  |
 |-----------------------------------------------------------|-------------------------------------------------------------------------|
-| `--server <URL>` / `VEDA_SERVER`                          | Server URL (required)                                                   |
-| `--key <KEY>` / `VEDA_KEY`                                | Workspace key `wk_…` (required)                                         |
+| `--server <URL>` / `VEDA_SERVER`                          | Server URL (falls back to `~/.config/veda/config.toml`)                 |
+| `--key <KEY>` / `VEDA_KEY`                                | Workspace key `wk_…` (falls back to the CLI config's active workspace)  |
+| `--workspace <ALIAS>`                                     | Pick a CLI workspace profile from config (instead of `--key`)           |
 | `--foreground`                                            | Block in terminal, no daemon log                                        |
 | `--cache-size <MB>`                                       | Read cache size (default 128)                                           |
-| `--attr-ttl <SEC>`                                        | Attr cache TTL (default 5)                                              |
+| `--attr-ttl <SEC>`                                        | File attr cache TTL (default 30)                                        |
+| `--dir-ttl <SEC>`                                         | Directory listing cache TTL (default 60)                                |
 | `--allow-other`                                           | Share mount with other UIDs (needs root in some envs)                   |
 | `--read-only`                                             | RO mount                                                                |
 | `--debug`                                                 | Verbose FUSE-layer logging                                              |

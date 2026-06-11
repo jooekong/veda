@@ -136,7 +136,6 @@ services:
     environment:
       VEDA_MYSQL_URL: mysql://${MYSQL_USER:-veda}:${MYSQL_PASSWORD:-veda-dev}@mysql:3306/${MYSQL_DATABASE:-veda}
       VEDA_MILVUS_URL: http://milvus:19530
-      VEDA_JWT_SECRET: ${VEDA_JWT_SECRET:?set VEDA_JWT_SECRET in .env}
       VEDA_METRICS_TOKEN: ${VEDA_METRICS_TOKEN:?set VEDA_METRICS_TOKEN in .env}
       VEDA_EMBEDDING_API_KEY: ${VEDA_EMBEDDING_API_KEY:?set VEDA_EMBEDDING_API_KEY in .env}
       VEDA_LLM_API_KEY: ${VEDA_LLM_API_KEY:-}

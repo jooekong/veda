@@ -1,6 +1,7 @@
 # Veda Alpha 6 周执行计划
 
-> **状态**：Draft（已和 Joe 对齐范围与节奏）
+> **状态**：✅ Alpha 已交付收尾（2026-05-15 closeout，见 `../handoff-2026-05-15-alpha-closeout.md`）。2026-06-10 归档。
+> 唯一未兑现尾巴：CI publish veda-server 二进制（已记 todos.md，server 升级仍需 box 上源码 build）。
 > **目标**：4 月 29 日起 6 周内完成 alpha 试用版，给工程师朋友试用 FUSE 形态
 > **约束**：一人推进 / 单副本部署 / 虚拟机 / 还无真实用户 / b 形态（自托管 + 内部多团队的 baseline，但 alpha 期单副本足够）
 > **后续多副本演进**：用 Zookeeper 做集群成员管理 + per-file_id 分桶（不在本计划范围）
@@ -556,7 +557,7 @@ async fn fs_events_retention_cleans_old_rows() {
 
 ### FUSE write-back + debounce + cancel-on-unlink (2026-05-15) ✅ 已交付
 
-触发：vim 在挂载点编辑文件报 `E72: Close error on swap file`，根因是 swap binary 同步打 server 被拒。详细设计、模块拆分、里程碑见归档的 [fuse-writeback-plan.md](../archive/plans/fuse-writeback-plan.md)。Server 不动，工作集中在 `veda-fuse`，5 天。**已落地 commits `d15d3f6` → `13edb01`**（含 destroy() drain、setattr-truncate writeback 修复、LocalOnly 跨 mark_dirty/truncate_to 保留）；87 unit tests pass，真挂载 vim/git/IDE 写零 server 误调。
+触发：vim 在挂载点编辑文件报 `E72: Close error on swap file`，根因是 swap binary 同步打 server 被拒。详细设计、模块拆分、里程碑见归档的 [fuse-writeback-plan.md](fuse-writeback-plan.md)。Server 不动，工作集中在 `veda-fuse`，5 天。**已落地 commits `d15d3f6` → `13edb01`**（含 destroy() drain、setattr-truncate writeback 修复、LocalOnly 跨 mark_dirty/truncate_to 保留）；87 unit tests pass，真挂载 vim/git/IDE 写零 server 误调。
 
 ### S8 — outbox retention sweep (2026-05-15) ✅ 已交付
 

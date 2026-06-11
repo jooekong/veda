@@ -22,15 +22,8 @@ the Pinecone-style `/v1/vectors/*` API. Four operations: `upsert`, `search`,
 
 ## Install
 
-Until the SDK is published to the internal Nexus, build and install it into your
-local `~/.m2`:
-
-```bash
-cd sdk/java
-mvn install
-```
-
-Then depend on it:
+The SDK is published to the internal ddxq Nexus (coordinates above) — depend on
+it directly:
 
 ```xml
 <dependency>
@@ -38,6 +31,14 @@ Then depend on it:
   <artifactId>veda-sdk-java</artifactId>
   <version>0.0.1-SNAPSHOT</version>
 </dependency>
+```
+
+Alternatively, when the internal Nexus isn't an option, build and install it
+into your local `~/.m2`:
+
+```bash
+cd sdk/java
+mvn install
 ```
 
 ## Quickstart
@@ -91,10 +92,13 @@ connection pool — `close()` it (or use try-with-resources) when done.
 
 ## Scope: workspaceId / dataset
 
-- `dataset` omitted → server uses `default` (safe).
-- `workspaceId` omitted → server resolves it **only if** the token is scoped to
-  exactly one workspace; otherwise it returns `INVALID_INPUT`. **Configure
-  `workspaceId` on the client.** Both can be overridden per request.
+- `dataset` omitted → server uses `default` (safe). Can be overridden per request.
+- `workspaceId`: the `wk_` key itself is bound to exactly one workspace, and the
+  server's data-plane DTOs no longer have a `workspace_id` field. The SDK still
+  injects one into request bodies; the server silently ignores it (adapting the
+  SDK to the `wk_` model is a todo). Setting it is still useful as the
+  `workspace` label on this SDK's spans/metrics (see
+  [Observability](#observability)).
 
 ## Search modes
 

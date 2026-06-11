@@ -1,5 +1,7 @@
 # Veda 向量服务 API（db workspace）
 
+> **对外权威契约**见 `web/public/docs/zh/reference.md` + `web/public/docs/zh/vectors.md`（随 console 发布）；本文件是 repo 内供 agent / SDK 开发的参考，两处有出入时以 web 版为准。
+
 面向业务方接入的完整 HTTP API 参考。目标读者：写 SDK / 集成的工程师，以及阅读本文生成代码的 coding agent。
 
 - 协议：HTTP/1.1，JSON over UTF-8，`Content-Type: application/json`。
@@ -145,6 +147,7 @@ curl -sX POST $BASE/v1/vectors/upsert \
 | `status` | enum | `active` \| `archived` |
 | `kind` | enum | `fs` \| `db` |
 | `app_id`? | string\|null | 治理标签 |
+| `description`? | string\|null | 描述 |
 | `created_at` / `updated_at` | string | RFC3339 |
 
 ### Dataset
@@ -154,16 +157,19 @@ curl -sX POST $BASE/v1/vectors/upsert \
 | `workspace_id` | string | 所属 workspace |
 | `name` | string | dataset 名 |
 | `status` | enum | `active` \| `archived` |
+| `description`? | string\|null | 描述 |
 | `created_at` / `updated_at` | string | RFC3339 |
 
-### WorkspaceKey（`POST /v1/workspaces/{id}/keys` 的列表项）
+### WorkspaceKey（`GET /v1/workspaces/{id}/keys` 的列表项）
 | 字段 | 类型 | 说明 |
 |---|---|---|
 | `id` | string | key id（撤销时用） |
 | `workspace_id` | string | 绑定的 workspace |
+| `account_id` | string | 所属账号（建 key 时从 workspace 冗余，供鉴权单查） |
 | `name` | string | key 名称 |
 | `permission` | enum | `read` \| `readwrite` |
 | `status` | enum | `active` \| `revoked` |
+| `kind` | enum | `fs` \| `db`（建 key 时从 workspace 冗余，不可变） |
 | `created_at` | string | RFC3339 |
 
 > 明文 `wk_` 仅在创建响应里出现一次（字段 `key`）；列表接口只回元数据，不含明文。
@@ -205,7 +211,7 @@ curl -sX POST $BASE/v1/vectors/upsert \
 | POST | `/v1/accounts/claim` | 🔑 | 认领匿名账号 |
 | POST | `/v1/workspaces` | 🔑 | 建 workspace（`kind:"db"`） |
 | GET | `/v1/workspaces` | 🔑 | 列 workspace（分页） |
-| DELETE | `/v1/workspaces/{id}` | 🔑 | 软删 workspace |
+| DELETE | `/v1/workspaces/{id}` | 🔑 | 软删 workspace（级联吊销全部 `wk_`） |
 | POST | `/v1/workspaces/{id}/keys` | 🔑 | 签发数据面 `wk_`（`read` / `readwrite`） |
 | GET | `/v1/workspaces/{id}/keys` | 🔑 | 列 `wk_` 元数据（无明文） |
 | DELETE | `/v1/workspaces/{id}/keys/{key_id}` | 🔑 | 撤销 `wk_` |
@@ -226,10 +232,10 @@ curl -sX POST $BASE/v1/vectors/upsert \
 ### 6.1 账号
 
 #### POST `/v1/accounts` 🔓
-注册命名账号。
-- 请求：`{ "name": string, "email": string, "password": string }`
+注册命名账号。两种**互斥**模式：email+password（console / CLI 自助），或 `{ name, app_id }` 平台无密码建号（无密码即不可 login，`vk_` 仅在本次响应返回一次；平台接入见 §2 末尾的平台说明）。
+- 请求：`{ "name": string, "email": string, "password": string }` 或 `{ "name": string, "app_id": string }`（混填两种模式的字段 → `400 INVALID_INPUT`）
 - 响应 200：`{ "account_id": string, "api_key": "vk_..." }`
-- 错误：`409 ALREADY_EXISTS`（邮箱已注册）。
+- 错误：`409 ALREADY_EXISTS`（邮箱已注册 / `app_id` 已占用）。
 
 #### POST `/v1/accounts/login` 🔓
 邮箱密码登录，铸一把新的 `vk_`（name=`login`）。**会撤销该账号此前所有 `login` key**。
@@ -264,7 +270,10 @@ curl -sX POST $BASE/v1/vectors/upsert \
 - 响应 200：`PaginatedResponse<Workspace>`
 
 #### DELETE `/v1/workspaces/{id}` 🔑
-软删（`status=archived`）。归档后再 load 该 workspace 的 dataset / 向量调用都返回 404。
+软删（`status=archived`），并在**同一事务内级联吊销该 workspace 的全部 `wk_`**。归档后：
+- 数据面 `/v1/vectors/*` 调用返回 **`401 UNAUTHORIZED`**（不是 404）——`wk_` 鉴权不读 workspace 状态，归档对数据面的生效方式就是级联吊销 key；
+- dataset 控制面（`/v1/workspaces/{ws}/datasets*`）仍返回 **`404 NOT_FOUND`**（加载 workspace 时校验其状态）。
+
 - 响应 **200**：`{ "success": true, "data": null }`
 - 错误：`403 PERMISSION_DENIED`（非本账号）、`404 NOT_FOUND`。
 - ⚠️ 当前为软删，**不回收 Milvus 向量**（存储泄漏，见 followups H1）；唯一约束仍在，名称暂不可复用。
@@ -279,7 +288,7 @@ curl -sX POST $BASE/v1/vectors/upsert \
 为 workspace 签发一把数据面 `wk_`。
 - 请求：`{ "name"?: string, "permission"?: "read"|"readwrite" }`（`permission` 默认 `readwrite`）
 - 响应 200：`{ "key": "wk_...", "permission": "read"|"readwrite" }` —— **明文仅此一次**。
-- 错误：`400 INVALID_INPUT`（`permission` 非法）、`403 PERMISSION_DENIED` / `404 NOT_FOUND`（workspace 非本账号 / 不存在）。
+- 错误：`400 INVALID_INPUT`（`permission` 非法）、`403 PERMISSION_DENIED` / `404 NOT_FOUND`（workspace 非本账号 / 不存在 / **已归档**——归档 workspace 不可再签发 key）。
 
 #### GET `/v1/workspaces/{id}/keys` 🔑
 列出该 workspace 的 key（仅元数据，无明文）。
@@ -460,7 +469,7 @@ Qdrant 风格的严格子集，仅用于 `/v1/vectors/search` 的 `filter`：
 
 以下端点属于 **fs workspace**（个人知识库 / FUSE）能力面，服务端强制目标 workspace 为 `kind=fs`——用 db workspace 的 `wk_` 调用会 `400 WORKSPACE_KIND_MISMATCH`，不要在 db SDK 里暴露：
 
-- `POST /v1/search`、`POST /v1/sql`、`GET /v1/abstract/{path}`、`GET /v1/overview/{path}`、`/v1/fs/*`、`/v1/events`、`/v1/collections/*`
+- `POST /v1/search`、`POST /v1/grep`、`POST /v1/sql`、`GET /v1/abstract/{path}`、`GET /v1/overview/{path}`、`/v1/fs/*`、`/v1/events`、`/v1/collections/*`
 
 它们与向量服务是两条独立产品线。fs 数据面同样以 `wk_` 鉴权，但绑定的是 `kind=fs` 的 workspace。
 
@@ -535,6 +544,8 @@ Qdrant 风格的严格子集，仅用于 `/v1/vectors/search` 的 `filter`：
 | GET | `/healthz` | 🔓 | 存活探针，恒返回 `ok`（纯文本，不查后端） |
 | GET | `/v1/ready` | 🔓 | 就绪探针，检查 MySQL + Milvus；就绪 200 / 否则 503，体含各组件状态 |
 | GET | `/capabilities` | 🔓 | 能力位（如 `summary_enabled`，fs 相关） |
+| GET | `/install.sh` | 🔓 | CLI 安装脚本（构建期内嵌，随服务端版本更新） |
 | GET | `/v1/metrics` | 单独 token | Prometheus 文本格式；未配置 token 或 token 错均返回 404 |
+| POST | `/admin/v1/reconcile/{workspace_id}` | 单独 token | 按 workspace 触发 MySQL↔Milvus 对账。`?dry_run=true\|false`，**默认 `true`（只报告漂移不修复）**，显式 `false` 才入队修复 / 删孤儿；鉴权复用 `/v1/metrics` 的 token，未配置或 token 错均 404 |
 
 `/healthz`（存活）与 `/v1/ready`（就绪）分离：systemd watchdog / k8s livenessProbe 应打 `/healthz`，避免后端瞬时抖动触发无意义重启。

@@ -8,7 +8,19 @@
 > `/v1/vectors/search`（`mode = hybrid|semantic|fulltext`，默认 hybrid）。本文档
 > §3.2「search 仅 semantic」、§3.4「allow_fallback（v0 没 hybrid）」、§5 v0/v1 表中
 > 的 hybrid/fulltext 行均已过时——以 `docs/api/vectors.md` + `docs/api/db-workspace-api.md`
-> + CHANGELOG 为对外契约的现行来源，实现细节见 `docs/plans/db-sparse-vector-plan.md`。
+> + CHANGELOG 为对外契约的现行来源，实现细节见 `docs/archive/plans/db-sparse-vector-plan.md`。
+>
+> **更新 2026-06-10**（这批章节同样已被演进推翻，按 § 锚点引用本文的代码注释仍有效）：
+> - **§1.5 鉴权流程已整体作废**：`fa7f91c`+`6e6d4bf` 后数据面只认 `wk_`（单查询鉴权，
+>   JOIN accounts 验 active，不读 workspace.status），请求体不再有 `workspace_id`；
+>   JWT 全删。现行见 `ARCHITECTURE.md`「Workspace kinds」节。
+> - **§0/§1.1「app 不是安全边界、不建 app 实体」已被平台账号模型取代**（`a904e2d`）：
+>   `app_id` 现在是 account 级唯一键 + 平台控制面租户边界（`/v1/apps/{app_id}/workspaces`），
+>   "不建 veda_apps 表"仍成立。
+> - **§3.2 upsert 新增 `write_mode=insert|upsert`**（`fdc42a9`，insert 跳 dedup ~3x 吞吐）。
+> - **§3.4「score_threshold (v1) 不暴露」已过时**：`min_score` 已实现（`1f6ac0b`，
+>   仅 semantic/fulltext，hybrid 传入返 400）。
+> - 低优先级回写清单（ENUM→VARCHAR 等 6 条）见 `docs/plans/db-workspace-followups.md` 尾部。
 
 ## 0. 决策摘要
 
@@ -323,7 +335,7 @@ upsert/search 时 text → EmbeddingService:
 
 ## 6. Stage 拆解（v0）
 
-> **测试纪律**：每个 Stage DoD 必须包含一份**真实 Milvus / MySQL / embedding 服务的集成测试**通过；纯逻辑单测 OK 用 mock，跨服务边界的禁用 mock（详见 [feedback_testing_use_real_services](../../.claude/projects/-Users-konglingqiao-code-personal-veda/memory/feedback_testing_use_real_services.md)）。
+> **测试纪律**：每个 Stage DoD 必须包含一份**真实 Milvus / MySQL / embedding 服务的集成测试**通过；纯逻辑单测 OK 用 mock，跨服务边界的禁用 mock（mock 会隐藏真实服务的版本 / 并发 / schema 行为差异）。
 
 | Stage | 工作量 | 主要文件 | 内容 |
 |---|---|---|---|

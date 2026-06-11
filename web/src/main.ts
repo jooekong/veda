@@ -835,6 +835,7 @@ const DOCS_META: Record<Lang, { sectionLabel: string; items: { id: string; title
     items: [
       { id: "introduction", title: "Introduction" },
       { id: "quickstart", title: "Quickstart" },
+      { id: "reference", title: "Reference" },
       { id: "cli", title: "CLI reference" },
       { id: "skill", title: "AI agent skill" },
       { id: "fuse", title: "FUSE mount" },

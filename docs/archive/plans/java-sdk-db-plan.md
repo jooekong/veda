@@ -4,6 +4,7 @@
 > 历史：2026-06-02 实现含 sparse/hybrid/min_score、e2e 2026-06-03 对线上实跑全绿（§8）；v2 过 Codex review（§13），D-a~D-g 全收口。
 > 决策基准（2026-06-02 与 Joe 敲定）：**手写精简 SDK / Java 8 基线 / monorepo `sdk/java` + 内部 Maven / 仅数据面 4 端点**。
 > 权威 API 参考：`docs/api/db-workspace-api.md`（专为写 SDK 准备）。覆盖 `docs/plans/db-workspace-followups.md` D1（与其原倾向 generator 相反，理由见 §1）。
+> **归档注记（2026-06-10）**：§4/§5/D-g 的 auth 示例（`.apiKey("vk_...")` + workspaceId 必配）是 `fa7f91c`（2026-06-03）之前的旧契约——现行数据面为 `wk_`、body 不带 workspace_id，SDK 的 wk_ 适配 + write_mode 支持未做（见 todos.md）。现行契约以 `sdk/java/README.md` + `docs/api/db-workspace-api.md` 为准。
 
 ---
 

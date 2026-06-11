@@ -30,7 +30,7 @@ veda-fuse       FUSE 挂载                           (已实现)
 - `veda-store`：MysqlStore（MetadataStore + MetadataTx + TaskQueue + AuthStore + CollectionMetaStore 实现，启动时 schema bootstrap (`CREATE TABLE IF NOT EXISTS`)，含 veda_summaries 表；`insert_dentry` 使用 MySQL errno 1062 精确匹配 duplicate entry；`claim()` 重入不重复递增 retry_count）；MilvusStore（VectorStore + CollectionVectorStore 实现，REST v2 client，新增 veda_summaries 集合，`post()` 含 3 次指数退避重试）；10 个 MySQL 集成测试 + 2 个 Milvus 集成测试
 - `veda-pipeline`：EmbeddingProvider（OpenAI 兼容 HTTP，100/batch 自动分批 + exponential backoff 重试，基于 HTTP status code 判断 retryable）；LlmProvider（OpenAI-compatible chat completions，含 3 次指数退避重试，429/5xx/连接错误自动重试）；semantic_chunk（heading-based + sliding window）；storage_chunk（256KB 边界 + start_line）；extract_text（text/plain 占位）；summary 模块（generate_l0/generate_l1/aggregate_dir_summary + prompt 模板）；6 个 chunking 单元测试 + 3 个 summary 单元测试 + 4 个 embedding 单元测试 + 4 个 embedding 集成测试
 - `veda-sql`：VedaSqlEngine（DataFusion session 管理）；FilesTable（递归 dentry 枚举）；CollectionTable（Milvus 查询 → Arrow）；8 个 FS SQL 标量函数（veda_read/write/append/exists/size/mtime/remove/mkdir，友好错误消息）；`embedding()` UDF（文本 → JSON 向量）；`veda_fs()` Table Function（目录列举 / 文件读取 / glob 匹配，CSV/TSV/JSONL/plain text 自动解析）；`search()` UDTF（向量搜索，支持 hybrid/semantic/fulltext 模式 + limit 参数）；`veda_fs_events()` Table Function（事件查询，支持 since_id/path_prefix/limit）；`veda_storage_stats()` Table Function（文件/目录/字节统计）；支持 SELECT/WHERE/COUNT/JOIN 等标准 SQL；37 个 mock 单元测试
-- `veda-server`：ServerConfig（TOML 加载 + `VEDA_` 环境变量覆盖，新增 LlmConfig/allowed_origins）；JWT 签发/验证；API Key + Workspace Key 认证中间件（workspace-key 路径自动填充 account_id）；Account/Workspace/File/Search/Collection/SQL 全部 REST 路由；Worker（outbox 消费 + chunk sync + summary sync + dir summary sync）；`GET /v1/summary/{path}` 摘要查询端点；搜索 API 支持 `detail_level` 参数（limit 上限 100）；`/v1/ready` 检查 MySQL+Milvus 可用性（返回 200/503）；SQL 路由使用 Arrow ArrayWriter 直接序列化 JSON；CORS 可配置白名单（`allowed_origins`，默认 permissive）；graceful shutdown；4 个 HTTP 端到端集成测试
+- `veda-server`：ServerConfig（TOML 加载 + `VEDA_` 环境变量覆盖，新增 LlmConfig/allowed_origins）；API key（`vk_`）+ workspace key（`wk_`）认证中间件（workspace-key 路径自动填充 account_id；JWT 曾有、2026-06 整体移除）；Account/Workspace/File/Search/Collection/SQL 全部 REST 路由；Worker（outbox 消费 + chunk sync + summary sync + dir summary sync）；`GET /v1/summary/{path}` 摘要查询端点；搜索 API 支持 `detail_level` 参数（limit 上限 100）；`/v1/ready` 检查 MySQL+Milvus 可用性（返回 200/503）；SQL 路由使用 Arrow ArrayWriter 直接序列化 JSON；CORS 可配置白名单（`allowed_origins`，默认 permissive）；graceful shutdown；4 个 HTTP 端到端集成测试
 - `veda-server`：新增 `POST /v1/fs/{path}` append 路由
 - `veda-cli`：clap 命令行解析；account create/login；workspace create/list/use；cp/cat/ls/mv/rm/mkdir/append；search（支持 --detail-level abstract/overview/full）；summary（查看文件/目录摘要）；collection CRUD；sql；config 管理；$HOME/.config/veda/config.toml 持久化；HTTP client 带 connect 10s / request 60s 超时
 - `veda-fuse`：FUSE 文件系统挂载（fuser 0.14），需要 macFUSE（macOS）或 libfuse（Linux）
@@ -46,7 +46,7 @@ veda-fuse       FUSE 挂载                           (已实现)
 - v0.1.5 批：
   - 搜索：真 BM25 hybrid（dense + sparse RRF via Milvus 2.5 `hybrid_search`），fulltext 改为 BM25 sparse，jieba 分词中文，自动 schema 迁移（drop+rebuild + 全量 ChunkSync 入队）；`SearchHit.score_type` 标 `rrf` / `bm25` / `cosine`；`/v1/search` 路由响应剥离内部字段（vector / workspace_id）
   - Worker：paginated chunk read（chunk_sync + summary_sync 共享 `load_full_content`），`catch_unwind` 隔离 task panic；summary debounce 30s + burst window 5min（`veda_summary_enqueue_total{burst=...}` 计数）；L1 prompt 结构化 + 输出语言策略仅 zh-CN / en（中文或中文+英语→中文，其余→英语）
-  - 端点：`/healthz` 轻量存活探针；`GET /v1/grep` 字面量子串扫描；summary 拆成两条路径——`GET /v1/abstract/{path}` 返 L0 abstract（默认便宜路径），`GET /v1/overview/{path}` 才返 L1 overview；两条都是三态响应（200 ready / 202 pending+Retry-After / 501 disabled+Cache-Control:no-store）
+  - 端点：`/healthz` 轻量存活探针；`POST /v1/grep` 字面量子串扫描；summary 拆成两条路径——`GET /v1/abstract/{path}` 返 L0 abstract（默认便宜路径），`GET /v1/overview/{path}` 才返 L1 overview；两条都是三态响应（200 ready / 202 pending+Retry-After / 501 disabled+Cache-Control:no-store）
   - 配置：`embedding.batch_size`（含 `VEDA_EMBEDDING_BATCH_SIZE`），`last_embedded_content_hash` 水印 + `force_reembed` 标志
   - CLI：`veda --version`，`veda cp -r` 递归目录上传（跳 symlink），`veda grep`，`veda abstract` (L0) + `veda overview` (L1) 两个独立子命令
   - CLI 初始化：单子命令 `veda init` 五模式互斥分发（anonymous / named `--email` / `--login` / `--upgrade` / `--import-key`），`veda status`（配置健康度 + server reachability ping）。`--import-key` 接 `vk_*` 或 `wk_*`，覆写前自动把旧 `config.toml` 备份成 `config.toml.bak.<unix-ts>`
@@ -71,35 +71,44 @@ veda-fuse       FUSE 挂载                           (已实现)
 
 Vector dataset 是 db workspace 内的逻辑分组（内部物理 pk = `{dataset}:{id}`，全 collection 共享 PK 空间；API 只暴露 `id`，pk 不出 wire）。每个 db workspace 创建时自动 bootstrap 一个 `default` dataset，业务方可不指定 dataset 直接 upsert。
 
-完整设计：`docs/vectors-merge-plan.md`；未修待办：`docs/vectors-merge-backlog.md`。
+**写入语义 `write_mode`**（`POST /v1/vectors/upsert`，2026-06-08）：默认 `upsert` 走 Milvus 幂等 dedup-by-id；`insert` 跳过 dedup+delete，~3x 写吞吐，由调用方保证 id 唯一（重复 id 会产生重复行）。
+
+完整设计：`docs/vectors-merge-plan.md`（鉴权/app_id/write_mode 等章节已被演进推翻，见其头部 2026-06-10 注记）；历史待办已归档：`docs/archive/vectors-merge-backlog.md`（未兑现尾巴并入 `docs/plans/db-workspace-followups.md`）。
 
 ### 客户端 SDK
 
-- **Java SDK**（`sdk/java`，独立 Maven 项目，不在 Cargo workspace）：db 数据面 4 端点（upsert/search/query/delete）的 Java 8 封装。Jackson + OkHttp，fluent filter builder，`error_code`→类型化异常（未知码归 `UNKNOWN`），幂等感知重试（id-less upsert 不自动重试），响应前向兼容（`ignoreUnknown`）。单测绿；真实 server 契约测试走 `mvn -P integration verify`（发版 gate，非 CI）。内部 Nexus 发布坐标待定（仅 `mvn deploy` 受阻）。设计：`docs/plans/java-sdk-db-plan.md`。**⚠ 待适配**：db 数据面 2026-06 已从 `vk_` 改 `wk_`、请求体去掉 `workspace_id`，SDK 的 `apiKey`→`workspaceKey` 改造 + e2e 重测尚未做（见 `docs/plans/platform-admin-api-plan.md`）。
+- **Java SDK**（`sdk/java`，独立 Maven 项目，不在 Cargo workspace）：db 数据面 4 端点（upsert/search/query/delete）的 Java 8 封装。Jackson + OkHttp，fluent filter builder，`error_code`→类型化异常（未知码归 `UNKNOWN`），幂等感知重试（id-less upsert 不自动重试），响应前向兼容（`ignoreUnknown`）。单测绿；真实 server 契约测试走 `mvn -P integration verify`（发版 gate，非 CI）。已发布 `csoss.veda:veda-sdk-java:0.0.1-SNAPSHOT` 到内部 ddxq Nexus（2026-06-04）。设计：`docs/archive/plans/java-sdk-db-plan.md`。**⚠ 待适配**：db 数据面 2026-06 已从 `vk_` 改 `wk_`、请求体去掉 `workspace_id`，SDK 的 `apiKey`→`workspaceKey` 改造 + `write_mode` + e2e 重测尚未做（见 todos.md）。
 - **Python 示例**：`examples/python_pinecone_demo.py`（无 SDK，裸 HTTP）。
+
+## 可观测性
+
+- **本地 exporter**：`GET /v1/metrics`（Prometheus 文本格式，`metrics_token` 门控；未配 token 时 404 隐藏）。
+- **OTLP 桥接**（2026-06-05 上线）：后台任务每 5s 把全量指标转 OTLP gRPC 推公司 Monitor Collector（counter→Sum / gauge→Gauge / histogram→桶差分，attributes+labels 双写；`[otlp]` config + `VEDA_OTLP_*` 灰度开关）。proto vendored 说明见 `crates/veda-server/proto/PROVENANCE.md`。
+- **向量数据面三层指标**：`veda_vector_request_seconds`（handler 端到端）/ `veda_vector_store_op_seconds`（store 层）/ `veda_milvus_request_seconds`（Milvus HTTP），label 含 operation/workspace_id/dataset/mode/outcome。
+- **outbox 死信可见性**：`veda_outbox_dead_total{event_type}` + `veda_outbox_depth{status}`（30s 采样），告警规则配在公司 Monitor 平台。
 
 ## 测试策略
 
-- 单元测试：`cargo test`（148 个测试，全部自动运行）
-- 集成测试：`cargo test -- --ignored`（22 个测试，需要 `config/test.toml` 配置真实 MySQL/Milvus/Embedding 服务）
-- 敏感配置：`config/test.toml`（已 gitignore），模板见 `config/test.toml.example`
+- 单元测试：`cargo test`（全自动，无外部依赖）
+- 集成测试：`cargo test -- --ignored`（需要 `config/test.toml` 配置真实 MySQL/Milvus/Embedding 服务；不起 docker，CI 不跑，手动执行）
+- 敏感配置：`config/test.toml`（已 gitignore），模板见 `config/test.toml.example`——新环境先 `cp config/test.toml.example config/test.toml`
 
 ## 待实现
 
-- Prometheus metrics 导出
 - PDF text extraction / Image OCR
-- CLI/FUSE 端到端测试、Docker Compose、K8s Helm chart
+- CLI/FUSE 端到端测试、K8s Helm chart
+- OTLP trace 二期（协议事实见 `docs/archive/plans/observability-otlp-plan.md` §0）
 
 ## 关键设计决策
 
-详见 `docs/design/design.md`。摘要：
+原始设计提案已归档（`docs/archive/design/design.md`——其中凭证体系 / reconciler / API 面 / 部署形态均已被演进推翻，**勿当现状读**，现状以本文件为准）。摘要：
 
 - MySQL = control plane (元数据、认证、outbox)
 - Milvus = data plane (向量搜索、structured collection 数据)
 - 文件分层存储：≤256KB inline，>256KB chunked
 - Content-addressed dedup (SHA256)
 - Outbox pattern 实现最终一致性。文件写入与其 ChunkSync/SummarySync 入队在**同一 MySQL 事务**提交，写路径不会漂移。残余漂移来源只有死信任务（`veda_outbox_dead_total` + `veda_outbox_depth{status}` 暴露，告警在 Monitor 平台配）和 Milvus 侧数据丢失（磁盘/运维/破坏式迁移）。**不再有 6h 后台 reconcile loop**；改为按需 `POST /admin/v1/reconcile/{workspace_id}?dry_run=`（ops `metrics_token` 鉴权，默认 dry_run=true 只报告，失败响亮返回 500）
-- Account → Workspace 多租户，API Key + Workspace Token 认证
+- Account → Workspace 多租户；控制面 `vk_`、数据面 `wk_`，纯 key 校验（JWT 已移除）
 - VedaError::Storage 使用 String（而非 anyhow::Error）避免 lib crate 兼容问题
 - **三层信息模型 (Tiered Context Loading)**：
   - L0 Abstract (~100 tokens)：文件/目录的一句话摘要，存入 Milvus 做向量搜索

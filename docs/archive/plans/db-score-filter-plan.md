@@ -1,7 +1,7 @@
 # 方案：db `/v1/vectors/search` 服务端按分过滤（`min_score`）
 
-> 状态：草稿，待 Codex review + Joe 确认。
-> 关联：`docs/plans/db-sparse-vector-plan.md`（mode/score_type 已落地）；本方案补"服务端按分过滤"。
+> 状态：✅ 已实现（`1f6ac0b`，2026-06-02，DoD 全勾）。2026-06-10 归档。
+> 关联：`docs/archive/plans/db-sparse-vector-plan.md`（mode/score_type 已落地）；本方案补"服务端按分过滤"。
 
 ## 1. 背景与现状
 

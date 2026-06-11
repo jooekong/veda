@@ -9,8 +9,9 @@ Veda is the successor to vecfs, rebuilt from the ground up with multi-tenancy, s
 - **Filesystem** — store text files via familiar `cp`, `cat`, `ls`, `rm` operations (PDF/OCR planned)
 - **Vector search** — every file is automatically chunked, embedded, and indexed for semantic + full-text hybrid search
 - **Structured collections** — create tables with auto-embedding, like a vector-native database
+- **Vector workspaces** — a Pinecone-style raw-vector data plane (`kind=db`) for company apps
 - **SQL queries** — query files and collections with DataFusion SQL engine
-- **Multi-tenant** — Account → Workspace isolation with API Key / Workspace Token auth
+- **Multi-tenant** — Account → Workspace isolation; account key (`vk_`) drives the control plane, workspace key (`wk_`) the data plane
 
 ## Architecture
 
@@ -24,30 +25,31 @@ Veda is the successor to vecfs, rebuilt from the ground up with multi-tenancy, s
                   │           │
                MySQL       Milvus
           (control plane)  (data plane)
-          ┌────────────┐  ┌─────────────────┐
-          │ accounts   │  │ veda_chunks      │
-          │ workspaces │  │   - file chunks  │
-          │ dentries   │  │   - embeddings   │
-          │ files      │  │   - BM25 index   │
-          │ outbox     │  │                  │
-          │ schemas    │  │ veda_coll_{id}   │
-          └────────────┘  │   - structured   │
-                  │       │                  │
-          Embedding Worker│ veda_vectors_{d} │
-          (tokio task)    │   - raw vectors  │
-          OpenAI-compat   └─────────────────┘
+          ┌────────────┐  ┌───────────────────┐
+          │ accounts   │  │ veda_chunks        │
+          │ workspaces │  │   - fs chunks      │
+          │ dentries   │  │   - BM25 index     │
+          │ files      │  │ veda_summaries     │
+          │ outbox     │  │ veda_coll_{id}     │
+          │ datasets   │  │   - structured     │
+          │ schemas    │  │ ws_<hash>_default  │
+          └────────────┘  │   - db vectors     │
+                  │       └───────────────────┘
+          Embedding Worker
+          (tokio task)
+          OpenAI-compat
 ```
 
 - **MySQL** — control plane: accounts, file metadata, path tree, outbox task queue (ACID)
-- **Milvus** — data plane: chunked content + embeddings (ANN + BM25), structured collections, raw vectors
-- **Embedding Worker** — background tokio task, processes outbox events, self-healing reconciler
+- **Milvus** — data plane: chunked content + embeddings (ANN + BM25), structured collections, and one raw-vector collection per `kind=db` workspace
+- **Embedding Worker** — background tokio task that consumes outbox events; drift repair is an on-demand admin endpoint (`POST /admin/v1/reconcile/{ws}`), not a background loop
 - **DataFusion** — embedded SQL engine for querying files and collections
 
 ### Key Design Decisions
 
 - **Layered file storage**: ≤256KB inline in MySQL `file_contents`, >256KB chunked in `file_chunks`
 - **Content-addressed dedup**: SHA256 fingerprint skips writes when content hasn't changed
-- **Outbox pattern**: MySQL outbox table replaces `semantic_tasks` for Milvus eventual consistency
+- **Outbox pattern**: file writes and their sync tasks commit in one MySQL transaction; Milvus catches up asynchronously
 - **Text-first storage**: text files only in v0; PDF/OCR extraction planned, no binary blobs
 - **Structured collections**: data stored directly in Milvus with synchronous embedding, MySQL only stores schema metadata
 
@@ -55,9 +57,9 @@ Veda is the successor to vecfs, rebuilt from the ground up with multi-tenancy, s
 
 ### Prerequisites
 
-- Rust toolchain (1.75+)
+- Rust toolchain
 - MySQL 8.0+
-- Milvus 2.4+
+- Milvus 2.6+ (BM25 hybrid search relies on Milvus functions; verified against 2.6.14)
 - An OpenAI-compatible embedding API
 
 ### 1. Start dependencies
@@ -69,14 +71,15 @@ docker run -d --name milvus -p 19530:19530 milvusdb/milvus:latest standalone
 
 ### 2. Configure
 
+The server reads `config/server.toml` by default, or takes a config path as
+its only positional argument (`veda-server /etc/veda/config.toml`).
+
 ```bash
-cp veda-server.toml.example veda-server.toml
+cp config/test.toml.example config/server.toml   # then edit
 ```
 
 ```toml
-[server]
-listen_addr = "0.0.0.0:9009"
-jwt_secret = "change-me"
+listen = "0.0.0.0:3000"   # optional — this is the default
 
 [mysql]
 database_url = "mysql://root:password@localhost:3306/veda"
@@ -91,7 +94,9 @@ model = "text-embedding-3-small"
 dimension = 1024
 ```
 
-Override via environment variables with `VEDA_` prefix.
+Values can be overridden via `VEDA_*` environment variables. The MySQL schema
+bootstraps itself on first start. For a full stack (Prometheus/Grafana
+included) see `deploy/docker-compose.yml`.
 
 ### 3. Build and run
 
@@ -118,18 +123,20 @@ another machine? `veda init --import-key vk_…` (auto-backs up old config).
 ### File Operations
 
 ```bash
-# Upload files
-veda cp ./README.md :/docs/readme.md
+# Upload (local → remote; "-" reads stdin)
+veda cp ./README.md /docs/readme.md
 
 # Browse
-veda ls :/docs
-veda cat :/docs/readme.md
-veda cat :/docs/readme.md --lines 10:20   # line-based reading
+veda ls /docs
+veda cat /docs/readme.md
+veda cat /docs/readme.md --range 10:20   # line slice; also --head N / --tail N
+
+# Download = cat into a local file
+veda cat /docs/readme.md > ./readme.md
 
 # Organize
-veda cp :/docs/readme.md :/backup/readme.md
-veda mv :/docs/old.md :/archive/old.md
-veda rm :/tmp -r
+veda mv /docs/old.md /archive/old.md
+veda rm /tmp        # delete file or directory (directories delete recursively)
 ```
 
 ### Search
@@ -143,35 +150,31 @@ veda search "error handling patterns" --mode semantic
 
 # Full-text only
 veda search "TODO fix" --mode fulltext
+
+# Scope to a subtree / literal substring scan
+veda search "auth" --path /docs
+veda grep "TODO" /src
 ```
 
 ### Structured Collections
 
 ```bash
-# Create a collection with schema
+# Create — schema is a JSON array; --embed-source picks the auto-embedded field
 veda collection create articles \
-  --field "title:string:index" \
-  --field "content:string:embed" \
-  --field "category:string:index"
+  --schema '[{"name":"title","type":"string","index":true},
+             {"name":"content","type":"string"},
+             {"name":"category","type":"string","index":true}]' \
+  --embed-source content
 
-# Insert rows (auto-embeds the content field)
+# Insert — a JSON ARRAY of rows (auto-embeds the content field)
 veda collection insert articles \
-  --data '{"title":"Intro to Rust","content":"Rust is a systems...","category":"tech"}'
+  '[{"title":"Intro to Rust","content":"Rust is a systems...","category":"tech"}]'
 
-# Search with filters
-veda collection search articles "systems programming" \
-  --filter "category == 'tech'" --limit 10
+# Semantic search against the embedded field
+veda collection search articles "systems programming" --limit 10
 
-# SQL query
+# Filters / aggregates live in SQL
 veda sql "SELECT title, category FROM articles WHERE category = 'tech' LIMIT 5"
-```
-
-### Raw Vector Collections
-
-```bash
-veda collection create my-vectors --dim 768 --type raw
-veda insert --vector "[0.1, 0.2, ...]" --payload '{"label":"example"}'
-veda collection search my-vectors --vector "[0.1, 0.2, ...]"
 ```
 
 ### Vector Workspaces (Pinecone-style)
@@ -184,14 +187,14 @@ Schema, defaults, and contracts: [`docs/api/vectors.md`](docs/api/vectors.md).
 # Control plane — account key (vk_, held by the platform/console): create a
 # db-kind workspace, then mint a workspace key (wk_) for it. Your app only ever
 # holds the wk_; vk_ stays on the platform side.
-curl -sS -X POST http://localhost:9009/v1/workspaces \
+curl -sS -X POST http://localhost:3000/v1/workspaces \
   -H "Authorization: Bearer $VK" \
   -H "Content-Type: application/json" \
   -d '{"name":"my-vectors","kind":"db","app_id":"my-app"}'
 
 # Data plane — workspace key (wk_). The target workspace is bound to the key, so
 # the request body carries NO workspace_id. text is required; rest has defaults.
-curl -sS -X POST http://localhost:9009/v1/vectors/upsert \
+curl -sS -X POST http://localhost:3000/v1/vectors/upsert \
   -H "Authorization: Bearer $WK" \
   -H "Content-Type: application/json" \
   -d '{"records":[
@@ -200,7 +203,7 @@ curl -sS -X POST http://localhost:9009/v1/vectors/upsert \
 
 # Search — mode defaults to hybrid; pick semantic/fulltext explicitly. No
 # workspace_id in the body.
-curl -sS -X POST http://localhost:9009/v1/vectors/search \
+curl -sS -X POST http://localhost:3000/v1/vectors/search \
   -H "Authorization: Bearer $WK" \
   -H "Content-Type: application/json" \
   -d '{"query":"sneakers under 1500","mode":"semantic","top_k":5,
@@ -220,13 +223,18 @@ veda/
 │   ├── veda-pipeline/   # Embedding, chunking, text extraction (PDF/OCR planned)
 │   ├── veda-sql/        # DataFusion SQL engine
 │   ├── veda-server/     # Axum HTTP server (thin shell)
-│   ├── veda-cli/        # CLI client
-│   └── veda-fuse/       # FUSE mount (optional, excluded from default build)
+│   ├── veda-cli/        # CLI client (binary name: veda)
+│   └── veda-fuse/       # FUSE mount (workspace member; install via --with-fuse)
+├── sdk/java/            # Java SDK for the db-workspace data plane
+├── web/                 # Console + user docs site
+├── deploy/              # Dockerfile, docker-compose, systemd units
 ├── docs/
-│   └── design/
-│       ├── design.md    # Complete design document
-│       └── plans.md     # Sprint planning
-└── AGENTS.md
+│   ├── api/             # API contracts (db-workspace, vectors)
+│   ├── plans/           # Active plans (index: docs/design/plans.md)
+│   ├── testing/         # Test SOPs
+│   └── archive/         # Completed / superseded docs
+├── ARCHITECTURE.md      # Current system state
+└── AGENTS.md            # Agent working protocol
 ```
 
 ## Search Modes

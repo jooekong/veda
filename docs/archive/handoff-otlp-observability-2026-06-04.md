@@ -6,7 +6,7 @@
 
 ## 直接开始（唯一实现依据）
 
-读 **`docs/plans/observability-otlp-plan.md`**：
+读 **`docs/archive/plans/observability-otlp-plan.md`**（交接任务已于 `62de928` 完成，本 handoff 2026-06-10 归档）：
 - **§0 协议事实速查**（自包含，含拉配置/连通验证的实测命令）
 - **§5 分步实施**（MVP 路径）
 - **§8 Codex 处置**（已并入的修正点）

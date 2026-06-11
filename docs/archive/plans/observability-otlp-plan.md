@@ -1,6 +1,7 @@
 # 方案：veda 接入公司可观测（一期 Metrics，OTLP 桥接）
 
-> 状态：方案草案（2026-06-04）。一期只做 **metrics**，trace 二期。
+> 状态：✅ 一期（metrics）已实现并上线（`62de928`，2026-06-05；两 box 灰度 + 平台查询验证完成）。2026-06-10 归档。
+> **trace 二期开工前先读本文 §0 协议事实**——datapoint label 查询、非标 ID、env.yaml 权限坑等对 trace 同样适用（todos.md 有指针）。
 > 协议事实见 memory `reference_company_observability` / `cs-oss/monitor-agent` 文档；不重复抄，本文聚焦 veda 侧落地。
 > 关联：veda 现有 metrics 栈（`obs.rs` + `metrics` 0.24 + `metrics-exporter-prometheus` 0.16）。
 

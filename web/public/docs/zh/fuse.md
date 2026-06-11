@@ -4,7 +4,7 @@
 
 ## 安装
 
-`veda-fuse` 跟 `veda` 是两个独立二进制。预编译 release 覆盖 **Linux x86_64** 和 **macOS Intel (x86_64)**；Apple Silicon 暂时需要从源码编译，或者只用 CLI。
+`veda-fuse` 跟 `veda` 是两个独立二进制。预编译 release 覆盖 **Linux x86_64**、**macOS Intel (x86_64)** 和 **macOS Apple Silicon (aarch64)**（0.1.11 起），安装脚本自动按平台选包。
 
 ```bash
 # 一次装好 veda + veda-fuse
@@ -23,7 +23,7 @@ sudo dnf install fuse3
 # Huawei Cloud EulerOS / openEuler / Kylin / Anolis / TencentOS
 sudo yum install fuse3
 
-# macOS（Intel）
+# macOS（Intel / Apple Silicon）
 brew install --cask macfuse
 ```
 

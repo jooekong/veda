@@ -157,8 +157,8 @@ async fn upsert_vectors(
     }
 
     // 8. Submit. A mixed batch issues two Milvus calls and is NOT atomic
-    //    (see vector-write-mode-plan.md "重试与原子性契约"). commit_ts is
-    //    server-now (Milvus REST doesn't surface a real one).
+    //    (see docs/archive/plans/vector-write-mode-plan.md "重试与原子性契约").
+    //    commit_ts is server-now (Milvus REST doesn't surface a real one).
     let mut commit_ts = now_ms;
     if !upsert_batch.is_empty() {
         commit_ts = state

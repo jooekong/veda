@@ -27,6 +27,34 @@ that matters.
   but not upsert/delete. The account `vk_` is control-plane only now. Existing
   db workspaces must mint a `wk_` to keep using the data plane; the Java SDK
   must switch `vk_`→`wk_` (not yet done).
+- **Auth is one MySQL query per request now**: the `wk_` lookup JOINs
+  `veda_accounts` to check account status (`veda_workspace_keys` denormalizes
+  `kind`/`account_id`) and no longer reads `workspace.status` — workspace
+  archive instead cascade-revokes all its `wk_` in the same transaction, so
+  data-plane calls after archive fail **401**. The `allowed_workspaces` scope
+  of a `vk_` is enforced at the single ownership gate (`load_owned_workspace`),
+  closing the scoped-`vk_` → out-of-scope `wk_` minting hole (S1).
+- **Wire (additive):** `/v1/vectors/search` hits include a new `score_type`
+  field. Deserializes with a `cosine` default, so older payloads keep their
+  (semantic-only) meaning; SDK/clients should surface it.
+- **Default search mode is now `hybrid`** (was implicitly semantic). `hybrid`
+  failures surface as errors — no silent fallback to semantic.
+
+### Fixed
+- **Outbox lease fencing (A-3)**: workers on multiple servers can now safely
+  share one MySQL. `claim()` stamps a `lease_owner` (`host:pid`); complete /
+  fail / renew are fenced on `owner + status='processing'`, so a stale executor
+  whose lease was taken over can no longer overwrite the new owner's task
+  state. A 3-min batch heartbeat keeps slow-but-healthy tasks inside the 10-min
+  lease; `veda_outbox_lease_lost_total{op}` / `veda_outbox_lease_takeover_total`
+  surface lost leases and takeovers. Mixed-version caveat: fencing fully
+  protects only once all workers sharing the MySQL run the new binary.
+- **Graceful shutdown actually runs in production**: worker shutdown drains the
+  in-flight batch instead of cancelling it at an await point, and the server
+  now listens for SIGTERM (systemd stop only sends SIGTERM; the old
+  ctrl_c-only handler never fired).
+- Hot-path indexes (A-8): `veda_dentries (workspace_id, file_id)` and
+  `veda_outbox (workspace_id, event_type, status)`.
 
 ### Removed
 - **BREAKING**: JWT workspace tokens. `POST /v1/workspaces/{id}/token` is gone,
@@ -66,20 +94,58 @@ that matters.
   hits below it). Valid only for `semantic` / `fulltext`; rejected with `400`
   for `hybrid` (incl. the default), whose RRF score is a rank artifact, not a
   relevance value. Applied after `top_k`, so the result may be shorter.
-- **Java SDK** (`sdk/java`, `com.veda:veda-sdk-java`): hand-written Java 8 client
+- **Java SDK** (`sdk/java`, `csoss.veda:veda-sdk-java`): hand-written Java 8 client
   for the db-workspace vector data-plane (`upsert`/`search`/`query`/`delete`).
   Jackson + OkHttp, fluent filter builder, `error_code` → typed exceptions with
   `UNKNOWN` fallback, idempotency-aware retry (id-less upsert is never
   auto-retried), and forward-compatible deserialization. Builds + unit-tests in
   CI; real-server contract tests run via `mvn -P integration verify`.
-  (Internal Nexus coordinates pending; only `mvn deploy` is blocked.)
+  Published `0.0.1-SNAPSHOT` to the internal ddxq Nexus (2026-06-04). Still on
+  the pre-`wk_` contract — data-plane adaptation tracked in todos.md.
+- `/v1/vectors/upsert` accepts `write_mode`: `upsert` (default, idempotent
+  dedup-by-id) or `insert` (skips Milvus's dedup+delete for ~3× write
+  throughput; caller guarantees `id` uniqueness — a repeated id inserts a
+  duplicate row).
+- **OTLP metrics bridge**: a background task pushes all metrics to the company
+  Monitor Collector every 5s over OTLP gRPC (counter→Sum, gauge→Gauge,
+  histogram→bucket-delta; `[otlp]` config + `VEDA_OTLP_*` env gates, off by
+  default). Vendored proto provenance: `crates/veda-server/proto/PROVENANCE.md`.
+- **Vector data-plane metrics**: `veda_vector_request_seconds` (handler),
+  `veda_vector_store_op_seconds` (store), `veda_milvus_request_seconds` (Milvus
+  HTTP), labeled by operation / workspace_id / dataset / mode / outcome.
+
+## [0.1.13] — 2026-05-22
+
+### Fixed
+- Stale directory summaries on four paths — embed-fail, delete, rename, and
+  empty-children — plus a dir-summary enqueue dedup race.
+
+## [0.1.12] — 2026-05-20
+
+### Added
+- `veda-fuse mount` falls back to the CLI config (`~/.config/veda/config.toml`)
+  for `--server` / `--key`, and gains `--workspace <alias>` to pick a CLI
+  workspace profile. The web console shows a ready-to-paste mount command.
+
+### Fixed
+- FUSE sync mode: write handles re-base after a `setattr` truncate, so
+  truncate-then-write no longer resurrects stale bytes.
+
+## [0.1.11] — 2026-05-20
+
+### Added
+- Release artifacts for `aarch64-apple-darwin` now include `veda-fuse` —
+  Apple Silicon no longer needs a source build for the FUSE mount.
+
+## [0.1.10] — 2026-05-20
+
+### Added
+- Web frontend (`web/`, Vite + TS + Tailwind): landing page, zh/en i18n, and
+  the user docs site served under `/docs`.
 
 ### Changed
-- **Wire (additive):** `/v1/vectors/search` hits include a new `score_type`
-  field. Deserializes with a `cosine` default, so older payloads keep their
-  (semantic-only) meaning; SDK/clients should surface it.
-- **Default search mode is now `hybrid`** (was implicitly semantic). `hybrid`
-  failures surface as errors — no silent fallback to semantic.
+- FUSE attribute caching: TTL split into `--attr-ttl` (default 30s) and
+  `--dir-ttl` (default 60s), plus SSE cache-consistency fixes.
 
 ## [0.1.9] — 2026-05-19
 
@@ -269,7 +335,12 @@ First public alpha. CI pipeline shipped, releases published to GitHub.
 - GitHub Actions release matrix: `x86_64-unknown-linux-gnu`,
   `x86_64-apple-darwin` (cross-compiled on macos-14 / M1).
 
-[Unreleased]: https://github.com/jooekong/veda/compare/0.1.8...HEAD
+[Unreleased]: https://github.com/jooekong/veda/compare/0.1.13...HEAD
+[0.1.13]: https://github.com/jooekong/veda/compare/0.1.12...0.1.13
+[0.1.12]: https://github.com/jooekong/veda/compare/0.1.11...0.1.12
+[0.1.11]: https://github.com/jooekong/veda/compare/0.1.10...0.1.11
+[0.1.10]: https://github.com/jooekong/veda/compare/0.1.9...0.1.10
+[0.1.9]: https://github.com/jooekong/veda/compare/0.1.8...0.1.9
 [0.1.8]: https://github.com/jooekong/veda/compare/0.1.7...0.1.8
 [0.1.7]: https://github.com/jooekong/veda/compare/0.1.6...0.1.7
 [0.1.6]: https://github.com/jooekong/veda/compare/0.1.5...0.1.6

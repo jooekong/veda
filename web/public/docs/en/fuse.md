@@ -4,7 +4,7 @@ Mount your Veda workspace as a local directory. Edit files with any editor; chan
 
 ## Install
 
-`veda-fuse` ships as a separate binary from `veda`. Prebuilt releases cover **Linux x86_64** and **macOS Intel (x86_64)**. Apple Silicon needs a source build, or use the CLI alone for now.
+`veda-fuse` ships as a separate binary from `veda`. Prebuilt releases cover **Linux x86_64**, **macOS Intel (x86_64)**, and **macOS Apple Silicon (aarch64)** (since 0.1.11); the install script picks the right package for your platform.
 
 ```bash
 # Install veda + veda-fuse together
@@ -23,7 +23,7 @@ sudo dnf install fuse3
 # Huawei Cloud EulerOS / openEuler / Kylin / Anolis / TencentOS
 sudo yum install fuse3
 
-# macOS (Intel)
+# macOS (Intel / Apple Silicon)
 brew install --cask macfuse
 ```
 
@@ -51,9 +51,30 @@ vim today.md
 
 ## Unmount
 
+Use the built-in subcommand on any platform (macOS goes through `umount`, Linux through `fusermount3`):
+
 ```bash
-fusermount -u ~/veda    # Linux
+veda-fuse umount ~/veda
 ```
+
+The system commands also work directly: `fusermount -u ~/veda` (Linux) / `umount ~/veda` (macOS).
+
+## Advanced options
+
+`veda-fuse mount` takes a set of optional flags (see `veda-fuse mount --help` for the full list):
+
+```bash
+veda-fuse mount --server … --key wk_… \
+  --write-mode writeback \      # default sync (each write blocks on upload); writeback buffers locally + debounced batch commits
+  --write-debounce-ms 5000 \    # writeback quiet period, default 5s
+  --cache-size 128 \            # read cache in MB, default 128
+  --attr-ttl 30 --dir-ttl 60 \  # attribute / directory listing cache TTL (seconds)
+  --read-only \                 # read-only mount
+  --allow-other \               # allow other users to access the mount point
+  ~/veda
+```
+
+`--server` / `--key` can also come from `$VEDA_SERVER` / `$VEDA_KEY` or the active workspace in the config file.
 
 ## Behavior to know
 

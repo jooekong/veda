@@ -10,8 +10,9 @@
 | 文档                | 职责                      | 何时读     |
 | ----------------- | ----------------------- | ------- |
 | `ARCHITECTURE.md`       | 系统现状：模块结构、已实现能力、已知问题    | 每次开始工作前 |
-| `docs/design/plans.md`  | Phase 总览 + 当前 sprint 任务 | 每次开始工作前 |
-| `docs/design/design.md` | 整体设计、API 定义、Schema 定义   | 做设计决策前  |
+| `docs/design/plans.md`  | 计划索引：活跃计划 + 归档导航 | 找计划/开新计划前 |
+| `docs/api/db-workspace-api.md` + `web/public/docs/zh/reference.md` | API 契约（repo 内参考 / 对外权威） | 改 API 前 |
+| `todos.md`              | 零散待办（/todo 管理）  | 接小任务前 |
 
 
 ---
@@ -21,8 +22,8 @@
 
 | 事件           | 更新哪里                     |
 | ------------ | ------------------------ |
-| 实现新功能 / 修改架构 | `ARCHITECTURE.md`        |
-| 完成 sprint 任务 | `docs/design/plans.md`（勾选 + 状态） |
+| 实现新功能 / 修改架构 | `ARCHITECTURE.md`（+ 用户可见变更记 `CHANGELOG.md`） |
+| 完成一个 plan | 归档到 `docs/archive/plans/` + 更新 `docs/design/plans.md` 索引 |
 
 
 **禁止**：把规划中的能力写成已实现。
@@ -38,11 +39,11 @@
   - `veda-pipeline` — embedding、chunking、文本提取（PDF/OCR planned）
   - `veda-sql` — DataFusion SQL 引擎
   - `veda-server` — Axum HTTP 层（薄壳，只做路由和中间件）
-  - `veda-cli` — CLI 客户端（纯 HTTP，不直接连数据库）
-  - `veda-fuse` — FUSE 挂载（独立编译，不在默认 workspace members 中）
+  - `veda-cli` — CLI 客户端（纯 HTTP，不直接连数据库；二进制名 `veda`）
+  - `veda-fuse` — FUSE 挂载（workspace member，`cargo build -p veda-fuse`）
 - 错误处理：lib crate 用 `thiserror`，bin crate 用 `anyhow`
-- 远程路径用 `:` 前缀（如 `:/docs/readme.md`）
-- 认证体系：Account -> Workspace 两级，API Key + Workspace Token
+- 远程路径就是普通绝对路径（如 `/docs/readme.md`），无 `:` 前缀
+- 认证体系：Account -> Workspace 两级；控制面账号 key `vk_`，数据面 workspace key `wk_`（纯 key 校验，JWT 已移除）
 - 一致性策略：正常最终一致 + 异常 Outbox 自愈，不做分布式强一致
 
 ---
@@ -70,7 +71,7 @@
 - 集成 / E2E 测试用测试环境真实 Milvus / MySQL / embedding，避免 mock
 - 单元测试可以 mock 纯逻辑（filter parser、PK 拼接、配置加载等）
 - 每个 Stage 收尾要有一个跑真实依赖的集成测试作为 DoD
-- 测试端点写在 `config/veda.test.toml` 或环境变量，不要 hard-code
+- 测试端点写在 `config/test.toml`（模板 `config/test.toml.example`，已 gitignore）或环境变量，不要 hard-code
 
 ---
 
