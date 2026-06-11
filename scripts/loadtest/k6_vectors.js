@@ -11,6 +11,12 @@
 //   MAX_VUS=200                      top of the ramp
 //   SEED_TOTAL=20000  SEED_PREFIX=seed   id space to read from (query/delete)
 //   UPSERT_BATCH=50                  records per upsert request
+//   WRITE_MODE=insert                upsert body write_mode (omit = server default
+//                                    dedup upsert). insert needs fresh unique ids.
+//   BASELINE=100                     run 1 VU × N iterations instead of the ramp
+//                                    (unloaded single-stream latency baseline)
+//   OP=mixed VUS=50 DURATION=30m     steady read-heavy mix for soak runs
+//                                    (cache-hit only, no delete; see MIX below)
 //
 // Example:
 //   k6 run -e OP=search -e MODE=hybrid -e BASE=$BASE -e WK=$WK k6_vectors.js
@@ -28,6 +34,10 @@ const SEED_TOTAL = Number(__ENV.SEED_TOTAL || 20000);
 const SEED_PREFIX = __ENV.SEED_PREFIX || 'seed';
 const UPSERT_BATCH = Number(__ENV.UPSERT_BATCH || 50);
 const STEP_SECS = Number(__ENV.STEP_SECS || 30); // seconds per ramp step (lower = quick smoke)
+const WRITE_MODE = __ENV.WRITE_MODE || '';
+const BASELINE = Number(__ENV.BASELINE || 0);
+const VUS = Number(__ENV.VUS || 50);
+const DURATION = __ENV.DURATION || '30m';
 
 if (!BASE || !WK) throw new Error('BASE and WK env are required (source .env.loadtest)');
 
@@ -47,15 +57,21 @@ function rampStages(maxVus) {
   return stages;
 }
 
+function scenario() {
+  if (BASELINE > 0) {
+    // Unloaded single-stream latency: serial iterations, no concurrency.
+    return { executor: 'per-vu-iterations', vus: 1, iterations: BASELINE, maxDuration: '30m' };
+  }
+  if (OP === 'mixed') {
+    // Steady-state soak at fixed VUs rather than a knee-hunting ramp.
+    return { executor: 'constant-vus', vus: VUS, duration: DURATION, gracefulStop: '30s' };
+  }
+  return { executor: 'ramping-vus', startVUs: 0, stages: rampStages(MAX_VUS), gracefulRampDown: '10s' };
+}
+
 export const options = {
   scenarios: {
-    [OP]: {
-      executor: 'ramping-vus',
-      startVUs: 0,
-      stages: rampStages(MAX_VUS),
-      tags: { op: OP },
-      gracefulRampDown: '10s',
-    },
+    [OP]: { ...scenario(), tags: { op: OP } },
   },
   // Thresholds are reference markers (no abort): they color the summary so the
   // pass/fail line is obvious at a glance.
@@ -72,39 +88,65 @@ function randSeedId() {
   return `${SEED_PREFIX}-${Math.floor(Math.random() * SEED_TOTAL)}`;
 }
 
+// Read-heavy steady-state profile for OP=mixed soak runs. Cache-hit only
+// (fixed POOL texts): a long unique-text run would burn the shared airouter
+// quota against live tenants. delete is excluded so the seed corpus survives
+// the whole run.
+const MIX = [
+  ['query', 0.45],
+  ['search-fulltext', 0.25],
+  ['search-hybrid', 0.2],
+  ['upsert', 0.1],
+];
+
+function pickMixedOp() {
+  let r = Math.random();
+  for (const [op, w] of MIX) {
+    r -= w;
+    if (r <= 0) return op;
+  }
+  return 'query';
+}
+
 function buildRequest() {
+  const op = OP === 'mixed' ? pickMixedOp() : OP;
   const tag = `${__VU}-${__ITER}`;
-  switch (OP) {
-    case 'search': {
-      const q = UNIQUE ? `${POOL[__ITER % POOL.length]} ${tag}` : POOL[__ITER % POOL.length];
-      const body = { query: q, mode: MODE, top_k: 10 };
-      return { path: '/v1/vectors/search', body };
+  switch (op) {
+    case 'search':
+    case 'search-fulltext':
+    case 'search-hybrid': {
+      const mode = op === 'search' ? MODE : op.slice('search-'.length);
+      const unique = op === 'search' && UNIQUE; // mixed soak stays on cache hits
+      const q = unique ? `${POOL[__ITER % POOL.length]} ${tag}` : POOL[__ITER % POOL.length];
+      return { op, path: '/v1/vectors/search', body: { query: q, mode, top_k: 10 } };
     }
     case 'query': {
       const ids = Array.from({ length: 10 }, randSeedId);
-      return { path: '/v1/vectors/query', body: { ids } };
+      return { op, path: '/v1/vectors/query', body: { ids } };
     }
     case 'delete': {
       // NOTE: deletes consume seed ids. Re-seed after a delete run, or point
       // SEED_PREFIX at a throwaway id segment.
-      return { path: '/v1/vectors/delete', body: { ids: [randSeedId()] } };
+      return { op, path: '/v1/vectors/delete', body: { ids: [randSeedId()] } };
     }
     case 'upsert': {
+      const unique = OP !== 'mixed' && UNIQUE;
       const records = Array.from({ length: UPSERT_BATCH }, (_, i) => ({
         id: `load-${tag}-${i}`,
-        text: UNIQUE ? `${POOL[i % POOL.length]} ${tag}-${i}` : POOL[i % POOL.length],
+        text: unique ? `${POOL[i % POOL.length]} ${tag}-${i}` : POOL[i % POOL.length],
         meta: { idx: i },
       }));
-      return { path: '/v1/vectors/upsert', body: { records } };
+      const body = WRITE_MODE ? { write_mode: WRITE_MODE, records } : { records };
+      return { op, path: '/v1/vectors/upsert', body };
     }
     default:
-      throw new Error(`unknown OP: ${OP}`);
+      throw new Error(`unknown OP: ${op}`);
   }
 }
 
 export default function () {
-  const { path, body } = buildRequest();
-  const res = http.post(BASE + path, JSON.stringify(body), { headers, tags: { op: OP } });
+  const { op, path, body } = buildRequest();
+  const res = http.post(BASE + path, JSON.stringify(body), { headers, tags: { op } });
   check(res, {
     'status 200': (r) => r.status === 200,
     'success true': (r) => {

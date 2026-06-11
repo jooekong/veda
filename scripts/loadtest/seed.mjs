@@ -8,6 +8,10 @@
 //
 // Reads scripts/loadtest/.env.loadtest (BASE, WK). Env overrides:
 //   TOTAL (20000)  BATCH (500)  CONCURRENCY (8)  PREFIX (seed)
+//   WRITE_MODE=insert  fast path for the FIRST seed into an empty workspace
+//                      only — re-seeds must stay on the default upsert
+//                      (insert on existing ids = duplicate PK, undefined
+//                      behavior in Milvus)
 //
 // Usage: node seed.mjs
 
@@ -60,6 +64,7 @@ const TOTAL = Number(process.env.TOTAL || 20000);
 const BATCH = Number(process.env.BATCH || 500);
 const CONCURRENCY = Number(process.env.CONCURRENCY || 8);
 const PREFIX = process.env.PREFIX || 'seed';
+const WRITE_MODE = process.env.WRITE_MODE || '';
 
 const templates = buildTemplates();
 
@@ -76,7 +81,7 @@ async function upsertBatch(start) {
   const res = await fetch(`${BASE}/v1/vectors/upsert`, {
     method: 'POST',
     headers: { 'content-type': 'application/json', authorization: `Bearer ${WK}` },
-    body: JSON.stringify({ records }),
+    body: JSON.stringify(WRITE_MODE ? { write_mode: WRITE_MODE, records } : { records }),
   });
   if (!res.ok) {
     const t = await res.text();

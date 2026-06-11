@@ -70,6 +70,42 @@ k6 run -e OP=delete -e BASE=$BASE -e WK=$WK k6_vectors.js   # ⚠ 删种子，�
   逼近 50（max_connections）说明 MySQL 连接池饱和。
 - k6 summary 的 `http_req_failed`、`http_req_duration p(99)` 是该轮总结；阈值只是标红参考，不中断。
 
+## 生产压测（负载机打 .85）
+
+绝对容量数字只能从生产环境拿。负载机用同机房内网 box（如 .161，RTT <1ms），
+**不要**让 k6 和 server 同机争核（.85 只有 4C，上轮同机跑读 QPS 被压低）。
+
+```bash
+# mac 上：provision + seed（控制面低频调用，跨网无所谓）
+node provision.mjs --base http://10.79.55.85:3000
+WRITE_MODE=insert node seed.mjs        # 首灌空库才用 insert；重灌走默认 upsert
+scp .env.loadtest root@<负载机>:/data/rust/veda/scripts/loadtest/
+
+# mac 上：归因采样（METRICS_TOKEN 从 .85 config 拿）
+METRICS_TOKEN=... node sample_metrics.mjs --op search
+
+# 负载机上：k6 轮次（示例）
+source .env.loadtest
+k6 run -e OP=query -e MAX_VUS=400 -e BASE=$BASE -e WK=$WK k6_vectors.js          # 读容量
+k6 run -e OP=upsert -e UNIQUE_TEXT=0 -e WRITE_MODE=insert -e BASE=$BASE -e WK=$WK k6_vectors.js  # 写快路径
+k6 run -e OP=search -e MODE=semantic -e BASELINE=100 -e BASE=$BASE -e WK=$WK k6_vectors.js       # 1VU 基线
+k6 run -e OP=mixed -e VUS=50 -e DURATION=30m -e UPSERT_BATCH=10 -e BASE=$BASE -e WK=$WK k6_vectors.js  # soak
+```
+
+限流维度判别（RPM vs TPM，embedding-throughput-plan 的前置确认）直接打 airouter，
+凭证从 box 的 `/data/veda/config/config.toml` 注入环境变量，不进命令行：
+
+```bash
+AIROUTER_API_URL=... AIROUTER_KEY=... node embedding_ratelimit_probe.mjs --batch 1
+AIROUTER_API_URL=... AIROUTER_KEY=... node embedding_ratelimit_probe.mjs --batch 10
+# 两次 429 起爆点同一 req/min ⇒ RPM；batch=10 提前 ~10× ⇒ TPM/条数维度
+```
+
+⚠️ 生产注意：real-embedding 轮和 probe 烧的是**全公司共享 airouter 配额**（会 429
+别的调用方），挑低峰窗口；写容量轮前知会 Milvus DBA。跑完两步清理：
+`DELETE /v1/workspaces/{id}`（vk_ 鉴权，软删+吊销 key）+ `cleanup_test_data.py`
+指向生产 Milvus drop collection。
+
 ## 对照实验（分离 embedding 变量）
 
 `UNIQUE_TEXT` 开关决定 query/text 是否唯一：
@@ -95,8 +131,9 @@ k6 run -e OP=upsert -e UNIQUE_TEXT=0 -e BASE=$BASE -e WK=$WK k6_vectors.js   # c
 ## 其他专项脚本
 
 本 README 只覆盖核心压测链路；目录下另有 `write_mode_e2e.mjs`（insert/upsert 语义
-e2e）、`cleanup_test_data.py`（清理压测残留数据）、`milvus_*.py`（Milvus 裸压/分诊
-系列），用法见各脚本顶部注释。
+e2e）、`embedding_ratelimit_probe.mjs`（限流维度判别，直打 airouter）、
+`cleanup_test_data.py`（drop 指定 ws 的 Milvus collection，--mv/--token/--db 必填）、
+`milvus_*.py`（Milvus 裸压/分诊系列），用法见各脚本顶部注释。
 
 ## 注意
 
