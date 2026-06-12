@@ -41,6 +41,15 @@ struct EmbeddingSection {
     api_key: String,
     model: String,
     dimension: u32,
+    // Upstream per-request input cap. airouter/DashScope rejects >10; the
+    // OpenAI-era hardcoded 100 only ever worked because small fixtures never
+    // accumulated a full batch.
+    #[serde(default = "default_embed_batch")]
+    batch_size: usize,
+}
+
+fn default_embed_batch() -> usize {
+    10
 }
 #[derive(Debug, Deserialize)]
 struct TestConfig {
@@ -193,7 +202,7 @@ async fn worker_streams_chunks_for_large_file_embed() {
             &cfg.embedding.api_key,
             &cfg.embedding.model,
             Some(cfg.embedding.dimension),
-            100,
+            cfg.embedding.batch_size,
         )
         .unwrap(),
     );
@@ -220,7 +229,22 @@ async fn worker_streams_chunks_for_large_file_embed() {
     );
     let (tx, rx) = watch::channel(false);
     let h = tokio::spawn(async move { worker.run(rx).await });
-    tokio::time::sleep(Duration::from_secs(20)).await;
+    // ~1000 chunks → ~100 upstream embedding round-trips; wall time scales
+    // with RTT to the embedding API (tens of seconds from a laptop over VPN),
+    // so poll the watermark instead of trusting a fixed sleep.
+    let deadline = std::time::Instant::now() + Duration::from_secs(120);
+    loop {
+        tokio::time::sleep(Duration::from_secs(3)).await;
+        let dentry = mysql.get_dentry(&ws, "/big.txt").await.unwrap().unwrap();
+        let file = mysql
+            .get_file(&dentry.file_id.unwrap())
+            .await
+            .unwrap()
+            .unwrap();
+        if file.last_embedded_content_hash.is_some() || std::time::Instant::now() > deadline {
+            break;
+        }
+    }
     let _ = tx.send(true);
     let _ = h.await;
 

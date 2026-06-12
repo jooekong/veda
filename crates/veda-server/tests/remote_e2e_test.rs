@@ -32,8 +32,10 @@ const DEFAULT_BASE: &str = "https://veda.dbpaas.dingdongxiaoqu.com";
 
 /// How long FS search / summaries may take to become consistent. Writes
 /// enqueue an outbox row that a worker drains on a ~2s poll; summaries also
-/// wait on an LLM call. Generous so the suite is not flaky on a busy server.
-const INDEX_TIMEOUT: Duration = Duration::from_secs(45);
+/// wait on an LLM call. 120s: each run creates a FRESH ws_* collection, and
+/// on the busy shared test Milvus the index build + load + first-search
+/// visibility alone has been observed to exceed 45s.
+const INDEX_TIMEOUT: Duration = Duration::from_secs(120);
 const SUMMARY_TIMEOUT: Duration = Duration::from_secs(150);
 
 fn base_url() -> String {

@@ -20,6 +20,15 @@ use veda_server::obs::otlp::OtlpExporter;
 #[tokio::test]
 #[ignore = "needs real company collector; run on an internal box"]
 async fn export_once_to_real_collector() {
+    // Box-only: without the company env.yaml there is no agent to discover,
+    // so a laptop run can only fail. Skip instead of failing the suite.
+    let env_yaml = std::env::var("VEDA_OTLP_ENV_YAML_PATH")
+        .unwrap_or_else(|_| "/etc/ddmc/env.yaml".to_string());
+    if !std::path::Path::new(&env_yaml).exists() {
+        eprintln!("skipping export_once_to_real_collector: {env_yaml} not present (company box only)");
+        return;
+    }
+
     // Record a counter into a local (non-global) Prometheus recorder so we get
     // real exposition text without touching the process-wide recorder.
     let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();

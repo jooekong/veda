@@ -19,6 +19,13 @@ struct EmbeddingSection {
     api_key: String,
     model: String,
     dimension: Option<u32>,
+    // airouter/DashScope caps inputs at 10 per request (see test.toml).
+    #[serde(default = "default_embed_batch")]
+    batch_size: usize,
+}
+
+fn default_embed_batch() -> usize {
+    10
 }
 
 fn load_test_config() -> EmbeddingSection {
@@ -31,7 +38,7 @@ fn load_test_config() -> EmbeddingSection {
 
 fn make_provider() -> EmbeddingProvider {
     let cfg = load_test_config();
-    EmbeddingProvider::new(cfg.api_url, cfg.api_key, cfg.model, cfg.dimension, 100)
+    EmbeddingProvider::new(cfg.api_url, cfg.api_key, cfg.model, cfg.dimension, cfg.batch_size)
         .expect("provider")
 }
 

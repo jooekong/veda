@@ -33,6 +33,13 @@ struct EmbeddingSection {
     api_key: String,
     model: String,
     dimension: u32,
+    // airouter/DashScope caps inputs at 10 per request (see test.toml).
+    #[serde(default = "default_embed_batch")]
+    batch_size: usize,
+}
+
+fn default_embed_batch() -> usize {
+    10
 }
 #[derive(Debug, Deserialize)]
 struct TestConfig {
@@ -126,7 +133,7 @@ async fn build_runtime() -> (
             &cfg.embedding.api_key,
             &cfg.embedding.model,
             Some(cfg.embedding.dimension),
-            100,
+            cfg.embedding.batch_size,
         )
         .expect("embedding provider"),
     );

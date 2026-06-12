@@ -415,12 +415,26 @@ async fn outbox_status_owner(store: &MysqlStore, task_id: i64) -> (String, Optio
         .expect("outbox row")
 }
 
-async fn outbox_lease_until(store: &MysqlStore, task_id: i64) -> Option<chrono::NaiveDateTime> {
+// lease_until is a TIMESTAMP column: sqlx maps it to DateTime<Utc>, decoding
+// it as NaiveDateTime is a type mismatch at runtime.
+async fn outbox_lease_until(store: &MysqlStore, task_id: i64) -> Option<chrono::DateTime<chrono::Utc>> {
     sqlx::query_scalar("SELECT lease_until FROM veda_outbox WHERE id = ?")
         .bind(task_id)
         .fetch_one(store.pool())
         .await
         .expect("outbox lease_until")
+}
+
+// claim() is global — no workspace filter, LIMIT batch, takeover on expired
+// leases. Leftover rows from earlier crashed runs change both what a claim
+// returns and when takeovers fire, so lease tests purge the table for a
+// hermetic start. Dedicated test DB only; the suite already requires
+// --test-threads=1 (parallel claims deadlock and steal each other's rows).
+async fn purge_outbox(store: &MysqlStore) {
+    sqlx::query("DELETE FROM veda_outbox")
+        .execute(store.pool())
+        .await
+        .expect("purge outbox");
 }
 
 #[tokio::test]
@@ -429,6 +443,7 @@ async fn mysql_outbox_lease_fencing_on_takeover() {
     let url = load_mysql_url();
     let store = MysqlStore::new(&url).await.expect("connect");
     store.migrate().await.expect("migrate");
+    purge_outbox(&store).await;
     let ws = Uuid::new_v4().to_string();
     store.enqueue(&lease_test_event(&ws)).await.expect("enqueue");
 
@@ -490,6 +505,7 @@ async fn mysql_outbox_lease_renew_extends_only_for_owner() {
     let url = load_mysql_url();
     let store = MysqlStore::new(&url).await.expect("connect");
     store.migrate().await.expect("migrate");
+    purge_outbox(&store).await;
     let ws = Uuid::new_v4().to_string();
     store.enqueue(&lease_test_event(&ws)).await.expect("enqueue");
 

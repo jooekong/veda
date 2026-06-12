@@ -637,9 +637,16 @@ async fn start_server() -> (String, reqwest::Client) {
     let addr = listener.local_addr().unwrap();
     let base = format!("http://{addr}");
     tokio::spawn(async move {
-        axum::serve(listener, app).await.ok();
+        if let Err(e) = axum::serve(listener, app).await {
+            eprintln!("[e2e] axum::serve exited with error: {e:?}");
+        }
     });
-    (base, reqwest::Client::new())
+    // no_proxy(): reqwest on macOS otherwise picks up the SYSTEM proxy
+    // (scutil), which env NO_PROXY can't override — a local Clash/Surge
+    // proxy then eats loopback requests and the first POST dies with
+    // hyper IncompleteMessage.
+    let client = reqwest::Client::builder().no_proxy().build().unwrap();
+    (base, client)
 }
 
 async fn post_json(

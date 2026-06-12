@@ -3,10 +3,12 @@
 #
 # Matrix:
 #   - x86_64-unknown-linux-gnu  — docker rust:1.90 on the linux runner
-#   - x86_64-apple-darwin       — shell executor on the intel mac runner
-#   - aarch64-apple-darwin      — cross-compiled on the same intel mac
-#     runner (veda + veda-fuse, since 0.1.11; macFUSE ships universal
-#     dylibs so PKG_CONFIG_ALLOW_CROSS=1 is sufficient)
+#   - aarch64-apple-darwin      — shell executor on the arm64 mac runner
+#     (runner 314 joe-mbp-arm64-darwin since 2026-06-11; the old intel
+#     runner 313 is retired)
+#   - x86_64-apple-darwin       — cross-compiled on the same arm64 mac
+#     (veda + veda-fuse; macFUSE ships universal dylibs so
+#     PKG_CONFIG_ALLOW_CROSS=1 is sufficient)
 
 stages:
   - build
@@ -85,6 +87,10 @@ build:darwin-x86_64:
     - veda
   variables:
     TARGET: x86_64-apple-darwin
+    # The macos runner is an arm64 machine now, so this target is the
+    # cross-compiled one — same pkg-config cross-check issue as the
+    # aarch64 job had on the intel runner; macFUSE dylibs are universal.
+    PKG_CONFIG_ALLOW_CROSS: "1"
   before_script:
     # Belt-and-suspenders: ensure the target is installed even if the
     # runner host got reinstalled or rustup was wiped. No-op if already there.
