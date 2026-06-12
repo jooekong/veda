@@ -3,6 +3,15 @@ use veda_types::SemanticChunk;
 /// Default `max_tokens` for [`semantic_chunk`] when callers want ~512-token sections.
 pub const DEFAULT_SEMANTIC_MAX_TOKENS: usize = 512;
 
+/// Binary payloads smuggled in as valid UTF-8 (e.g. an image whose bytes
+/// happen to decode — in the wild: NUL-flooded PNG attachments synced into
+/// an fs workspace). They are garbage to embed and tokenizers price control
+/// bytes at ~1 token/char, so an "ASCII" window of NULs still blows the
+/// upstream 8192-token/input cap. NUL never appears in legitimate text.
+pub fn is_binary_content(text: &str) -> bool {
+    text.contains('\0')
+}
+
 /// Per-char weight in quarter-tokens (no tokenizer in-tree). ASCII ≈ 4
 /// chars/token — the BPE English rule of thumb; everything else (CJK,
 /// emoji, …) is budgeted at 1 token/char. This is a worst-case ESTIMATE,

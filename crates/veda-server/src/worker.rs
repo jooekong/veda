@@ -10,7 +10,7 @@ use tokio::time::sleep;
 use tracing::{debug, error, info, warn};
 
 use veda_core::store::{EmbeddingService, LlmService, MetadataStore, TaskQueue, VectorStore};
-use veda_pipeline::chunking::semantic_chunk;
+use veda_pipeline::chunking::{is_binary_content, semantic_chunk};
 use veda_pipeline::summary;
 use veda_types::*;
 
@@ -311,6 +311,24 @@ impl Worker {
         }
 
         let content = self.load_full_content(&file).await?;
+
+        // Binary smuggled in as valid UTF-8 (NUL-flooded image attachments
+        // from folder-sync tools) is garbage to embed, and tokenizers price
+        // control bytes at ~1 token/char — windows of it blow the upstream
+        // per-input token cap, retrying the task into the dead letters.
+        // Same semantics as empty content: nothing to index, watermark
+        // advances so the file doesn't re-enter the queue.
+        if is_binary_content(&content) {
+            warn!(
+                workspace_id,
+                file_id, "chunk_sync skipped: binary content (NUL bytes), not embeddable"
+            );
+            self.vector.delete_chunks(workspace_id, file_id).await?;
+            self.meta
+                .update_file_content_hash(file_id, &file.checksum_sha256)
+                .await?;
+            return Ok(());
+        }
 
         let sem_chunks = semantic_chunk(&content, 2048);
         // Drop the assembled file buffer before the embed loop allocates per-batch

@@ -1,4 +1,12 @@
-use veda_pipeline::chunking::{semantic_chunk, DEFAULT_SEMANTIC_MAX_TOKENS};
+use veda_pipeline::chunking::{is_binary_content, semantic_chunk, DEFAULT_SEMANTIC_MAX_TOKENS};
+
+#[test]
+fn binary_content_detection() {
+    assert!(is_binary_content("\0\0\0\0"));
+    assert!(is_binary_content("prefix\0suffix"));
+    assert!(!is_binary_content("正常中文文本 with ASCII and émojis 🙂"));
+    assert!(!is_binary_content(""));
+}
 
 #[test]
 fn semantic_chunk_splits_on_markdown_headings() {
