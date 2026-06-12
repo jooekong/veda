@@ -154,6 +154,7 @@ async fn build_test_app() -> (Arc<AppState>, Arc<MysqlStore>, axum::Router) {
         metrics: veda_server::obs::install(),
         metrics_token: None,
         summary_enabled: false,
+        draining: std::sync::atomic::AtomicBool::new(false),
     });
     let router = build_router(state.clone());
     (state, mysql, router)

@@ -1,0 +1,40 @@
+# veda-server systemd unit — single-node production with socket activation.
+# The paired veda-server.socket holds the listening socket; this service
+# inherits it via LISTEN_FDS (config `listen` is ignored when inherited).
+# Install: cp both units to /etc/systemd/system/ && systemctl daemon-reload
+#          && systemctl enable --now veda-server.socket veda-server
+[Unit]
+Description=veda server
+Requires=veda-server.socket
+After=veda-server.socket network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/data/veda/bin/veda-server /data/veda/config/server.toml
+WorkingDirectory=/data/veda
+# Dedicated unprivileged user (provision: useradd -r -d /data/veda veda &&
+# chown -R veda:veda /data/veda). The service holds DB/API credentials and
+# faces the network — do not run it as root.
+User=veda
+Group=veda
+NoNewPrivileges=true
+# Stricter sandboxing if desired (verify /etc/ddmc/env.yaml stays readable):
+# ProtectSystem=strict
+# ReadWritePaths=/data/veda
+Restart=always
+RestartSec=2
+# SIGTERM -> graceful shutdown: stop accepting (the socket itself stays open
+# in systemd, new connections queue), finish in-flight requests + the current
+# worker batch. This CAPS stop time, it does not guarantee the batch finishes:
+# a batch slowed by external embedding/LLM calls past 120s gets SIGKILLed —
+# safe (outbox lease re-claims it) but in-flight clients see a reset. With a
+# multi-node LB setup add drain_secs to the server config and keep this above
+# drain + typical batch time.
+TimeoutStopSec=120
+# Load-test verified 5k+ QPS — default 1024 fds would exhaust under load.
+LimitNOFILE=65536
+Environment=RUST_LOG=info
+
+[Install]
+WantedBy=multi-user.target

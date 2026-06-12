@@ -1,0 +1,20 @@
+# veda-server socket unit — systemd holds the listening socket so deploys
+# and restarts never close the port: connections queue in the kernel backlog
+# while the service process swaps, then get accepted by the new process.
+# Install: cp to /etc/systemd/system/ && systemctl daemon-reload &&
+#          systemctl enable --now veda-server.socket
+[Unit]
+Description=veda server socket
+
+[Socket]
+# THIS is the production listen address — `listen` in server.toml is ignored
+# when the socket is inherited. Bare port = wildcard bind; switch to e.g.
+# ListenStream=10.x.x.x:3000 to restrict exposure (security group is the
+# primary control either way).
+ListenStream=3000
+# Connections queue here during the deploy window (graceful stop + binary
+# swap + startup, ~2-4s). Effective value is capped by net.core.somaxconn.
+Backlog=4096
+
+[Install]
+WantedBy=sockets.target

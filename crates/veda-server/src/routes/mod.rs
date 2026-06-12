@@ -175,6 +175,16 @@ async fn install_script() -> impl IntoResponse {
 }
 
 async fn ready(State(state): State<Arc<AppState>>) -> Response {
+    // Drain window: SIGTERM received, still serving traffic. Report 503
+    // without pinging dependencies so the LB health check flips fast and
+    // pulls this node before the listener closes.
+    if state.draining.load(std::sync::atomic::Ordering::Relaxed) {
+        let body = ReadyResponse {
+            status: "draining",
+            components: vec![],
+        };
+        return (StatusCode::SERVICE_UNAVAILABLE, Json(body)).into_response();
+    }
     let (mysql_res, milvus_res) = tokio::join!(
         tokio::time::timeout(READY_TIMEOUT, state.meta_store.ping()),
         tokio::time::timeout(READY_TIMEOUT, state.vector_store.ping()),

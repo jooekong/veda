@@ -36,6 +36,9 @@ metrics = "0.24"
 metrics-exporter-prometheus = "0.16"
 # Outbox lease owner identity (host part of "host:pid").
 gethostname = "0.5"
+# Socket activation (systemd .socket / systemfd): inherit the listener via
+# LISTEN_FDS so restarts never close the port. See docs/deploy.md.
+listenfd = "1"
 
 # OTLP metrics bridge → company Monitor Collector (gRPC). See proto/PROVENANCE.md.
 # Hand-rolled exporter (no opentelemetry-rust): the Collector needs the legacy

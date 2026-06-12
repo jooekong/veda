@@ -130,6 +130,7 @@ async fn main() -> anyhow::Result<()> {
         metrics: metrics.clone(),
         metrics_token: cfg.metrics_token.clone(),
         summary_enabled: cfg.llm.is_some(),
+        draining: std::sync::atomic::AtomicBool::new(false),
     });
 
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
@@ -322,13 +323,32 @@ async fn main() -> anyhow::Result<()> {
         CorsLayer::new()
     };
 
+    let drain_secs = cfg.drain_secs;
+    let drain_state = app_state.clone();
     let app = routes::build_router(app_state)
         .layer(axum::middleware::from_fn(obs::track_http))
         .layer(TraceLayer::new_for_http())
         .layer(cors);
 
-    let listener = TcpListener::bind(&cfg.listen).await?;
-    info!(addr = %cfg.listen, "server listening");
+    // Socket activation: when systemd (or systemfd for local testing) passes
+    // a listener via LISTEN_FDS, inherit it instead of binding. The socket
+    // stays open in systemd across restarts, so a deploy never refuses
+    // connections — they queue in the kernel backlog until the new process
+    // accepts. `cfg.listen` is ignored in that case (the .socket unit owns
+    // the address). Falls back to a plain bind for dev and non-systemd runs.
+    let listener = match listenfd::ListenFd::from_env().take_tcp_listener(0)? {
+        Some(inherited) => {
+            inherited.set_nonblocking(true)?;
+            let addr = inherited.local_addr()?;
+            info!(%addr, "server listening on inherited socket (socket activation)");
+            TcpListener::from_std(inherited)?
+        }
+        None => {
+            let l = TcpListener::bind(&cfg.listen).await?;
+            info!(addr = %cfg.listen, "server listening");
+            l
+        }
+    };
 
     axum::serve(listener, app)
         .with_graceful_shutdown(async move {
@@ -342,7 +362,24 @@ async fn main() -> anyhow::Result<()> {
                 _ = term.recv() => {}
             }
             info!("shutdown signal received");
+            // Stop background tasks (worker/retention/OTLP) right away so the
+            // worker doesn't claim a fresh batch during the drain window and
+            // stretch total stop time past drain_secs + current batch.
             let _ = shutdown_tx.send(true);
+            if drain_secs > 0 {
+                // Drain window: keep serving while /v1/ready reports 503 so
+                // the LB health check pulls this node before the listener
+                // closes. A second signal cuts the wait short.
+                drain_state
+                    .draining
+                    .store(true, std::sync::atomic::Ordering::Relaxed);
+                info!(drain_secs, "draining: /v1/ready now 503, still serving");
+                tokio::select! {
+                    _ = tokio::time::sleep(std::time::Duration::from_secs(drain_secs)) => {}
+                    _ = tokio::signal::ctrl_c() => info!("second signal — drain wait skipped"),
+                    _ = term.recv() => info!("second signal — drain wait skipped"),
+                }
+            }
         })
         .await?;
 

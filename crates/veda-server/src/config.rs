@@ -28,6 +28,14 @@ pub struct ServerConfig {
     /// local development. Env override: `VEDA_DEV_MODE`.
     #[serde(default)]
     pub dev_mode: bool,
+    /// Seconds to keep serving traffic after SIGTERM while `/v1/ready`
+    /// reports 503 "draining", so an LB with active health checks pulls
+    /// this node before the listener stops accepting. Must exceed
+    /// `check interval × unhealthy threshold` of the LB. 0 (default)
+    /// skips the drain window — shutdown starts immediately, which is
+    /// what dev/tests want. Env override: `VEDA_DRAIN_SECS`.
+    #[serde(default)]
+    pub drain_secs: u64,
 }
 
 #[derive(Debug, Deserialize)]
@@ -297,6 +305,8 @@ impl ServerConfig {
             }
         }
 
+        env_parse("VEDA_DRAIN_SECS", &mut self.drain_secs);
+
         env_parse("VEDA_RETENTION_ENABLED", &mut self.retention.enabled);
         env_parse("VEDA_RETENTION_INTERVAL_SECS", &mut self.retention.interval_secs);
         env_parse("VEDA_RETENTION_EVENTS_DAYS", &mut self.retention.events_retention_days);
@@ -532,6 +542,18 @@ dimension = 768
             cfg.allowed_origins.is_empty(),
             "empty env should not produce vec![\"\"]"
         );
+    }
+
+    #[test]
+    fn drain_secs_defaults_zero_env_overrides() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
+        let cfg = ServerConfig::from_toml(MINIMAL_TOML).unwrap();
+        assert_eq!(cfg.drain_secs, 0, "dev/tests must not pay a drain wait");
+
+        std::env::set_var("VEDA_DRAIN_SECS", "10");
+        let cfg = ServerConfig::from_toml(MINIMAL_TOML).unwrap();
+        std::env::remove_var("VEDA_DRAIN_SECS");
+        assert_eq!(cfg.drain_secs, 10);
     }
 
     #[test]

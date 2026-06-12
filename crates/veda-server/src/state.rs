@@ -39,4 +39,9 @@ pub struct AppState {
     /// permanently disabled, and `GET /v1/summary/...` returns 501 Not
     /// Implemented instead of the misleading 202 "pending".
     pub summary_enabled: bool,
+    /// Flipped by the SIGTERM handler at the start of the drain window
+    /// (`ServerConfig::drain_secs`). While set, `/v1/ready` reports 503
+    /// "draining" so the LB pulls this node, but the listener keeps
+    /// serving until the window elapses. `/healthz` is unaffected.
+    pub draining: std::sync::atomic::AtomicBool,
 }
