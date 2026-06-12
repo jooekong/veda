@@ -74,47 +74,39 @@ fn split_by_headings(text: &str) -> Vec<String> {
     sections
 }
 
+// An empty section yields NO windows (an empty string is below the
+// upstream's [1, 8192] input range and would 400 the whole batch).
 fn sliding_windows(section: &str, budget_quarters: usize, overlap_quarters: usize) -> Vec<String> {
     let chars: Vec<char> = section.chars().collect();
-    if chars.is_empty() {
-        return vec![String::new()];
-    }
-    // prefix[i] = quarter-token weight of chars[..i]; strictly increasing.
-    let mut prefix = Vec::with_capacity(chars.len() + 1);
-    prefix.push(0usize);
-    for &c in &chars {
-        prefix.push(prefix[prefix.len() - 1] + char_quarters(c));
-    }
-    if *prefix.last().unwrap() <= budget_quarters {
-        return vec![section.to_string()];
-    }
-
     let overlap = overlap_quarters.min(budget_quarters.saturating_sub(1));
     let step_quarters = budget_quarters - overlap; // >= 1
+
     let mut out = Vec::new();
     let mut start = 0usize;
     while start < chars.len() {
-        // Furthest boundary keeping weight(start..end) <= budget. The clamp
-        // guarantees >= 1 char of progress even if a single char outweighs
-        // the whole budget.
-        let end = prefix
-            .partition_point(|&p| p <= prefix[start] + budget_quarters)
-            .saturating_sub(1)
-            .clamp(start + 1, chars.len());
+        // One pass: grow the window until the budget is spent, noting on the
+        // way where the next window starts (first boundary with weight >=
+        // step, i.e. ~20% overlap in any script). `end > start` guarantees
+        // >= 1 char of progress even if one char outweighs the whole budget.
+        let mut weight = 0usize;
+        let mut end = start;
+        let mut next = usize::MAX;
+        while end < chars.len() {
+            let q = char_quarters(chars[end]);
+            if weight + q > budget_quarters && end > start {
+                break;
+            }
+            weight += q;
+            end += 1;
+            if next == usize::MAX && weight >= step_quarters {
+                next = end;
+            }
+        }
         out.push(chars[start..end].iter().collect());
         if end == chars.len() {
             break;
         }
-        // First boundary with weight(start..i) >= step — the old fixed
-        // `start += max_chars - overlap` stride, expressed by weight so the
-        // overlap stays ~20% of the budget in any script.
-        let next = prefix
-            .partition_point(|&p| p < prefix[start] + step_quarters)
-            .clamp(start + 1, chars.len());
-        if next >= chars.len() {
-            break;
-        }
-        start = next;
+        start = next.clamp(start + 1, chars.len());
     }
     out
 }

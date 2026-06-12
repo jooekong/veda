@@ -53,6 +53,19 @@ fn semantic_chunk_empty_input() {
     assert!(semantic_chunk("", DEFAULT_SEMANTIC_MAX_TOKENS).is_empty());
 }
 
+/// A file starting with a blank line before its first heading produces an
+/// empty leading section. That must not become an empty chunk: the embed
+/// upstream's input range is [1, 8192], so an empty string 400s the whole
+/// batch just like an oversized one.
+#[test]
+fn semantic_chunk_drops_empty_leading_section() {
+    let chunks = semantic_chunk("\n# Title\n\nbody text", DEFAULT_SEMANTIC_MAX_TOKENS);
+    assert!(!chunks.is_empty());
+    for c in &chunks {
+        assert!(!c.content.is_empty(), "empty chunk would 400 the embed batch");
+    }
+}
+
 /// Worst-case token estimate mirroring what the embed upstream faces:
 /// ASCII ≈ 4 chars/token (BPE English rule of thumb), CJK and other
 /// non-ASCII ≈ 1 token/char. Counted in quarter-tokens to stay integral.
