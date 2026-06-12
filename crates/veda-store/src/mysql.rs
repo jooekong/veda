@@ -801,9 +801,19 @@ async fn insert_fs_event_conn(conn: &mut sqlx::MySqlConnection, event: &FsEvent)
 }
 
 async fn insert_outbox_conn(conn: &mut sqlx::MySqlConnection, event: &OutboxEvent) -> Result<()> {
+    use chrono::Timelike;
     let payload = serde_json::to_string(&event.payload).map_err(|e| storage_err(e.to_string()))?;
     let status = db_enum_str(&event.status);
     let et = db_enum_str(&event.event_type);
+    // MySQL ROUNDS fractional seconds into TIMESTAMP(0): an available_at of
+    // ...39.7 lands as ...40, putting a just-enqueued task up to 500ms in the
+    // future where claim's `available_at <= UTC_TIMESTAMP()` can't see it.
+    // Truncate so enqueue-then-claim is immediate.
+    let available_at = event
+        .available_at
+        .naive_utc()
+        .with_nanosecond(0)
+        .expect("nanosecond 0 is always valid");
     if event.id == 0 {
         sqlx::query(
             r#"INSERT INTO veda_outbox
@@ -816,7 +826,7 @@ async fn insert_outbox_conn(conn: &mut sqlx::MySqlConnection, event: &OutboxEven
         .bind(status)
         .bind(event.retry_count)
         .bind(event.max_retries)
-        .bind(event.available_at.naive_utc())
+        .bind(available_at)
         .bind(event.lease_until.map(|x| x.naive_utc()))
         .bind(event.created_at.naive_utc())
         .execute(conn)
@@ -835,7 +845,7 @@ async fn insert_outbox_conn(conn: &mut sqlx::MySqlConnection, event: &OutboxEven
         .bind(status)
         .bind(event.retry_count)
         .bind(event.max_retries)
-        .bind(event.available_at.naive_utc())
+        .bind(available_at)
         .bind(event.lease_until.map(|x| x.naive_utc()))
         .bind(event.created_at.naive_utc())
         .execute(conn)
