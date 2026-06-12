@@ -119,8 +119,14 @@ struct Srv {
 
 impl Srv {
     fn new() -> Self {
+        // .no_proxy(): reqwest on macOS otherwise honours the SYSTEM proxy
+        // (scutil), which env NO_PROXY can't override — a local Clash/Surge
+        // proxy then drops the slow async-index / summary polls mid-flight
+        // ("peer closed connection without TLS close_notify"). The deployment
+        // target is reachable directly, so bypass any proxy unconditionally.
         let c = Client::builder()
             .timeout(Duration::from_secs(60))
+            .no_proxy()
             .build()
             .expect("build reqwest client");
         Srv {
@@ -939,13 +945,16 @@ async fn fs_search_dense_sparse_and_hybrid() {
         }
     };
 
-    // Wait for async indexing (outbox → worker → Milvus) to make both visible.
+    // Wait for async indexing to make BOTH docs visible. Each PUT enqueues
+    // its own outbox task indexed independently, so gating on only one races
+    // the other into the assertions below (the "revenue"→finance check).
     let indexed = poll(INDEX_TIMEOUT, || async {
-        let r = search("marshmallow", "fulltext").await;
-        paths(&r).iter().any(|p| p == music)
+        let m = search("marshmallow", "fulltext").await;
+        let f = search("revenue", "fulltext").await;
+        paths(&m).iter().any(|p| p == music) && paths(&f).iter().any(|p| p == finance)
     })
     .await;
-    assert!(indexed, "fulltext never indexed within {INDEX_TIMEOUT:?}");
+    assert!(indexed, "fulltext never indexed both docs within {INDEX_TIMEOUT:?}");
 
     // ── Sparse / BM25 ── a rare word resolves ONLY the doc containing it.
     let r = search("marshmallow", "fulltext").await;
