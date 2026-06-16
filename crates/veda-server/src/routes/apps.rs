@@ -107,6 +107,8 @@ pub fn routes() -> Router<Arc<AppState>> {
             "/v1/apps/{app_id}/workspaces/{id}/datasets",
             post(create_app_dataset).get(list_app_datasets),
         )
+        // Stage 6: company response envelope, apps surface only.
+        .layer(axum::middleware::from_fn(company_envelope))
 }
 
 fn require_app_id(app_id: &str) -> Result<&str, AppError> {
@@ -537,4 +539,81 @@ async fn list_app_datasets(
         has_more,
         next_cursor,
     })))
+}
+
+// ── Company response envelope (stage 6, apps surface only) ──────────────
+
+/// Rewrite veda's native response body into the OnePaaS company format for the
+/// AI Workbench frontend, leaving REST status untouched:
+///   success → `{ data:[...], page, size, order_by, order, total, total_page,
+///               has_next_page, has_prev_page }` (data is always an array;
+///               single objects become a one-element array)
+///   error   → `{ error: { code, reason, message, external } }`
+/// Applied only to the apps router via `from_fn`; the data plane keeps veda's
+/// native `{success,data}` / `error_code` shape.
+async fn company_envelope(
+    req: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    let resp = next.run(req).await;
+    let (mut parts, body) = resp.into_parts();
+    let bytes = match axum::body::to_bytes(body, usize::MAX).await {
+        Ok(b) => b,
+        Err(_) => return axum::response::Response::from_parts(parts, axum::body::Body::empty()),
+    };
+    let Ok(v) = serde_json::from_slice::<serde_json::Value>(&bytes) else {
+        // Non-JSON (e.g. a 204 with empty body) — pass through unchanged.
+        return axum::response::Response::from_parts(parts, axum::body::Body::from(bytes));
+    };
+    let nb = serde_json::to_vec(&map_to_company(v)).unwrap_or_default();
+    // Body length changed; drop the stale Content-Length so it's recomputed.
+    parts.headers.remove(axum::http::header::CONTENT_LENGTH);
+    axum::response::Response::from_parts(parts, axum::body::Body::from(nb))
+}
+
+fn map_to_company(v: serde_json::Value) -> serde_json::Value {
+    use serde_json::json;
+    // veda error: `{ success:false, error_code, error }`.
+    if v.get("success").and_then(|s| s.as_bool()) == Some(false) {
+        let code = v
+            .get("error_code")
+            .and_then(|x| x.as_str())
+            .unwrap_or("INTERNAL");
+        let message = v.get("error").and_then(|x| x.as_str()).unwrap_or("");
+        return json!({ "error": { "code": code, "reason": "", "message": message, "external": {} } });
+    }
+    let data = v.get("data").cloned().unwrap_or(serde_json::Value::Null);
+    if let Some(obj) = data.as_object() {
+        // veda PaginatedResponse: `{ items, has_more, next_cursor }`.
+        if let Some(items) = obj.get("items").and_then(|i| i.as_array()) {
+            let has_more = obj.get("has_more").and_then(|b| b.as_bool()).unwrap_or(false);
+            return company_page(items.clone(), has_more);
+        }
+        return company_page(vec![data], false); // single object
+    }
+    match data {
+        serde_json::Value::Array(arr) => company_page(arr, false), // bare list (keys)
+        serde_json::Value::Null => company_page(vec![], false),    // 200-with-null (delete)
+        other => company_page(vec![other], false),
+    }
+}
+
+/// Build the company page envelope. `total` / `page` are best-effort (the
+/// current page's count) — exact totals need offset+count, which veda's cursor
+/// lists don't carry; `has_next_page` is authoritative from the cursor's
+/// `has_more`. Apps tenants are typically single-page, so this is accurate in
+/// the common case; exact offset pagination is a follow-up.
+fn company_page(data: Vec<serde_json::Value>, has_more: bool) -> serde_json::Value {
+    let size = data.len();
+    serde_json::json!({
+        "data": data,
+        "page": 1,
+        "size": size,
+        "order_by": "created_at",
+        "order": "desc",
+        "total": size,
+        "total_page": 1,
+        "has_next_page": has_more,
+        "has_prev_page": false,
+    })
 }

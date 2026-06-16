@@ -429,10 +429,11 @@ async fn sub_app_auto_provision(state: &Arc<AppState>, mysql: &MysqlStore, route
     let resp = post_ws(app_id.clone(), json!({"name": "idx-a", "kind": "db"})).await;
     assert_eq!(resp.status(), StatusCode::CREATED, "first app workspace → 201");
     let j = body_json(resp.into_body()).await;
-    assert_eq!(j["success"], true);
-    assert_eq!(j["data"]["kind"], "db");
-    assert_eq!(j["data"]["workspace_id"], app_id);
-    let ws_db = j["data"]["id"].as_str().unwrap().to_string();
+    // Company envelope (stage 6): success body is `{data:[...], page, ...}`,
+    // single objects become a one-element `data` array; no `success` field.
+    assert_eq!(j["data"][0]["kind"], "db");
+    assert_eq!(j["data"][0]["workspace_id"], app_id);
+    let ws_db = j["data"][0]["id"].as_str().unwrap().to_string();
 
     // Account auto-created for the app_id, with NO vk_ minted (A drops account keys).
     let acct = state
@@ -448,7 +449,7 @@ async fn sub_app_auto_provision(state: &Arc<AppState>, mysql: &MysqlStore, route
     let resp = post_ws(app_id.clone(), json!({"name": "idx-b", "kind": "fs"})).await;
     assert_eq!(resp.status(), StatusCode::CREATED, "second create reuses tenant");
     let j = body_json(resp.into_body()).await;
-    let ws_fs = j["data"]["id"].as_str().unwrap().to_string();
+    let ws_fs = j["data"][0]["id"].as_str().unwrap().to_string();
     let acct2 = state
         .auth_store
         .get_account_by_app_id(&app_id)
@@ -462,7 +463,7 @@ async fn sub_app_auto_provision(state: &Arc<AppState>, mysql: &MysqlStore, route
     assert_eq!(resp.status(), StatusCode::OK);
     let j = body_json(resp.into_body()).await;
     assert_eq!(
-        j["data"]["items"].as_array().unwrap().len(),
+        j["data"].as_array().unwrap().len(),
         2,
         "list scoped to app"
     );
@@ -470,7 +471,7 @@ async fn sub_app_auto_provision(state: &Arc<AppState>, mysql: &MysqlStore, route
     // 4. Unknown app_id lists empty WITHOUT provisioning a tenant.
     let resp = get_ws(other_app.clone()).await;
     let j = body_json(resp.into_body()).await;
-    assert_eq!(j["data"]["items"].as_array().unwrap().len(), 0);
+    assert_eq!(j["data"].as_array().unwrap().len(), 0);
     assert!(
         state
             .auth_store
@@ -485,7 +486,7 @@ async fn sub_app_auto_provision(state: &Arc<AppState>, mysql: &MysqlStore, route
     //    (cross-tenant id is hidden, not 403, so it can't be used as a probe).
     let resp = post_ws(rival_app.clone(), json!({"name": "rival", "kind": "fs"})).await;
     assert_eq!(resp.status(), StatusCode::CREATED);
-    let rival_ws = body_json(resp.into_body()).await["data"]["id"]
+    let rival_ws = body_json(resp.into_body()).await["data"][0]["id"]
         .as_str()
         .unwrap()
         .to_string();
@@ -504,7 +505,7 @@ async fn sub_app_auto_provision(state: &Arc<AppState>, mysql: &MysqlStore, route
     let resp = get_ws(app_id.clone()).await;
     let j = body_json(resp.into_body()).await;
     assert_eq!(
-        j["data"]["items"].as_array().unwrap().len(),
+        j["data"].as_array().unwrap().len(),
         2,
         "cross-tenant delete must be a no-op"
     );
@@ -515,7 +516,7 @@ async fn sub_app_auto_provision(state: &Arc<AppState>, mysql: &MysqlStore, route
     let resp = get_ws(app_id.clone()).await;
     let j = body_json(resp.into_body()).await;
     assert_eq!(
-        j["data"]["items"].as_array().unwrap().len(),
+        j["data"].as_array().unwrap().len(),
         1,
         "list drops to 1 after delete"
     );
