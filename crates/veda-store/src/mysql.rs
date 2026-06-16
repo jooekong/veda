@@ -559,6 +559,18 @@ impl MysqlStore {
             // existing indexes all lead with path columns, so this lookup
             // otherwise scans every dentry in the workspace.
             "ALTER TABLE veda_dentries ADD INDEX idx_ws_file (workspace_id, file_id)",
+            // Platform (AI Workbench / apps surface) columns — all nullable so
+            // direct (non-gateway) access is unaffected. creator/creator_name are
+            // stamped from the gateway `user` header (item 2). `token` stores the
+            // plaintext wk_ so the console can re-reveal it via getToken (item 1);
+            // only populated for keys minted on the apps surface.
+            "ALTER TABLE veda_workspaces ADD COLUMN creator VARCHAR(64) NULL",
+            "ALTER TABLE veda_workspaces ADD COLUMN creator_name VARCHAR(128) NULL",
+            "ALTER TABLE veda_datasets ADD COLUMN creator VARCHAR(64) NULL",
+            "ALTER TABLE veda_datasets ADD COLUMN creator_name VARCHAR(128) NULL",
+            "ALTER TABLE veda_workspace_keys ADD COLUMN creator VARCHAR(64) NULL",
+            "ALTER TABLE veda_workspace_keys ADD COLUMN creator_name VARCHAR(128) NULL",
+            "ALTER TABLE veda_workspace_keys ADD COLUMN token VARCHAR(128) NULL",
         ];
         for s in alters {
             if let Err(e) = sqlx::query(s).execute(&self.pool).await {
@@ -2520,6 +2532,22 @@ impl AuthStore for MysqlStore {
             }
             Err(e) => Err(storage_err(e)),
         }
+    }
+
+    async fn set_workspace_creator(
+        &self,
+        workspace_id: &str,
+        creator: Option<&str>,
+        creator_name: Option<&str>,
+    ) -> Result<()> {
+        sqlx::query(r#"UPDATE veda_workspaces SET creator = ?, creator_name = ? WHERE id = ?"#)
+            .bind(creator)
+            .bind(creator_name)
+            .bind(workspace_id)
+            .execute(&self.pool)
+            .await
+            .map_err(storage_err)?;
+        Ok(())
     }
 
     async fn create_db_workspace(

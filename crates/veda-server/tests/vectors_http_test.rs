@@ -431,7 +431,7 @@ async fn sub_app_auto_provision(state: &Arc<AppState>, mysql: &MysqlStore, route
     let j = body_json(resp.into_body()).await;
     assert_eq!(j["success"], true);
     assert_eq!(j["data"]["kind"], "db");
-    assert_eq!(j["data"]["app_id"], app_id);
+    assert_eq!(j["data"]["workspace_id"], app_id);
     let ws_db = j["data"]["id"].as_str().unwrap().to_string();
 
     // Account auto-created for the app_id, with NO vk_ minted (A drops account keys).

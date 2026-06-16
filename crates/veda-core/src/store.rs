@@ -556,6 +556,17 @@ pub trait AuthStore: Send + Sync {
 
     // workspace
     async fn create_workspace(&self, workspace: &Workspace) -> Result<()>;
+
+    /// Stamp creator identity onto a workspace (apps surface only): `creator`
+    /// is the gateway domain account, `creator_name` the display name. Both
+    /// NULL on direct (non-gateway) access. Kept separate from create so the
+    /// shared create path stays unchanged.
+    async fn set_workspace_creator(
+        &self,
+        workspace_id: &str,
+        creator: Option<&str>,
+        creator_name: Option<&str>,
+    ) -> Result<()>;
     /// Atomically insert a db-kind workspace together with its bootstrap
     /// dataset in a single transaction — either both rows land or neither.
     /// Closes the crash window where `create_workspace` followed by a

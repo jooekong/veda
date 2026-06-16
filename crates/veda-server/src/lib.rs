@@ -9,6 +9,7 @@ pub mod error;
 pub mod filter;
 pub mod obs;
 pub mod outbox;
+pub mod platform;
 pub mod reconciler;
 pub mod routes;
 pub mod state;

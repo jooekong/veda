@@ -15,12 +15,13 @@ use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::routing::{delete, post};
 use axum::{Json, Router};
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use uuid::Uuid;
 use veda_types::api::{CreateWorkspaceRequest, PaginatedResponse, PaginationQuery};
 use veda_types::{Account, AccountStatus, ApiResponse, VedaError, Workspace};
 
 use crate::error::AppError;
+use crate::platform::{resolve_workspace_name, GatewayUser};
 use crate::routes::account::create_workspace_under;
 use crate::state::AppState;
 
@@ -29,6 +30,50 @@ const LIST_MAX_LIMIT: u32 = 200;
 
 fn clamp_limit(q: &PaginationQuery) -> u32 {
     q.limit.unwrap_or(LIST_DEFAULT_LIMIT).clamp(1, LIST_MAX_LIMIT)
+}
+
+/// Apps-surface workspace view. Renames the internal `app_id` to the platform
+/// `workspace_id` at the boundary (item 3) and carries `workspace_name` +
+/// creator identity; the internal `Workspace` type stays untouched.
+#[derive(serde::Serialize)]
+struct AppWorkspace {
+    /// Platform workspace code (gateway tenant; stored internally as `app_id`).
+    workspace_id: Option<String>,
+    /// Platform workspace display name (looked up; null until lookup is wired).
+    workspace_name: Option<String>,
+    /// veda's own workspace (vector index) id.
+    id: String,
+    name: String,
+    kind: veda_types::WorkspaceKind,
+    status: veda_types::WorkspaceStatus,
+    description: Option<String>,
+    creator: Option<String>,
+    creator_name: Option<String>,
+    created_at: DateTime<Utc>,
+    updated_at: DateTime<Utc>,
+}
+
+impl AppWorkspace {
+    fn build(
+        ws: Workspace,
+        workspace_name: Option<String>,
+        creator: Option<String>,
+        creator_name: Option<String>,
+    ) -> Self {
+        AppWorkspace {
+            workspace_id: ws.app_id,
+            workspace_name,
+            id: ws.id,
+            name: ws.name,
+            kind: ws.kind,
+            status: ws.status,
+            description: ws.description,
+            creator,
+            creator_name,
+            created_at: ws.created_at,
+            updated_at: ws.updated_at,
+        }
+    }
 }
 
 pub fn routes() -> Router<Arc<AppState>> {
@@ -104,13 +149,30 @@ async fn ensure_account(state: &AppState, app_id: &str) -> Result<Account, AppEr
 async fn create_app_workspace(
     State(state): State<Arc<AppState>>,
     Path(app_id): Path<String>,
+    gw: GatewayUser,
     Json(mut req): Json<CreateWorkspaceRequest>,
-) -> Result<(StatusCode, Json<ApiResponse<Workspace>>), AppError> {
+) -> Result<(StatusCode, Json<ApiResponse<AppWorkspace>>), AppError> {
     let app_id = require_app_id(&app_id)?.to_string();
     let account = ensure_account(&state, &app_id).await?;
-    req.app_id = Some(app_id);
+    req.app_id = Some(app_id.clone());
     let ws = create_workspace_under(&state, account.id, req).await?;
-    Ok((StatusCode::CREATED, Json(ApiResponse::ok(ws))))
+    // Stamp creator from the gateway identity (NULL on direct access).
+    let creator = gw.creator();
+    let creator_name = gw.creator_name();
+    state
+        .auth_store
+        .set_workspace_creator(&ws.id, creator.as_deref(), creator_name.as_deref())
+        .await?;
+    let workspace_name = resolve_workspace_name(&app_id).await;
+    Ok((
+        StatusCode::CREATED,
+        Json(ApiResponse::ok(AppWorkspace::build(
+            ws,
+            workspace_name,
+            creator,
+            creator_name,
+        ))),
+    ))
 }
 
 /// GET /v1/apps/{app_id}/workspaces — list active workspaces under the app.
