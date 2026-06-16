@@ -13,12 +13,16 @@ use std::sync::Arc;
 
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
-use axum::routing::{delete, post};
+use axum::routing::{delete, get, post};
 use axum::{Json, Router};
 use chrono::{DateTime, Utc};
 use uuid::Uuid;
 use veda_types::api::{CreateWorkspaceRequest, PaginatedResponse, PaginationQuery};
-use veda_types::{Account, AccountStatus, ApiResponse, VedaError, Workspace};
+use veda_core::checksum::sha256_hex;
+use veda_types::{
+    Account, AccountStatus, ApiResponse, KeyPermission, KeyStatus, VedaError, Workspace,
+    WorkspaceKey,
+};
 
 use crate::error::AppError;
 use crate::platform::{resolve_workspace_name, GatewayUser};
@@ -85,6 +89,18 @@ pub fn routes() -> Router<Arc<AppState>> {
         .route(
             "/v1/apps/{app_id}/workspaces/{id}",
             delete(delete_app_workspace),
+        )
+        .route(
+            "/v1/apps/{app_id}/workspaces/{id}/keys",
+            post(create_app_key).get(list_app_keys),
+        )
+        .route(
+            "/v1/apps/{app_id}/workspaces/{id}/keys/{key_id}",
+            delete(revoke_app_key),
+        )
+        .route(
+            "/v1/apps/{app_id}/workspaces/{id}/keys/{key_id}/token",
+            get(get_app_key_token),
         )
 }
 
@@ -239,5 +255,171 @@ async fn delete_app_workspace(
         return Err(VedaError::NotFound(format!("workspace {ws_id}")).into());
     }
     state.auth_store.delete_workspace(&ws_id).await?;
+    Ok(Json(ApiResponse::ok(())))
+}
+
+// ── Workspace keys (apps surface) ──────────────────────
+
+/// Apps-surface key view. Carries a MASKED token (full token via getToken)
+/// plus creator identity; never exposes `key_hash`.
+#[derive(serde::Serialize)]
+struct AppKey {
+    id: String,
+    name: String,
+    permission: KeyPermission,
+    status: KeyStatus,
+    /// Masked token for display, e.g. `wk_a1b2…c3d4`. Full token via getToken.
+    token: String,
+    creator: Option<String>,
+    creator_name: Option<String>,
+    created_at: DateTime<Utc>,
+}
+
+/// Mask a `wk_` token for console display: keep the `wk_` + 4 leading chars and
+/// the last 4. Tokens are ASCII (`wk_` + hex) so byte-slicing is safe.
+fn mask_token(token: &str) -> String {
+    let n = token.len();
+    if n <= 12 {
+        return "****".to_string();
+    }
+    format!("{}…{}", &token[..7], &token[n - 4..])
+}
+
+/// Resolve + authorize the target veda workspace for an app: the app's account
+/// must exist (active) and own the workspace. A missing app, missing workspace,
+/// or cross-tenant id all collapse to the same `NOT_FOUND` so a probe can't
+/// learn another tenant's workspace ids.
+async fn load_app_workspace(
+    state: &AppState,
+    app_id: &str,
+    ws_id: &str,
+) -> Result<Workspace, AppError> {
+    let app_id = require_app_id(app_id)?;
+    let account = lookup_active_account(state, app_id)
+        .await?
+        .ok_or_else(|| VedaError::NotFound(format!("workspace {ws_id}")))?;
+    let ws = state
+        .auth_store
+        .get_workspace(ws_id)
+        .await?
+        .ok_or_else(|| VedaError::NotFound(format!("workspace {ws_id}")))?;
+    if ws.account_id != account.id {
+        return Err(VedaError::NotFound(format!("workspace {ws_id}")).into());
+    }
+    Ok(ws)
+}
+
+/// POST /v1/apps/{app_id}/workspaces/{id}/keys — mint a data-plane `wk_`.
+/// Persists the plaintext token (for getToken) + creator; returns it MASKED.
+async fn create_app_key(
+    State(state): State<Arc<AppState>>,
+    Path((app_id, ws_id)): Path<(String, String)>,
+    gw: GatewayUser,
+    Json(body): Json<serde_json::Value>,
+) -> Result<(StatusCode, Json<ApiResponse<AppKey>>), AppError> {
+    let ws = load_app_workspace(&state, &app_id, &ws_id).await?;
+    if ws.status != veda_types::WorkspaceStatus::Active {
+        return Err(VedaError::NotFound(format!("workspace {ws_id}")).into());
+    }
+    let name = body
+        .get("name")
+        .and_then(|v| v.as_str())
+        .unwrap_or("default")
+        .to_string();
+    let permission = match body
+        .get("permission")
+        .and_then(|v| v.as_str())
+        .unwrap_or("readwrite")
+    {
+        "read" => KeyPermission::Read,
+        "readwrite" => KeyPermission::ReadWrite,
+        other => {
+            return Err(VedaError::InvalidInput(format!(
+                "unknown permission '{other}', expected 'read' or 'readwrite'"
+            ))
+            .into())
+        }
+    };
+    let raw_key = format!("wk_{}", Uuid::new_v4().to_string().replace('-', ""));
+    let creator = gw.creator();
+    let creator_name = gw.creator_name();
+    let wk = WorkspaceKey {
+        id: Uuid::new_v4().to_string(),
+        workspace_id: ws.id.clone(),
+        account_id: ws.account_id.clone(),
+        name,
+        key_hash: sha256_hex(raw_key.as_bytes()),
+        permission,
+        status: KeyStatus::Active,
+        kind: ws.kind,
+        created_at: Utc::now(),
+    };
+    state
+        .auth_store
+        .create_app_workspace_key(&wk, &raw_key, creator.as_deref(), creator_name.as_deref())
+        .await?;
+    Ok((
+        StatusCode::CREATED,
+        Json(ApiResponse::ok(AppKey {
+            id: wk.id,
+            name: wk.name,
+            permission: wk.permission,
+            status: wk.status,
+            token: mask_token(&raw_key),
+            creator,
+            creator_name,
+            created_at: wk.created_at,
+        })),
+    ))
+}
+
+/// GET /v1/apps/{app_id}/workspaces/{id}/keys — list keys (masked tokens).
+async fn list_app_keys(
+    State(state): State<Arc<AppState>>,
+    Path((app_id, ws_id)): Path<(String, String)>,
+) -> Result<Json<ApiResponse<Vec<AppKey>>>, AppError> {
+    load_app_workspace(&state, &app_id, &ws_id).await?;
+    let rows = state.auth_store.list_app_workspace_keys(&ws_id).await?;
+    let items = rows
+        .into_iter()
+        .map(|(k, token, creator, creator_name)| AppKey {
+            id: k.id,
+            name: k.name,
+            permission: k.permission,
+            status: k.status,
+            token: token
+                .as_deref()
+                .map(mask_token)
+                .unwrap_or_else(|| "****".to_string()),
+            creator,
+            creator_name,
+            created_at: k.created_at,
+        })
+        .collect();
+    Ok(Json(ApiResponse::ok(items)))
+}
+
+/// GET /v1/apps/{app_id}/workspaces/{id}/keys/{key_id}/token — reveal the full
+/// plaintext token: `{ "token": "wk_..." }`.
+async fn get_app_key_token(
+    State(state): State<Arc<AppState>>,
+    Path((app_id, ws_id, key_id)): Path<(String, String, String)>,
+) -> Result<Json<ApiResponse<serde_json::Value>>, AppError> {
+    load_app_workspace(&state, &app_id, &ws_id).await?;
+    let token = state
+        .auth_store
+        .get_workspace_key_token(&key_id, &ws_id)
+        .await?
+        .ok_or_else(|| VedaError::NotFound(format!("key {key_id}")))?;
+    Ok(Json(ApiResponse::ok(serde_json::json!({ "token": token }))))
+}
+
+/// DELETE /v1/apps/{app_id}/workspaces/{id}/keys/{key_id} — revoke a key.
+async fn revoke_app_key(
+    State(state): State<Arc<AppState>>,
+    Path((app_id, ws_id, key_id)): Path<(String, String, String)>,
+) -> Result<Json<ApiResponse<()>>, AppError> {
+    load_app_workspace(&state, &app_id, &ws_id).await?;
+    state.auth_store.revoke_workspace_key(&key_id).await?;
     Ok(Json(ApiResponse::ok(())))
 }

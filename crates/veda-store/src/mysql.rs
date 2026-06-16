@@ -2912,6 +2912,77 @@ impl AuthStore for MysqlStore {
         rows.iter().map(|r| row_to_workspace_key(r)).collect()
     }
 
+    async fn create_app_workspace_key(
+        &self,
+        key: &WorkspaceKey,
+        token: &str,
+        creator: Option<&str>,
+        creator_name: Option<&str>,
+    ) -> Result<()> {
+        sqlx::query(
+            r#"INSERT INTO veda_workspace_keys (id, workspace_id, account_id, name, key_hash, permission, status, kind, created_at, token, creator, creator_name)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"#,
+        )
+        .bind(&key.id)
+        .bind(&key.workspace_id)
+        .bind(&key.account_id)
+        .bind(&key.name)
+        .bind(&key.key_hash)
+        .bind(db_enum_str(&key.permission))
+        .bind(db_enum_str(&key.status))
+        .bind(db_enum_str(&key.kind))
+        .bind(key.created_at.naive_utc())
+        .bind(token)
+        .bind(creator)
+        .bind(creator_name)
+        .execute(&self.pool)
+        .await
+        .map_err(storage_err)?;
+        Ok(())
+    }
+
+    async fn list_app_workspace_keys(
+        &self,
+        workspace_id: &str,
+    ) -> Result<Vec<(WorkspaceKey, Option<String>, Option<String>, Option<String>)>> {
+        let rows = sqlx::query(
+            r#"SELECT id, workspace_id, account_id, name, key_hash, permission, status, kind, created_at, token, creator, creator_name
+               FROM veda_workspace_keys WHERE workspace_id = ? ORDER BY created_at"#,
+        )
+        .bind(workspace_id)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(storage_err)?;
+        rows.iter()
+            .map(|r| {
+                let key = row_to_workspace_key(r)?;
+                let token: Option<String> = r.try_get("token").map_err(storage_err)?;
+                let creator: Option<String> = r.try_get("creator").map_err(storage_err)?;
+                let creator_name: Option<String> = r.try_get("creator_name").map_err(storage_err)?;
+                Ok((key, token, creator, creator_name))
+            })
+            .collect()
+    }
+
+    async fn get_workspace_key_token(
+        &self,
+        key_id: &str,
+        workspace_id: &str,
+    ) -> Result<Option<String>> {
+        let row = sqlx::query(
+            r#"SELECT token FROM veda_workspace_keys WHERE id = ? AND workspace_id = ?"#,
+        )
+        .bind(key_id)
+        .bind(workspace_id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(storage_err)?;
+        match row {
+            Some(r) => Ok(r.try_get("token").map_err(storage_err)?),
+            None => Ok(None),
+        }
+    }
+
     async fn revoke_workspace_key(&self, id: &str) -> Result<()> {
         sqlx::query(r#"UPDATE veda_workspace_keys SET status = 'revoked' WHERE id = ?"#)
             .bind(id)

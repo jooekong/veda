@@ -578,6 +578,33 @@ pub trait AuthStore: Send + Sync {
         after: Option<&str>,
         limit: u32,
     ) -> Result<(Vec<(Workspace, Option<String>, Option<String>)>, bool)>;
+
+    /// Create a workspace key on the apps surface, persisting the plaintext
+    /// `token` (for getToken) and creator identity alongside the hash.
+    async fn create_app_workspace_key(
+        &self,
+        key: &WorkspaceKey,
+        token: &str,
+        creator: Option<&str>,
+        creator_name: Option<&str>,
+    ) -> Result<()>;
+
+    /// List a workspace's keys WITH plaintext token + creator (apps surface),
+    /// so the handler can return a masked token and the creator.
+    #[allow(clippy::type_complexity)]
+    async fn list_app_workspace_keys(
+        &self,
+        workspace_id: &str,
+    ) -> Result<Vec<(WorkspaceKey, Option<String>, Option<String>, Option<String>)>>;
+
+    /// Fetch a key's plaintext token by id, scoped to its workspace (getToken).
+    /// `None` when the key is absent, not in that workspace, or has no stored
+    /// token (pre-apps keys).
+    async fn get_workspace_key_token(
+        &self,
+        key_id: &str,
+        workspace_id: &str,
+    ) -> Result<Option<String>>;
     /// Atomically insert a db-kind workspace together with its bootstrap
     /// dataset in a single transaction — either both rows land or neither.
     /// Closes the crash window where `create_workspace` followed by a
