@@ -2983,6 +2983,62 @@ impl AuthStore for MysqlStore {
         }
     }
 
+    async fn set_dataset_creator(
+        &self,
+        dataset_id: &str,
+        creator: Option<&str>,
+        creator_name: Option<&str>,
+    ) -> Result<()> {
+        sqlx::query(r#"UPDATE veda_datasets SET creator = ?, creator_name = ? WHERE id = ?"#)
+            .bind(creator)
+            .bind(creator_name)
+            .bind(dataset_id)
+            .execute(&self.pool)
+            .await
+            .map_err(storage_err)?;
+        Ok(())
+    }
+
+    async fn list_app_datasets(
+        &self,
+        workspace_id: &str,
+        after: Option<&str>,
+        limit: u32,
+    ) -> Result<(Vec<(Dataset, Option<String>, Option<String>)>, bool)> {
+        let fetch_n = (limit as i64) + 1;
+        let cols = "id, workspace_id, name, status, description, created_at, updated_at, creator, creator_name";
+        let sql_after = format!(
+            "SELECT {cols} FROM veda_datasets \
+             WHERE workspace_id = ? AND status = 'active' AND id > ? ORDER BY id LIMIT ?"
+        );
+        let sql_first = format!(
+            "SELECT {cols} FROM veda_datasets \
+             WHERE workspace_id = ? AND status = 'active' ORDER BY id LIMIT ?"
+        );
+        let rows = match after {
+            Some(cursor) => sqlx::query(&sql_after)
+                .bind(workspace_id)
+                .bind(cursor)
+                .bind(fetch_n),
+            None => sqlx::query(&sql_first).bind(workspace_id).bind(fetch_n),
+        }
+        .fetch_all(&self.pool)
+        .await
+        .map_err(storage_err)?;
+        let has_more = rows.len() > limit as usize;
+        let items: Result<Vec<_>> = rows
+            .iter()
+            .take(limit as usize)
+            .map(|r| {
+                let ds = row_to_dataset(r)?;
+                let creator: Option<String> = r.try_get("creator").map_err(storage_err)?;
+                let creator_name: Option<String> = r.try_get("creator_name").map_err(storage_err)?;
+                Ok((ds, creator, creator_name))
+            })
+            .collect();
+        Ok((items?, has_more))
+    }
+
     async fn revoke_workspace_key(&self, id: &str) -> Result<()> {
         sqlx::query(r#"UPDATE veda_workspace_keys SET status = 'revoked' WHERE id = ?"#)
             .bind(id)

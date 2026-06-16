@@ -605,6 +605,24 @@ pub trait AuthStore: Send + Sync {
         key_id: &str,
         workspace_id: &str,
     ) -> Result<Option<String>>;
+
+    /// Stamp creator identity onto a dataset (apps surface). NULL on direct access.
+    async fn set_dataset_creator(
+        &self,
+        dataset_id: &str,
+        creator: Option<&str>,
+        creator_name: Option<&str>,
+    ) -> Result<()>;
+
+    /// List active datasets for a workspace WITH creator identity (apps
+    /// surface). Cursor-paginated like `list_active_datasets`.
+    #[allow(clippy::type_complexity)]
+    async fn list_app_datasets(
+        &self,
+        workspace_id: &str,
+        after: Option<&str>,
+        limit: u32,
+    ) -> Result<(Vec<(Dataset, Option<String>, Option<String>)>, bool)>;
     /// Atomically insert a db-kind workspace together with its bootstrap
     /// dataset in a single transaction — either both rows land or neither.
     /// Closes the crash window where `create_workspace` followed by a

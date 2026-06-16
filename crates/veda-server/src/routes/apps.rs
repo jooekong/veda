@@ -19,9 +19,10 @@ use chrono::{DateTime, Utc};
 use uuid::Uuid;
 use veda_types::api::{CreateWorkspaceRequest, PaginatedResponse, PaginationQuery};
 use veda_core::checksum::sha256_hex;
+use veda_types::validate;
 use veda_types::{
-    Account, AccountStatus, ApiResponse, KeyPermission, KeyStatus, VedaError, Workspace,
-    WorkspaceKey,
+    Account, AccountStatus, ApiResponse, Dataset, DatasetStatus, KeyPermission, KeyStatus,
+    VedaError, Workspace, WorkspaceKey,
 };
 
 use crate::error::AppError;
@@ -101,6 +102,10 @@ pub fn routes() -> Router<Arc<AppState>> {
         .route(
             "/v1/apps/{app_id}/workspaces/{id}/keys/{key_id}/token",
             get(get_app_key_token),
+        )
+        .route(
+            "/v1/apps/{app_id}/workspaces/{id}/datasets",
+            post(create_app_dataset).get(list_app_datasets),
         )
 }
 
@@ -422,4 +427,114 @@ async fn revoke_app_key(
     load_app_workspace(&state, &app_id, &ws_id).await?;
     state.auth_store.revoke_workspace_key(&key_id).await?;
     Ok(Json(ApiResponse::ok(())))
+}
+
+// ── Datasets (apps surface) ────────────────────────────
+
+/// Apps-surface dataset view: carries creator identity; the internal `Dataset`
+/// type is untouched.
+#[derive(serde::Serialize)]
+struct AppDataset {
+    id: String,
+    name: String,
+    status: DatasetStatus,
+    description: Option<String>,
+    creator: Option<String>,
+    creator_name: Option<String>,
+    created_at: DateTime<Utc>,
+    updated_at: DateTime<Utc>,
+}
+
+impl AppDataset {
+    fn build(ds: Dataset, creator: Option<String>, creator_name: Option<String>) -> Self {
+        AppDataset {
+            id: ds.id,
+            name: ds.name,
+            status: ds.status,
+            description: ds.description,
+            creator,
+            creator_name,
+            created_at: ds.created_at,
+            updated_at: ds.updated_at,
+        }
+    }
+}
+
+/// POST /v1/apps/{app_id}/workspaces/{id}/datasets — create a dataset (db ws).
+async fn create_app_dataset(
+    State(state): State<Arc<AppState>>,
+    Path((app_id, ws_id)): Path<(String, String)>,
+    gw: GatewayUser,
+    Json(body): Json<serde_json::Value>,
+) -> Result<(StatusCode, Json<ApiResponse<AppDataset>>), AppError> {
+    let ws = load_app_workspace(&state, &app_id, &ws_id).await?;
+    if ws.status != veda_types::WorkspaceStatus::Active {
+        return Err(VedaError::NotFound(format!("workspace {ws_id}")).into());
+    }
+    if ws.kind != veda_types::WorkspaceKind::Db {
+        return Err(VedaError::WorkspaceKindMismatch.into());
+    }
+    let name = body
+        .get("name")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default()
+        .to_string();
+    validate::validate_dataset_name(&name)?;
+    let description = body
+        .get("description")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+    let now = Utc::now();
+    let dataset = Dataset {
+        id: Uuid::new_v4().to_string(),
+        workspace_id: ws.id,
+        name,
+        status: DatasetStatus::Active,
+        description,
+        created_at: now,
+        updated_at: now,
+    };
+    state.auth_store.create_dataset(&dataset).await?;
+    let creator = gw.creator();
+    let creator_name = gw.creator_name();
+    state
+        .auth_store
+        .set_dataset_creator(&dataset.id, creator.as_deref(), creator_name.as_deref())
+        .await?;
+    Ok((
+        StatusCode::CREATED,
+        Json(ApiResponse::ok(AppDataset::build(
+            dataset,
+            creator,
+            creator_name,
+        ))),
+    ))
+}
+
+/// GET /v1/apps/{app_id}/workspaces/{id}/datasets — list datasets (with creator).
+async fn list_app_datasets(
+    State(state): State<Arc<AppState>>,
+    Path((app_id, ws_id)): Path<(String, String)>,
+    Query(q): Query<PaginationQuery>,
+) -> Result<Json<ApiResponse<PaginatedResponse<AppDataset>>>, AppError> {
+    load_app_workspace(&state, &app_id, &ws_id).await?;
+    let limit = clamp_limit(&q);
+    let (rows, has_more) = state
+        .auth_store
+        .list_app_datasets(&ws_id, q.after.as_deref(), limit)
+        .await?;
+    let next_cursor = if has_more {
+        rows.last().map(|(d, _, _)| d.id.clone())
+    } else {
+        None
+    };
+    let items = rows
+        .into_iter()
+        .map(|(ds, creator, creator_name)| AppDataset::build(ds, creator, creator_name))
+        .collect();
+    Ok(Json(ApiResponse::ok(PaginatedResponse {
+        items,
+        has_more,
+        next_cursor,
+    })))
 }
