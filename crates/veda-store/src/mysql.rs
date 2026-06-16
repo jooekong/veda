@@ -2550,6 +2550,48 @@ impl AuthStore for MysqlStore {
         Ok(())
     }
 
+    async fn list_app_workspaces(
+        &self,
+        account_id: &str,
+        after: Option<&str>,
+        limit: u32,
+    ) -> Result<(Vec<(Workspace, Option<String>, Option<String>)>, bool)> {
+        let fetch_n = (limit as i64) + 1;
+        let cols = "id, account_id, name, status, kind, app_id, description, created_at, updated_at, creator, creator_name";
+        // Bind the SQL to `let`s so the &str borrow outlives the match + fetch
+        // (a `&format!(...)` temporary would be dropped before fetch_all).
+        let sql_after = format!(
+            "SELECT {cols} FROM veda_workspaces \
+             WHERE account_id = ? AND status = 'active' AND id > ? ORDER BY id LIMIT ?"
+        );
+        let sql_first = format!(
+            "SELECT {cols} FROM veda_workspaces \
+             WHERE account_id = ? AND status = 'active' ORDER BY id LIMIT ?"
+        );
+        let rows = match after {
+            Some(cursor) => sqlx::query(&sql_after)
+                .bind(account_id)
+                .bind(cursor)
+                .bind(fetch_n),
+            None => sqlx::query(&sql_first).bind(account_id).bind(fetch_n),
+        }
+        .fetch_all(&self.pool)
+        .await
+        .map_err(storage_err)?;
+        let has_more = rows.len() > limit as usize;
+        let items: Result<Vec<_>> = rows
+            .iter()
+            .take(limit as usize)
+            .map(|r| {
+                let ws = row_to_workspace(r)?;
+                let creator: Option<String> = r.try_get("creator").map_err(storage_err)?;
+                let creator_name: Option<String> = r.try_get("creator_name").map_err(storage_err)?;
+                Ok((ws, creator, creator_name))
+            })
+            .collect();
+        Ok((items?, has_more))
+    }
+
     async fn create_db_workspace(
         &self,
         workspace: &Workspace,

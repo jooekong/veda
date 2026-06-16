@@ -182,7 +182,7 @@ async fn list_app_workspaces(
     State(state): State<Arc<AppState>>,
     Path(app_id): Path<String>,
     Query(q): Query<PaginationQuery>,
-) -> Result<Json<ApiResponse<PaginatedResponse<Workspace>>>, AppError> {
+) -> Result<Json<ApiResponse<PaginatedResponse<AppWorkspace>>>, AppError> {
     let app_id = require_app_id(&app_id)?;
     let account = match lookup_active_account(&state, app_id).await? {
         Some(acc) => acc,
@@ -195,15 +195,22 @@ async fn list_app_workspaces(
         }
     };
     let limit = clamp_limit(&q);
-    let (items, has_more) = state
+    let (rows, has_more) = state
         .auth_store
-        .list_workspaces(&account.id, q.after.as_deref(), limit)
+        .list_app_workspaces(&account.id, q.after.as_deref(), limit)
         .await?;
     let next_cursor = if has_more {
-        items.last().map(|w| w.id.clone())
+        rows.last().map(|(w, _, _)| w.id.clone())
     } else {
         None
     };
+    let workspace_name = resolve_workspace_name(app_id).await;
+    let items = rows
+        .into_iter()
+        .map(|(ws, creator, creator_name)| {
+            AppWorkspace::build(ws, workspace_name.clone(), creator, creator_name)
+        })
+        .collect();
     Ok(Json(ApiResponse::ok(PaginatedResponse {
         items,
         has_more,

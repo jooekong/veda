@@ -567,6 +567,17 @@ pub trait AuthStore: Send + Sync {
         creator: Option<&str>,
         creator_name: Option<&str>,
     ) -> Result<()>;
+
+    /// List active workspaces for an account WITH their creator identity
+    /// (apps surface). Like `list_workspaces` but also returns
+    /// `(creator, creator_name)`; cursor-paginated the same way.
+    #[allow(clippy::type_complexity)]
+    async fn list_app_workspaces(
+        &self,
+        account_id: &str,
+        after: Option<&str>,
+        limit: u32,
+    ) -> Result<(Vec<(Workspace, Option<String>, Option<String>)>, bool)>;
     /// Atomically insert a db-kind workspace together with its bootstrap
     /// dataset in a single transaction — either both rows land or neither.
     /// Closes the crash window where `create_workspace` followed by a
