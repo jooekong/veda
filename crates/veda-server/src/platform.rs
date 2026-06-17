@@ -73,10 +73,22 @@ fn decode_user_header(parts: &Parts) -> Option<PlatformUser> {
     serde_json::from_slice(&bytes).ok()
 }
 
-/// Resolve a platform workspace's display name by its code (the gateway
-/// workspace / app_id). TODO: call the AI Workbench API
-/// `GET <base>/open/v1/workspace/{code}` once a gateway credential is wired;
-/// returns `None` for now so responses carry `workspace_name: null`.
+/// Resolve a platform workspace's display name by its code (= `workspace_id`).
+///
+/// Verified against the AI Workbench API (2026-06-17):
+/// ```text
+/// GET {base}/proxy/llm/open/v1/workspace/{code}
+/// 200 (bare object, NOT the company envelope):
+///   { "id", "code", "name", "description", "creator", "creator_name",
+///     "created_at", "updated_at", "removed_at" }
+/// ```
+/// `workspace_name` is the `name` field (code `dbpaas-test` → "DBPaaS 测试").
+/// base = paas-api-test.ddmc-inc.com (test) / paas-api.ddmc-inc.com (prod).
+///
+/// Returns `None` for now (stub): the call needs veda's OWN credential to the
+/// platform — the working test auth is a user JWT cookie (`DDMC-INC`), so a
+/// server-side service token is the real path. That's part of the frozen
+/// external-authz work; wire the reqwest GET + `.name` extraction once it lands.
 pub async fn resolve_workspace_name(_code: &str) -> Option<String> {
     None
 }
