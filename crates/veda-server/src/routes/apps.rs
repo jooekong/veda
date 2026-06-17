@@ -148,7 +148,9 @@ pub fn routes() -> Router<Arc<AppState>> {
         )
         .route(
             "/v1/workspace/{workspace}/project/{id}",
-            patch(update_app_project).delete(delete_app_project),
+            get(get_app_project)
+                .patch(update_app_project)
+                .delete(delete_app_project),
         )
         .route(
             "/v1/workspace/{workspace}/project/{id}/keys",
@@ -289,6 +291,25 @@ async fn list_app_projects(
         })
         .collect();
     Ok(Json(CompanyPage::new(data, page, size, order_by, order, total)))
+}
+
+/// GET /v1/workspace/{workspace}/project/{id} — fetch a single project by its
+/// veda `id`, scoped to the workspace. 404 if the project is absent or belongs
+/// to another tenant (so the id can't be used as a cross-tenant probe).
+async fn get_app_project(
+    State(state): State<Arc<AppState>>,
+    Path((workspace, ws_id)): Path<(String, String)>,
+    gw: GatewayUser,
+) -> Result<Json<ApiResponse<AppProject>>, AppError> {
+    let ws = load_app_project(&state, &workspace, &ws_id).await?;
+    let (creator, creator_name) = state.auth_store.get_workspace_creator(&ws.id).await?;
+    let workspace_name = resolve_workspace_name(gw.cookie(), &workspace).await;
+    Ok(Json(ApiResponse::ok(AppProject::build(
+        ws,
+        workspace_name,
+        creator,
+        creator_name,
+    ))))
 }
 
 /// PATCH /v1/workspace/{workspace}/project/{id} — update a project's `name`

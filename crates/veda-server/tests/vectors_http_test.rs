@@ -608,6 +608,14 @@ async fn apps_mgmt_company_envelope_e2e() {
     assert_eq!(j["kind"], "db", "kind is immutable");
     assert_eq!(j["id"].as_str().unwrap(), ws, "same project id");
 
+    // 1c. GET project by id → same single object, reflecting the update.
+    let resp = send("GET", format!("/v1/workspace/{app}/project/{ws}"), None, None).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let j = body_json(resp.into_body()).await;
+    assert_eq!(j["id"].as_str().unwrap(), ws);
+    assert_eq!(j["name"], "idx-renamed", "GET reflects the prior update");
+    assert_eq!(j["kind"], "db");
+
     // 2. Create key → token MASKED, creator stamped (single object expanded).
     let resp = send(
         "POST",
