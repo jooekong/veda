@@ -265,7 +265,22 @@ class VedaE2EIT {
     // ── bootstrap (raw HTTP — control plane is outside the SDK surface) ──────
 
     private static VedaClient clientFor(String workspaceId) {
-        return VedaClient.builder().baseUrl(baseUrl).apiKey(accountKey).workspaceId(workspaceId).build();
+        // Data-plane no longer accepts the vk_ account key — it requires a wk_
+        // workspace key. Mint one for this workspace and use it.
+        return VedaClient.builder().baseUrl(baseUrl).apiKey(issueWorkspaceKey(workspaceId))
+                .workspaceId(workspaceId).build();
+    }
+
+    /** Issues a readwrite wk_ workspace key under the account; the data plane needs this, not vk_. */
+    private static String issueWorkspaceKey(String workspaceId) {
+        try {
+            ObjectNode body = mapper.createObjectNode();
+            body.put("name", "e2e-key");
+            JsonNode data = postData("/v1/workspaces/" + workspaceId + "/keys", accountKey, body);
+            return data.get("key").asText();
+        } catch (IOException e) {
+            throw new IllegalStateException("failed to issue workspace key for " + workspaceId, e);
+        }
     }
 
     private static String createAccount() throws IOException {

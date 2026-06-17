@@ -9,7 +9,7 @@
        come from ~/.m2/settings.xml <server> entries (ddmc-repo / snapshots). -->
   <groupId>csoss.veda</groupId>
   <artifactId>veda-sdk-java</artifactId>
-  <version>0.0.1-SNAPSHOT</version>
+  <version>0.0.1-RELEASE</version>
   <packaging>jar</packaging>
 
   <name>Veda Java SDK</name>
@@ -114,16 +114,17 @@
   </profiles>
 
   <!-- Internal ddxq Nexus. Repo ids match the <server> ids in ~/.m2/settings.xml
-       so credentials are picked up automatically. A -SNAPSHOT version routes to
-       the snapshot repo; any other version goes to the release repo. -->
+       so credentials are picked up automatically — same ids as athena and other
+       ddxq projects (`ddmc.repo` / `ddmc.repo.snapshot`). A -SNAPSHOT version
+       routes to the snapshot repo; any other version goes to the release repo. -->
   <distributionManagement>
     <repository>
-      <id>ddmc-repo</id>
+      <id>ddmc.repo</id>
       <name>ddxq nexus releases</name>
       <url>https://nexus.ddxq.mobi/repository/maven-releases/</url>
     </repository>
     <snapshotRepository>
-      <id>snapshots</id>
+      <id>ddmc.repo.snapshot</id>
       <name>ddxq nexus snapshots</name>
       <url>https://nexus.ddxq.mobi/repository/maven-snapshots/</url>
     </snapshotRepository>

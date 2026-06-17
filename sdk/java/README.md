@@ -16,9 +16,9 @@ the Pinecone-style `/v1/vectors/*` API. Four operations: `upsert`, `search`,
 - **Forward-compatible**: unknown response fields are ignored, unknown
   `error_code`s map to `UNKNOWN` — a newer server never breaks an older SDK.
 
-> **Coordinates:** `csoss.veda:veda-sdk-java:0.0.1-SNAPSHOT`, published to the
+> **Coordinates:** `csoss.veda:veda-sdk-java:0.0.1-RELEASE`, published to the
 > internal ddxq Nexus (see `<distributionManagement>` in `pom.xml`). Credentials
-> are read from your `~/.m2/settings.xml` (`ddmc-repo` / `snapshots` servers).
+> are read from your `~/.m2/settings.xml` (`ddmc.repo` / `ddmc.repo.snapshot` servers).
 
 ## Install
 
@@ -29,7 +29,7 @@ it directly:
 <dependency>
   <groupId>csoss.veda</groupId>
   <artifactId>veda-sdk-java</artifactId>
-  <version>0.0.1-SNAPSHOT</version>
+  <version>0.0.1-RELEASE</version>
 </dependency>
 ```
 

@@ -100,8 +100,10 @@ that matters.
   `UNKNOWN` fallback, idempotency-aware retry (id-less upsert is never
   auto-retried), and forward-compatible deserialization. Builds + unit-tests in
   CI; real-server contract tests run via `mvn -P integration verify`.
-  Published `0.0.1-SNAPSHOT` to the internal ddxq Nexus (2026-06-04). Still on
-  the pre-`wk_` contract — data-plane adaptation tracked in todos.md.
+  Released `0.0.1-RELEASE` to the internal ddxq Nexus (2026-06-17; the `0.0.1-SNAPSHOT`
+  preview shipped 2026-06-04). Verified against the `wk_` data-plane — full
+  integration suite green on the live server (28 unit + `VedaClientIT` 5 +
+  `VedaE2EIT` 4).
 - `/v1/vectors/upsert` accepts `write_mode`: `upsert` (default, idempotent
   dedup-by-id) or `insert` (skips Milvus's dedup+delete for ~3× write
   throughput; caller guarantees `id` uniqueness — a repeated id inserts a
