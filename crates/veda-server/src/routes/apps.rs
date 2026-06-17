@@ -617,3 +617,71 @@ fn company_page(data: Vec<serde_json::Value>, has_more: bool) -> serde_json::Val
         "has_prev_page": false,
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{map_to_company, mask_token};
+    use serde_json::json;
+
+    #[test]
+    fn envelope_error_to_error_object() {
+        let out = map_to_company(json!({
+            "success": false, "error_code": "INVALID_INPUT", "error": "text: empty"
+        }));
+        assert_eq!(out["error"]["code"], "INVALID_INPUT");
+        assert_eq!(out["error"]["message"], "text: empty");
+        assert_eq!(out["error"]["reason"], "");
+        assert!(out.get("data").is_none(), "error body carries no data");
+    }
+
+    #[test]
+    fn envelope_single_object_becomes_one_element_array() {
+        let out = map_to_company(json!({ "success": true, "data": { "id": "w1", "kind": "db" } }));
+        assert_eq!(out["data"].as_array().unwrap().len(), 1);
+        assert_eq!(out["data"][0]["id"], "w1");
+        assert_eq!(out["page"], 1);
+        assert_eq!(out["total"], 1);
+        assert_eq!(out["has_next_page"], false);
+        assert!(out.get("success").is_none(), "no success field in company envelope");
+    }
+
+    #[test]
+    fn envelope_paginated_drops_cursor_keeps_has_next() {
+        let out = map_to_company(json!({
+            "success": true,
+            "data": { "items": [{"a":1},{"b":2}], "has_more": true, "next_cursor": "c" }
+        }));
+        assert_eq!(out["data"].as_array().unwrap().len(), 2);
+        assert_eq!(out["size"], 2);
+        assert_eq!(out["has_next_page"], true);
+        assert!(out.get("next_cursor").is_none(), "cursor not leaked into envelope");
+        assert!(out["data"][0].get("items").is_none(), "items unwrapped, not nested");
+    }
+
+    #[test]
+    fn envelope_bare_array_passes_through() {
+        let out = map_to_company(json!({ "success": true, "data": [{"k":1}] }));
+        assert_eq!(out["data"].as_array().unwrap().len(), 1);
+        assert_eq!(out["total"], 1);
+    }
+
+    #[test]
+    fn envelope_null_data_is_empty_array() {
+        let out = map_to_company(json!({ "success": true, "data": null }));
+        assert_eq!(out["data"].as_array().unwrap().len(), 0);
+        assert_eq!(out["total"], 0);
+    }
+
+    #[test]
+    fn mask_keeps_head_and_tail_hides_middle() {
+        let t = format!("wk_{}", "a".repeat(32));
+        let m = mask_token(&t);
+        assert!(m.starts_with("wk_a") && m.ends_with("aaaa") && m.contains('…'));
+        assert!(!m.contains(&t[7..t.len() - 4]), "middle stays hidden");
+    }
+
+    #[test]
+    fn mask_short_token_fully_masked() {
+        assert_eq!(mask_token("wk_short"), "****");
+    }
+}
