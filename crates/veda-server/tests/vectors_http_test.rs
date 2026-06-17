@@ -541,6 +541,158 @@ async fn sub_app_auto_provision(state: &Arc<AppState>, mysql: &MysqlStore, route
     }
 }
 
+/// Apps management surface end-to-end: company envelope + key masking + getToken
+/// + dataset, all carrying `creator` from the gateway `user` header, plus the
+/// error envelope. MySQL + Milvus only (no embedding), so it's fast and stable.
+#[tokio::test]
+async fn apps_mgmt_company_envelope_e2e() {
+    let (state, mysql, router) = build_test_app().await;
+    let app = format!("apps-mgmt-{}", &Uuid::new_v4().simple().to_string()[..8]);
+    // base64 of {"name":"zhangsan","displayName":"张三"} — the gateway identity.
+    let user = "eyJuYW1lIjoiemhhbmdzYW4iLCJkaXNwbGF5TmFtZSI6IuW8oOS4iSJ9";
+
+    let send = |method: &'static str,
+                uri: String,
+                body: Option<serde_json::Value>,
+                user: Option<&'static str>| {
+        let router = router.clone();
+        async move {
+            let mut b = Request::builder().method(method).uri(uri);
+            if let Some(u) = user {
+                b = b.header("user", u);
+            }
+            let req = match body {
+                Some(j) => b
+                    .header("content-type", "application/json")
+                    .body(Body::from(j.to_string()))
+                    .unwrap(),
+                None => b.body(Body::empty()).unwrap(),
+            };
+            router.oneshot(req).await.unwrap()
+        }
+    };
+
+    // 1. Create db workspace → company envelope (data is a 1-element array, no
+    //    `success`), workspace_id = app, creator/creator_name from the header.
+    let resp = send(
+        "POST",
+        format!("/v1/apps/{app}/workspaces"),
+        Some(json!({"name":"idx","kind":"db"})),
+        Some(user),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::CREATED);
+    let j = body_json(resp.into_body()).await;
+    assert!(j.get("success").is_none(), "company envelope drops `success`");
+    assert_eq!(j["data"][0]["kind"], "db");
+    assert_eq!(j["data"][0]["workspace_id"], app);
+    assert_eq!(j["data"][0]["creator"], "zhangsan");
+    assert_eq!(j["data"][0]["creator_name"], "张三");
+    assert_eq!(j["total"], 1);
+    let ws = j["data"][0]["id"].as_str().unwrap().to_string();
+
+    // 2. Create key → token MASKED, creator stamped.
+    let resp = send(
+        "POST",
+        format!("/v1/apps/{app}/workspaces/{ws}/keys"),
+        Some(json!({"permission":"readwrite"})),
+        Some(user),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::CREATED);
+    let j = body_json(resp.into_body()).await;
+    let masked = j["data"][0]["token"].as_str().unwrap().to_string();
+    assert!(
+        masked.starts_with("wk_") && masked.contains('…'),
+        "token masked on create: {masked}"
+    );
+    assert_eq!(j["data"][0]["creator"], "zhangsan");
+    let key_id = j["data"][0]["id"].as_str().unwrap().to_string();
+
+    // 3. getToken → full plaintext (valid wk_, not masked).
+    let resp = send(
+        "GET",
+        format!("/v1/apps/{app}/workspaces/{ws}/keys/{key_id}/token"),
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let real = body_json(resp.into_body()).await["data"][0]["token"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert!(
+        real.starts_with("wk_") && !real.contains('…') && real.len() > 12,
+        "getToken returns full token: {real}"
+    );
+
+    // 4. Create dataset → creator stamped.
+    let resp = send(
+        "POST",
+        format!("/v1/apps/{app}/workspaces/{ws}/datasets"),
+        Some(json!({"name":"products"})),
+        Some(user),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::CREATED);
+    let j = body_json(resp.into_body()).await;
+    assert_eq!(j["data"][0]["name"], "products");
+    assert_eq!(j["data"][0]["creator"], "zhangsan");
+
+    // 5. List datasets → company page envelope (data array + page fields).
+    let resp = send(
+        "GET",
+        format!("/v1/apps/{app}/workspaces/{ws}/datasets"),
+        None,
+        None,
+    )
+    .await;
+    let j = body_json(resp.into_body()).await;
+    assert!(
+        j["data"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|d| d["name"] == "products"),
+        "created dataset shows in the list"
+    );
+    assert!(
+        j.get("page").is_some() && j.get("has_next_page").is_some(),
+        "list carries the page envelope"
+    );
+
+    // 6. Error envelope: bad permission → {error:{code:INVALID_INPUT}}, no data.
+    let resp = send(
+        "POST",
+        format!("/v1/apps/{app}/workspaces/{ws}/keys"),
+        Some(json!({"permission":"bad"})),
+        None,
+    )
+    .await;
+    assert!(resp.status().is_client_error());
+    let j = body_json(resp.into_body()).await;
+    assert_eq!(j["error"]["code"], "INVALID_INPUT");
+    assert!(j.get("data").is_none(), "error body carries no data");
+
+    // cleanup
+    let _ = state
+        .vector_workspace_store
+        .drop_collection(&veda_store::vector_collection_name(&ws))
+        .await;
+    let _ = state
+        .auth_store
+        .hard_delete_datasets_for_workspace(&ws)
+        .await;
+    let _ = state.auth_store.hard_delete_workspace(&ws).await;
+    if let Some(a) = state.auth_store.get_account_by_app_id(&app).await.unwrap() {
+        let _ = sqlx::query("DELETE FROM veda_accounts WHERE id = ?")
+            .bind(&a.id)
+            .execute(mysql.pool())
+            .await;
+    }
+}
+
 /// Mode passthrough + `score_type` contract over the full HTTP stack.
 /// Asserts semantic→`cosine`, fulltext→`bm25`, hybrid→`rrf`, and that an
 /// omitted `mode` defaults to hybrid. Fulltext must match a lexical token
