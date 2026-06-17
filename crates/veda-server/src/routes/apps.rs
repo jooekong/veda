@@ -90,12 +90,12 @@ impl<T> CompanyPage<T> {
 }
 
 /// Apps-surface workspace view. Renames the internal `app_id` to the platform
-/// `workspace_id` at the boundary (item 3) and carries `workspace_name` +
+/// `workspace` at the boundary (item 3) and carries `workspace_name` +
 /// creator identity; the internal `Workspace` type stays untouched.
 #[derive(serde::Serialize)]
 struct AppWorkspace {
     /// Platform workspace code (gateway tenant; stored internally as `app_id`).
-    workspace_id: Option<String>,
+    workspace: Option<String>,
     /// Platform workspace display name (looked up; null until lookup is wired).
     workspace_name: Option<String>,
     /// veda's own workspace (vector index) id.
@@ -118,7 +118,7 @@ impl AppWorkspace {
         creator_name: Option<String>,
     ) -> Self {
         AppWorkspace {
-            workspace_id: ws.app_id,
+            workspace: ws.app_id,
             workspace_name,
             id: ws.id,
             name: ws.name,

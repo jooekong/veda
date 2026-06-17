@@ -432,7 +432,7 @@ async fn sub_app_auto_provision(state: &Arc<AppState>, mysql: &MysqlStore, route
     // Company envelope (stage 6): success body is `{data:[...], page, ...}`,
     // single objects become a one-element `data` array; no `success` field.
     assert_eq!(j["data"][0]["kind"], "db");
-    assert_eq!(j["data"][0]["workspace_id"], app_id);
+    assert_eq!(j["data"][0]["workspace"], app_id);
     let ws_db = j["data"][0]["id"].as_str().unwrap().to_string();
 
     // Account auto-created for the app_id, with NO vk_ minted (A drops account keys).
@@ -573,7 +573,7 @@ async fn apps_mgmt_company_envelope_e2e() {
     };
 
     // 1. Create db workspace → company envelope (data is a 1-element array, no
-    //    `success`), workspace_id = app, creator/creator_name from the header.
+    //    `success`), workspace = app, creator/creator_name from the header.
     let resp = send(
         "POST",
         format!("/v1/apps/{app}/workspaces"),
@@ -585,7 +585,7 @@ async fn apps_mgmt_company_envelope_e2e() {
     let j = body_json(resp.into_body()).await;
     assert!(j.get("success").is_none(), "company envelope drops `success`");
     assert_eq!(j["data"][0]["kind"], "db");
-    assert_eq!(j["data"][0]["workspace_id"], app);
+    assert_eq!(j["data"][0]["workspace"], app);
     assert_eq!(j["data"][0]["creator"], "zhangsan");
     assert_eq!(j["data"][0]["creator_name"], "张三");
     assert_eq!(j["total"], 1);
