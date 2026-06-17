@@ -253,7 +253,7 @@ async fn create_app_project(
         .await?;
     let workspace_name = resolve_workspace_name(gw.cookie(), &workspace).await;
     Ok((
-        StatusCode::CREATED,
+        StatusCode::OK,
         Json(ApiResponse::ok(AppProject::build(
             ws,
             workspace_name,
@@ -486,7 +486,7 @@ async fn create_app_key(
         .create_app_workspace_key(&wk, &raw_key, creator.as_deref(), creator_name.as_deref())
         .await?;
     Ok((
-        StatusCode::CREATED,
+        StatusCode::OK,
         Json(ApiResponse::ok(AppKey {
             id: wk.id,
             name: wk.name,
@@ -630,7 +630,7 @@ async fn create_app_dataset(
         .set_dataset_creator(&dataset.id, creator.as_deref(), creator_name.as_deref())
         .await?;
     Ok((
-        StatusCode::CREATED,
+        StatusCode::OK,
         Json(ApiResponse::ok(AppDataset::build(
             dataset,
             creator,

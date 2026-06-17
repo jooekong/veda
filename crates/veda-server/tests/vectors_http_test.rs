@@ -428,7 +428,7 @@ async fn sub_app_auto_provision(state: &Arc<AppState>, mysql: &MysqlStore, route
 
     // 1. First POST auto-provisions the account + creates a db workspace (201).
     let resp = post_ws(app_id.clone(), json!({"name": "idx-a", "kind": "db"})).await;
-    assert_eq!(resp.status(), StatusCode::CREATED, "first app workspace → 201");
+    assert_eq!(resp.status(), StatusCode::OK, "first app workspace → 200");
     let j = body_json(resp.into_body()).await;
     // Company envelope (stage 6): a single object is returned expanded — no
     // `data` wrapper, no pagination, no `success` field.
@@ -448,7 +448,7 @@ async fn sub_app_auto_provision(state: &Arc<AppState>, mysql: &MysqlStore, route
 
     // 2. Second POST under the SAME app_id reuses the account (no 409).
     let resp = post_ws(app_id.clone(), json!({"name": "idx-b", "kind": "fs"})).await;
-    assert_eq!(resp.status(), StatusCode::CREATED, "second create reuses tenant");
+    assert_eq!(resp.status(), StatusCode::OK, "second create reuses tenant");
     let j = body_json(resp.into_body()).await;
     let ws_fs = j["id"].as_str().unwrap().to_string();
     let acct2 = state
@@ -486,7 +486,7 @@ async fn sub_app_auto_provision(state: &Arc<AppState>, mysql: &MysqlStore, route
     // 5. A different real tenant cannot delete this app's workspace → 404
     //    (cross-tenant id is hidden, not 403, so it can't be used as a probe).
     let resp = post_ws(rival_app.clone(), json!({"name": "rival", "kind": "fs"})).await;
-    assert_eq!(resp.status(), StatusCode::CREATED);
+    assert_eq!(resp.status(), StatusCode::OK);
     let rival_ws = body_json(resp.into_body()).await["id"]
         .as_str()
         .unwrap()
@@ -582,7 +582,7 @@ async fn apps_mgmt_company_envelope_e2e() {
         Some(user),
     )
     .await;
-    assert_eq!(resp.status(), StatusCode::CREATED);
+    assert_eq!(resp.status(), StatusCode::OK);
     let j = body_json(resp.into_body()).await;
     assert!(j.get("success").is_none(), "company envelope drops `success`");
     assert!(j.get("data").is_none(), "single object is not wrapped in data");
@@ -624,7 +624,7 @@ async fn apps_mgmt_company_envelope_e2e() {
         Some(user),
     )
     .await;
-    assert_eq!(resp.status(), StatusCode::CREATED);
+    assert_eq!(resp.status(), StatusCode::OK);
     let j = body_json(resp.into_body()).await;
     let masked = j["token"].as_str().unwrap().to_string();
     assert!(
@@ -661,7 +661,7 @@ async fn apps_mgmt_company_envelope_e2e() {
             Some(user),
         )
         .await;
-        assert_eq!(resp.status(), StatusCode::CREATED);
+        assert_eq!(resp.status(), StatusCode::OK);
         let j = body_json(resp.into_body()).await;
         assert_eq!(j["name"], name);
         assert_eq!(j["creator"], "zhangsan");
@@ -773,7 +773,7 @@ async fn apps_authz_and_workspace_name_e2e() {
         cookie.clone(),
     )
     .await;
-    assert_eq!(resp.status(), StatusCode::CREATED, "authorized create → 201");
+    assert_eq!(resp.status(), StatusCode::OK, "authorized create → 200");
     let j = body_json(resp.into_body()).await;
     assert_eq!(
         j["workspace_name"], "DBPaaS 测试",
