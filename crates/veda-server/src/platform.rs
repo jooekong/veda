@@ -33,20 +33,35 @@ pub struct PlatformUser {
 /// callers legitimately have no gateway identity, and authorization is enforced
 /// separately by the external authz API (item 4) — this only carries *who* the
 /// caller is, not *whether* they may act.
-pub struct GatewayUser(pub Option<PlatformUser>);
+pub struct GatewayUser {
+    user: Option<PlatformUser>,
+    /// Raw `Cookie` header, forwarded to the platform APIs (authz / workspace
+    /// lookup) so veda acts on behalf of the calling user.
+    cookie: Option<String>,
+}
 
 impl GatewayUser {
-    /// Domain account for `creator`, if present.
+    /// Domain account for `creator` / the authz `user` param, if present.
     pub fn creator(&self) -> Option<String> {
-        self.0.as_ref().map(|u| u.name.clone())
+        self.user.as_ref().map(|u| u.name.clone())
     }
 
     /// Chinese display name for `creator_name`, if present and non-empty.
     pub fn creator_name(&self) -> Option<String> {
-        self.0
+        self.user
             .as_ref()
             .filter(|u| !u.display_name.is_empty())
             .map(|u| u.display_name.clone())
+    }
+
+    /// Domain account as a borrow, for the authz `user` query param.
+    pub fn user_name(&self) -> Option<&str> {
+        self.user.as_ref().map(|u| u.name.as_str())
+    }
+
+    /// Raw `Cookie` header to forward to platform APIs.
+    pub fn cookie(&self) -> Option<&str> {
+        self.cookie.as_deref()
     }
 }
 
@@ -58,7 +73,12 @@ impl<S: Send + Sync> FromRequestParts<S> for GatewayUser {
         _state: &S,
     ) -> impl Future<Output = Result<Self, Self::Rejection>> + Send {
         let user = decode_user_header(parts);
-        async move { Ok(GatewayUser(user)) }
+        let cookie = parts
+            .headers
+            .get("cookie")
+            .and_then(|v| v.to_str().ok())
+            .map(|s| s.to_string());
+        async move { Ok(GatewayUser { user, cookie }) }
     }
 }
 
@@ -73,24 +93,76 @@ fn decode_user_header(parts: &Parts) -> Option<PlatformUser> {
     serde_json::from_slice(&bytes).ok()
 }
 
-/// Resolve a platform workspace's display name by its code (= `workspace_id`).
+/// Platform API base, e.g. `https://paas-api-test.ddmc-inc.com/proxy/llm`. Read
+/// from `VEDA_PLATFORM_BASE`. When unset, external authz is **not enforced** and
+/// workspace-name lookup is skipped — so dev / integration without the platform
+/// configured behaves as before.
+fn platform_base() -> Option<String> {
+    std::env::var("VEDA_PLATFORM_BASE")
+        .ok()
+        .filter(|s| !s.is_empty())
+}
+
+/// External authorization (item 4): check the caller may perform `action` in
+/// `workspace`, forwarding the request `cookie` so the platform authenticates
+/// the call as that user. Fail-closed — missing cookie/user, non-200, or any
+/// transport error all deny (`PermissionDenied` → 403); no fallback. Skipped
+/// (allowed) when `VEDA_PLATFORM_BASE` is unset. The platform registers a single
+/// `workspace-create` action that gates all resource creation (verified: 200
+/// `{}` = allowed, 403 = denied).
+pub async fn authorize(
+    cookie: Option<&str>,
+    action: &str,
+    workspace: &str,
+    user: Option<&str>,
+) -> Result<(), crate::error::AppError> {
+    let base = match platform_base() {
+        Some(b) => b,
+        None => return Ok(()), // platform not configured → don't enforce
+    };
+    let (cookie, user) = match (cookie, user) {
+        (Some(c), Some(u)) => (c, u),
+        _ => return Err(veda_types::VedaError::PermissionDenied.into()),
+    };
+    let url = format!("{base}/open/v1/auth/service/veda-reach/action/{action}");
+    let allowed = reqwest::Client::new()
+        .get(&url)
+        .query(&[("workspace", workspace), ("user", user)])
+        .header("Cookie", cookie)
+        .send()
+        .await
+        .map(|r| r.status().is_success())
+        .unwrap_or(false);
+    if allowed {
+        Ok(())
+    } else {
+        Err(veda_types::VedaError::PermissionDenied.into())
+    }
+}
+
+/// Resolve a platform workspace's display name by code (= `workspace_id`),
+/// forwarding the request `cookie`. Returns the `name` field; `None` on any
+/// failure or when the platform isn't configured (response then carries
+/// `workspace_name: null`).
 ///
-/// Verified against the AI Workbench API (2026-06-17):
-/// ```text
-/// GET {base}/proxy/llm/open/v1/workspace/{code}
-/// 200 (bare object, NOT the company envelope):
-///   { "id", "code", "name", "description", "creator", "creator_name",
-///     "created_at", "updated_at", "removed_at" }
-/// ```
-/// `workspace_name` is the `name` field (code `dbpaas-test` → "DBPaaS 测试").
-/// base = paas-api-test.ddmc-inc.com (test) / paas-api.ddmc-inc.com (prod).
-///
-/// Returns `None` for now (stub): the call needs veda's OWN credential to the
-/// platform — the working test auth is a user JWT cookie (`DDMC-INC`), so a
-/// server-side service token is the real path. That's part of the frozen
-/// external-authz work; wire the reqwest GET + `.name` extraction once it lands.
-pub async fn resolve_workspace_name(_code: &str) -> Option<String> {
-    None
+/// Verified shape (2026-06-17): `GET {base}/open/v1/workspace/{code}` → 200 bare
+/// object `{ id, code, name, description, creator, creator_name, ... }`
+/// (`dbpaas-test` → "DBPaaS 测试").
+pub async fn resolve_workspace_name(cookie: Option<&str>, code: &str) -> Option<String> {
+    let base = platform_base()?;
+    let cookie = cookie?;
+    let url = format!("{base}/open/v1/workspace/{code}");
+    let resp = reqwest::Client::new()
+        .get(&url)
+        .header("Cookie", cookie)
+        .send()
+        .await
+        .ok()?;
+    if !resp.status().is_success() {
+        return None;
+    }
+    let v: serde_json::Value = resp.json().await.ok()?;
+    v.get("name").and_then(|n| n.as_str()).map(String::from)
 }
 
 #[cfg(test)]

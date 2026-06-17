@@ -705,6 +705,84 @@ async fn apps_mgmt_company_envelope_e2e() {
     }
 }
 
+/// Authz + workspace_name end-to-end against the REAL AI Workbench platform.
+/// Requires `VEDA_PLATFORM_BASE` + `VEDA_TEST_COOKIE` (a `DDMC-INC=...` user
+/// cookie); skips otherwise so CI / no-platform runs are unaffected. Uses the
+/// real workspace `dbpaas-test`, where the cookie's user (`konglingqiao`) has
+/// `workspace-create`.
+#[tokio::test]
+async fn apps_authz_and_workspace_name_e2e() {
+    let cookie = match std::env::var("VEDA_TEST_COOKIE") {
+        Ok(c) if !c.is_empty() => c,
+        _ => {
+            eprintln!("skip apps_authz_and_workspace_name_e2e: VEDA_TEST_COOKIE unset");
+            return;
+        }
+    };
+    let (state, mysql, router) = build_test_app().await;
+    let app = "dbpaas-test"; // real platform workspace the cookie user owns
+    // base64 of {"name":"konglingqiao","displayName":"孔令乔"}
+    let user = "eyJuYW1lIjoia29uZ2xpbmdxaWFvIiwiZGlzcGxheU5hbWUiOiLlrZTku6TkuZQifQ==";
+
+    let send = |method: &'static str, uri: String, body: serde_json::Value, ck: String| {
+        let router = router.clone();
+        async move {
+            let req = Request::builder()
+                .method(method)
+                .uri(uri)
+                .header("cookie", &ck)
+                .header("user", user)
+                .header("content-type", "application/json")
+                .body(Body::from(body.to_string()))
+                .unwrap();
+            router.oneshot(req).await.unwrap()
+        }
+    };
+
+    // 1. Authorized create (konglingqiao has workspace-create on dbpaas-test) →
+    //    201; workspace_name resolved from the platform.
+    let resp = send(
+        "POST",
+        format!("/v1/apps/{app}/workspaces"),
+        json!({"name":"authz-idx","kind":"db"}),
+        cookie.clone(),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::CREATED, "authorized create → 201");
+    let j = body_json(resp.into_body()).await;
+    assert_eq!(
+        j["data"][0]["workspace_name"], "DBPaaS 测试",
+        "workspace_name resolved from the platform"
+    );
+    assert_eq!(j["data"][0]["creator"], "konglingqiao");
+    let ws = j["data"][0]["id"].as_str().unwrap().to_string();
+
+    // 2. Unauthorized: a workspace the user has no perm on → 403 (authz denies,
+    //    fail-closed, before any provisioning).
+    let resp = send(
+        "POST",
+        "/v1/apps/no-such-ws-xyz/workspaces".to_string(),
+        json!({"name":"x","kind":"fs"}),
+        cookie.clone(),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::FORBIDDEN, "unauthorized create → 403");
+
+    // cleanup
+    let _ = state
+        .vector_workspace_store
+        .drop_collection(&veda_store::vector_collection_name(&ws))
+        .await;
+    let _ = state.auth_store.hard_delete_datasets_for_workspace(&ws).await;
+    let _ = state.auth_store.hard_delete_workspace(&ws).await;
+    if let Some(a) = state.auth_store.get_account_by_app_id(app).await.unwrap() {
+        let _ = sqlx::query("DELETE FROM veda_accounts WHERE id = ?")
+            .bind(&a.id)
+            .execute(mysql.pool())
+            .await;
+    }
+}
+
 /// Mode passthrough + `score_type` contract over the full HTTP stack.
 /// Asserts semantic→`cosine`, fulltext→`bm25`, hybrid→`rrf`, and that an
 /// omitted `mode` defaults to hybrid. Fulltext must match a lexical token

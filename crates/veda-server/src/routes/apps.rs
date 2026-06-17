@@ -228,6 +228,9 @@ async fn create_app_workspace(
     Json(mut req): Json<CreateWorkspaceRequest>,
 ) -> Result<(StatusCode, Json<ApiResponse<AppWorkspace>>), AppError> {
     let app_id = require_app_id(&app_id)?.to_string();
+    // External authz (item 4): caller must be allowed to create in this
+    // ai_workspace. Skipped when the platform isn't configured (VEDA_PLATFORM_BASE).
+    crate::platform::authorize(gw.cookie(), "workspace-create", &app_id, gw.user_name()).await?;
     let account = ensure_account(&state, &app_id).await?;
     req.app_id = Some(app_id.clone());
     let ws = create_workspace_under(&state, account.id, req).await?;
@@ -238,7 +241,7 @@ async fn create_app_workspace(
         .auth_store
         .set_workspace_creator(&ws.id, creator.as_deref(), creator_name.as_deref())
         .await?;
-    let workspace_name = resolve_workspace_name(&app_id).await;
+    let workspace_name = resolve_workspace_name(gw.cookie(), &app_id).await;
     Ok((
         StatusCode::CREATED,
         Json(ApiResponse::ok(AppWorkspace::build(
@@ -256,6 +259,7 @@ async fn create_app_workspace(
 async fn list_app_workspaces(
     State(state): State<Arc<AppState>>,
     Path(app_id): Path<String>,
+    gw: GatewayUser,
     Query(q): Query<AppPageQuery>,
 ) -> Result<Json<CompanyPage<AppWorkspace>>, AppError> {
     let app_id = require_app_id(&app_id)?;
@@ -269,7 +273,7 @@ async fn list_app_workspaces(
         .auth_store
         .list_app_workspaces(&account.id, offset, size, &order_by, &order)
         .await?;
-    let workspace_name = resolve_workspace_name(app_id).await;
+    let workspace_name = resolve_workspace_name(gw.cookie(), app_id).await;
     let data = rows
         .into_iter()
         .map(|(ws, creator, creator_name)| {
@@ -362,6 +366,7 @@ async fn create_app_key(
     gw: GatewayUser,
     Json(body): Json<serde_json::Value>,
 ) -> Result<(StatusCode, Json<ApiResponse<AppKey>>), AppError> {
+    crate::platform::authorize(gw.cookie(), "workspace-create", &app_id, gw.user_name()).await?;
     let ws = load_app_workspace(&state, &app_id, &ws_id).await?;
     if ws.status != veda_types::WorkspaceStatus::Active {
         return Err(VedaError::NotFound(format!("workspace {ws_id}")).into());
@@ -507,6 +512,7 @@ async fn create_app_dataset(
     gw: GatewayUser,
     Json(body): Json<serde_json::Value>,
 ) -> Result<(StatusCode, Json<ApiResponse<AppDataset>>), AppError> {
+    crate::platform::authorize(gw.cookie(), "workspace-create", &app_id, gw.user_name()).await?;
     let ws = load_app_workspace(&state, &app_id, &ws_id).await?;
     if ws.status != veda_types::WorkspaceStatus::Active {
         return Err(VedaError::NotFound(format!("workspace {ws_id}")).into());
