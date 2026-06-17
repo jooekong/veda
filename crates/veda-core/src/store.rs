@@ -568,16 +568,19 @@ pub trait AuthStore: Send + Sync {
         creator_name: Option<&str>,
     ) -> Result<()>;
 
-    /// List active workspaces for an account WITH their creator identity
-    /// (apps surface). Like `list_workspaces` but also returns
-    /// `(creator, creator_name)`; cursor-paginated the same way.
+    /// Offset-paginated list of an account's active workspaces WITH creator
+    /// identity (apps surface). Returns `(page items, total count)`. `order_by`
+    /// (`created_at` | `id`) and `order` (`asc` | `desc`) are whitelisted by the
+    /// impl — never interpolate caller input into SQL directly.
     #[allow(clippy::type_complexity)]
     async fn list_app_workspaces(
         &self,
         account_id: &str,
-        after: Option<&str>,
-        limit: u32,
-    ) -> Result<(Vec<(Workspace, Option<String>, Option<String>)>, bool)>;
+        offset: u32,
+        size: u32,
+        order_by: &str,
+        order: &str,
+    ) -> Result<(Vec<(Workspace, Option<String>, Option<String>)>, i64)>;
 
     /// Create a workspace key on the apps surface, persisting the plaintext
     /// `token` (for getToken) and creator identity alongside the hash.
@@ -614,15 +617,18 @@ pub trait AuthStore: Send + Sync {
         creator_name: Option<&str>,
     ) -> Result<()>;
 
-    /// List active datasets for a workspace WITH creator identity (apps
-    /// surface). Cursor-paginated like `list_active_datasets`.
+    /// Offset-paginated list of a workspace's active datasets WITH creator
+    /// identity (apps surface). Returns `(page items, total count)`; `order_by`
+    /// / `order` whitelisted by the impl.
     #[allow(clippy::type_complexity)]
     async fn list_app_datasets(
         &self,
         workspace_id: &str,
-        after: Option<&str>,
-        limit: u32,
-    ) -> Result<(Vec<(Dataset, Option<String>, Option<String>)>, bool)>;
+        offset: u32,
+        size: u32,
+        order_by: &str,
+        order: &str,
+    ) -> Result<(Vec<(Dataset, Option<String>, Option<String>)>, i64)>;
     /// Atomically insert a db-kind workspace together with its bootstrap
     /// dataset in a single transaction — either both rows land or neither.
     /// Closes the crash window where `create_workspace` followed by a

@@ -114,6 +114,22 @@ fn row_to_account(row: &sqlx::mysql::MySqlRow) -> Result<Account> {
     })
 }
 
+/// Whitelist the apps-surface `order_by` / `order` into safe SQL fragments —
+/// caller input must never be interpolated into SQL raw. Defaults `created_at`
+/// `DESC`.
+fn order_clause(order_by: &str, order: &str) -> (&'static str, &'static str) {
+    let col = match order_by {
+        "id" => "id",
+        _ => "created_at",
+    };
+    let dir = if order.eq_ignore_ascii_case("asc") {
+        "ASC"
+    } else {
+        "DESC"
+    };
+    (col, dir)
+}
+
 fn row_to_dataset(row: &sqlx::mysql::MySqlRow) -> Result<Dataset> {
     let st: String = row.try_get("status").map_err(storage_err)?;
     Ok(Dataset {
@@ -2553,35 +2569,33 @@ impl AuthStore for MysqlStore {
     async fn list_app_workspaces(
         &self,
         account_id: &str,
-        after: Option<&str>,
-        limit: u32,
-    ) -> Result<(Vec<(Workspace, Option<String>, Option<String>)>, bool)> {
-        let fetch_n = (limit as i64) + 1;
+        offset: u32,
+        size: u32,
+        order_by: &str,
+        order: &str,
+    ) -> Result<(Vec<(Workspace, Option<String>, Option<String>)>, i64)> {
         let cols = "id, account_id, name, status, kind, app_id, description, created_at, updated_at, creator, creator_name";
-        // Bind the SQL to `let`s so the &str borrow outlives the match + fetch
-        // (a `&format!(...)` temporary would be dropped before fetch_all).
-        let sql_after = format!(
+        let (ob, od) = order_clause(order_by, order);
+        let sql = format!(
             "SELECT {cols} FROM veda_workspaces \
-             WHERE account_id = ? AND status = 'active' AND id > ? ORDER BY id LIMIT ?"
+             WHERE account_id = ? AND status = 'active' ORDER BY {ob} {od} LIMIT ? OFFSET ?"
         );
-        let sql_first = format!(
-            "SELECT {cols} FROM veda_workspaces \
-             WHERE account_id = ? AND status = 'active' ORDER BY id LIMIT ?"
-        );
-        let rows = match after {
-            Some(cursor) => sqlx::query(&sql_after)
-                .bind(account_id)
-                .bind(cursor)
-                .bind(fetch_n),
-            None => sqlx::query(&sql_first).bind(account_id).bind(fetch_n),
-        }
-        .fetch_all(&self.pool)
+        let rows = sqlx::query(&sql)
+            .bind(account_id)
+            .bind(size as i64)
+            .bind(offset as i64)
+            .fetch_all(&self.pool)
+            .await
+            .map_err(storage_err)?;
+        let total: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM veda_workspaces WHERE account_id = ? AND status = 'active'",
+        )
+        .bind(account_id)
+        .fetch_one(&self.pool)
         .await
         .map_err(storage_err)?;
-        let has_more = rows.len() > limit as usize;
         let items: Result<Vec<_>> = rows
             .iter()
-            .take(limit as usize)
             .map(|r| {
                 let ws = row_to_workspace(r)?;
                 let creator: Option<String> = r.try_get("creator").map_err(storage_err)?;
@@ -2589,7 +2603,7 @@ impl AuthStore for MysqlStore {
                 Ok((ws, creator, creator_name))
             })
             .collect();
-        Ok((items?, has_more))
+        Ok((items?, total))
     }
 
     async fn create_db_workspace(
@@ -3002,33 +3016,33 @@ impl AuthStore for MysqlStore {
     async fn list_app_datasets(
         &self,
         workspace_id: &str,
-        after: Option<&str>,
-        limit: u32,
-    ) -> Result<(Vec<(Dataset, Option<String>, Option<String>)>, bool)> {
-        let fetch_n = (limit as i64) + 1;
+        offset: u32,
+        size: u32,
+        order_by: &str,
+        order: &str,
+    ) -> Result<(Vec<(Dataset, Option<String>, Option<String>)>, i64)> {
         let cols = "id, workspace_id, name, status, description, created_at, updated_at, creator, creator_name";
-        let sql_after = format!(
+        let (ob, od) = order_clause(order_by, order);
+        let sql = format!(
             "SELECT {cols} FROM veda_datasets \
-             WHERE workspace_id = ? AND status = 'active' AND id > ? ORDER BY id LIMIT ?"
+             WHERE workspace_id = ? AND status = 'active' ORDER BY {ob} {od} LIMIT ? OFFSET ?"
         );
-        let sql_first = format!(
-            "SELECT {cols} FROM veda_datasets \
-             WHERE workspace_id = ? AND status = 'active' ORDER BY id LIMIT ?"
-        );
-        let rows = match after {
-            Some(cursor) => sqlx::query(&sql_after)
-                .bind(workspace_id)
-                .bind(cursor)
-                .bind(fetch_n),
-            None => sqlx::query(&sql_first).bind(workspace_id).bind(fetch_n),
-        }
-        .fetch_all(&self.pool)
+        let rows = sqlx::query(&sql)
+            .bind(workspace_id)
+            .bind(size as i64)
+            .bind(offset as i64)
+            .fetch_all(&self.pool)
+            .await
+            .map_err(storage_err)?;
+        let total: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM veda_datasets WHERE workspace_id = ? AND status = 'active'",
+        )
+        .bind(workspace_id)
+        .fetch_one(&self.pool)
         .await
         .map_err(storage_err)?;
-        let has_more = rows.len() > limit as usize;
         let items: Result<Vec<_>> = rows
             .iter()
-            .take(limit as usize)
             .map(|r| {
                 let ds = row_to_dataset(r)?;
                 let creator: Option<String> = r.try_get("creator").map_err(storage_err)?;
@@ -3036,7 +3050,7 @@ impl AuthStore for MysqlStore {
                 Ok((ds, creator, creator_name))
             })
             .collect();
-        Ok((items?, has_more))
+        Ok((items?, total))
     }
 
     async fn revoke_workspace_key(&self, id: &str) -> Result<()> {

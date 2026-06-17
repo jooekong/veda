@@ -17,7 +17,7 @@ use axum::routing::{delete, get, post};
 use axum::{Json, Router};
 use chrono::{DateTime, Utc};
 use uuid::Uuid;
-use veda_types::api::{CreateWorkspaceRequest, PaginatedResponse, PaginationQuery};
+use veda_types::api::CreateWorkspaceRequest;
 use veda_core::checksum::sha256_hex;
 use veda_types::validate;
 use veda_types::{
@@ -30,11 +30,63 @@ use crate::platform::{resolve_workspace_name, GatewayUser};
 use crate::routes::account::create_workspace_under;
 use crate::state::AppState;
 
-const LIST_DEFAULT_LIMIT: u32 = 100;
-const LIST_MAX_LIMIT: u32 = 200;
+/// Offset-pagination query for apps list endpoints (company spec): `page` (from
+/// 1), `size` (default 20, max 200), `order_by` (`created_at` | `id`), `order`
+/// (`asc` | `desc`).
+#[derive(serde::Deserialize)]
+struct AppPageQuery {
+    page: Option<u32>,
+    size: Option<u32>,
+    order_by: Option<String>,
+    order: Option<String>,
+}
 
-fn clamp_limit(q: &PaginationQuery) -> u32 {
-    q.limit.unwrap_or(LIST_DEFAULT_LIMIT).clamp(1, LIST_MAX_LIMIT)
+impl AppPageQuery {
+    /// `(page, size, order_by, order)` with defaults + clamps applied.
+    fn resolved(&self) -> (u32, u32, String, String) {
+        (
+            self.page.unwrap_or(1).max(1),
+            self.size.unwrap_or(20).clamp(1, 200),
+            self.order_by.clone().unwrap_or_else(|| "created_at".into()),
+            self.order.clone().unwrap_or_else(|| "desc".into()),
+        )
+    }
+}
+
+/// Company page envelope returned directly by apps list handlers. The response
+/// middleware passes it through untouched (it has no `success` field).
+#[derive(serde::Serialize)]
+struct CompanyPage<T> {
+    data: Vec<T>,
+    page: u32,
+    size: u32,
+    order_by: String,
+    order: String,
+    total: i64,
+    total_page: i64,
+    has_next_page: bool,
+    has_prev_page: bool,
+}
+
+impl<T> CompanyPage<T> {
+    fn new(data: Vec<T>, page: u32, size: u32, order_by: String, order: String, total: i64) -> Self {
+        let total_page = if size > 0 {
+            (total + size as i64 - 1) / size as i64
+        } else {
+            0
+        };
+        CompanyPage {
+            has_next_page: (page as i64) < total_page,
+            has_prev_page: page > 1,
+            data,
+            page,
+            size,
+            order_by,
+            order,
+            total,
+            total_page,
+        }
+    }
 }
 
 /// Apps-surface workspace view. Renames the internal `app_id` to the platform
@@ -204,41 +256,27 @@ async fn create_app_workspace(
 async fn list_app_workspaces(
     State(state): State<Arc<AppState>>,
     Path(app_id): Path<String>,
-    Query(q): Query<PaginationQuery>,
-) -> Result<Json<ApiResponse<PaginatedResponse<AppWorkspace>>>, AppError> {
+    Query(q): Query<AppPageQuery>,
+) -> Result<Json<CompanyPage<AppWorkspace>>, AppError> {
     let app_id = require_app_id(&app_id)?;
+    let (page, size, order_by, order) = q.resolved();
     let account = match lookup_active_account(&state, app_id).await? {
         Some(acc) => acc,
-        None => {
-            return Ok(Json(ApiResponse::ok(PaginatedResponse {
-                items: Vec::new(),
-                has_more: false,
-                next_cursor: None,
-            })))
-        }
+        None => return Ok(Json(CompanyPage::new(Vec::new(), page, size, order_by, order, 0))),
     };
-    let limit = clamp_limit(&q);
-    let (rows, has_more) = state
+    let offset = (page - 1) * size;
+    let (rows, total) = state
         .auth_store
-        .list_app_workspaces(&account.id, q.after.as_deref(), limit)
+        .list_app_workspaces(&account.id, offset, size, &order_by, &order)
         .await?;
-    let next_cursor = if has_more {
-        rows.last().map(|(w, _, _)| w.id.clone())
-    } else {
-        None
-    };
     let workspace_name = resolve_workspace_name(app_id).await;
-    let items = rows
+    let data = rows
         .into_iter()
         .map(|(ws, creator, creator_name)| {
             AppWorkspace::build(ws, workspace_name.clone(), creator, creator_name)
         })
         .collect();
-    Ok(Json(ApiResponse::ok(PaginatedResponse {
-        items,
-        has_more,
-        next_cursor,
-    })))
+    Ok(Json(CompanyPage::new(data, page, size, order_by, order, total)))
 }
 
 /// DELETE /v1/apps/{app_id}/workspaces/{id} — soft-delete a workspace under the
@@ -517,28 +555,20 @@ async fn create_app_dataset(
 async fn list_app_datasets(
     State(state): State<Arc<AppState>>,
     Path((app_id, ws_id)): Path<(String, String)>,
-    Query(q): Query<PaginationQuery>,
-) -> Result<Json<ApiResponse<PaginatedResponse<AppDataset>>>, AppError> {
+    Query(q): Query<AppPageQuery>,
+) -> Result<Json<CompanyPage<AppDataset>>, AppError> {
     load_app_workspace(&state, &app_id, &ws_id).await?;
-    let limit = clamp_limit(&q);
-    let (rows, has_more) = state
+    let (page, size, order_by, order) = q.resolved();
+    let offset = (page - 1) * size;
+    let (rows, total) = state
         .auth_store
-        .list_app_datasets(&ws_id, q.after.as_deref(), limit)
+        .list_app_datasets(&ws_id, offset, size, &order_by, &order)
         .await?;
-    let next_cursor = if has_more {
-        rows.last().map(|(d, _, _)| d.id.clone())
-    } else {
-        None
-    };
-    let items = rows
+    let data = rows
         .into_iter()
         .map(|(ds, creator, creator_name)| AppDataset::build(ds, creator, creator_name))
         .collect();
-    Ok(Json(ApiResponse::ok(PaginatedResponse {
-        items,
-        has_more,
-        next_cursor,
-    })))
+    Ok(Json(CompanyPage::new(data, page, size, order_by, order, total)))
 }
 
 // ── Company response envelope (stage 6, apps surface only) ──────────────
@@ -573,6 +603,13 @@ async fn company_envelope(
 
 fn map_to_company(v: serde_json::Value) -> serde_json::Value {
     use serde_json::json;
+    // Already a company envelope (apps list handlers return `CompanyPage`, which
+    // has no `success` field) — pass through untouched, keeping its real
+    // page/total. Only veda's `ApiResponse` bodies (always carry `success`) are
+    // transformed below.
+    if v.get("success").is_none() {
+        return v;
+    }
     // veda error: `{ success:false, error_code, error }`.
     if v.get("success").and_then(|s| s.as_bool()) == Some(false) {
         let code = v

@@ -627,40 +627,52 @@ async fn apps_mgmt_company_envelope_e2e() {
         "getToken returns full token: {real}"
     );
 
-    // 4. Create dataset → creator stamped.
-    let resp = send(
-        "POST",
-        format!("/v1/apps/{app}/workspaces/{ws}/datasets"),
-        Some(json!({"name":"products"})),
-        Some(user),
-    )
-    .await;
-    assert_eq!(resp.status(), StatusCode::CREATED);
-    let j = body_json(resp.into_body()).await;
-    assert_eq!(j["data"][0]["name"], "products");
-    assert_eq!(j["data"][0]["creator"], "zhangsan");
+    // 4. Create two datasets → creator stamped.
+    for name in ["products", "faq"] {
+        let resp = send(
+            "POST",
+            format!("/v1/apps/{app}/workspaces/{ws}/datasets"),
+            Some(json!({ "name": name })),
+            Some(user),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::CREATED);
+        let j = body_json(resp.into_body()).await;
+        assert_eq!(j["data"][0]["name"], name);
+        assert_eq!(j["data"][0]["creator"], "zhangsan");
+    }
 
-    // 5. List datasets → company page envelope (data array + page fields).
+    // 5. List datasets with real offset pagination (page/size → total /
+    //    total_page / has_next / has_prev). A db workspace bootstraps a
+    //    `default` dataset, so total >= 3 (default + products + faq).
     let resp = send(
         "GET",
-        format!("/v1/apps/{app}/workspaces/{ws}/datasets"),
+        format!("/v1/apps/{app}/workspaces/{ws}/datasets?page=1&size=2"),
         None,
         None,
     )
     .await;
     let j = body_json(resp.into_body()).await;
-    assert!(
-        j["data"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|d| d["name"] == "products"),
-        "created dataset shows in the list"
-    );
-    assert!(
-        j.get("page").is_some() && j.get("has_next_page").is_some(),
-        "list carries the page envelope"
-    );
+    let total = j["total"].as_i64().unwrap();
+    assert!(total >= 3, "default + products + faq: {total}");
+    assert_eq!(j["data"].as_array().unwrap().len(), 2, "size=2 caps the page");
+    assert_eq!(j["page"], 1);
+    assert_eq!(j["size"], 2);
+    assert_eq!(j["has_next_page"], true, "more than one page");
+    assert_eq!(j["has_prev_page"], false);
+    // Page 2 carries the rest and flips has_prev_page; total is stable.
+    let resp = send(
+        "GET",
+        format!("/v1/apps/{app}/workspaces/{ws}/datasets?page=2&size=2"),
+        None,
+        None,
+    )
+    .await;
+    let j2 = body_json(resp.into_body()).await;
+    assert_eq!(j2["page"], 2);
+    assert_eq!(j2["has_prev_page"], true);
+    assert_eq!(j2["total"], total, "total stable across pages");
+    assert!(!j2["data"].as_array().unwrap().is_empty(), "page 2 non-empty");
 
     // 6. Error envelope: bad permission → {error:{code:INVALID_INPUT}}, no data.
     let resp = send(
