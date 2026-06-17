@@ -1,10 +1,16 @@
-//! app_id-scoped control plane (`/v1/apps/{app_id}/...`).
+//! workspace-scoped control plane for the AI Workbench
+//! (`/v1/workspace/{workspace}/...`).
+//!
+//! `{workspace}` is the **platform workspace code** (the AI Workbench tenant;
+//! stored internally as `app_id`). Under it veda exposes **projects** — veda's
+//! own workspaces (vector / file libraries). The word "workspace" is reserved
+//! for the platform tenant on this surface, so veda's own are called *projects*
+//! and identified by their `id`.
 //!
 //! Auth is **externalized to the platform gateway**: these endpoints take NO
-//! veda credential. The path `app_id` is the tenant boundary — the gateway is
-//! responsible for proving the caller may act as that app_id. veda trusts it
-//! and resolves the account behind the app_id, auto-provisioning it on first
-//! use (`POST` only).
+//! veda credential. The path `{workspace}` is the tenant boundary — the gateway
+//! proves the caller may act as it. veda trusts it and resolves the account
+//! behind the workspace code, auto-provisioning it on first use (`POST` only).
 //!
 //! Runs alongside the legacy `vk_` control plane in `account.rs`
 //! (`/v1/workspaces`), which stays for console/CLI during the A migration.
@@ -13,7 +19,7 @@ use std::sync::Arc;
 
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
-use axum::routing::{delete, get, post};
+use axum::routing::{delete, get, patch, post};
 use axum::{Json, Router};
 use chrono::{DateTime, Utc};
 use uuid::Uuid;
@@ -89,16 +95,17 @@ impl<T> CompanyPage<T> {
     }
 }
 
-/// Apps-surface workspace view. Renames the internal `app_id` to the platform
-/// `workspace` at the boundary (item 3) and carries `workspace_name` +
-/// creator identity; the internal `Workspace` type stays untouched.
+/// AI-Workbench project view (veda's own workspace, exposed as a *project*).
+/// Carries the platform `workspace` (its tenant code, stored internally as
+/// `app_id`) + `workspace_name`; the project's own id is `id`. The internal
+/// `Workspace` type stays untouched.
 #[derive(serde::Serialize)]
-struct AppWorkspace {
+struct AppProject {
     /// Platform workspace code (gateway tenant; stored internally as `app_id`).
     workspace: Option<String>,
     /// Platform workspace display name (looked up; null until lookup is wired).
     workspace_name: Option<String>,
-    /// veda's own workspace (vector index) id.
+    /// veda's own project (vector / file library) id.
     id: String,
     name: String,
     kind: veda_types::WorkspaceKind,
@@ -110,14 +117,14 @@ struct AppWorkspace {
     updated_at: DateTime<Utc>,
 }
 
-impl AppWorkspace {
+impl AppProject {
     fn build(
         ws: Workspace,
         workspace_name: Option<String>,
         creator: Option<String>,
         creator_name: Option<String>,
     ) -> Self {
-        AppWorkspace {
+        AppProject {
             workspace: ws.app_id,
             workspace_name,
             id: ws.id,
@@ -136,45 +143,45 @@ impl AppWorkspace {
 pub fn routes() -> Router<Arc<AppState>> {
     Router::new()
         .route(
-            "/v1/apps/{app_id}/workspaces",
-            post(create_app_workspace).get(list_app_workspaces),
+            "/v1/workspace/{workspace}/projects",
+            post(create_app_project).get(list_app_projects),
         )
         .route(
-            "/v1/apps/{app_id}/workspaces/{id}",
-            delete(delete_app_workspace),
+            "/v1/workspace/{workspace}/project/{id}",
+            patch(update_app_project).delete(delete_app_project),
         )
         .route(
-            "/v1/apps/{app_id}/workspaces/{id}/keys",
+            "/v1/workspace/{workspace}/project/{id}/keys",
             post(create_app_key).get(list_app_keys),
         )
         .route(
-            "/v1/apps/{app_id}/workspaces/{id}/keys/{key_id}",
+            "/v1/workspace/{workspace}/project/{id}/keys/{key_id}",
             delete(revoke_app_key),
         )
         .route(
-            "/v1/apps/{app_id}/workspaces/{id}/keys/{key_id}/token",
+            "/v1/workspace/{workspace}/project/{id}/keys/{key_id}/token",
             get(get_app_key_token),
         )
         .route(
-            "/v1/apps/{app_id}/workspaces/{id}/datasets",
+            "/v1/workspace/{workspace}/project/{id}/datasets",
             post(create_app_dataset).get(list_app_datasets),
         )
         // Stage 6: company response envelope, apps surface only.
         .layer(axum::middleware::from_fn(company_envelope))
 }
 
-fn require_app_id(app_id: &str) -> Result<&str, AppError> {
-    let trimmed = app_id.trim();
+fn require_workspace(workspace: &str) -> Result<&str, AppError> {
+    let trimmed = workspace.trim();
     if trimmed.is_empty() {
-        return Err(VedaError::InvalidInput("app_id must not be empty".into()).into());
+        return Err(VedaError::InvalidInput("workspace must not be empty".into()).into());
     }
     Ok(trimmed)
 }
 
-/// Look up the account for `app_id`, treating a **suspended** account as
-/// unavailable — mirrors the `vk_` / `wk_` auth paths, which only match active
-/// accounts (so ops can lock an app out of the control plane too). Returns
-/// `Ok(None)` when the app_id is simply unknown.
+/// Look up the account for a platform `workspace` code, treating a **suspended**
+/// account as unavailable — mirrors the `vk_` / `wk_` auth paths, which only
+/// match active accounts (so ops can lock a tenant out of the control plane
+/// too). Returns `Ok(None)` when the workspace code is simply unknown.
 async fn lookup_active_account(
     state: &AppState,
     app_id: &str,
@@ -186,10 +193,11 @@ async fn lookup_active_account(
     }
 }
 
-/// Resolve the account for `app_id`, creating it (auto-provisioning the tenant)
-/// when absent. Race-safe: a concurrent create that loses the UNIQUE(app_id)
-/// race surfaces as `AlreadyExists`, which we resolve by re-reading the winner.
-/// Only the account row is created — no `vk_` is minted (A drops account keys).
+/// Resolve the account for a platform `workspace` code, creating it
+/// (auto-provisioning the tenant) when absent. Race-safe: a concurrent create
+/// that loses the UNIQUE(app_id) race surfaces as `AlreadyExists`, which we
+/// resolve by re-reading the winner. Only the account row is created — no `vk_`
+/// is minted (A drops account keys).
 async fn ensure_account(state: &AppState, app_id: &str) -> Result<Account, AppError> {
     if let Some(acc) = lookup_active_account(state, app_id).await? {
         return Ok(acc);
@@ -207,7 +215,7 @@ async fn ensure_account(state: &AppState, app_id: &str) -> Result<Account, AppEr
     };
     match state.auth_store.create_account(&account).await {
         Ok(()) => Ok(account),
-        // Lost the race against a concurrent first-touch of the same app_id;
+        // Lost the race against a concurrent first-touch of the same workspace;
         // the winner's row now exists — read it back.
         Err(VedaError::AlreadyExists(_)) => lookup_active_account(state, app_id)
             .await?
@@ -218,21 +226,21 @@ async fn ensure_account(state: &AppState, app_id: &str) -> Result<Account, AppEr
     }
 }
 
-/// POST /v1/apps/{app_id}/workspaces — auto-provision the tenant (if new) and
-/// create a workspace under it. The path `app_id` is authoritative and stamped
-/// onto the workspace; any `app_id` in the body is ignored.
-async fn create_app_workspace(
+/// POST /v1/workspace/{workspace}/projects — auto-provision the tenant (if new)
+/// and create a project under it. The path `{workspace}` is authoritative and
+/// stamped onto the project; any `app_id` in the body is ignored.
+async fn create_app_project(
     State(state): State<Arc<AppState>>,
-    Path(app_id): Path<String>,
+    Path(workspace): Path<String>,
     gw: GatewayUser,
     Json(mut req): Json<CreateWorkspaceRequest>,
-) -> Result<(StatusCode, Json<ApiResponse<AppWorkspace>>), AppError> {
-    let app_id = require_app_id(&app_id)?.to_string();
+) -> Result<(StatusCode, Json<ApiResponse<AppProject>>), AppError> {
+    let workspace = require_workspace(&workspace)?.to_string();
     // External authz (item 4): caller must be allowed to create in this
-    // ai_workspace. Skipped when the platform isn't configured (VEDA_PLATFORM_BASE).
-    crate::platform::authorize(gw.cookie(), "workspace-create", &app_id, gw.user_name()).await?;
-    let account = ensure_account(&state, &app_id).await?;
-    req.app_id = Some(app_id.clone());
+    // workspace. Skipped when the platform isn't configured (VEDA_PLATFORM_BASE).
+    crate::platform::authorize(gw.cookie(), "workspace-create", &workspace, gw.user_name()).await?;
+    let account = ensure_account(&state, &workspace).await?;
+    req.app_id = Some(workspace.clone());
     let ws = create_workspace_under(&state, account.id, req).await?;
     // Stamp creator from the gateway identity (NULL on direct access).
     let creator = gw.creator();
@@ -241,10 +249,10 @@ async fn create_app_workspace(
         .auth_store
         .set_workspace_creator(&ws.id, creator.as_deref(), creator_name.as_deref())
         .await?;
-    let workspace_name = resolve_workspace_name(gw.cookie(), &app_id).await;
+    let workspace_name = resolve_workspace_name(gw.cookie(), &workspace).await;
     Ok((
         StatusCode::CREATED,
-        Json(ApiResponse::ok(AppWorkspace::build(
+        Json(ApiResponse::ok(AppProject::build(
             ws,
             workspace_name,
             creator,
@@ -253,18 +261,18 @@ async fn create_app_workspace(
     ))
 }
 
-/// GET /v1/apps/{app_id}/workspaces — list active workspaces under the app.
-/// A GET must not have side effects, so an unknown app_id returns an empty page
-/// rather than auto-provisioning a tenant.
-async fn list_app_workspaces(
+/// GET /v1/workspace/{workspace}/projects — list active projects under the
+/// workspace. A GET must not have side effects, so an unknown workspace returns
+/// an empty page rather than auto-provisioning a tenant.
+async fn list_app_projects(
     State(state): State<Arc<AppState>>,
-    Path(app_id): Path<String>,
+    Path(workspace): Path<String>,
     gw: GatewayUser,
     Query(q): Query<AppPageQuery>,
-) -> Result<Json<CompanyPage<AppWorkspace>>, AppError> {
-    let app_id = require_app_id(&app_id)?;
+) -> Result<Json<CompanyPage<AppProject>>, AppError> {
+    let workspace = require_workspace(&workspace)?;
     let (page, size, order_by, order) = q.resolved();
-    let account = match lookup_active_account(&state, app_id).await? {
+    let account = match lookup_active_account(&state, workspace).await? {
         Some(acc) => acc,
         None => return Ok(Json(CompanyPage::new(Vec::new(), page, size, order_by, order, 0))),
     };
@@ -273,41 +281,89 @@ async fn list_app_workspaces(
         .auth_store
         .list_app_workspaces(&account.id, offset, size, &order_by, &order)
         .await?;
-    let workspace_name = resolve_workspace_name(gw.cookie(), app_id).await;
+    let workspace_name = resolve_workspace_name(gw.cookie(), workspace).await;
     let data = rows
         .into_iter()
         .map(|(ws, creator, creator_name)| {
-            AppWorkspace::build(ws, workspace_name.clone(), creator, creator_name)
+            AppProject::build(ws, workspace_name.clone(), creator, creator_name)
         })
         .collect();
     Ok(Json(CompanyPage::new(data, page, size, order_by, order, total)))
 }
 
-/// DELETE /v1/apps/{app_id}/workspaces/{id} — soft-delete a workspace under the
-/// app. Confirms the workspace belongs to this app's account first; a missing
-/// or cross-tenant id both return the same `NOT_FOUND` so a probe can't learn
-/// whether another app's workspace id exists.
-async fn delete_app_workspace(
+/// PATCH /v1/workspace/{workspace}/project/{id} — update a project's `name`
+/// and/or `description` (its `kind` is immutable). Partial: an omitted field
+/// keeps its current value; `description: null` clears it. Identified by the
+/// veda project `id`.
+async fn update_app_project(
     State(state): State<Arc<AppState>>,
-    Path((app_id, ws_id)): Path<(String, String)>,
+    Path((workspace, ws_id)): Path<(String, String)>,
+    gw: GatewayUser,
+    Json(body): Json<serde_json::Value>,
+) -> Result<Json<ApiResponse<AppProject>>, AppError> {
+    crate::platform::authorize(gw.cookie(), "workspace-create", &workspace, gw.user_name()).await?;
+    let ws = load_app_project(&state, &workspace, &ws_id).await?;
+    // PATCH: an absent field keeps its current value; a present one overwrites
+    // (`description: null` clears it). `kind` is never touched.
+    let name = match body.get("name") {
+        Some(v) => {
+            let s = v.as_str().unwrap_or("").trim().to_string();
+            if s.is_empty() {
+                return Err(VedaError::InvalidInput("name must not be empty".into()).into());
+            }
+            s
+        }
+        None => ws.name.clone(),
+    };
+    let description = match body.get("description") {
+        Some(v) => v.as_str().map(|s| s.to_string()),
+        None => ws.description.clone(),
+    };
+    state
+        .auth_store
+        .update_workspace(&ws.id, &name, description.as_deref())
+        .await?;
+    let (creator, creator_name) = state.auth_store.get_workspace_creator(&ws.id).await?;
+    let workspace_name = resolve_workspace_name(gw.cookie(), &workspace).await;
+    let updated = Workspace {
+        name,
+        description,
+        updated_at: Utc::now(),
+        ..ws
+    };
+    Ok(Json(ApiResponse::ok(AppProject::build(
+        updated,
+        workspace_name,
+        creator,
+        creator_name,
+    ))))
+}
+
+/// DELETE /v1/workspace/{workspace}/project/{id} — soft-delete a project under
+/// the workspace. Confirms it belongs to this workspace's account first; a
+/// missing or cross-tenant id both return the same `NOT_FOUND` so a probe can't
+/// learn whether another workspace's project id exists.
+async fn delete_app_project(
+    State(state): State<Arc<AppState>>,
+    Path((workspace, ws_id)): Path<(String, String)>,
 ) -> Result<Json<ApiResponse<()>>, AppError> {
-    let app_id = require_app_id(&app_id)?;
-    let account = lookup_active_account(&state, app_id)
+    let workspace = require_workspace(&workspace)?;
+    let account = lookup_active_account(&state, workspace)
         .await?
-        .ok_or_else(|| VedaError::NotFound(format!("workspace {ws_id}")))?;
+        .ok_or_else(|| VedaError::NotFound(format!("project {ws_id}")))?;
     let ws = state
         .auth_store
         .get_workspace(&ws_id)
         .await?
-        .ok_or_else(|| VedaError::NotFound(format!("workspace {ws_id}")))?;
+        .ok_or_else(|| VedaError::NotFound(format!("project {ws_id}")))?;
     if ws.account_id != account.id {
-        return Err(VedaError::NotFound(format!("workspace {ws_id}")).into());
+        return Err(VedaError::NotFound(format!("project {ws_id}")).into());
     }
     state.auth_store.delete_workspace(&ws_id).await?;
     Ok(Json(ApiResponse::ok(())))
 }
 
-// ── Workspace keys (apps surface) ──────────────────────
+// ── Project keys (apps surface) ────────────────────────
 
 /// Apps-surface key view. Carries a MASKED token (full token via getToken)
 /// plus creator identity; never exposes `key_hash`.
@@ -334,42 +390,42 @@ fn mask_token(token: &str) -> String {
     format!("{}…{}", &token[..7], &token[n - 4..])
 }
 
-/// Resolve + authorize the target veda workspace for an app: the app's account
-/// must exist (active) and own the workspace. A missing app, missing workspace,
-/// or cross-tenant id all collapse to the same `NOT_FOUND` so a probe can't
-/// learn another tenant's workspace ids.
-async fn load_app_workspace(
+/// Resolve + authorize the target project for a workspace: the workspace's
+/// account must exist (active) and own the project. A missing workspace, missing
+/// project, or cross-tenant id all collapse to the same `NOT_FOUND` so a probe
+/// can't learn another tenant's project ids.
+async fn load_app_project(
     state: &AppState,
-    app_id: &str,
+    workspace: &str,
     ws_id: &str,
 ) -> Result<Workspace, AppError> {
-    let app_id = require_app_id(app_id)?;
-    let account = lookup_active_account(state, app_id)
+    let workspace = require_workspace(workspace)?;
+    let account = lookup_active_account(state, workspace)
         .await?
-        .ok_or_else(|| VedaError::NotFound(format!("workspace {ws_id}")))?;
+        .ok_or_else(|| VedaError::NotFound(format!("project {ws_id}")))?;
     let ws = state
         .auth_store
         .get_workspace(ws_id)
         .await?
-        .ok_or_else(|| VedaError::NotFound(format!("workspace {ws_id}")))?;
+        .ok_or_else(|| VedaError::NotFound(format!("project {ws_id}")))?;
     if ws.account_id != account.id {
-        return Err(VedaError::NotFound(format!("workspace {ws_id}")).into());
+        return Err(VedaError::NotFound(format!("project {ws_id}")).into());
     }
     Ok(ws)
 }
 
-/// POST /v1/apps/{app_id}/workspaces/{id}/keys — mint a data-plane `wk_`.
+/// POST /v1/workspace/{workspace}/project/{id}/keys — mint a data-plane `wk_`.
 /// Persists the plaintext token (for getToken) + creator; returns it MASKED.
 async fn create_app_key(
     State(state): State<Arc<AppState>>,
-    Path((app_id, ws_id)): Path<(String, String)>,
+    Path((workspace, ws_id)): Path<(String, String)>,
     gw: GatewayUser,
     Json(body): Json<serde_json::Value>,
 ) -> Result<(StatusCode, Json<ApiResponse<AppKey>>), AppError> {
-    crate::platform::authorize(gw.cookie(), "workspace-create", &app_id, gw.user_name()).await?;
-    let ws = load_app_workspace(&state, &app_id, &ws_id).await?;
+    crate::platform::authorize(gw.cookie(), "workspace-create", &workspace, gw.user_name()).await?;
+    let ws = load_app_project(&state, &workspace, &ws_id).await?;
     if ws.status != veda_types::WorkspaceStatus::Active {
-        return Err(VedaError::NotFound(format!("workspace {ws_id}")).into());
+        return Err(VedaError::NotFound(format!("project {ws_id}")).into());
     }
     let name = body
         .get("name")
@@ -423,12 +479,12 @@ async fn create_app_key(
     ))
 }
 
-/// GET /v1/apps/{app_id}/workspaces/{id}/keys — list keys (masked tokens).
+/// GET /v1/workspace/{workspace}/project/{id}/keys — list keys (masked tokens).
 async fn list_app_keys(
     State(state): State<Arc<AppState>>,
-    Path((app_id, ws_id)): Path<(String, String)>,
+    Path((workspace, ws_id)): Path<(String, String)>,
 ) -> Result<Json<ApiResponse<Vec<AppKey>>>, AppError> {
-    load_app_workspace(&state, &app_id, &ws_id).await?;
+    load_app_project(&state, &workspace, &ws_id).await?;
     let rows = state.auth_store.list_app_workspace_keys(&ws_id).await?;
     let items = rows
         .into_iter()
@@ -449,13 +505,13 @@ async fn list_app_keys(
     Ok(Json(ApiResponse::ok(items)))
 }
 
-/// GET /v1/apps/{app_id}/workspaces/{id}/keys/{key_id}/token — reveal the full
-/// plaintext token: `{ "token": "wk_..." }`.
+/// GET /v1/workspace/{workspace}/project/{id}/keys/{key_id}/token — reveal the
+/// full plaintext token: `{ "token": "wk_..." }`.
 async fn get_app_key_token(
     State(state): State<Arc<AppState>>,
-    Path((app_id, ws_id, key_id)): Path<(String, String, String)>,
+    Path((workspace, ws_id, key_id)): Path<(String, String, String)>,
 ) -> Result<Json<ApiResponse<serde_json::Value>>, AppError> {
-    load_app_workspace(&state, &app_id, &ws_id).await?;
+    load_app_project(&state, &workspace, &ws_id).await?;
     let token = state
         .auth_store
         .get_workspace_key_token(&key_id, &ws_id)
@@ -464,12 +520,12 @@ async fn get_app_key_token(
     Ok(Json(ApiResponse::ok(serde_json::json!({ "token": token }))))
 }
 
-/// DELETE /v1/apps/{app_id}/workspaces/{id}/keys/{key_id} — revoke a key.
+/// DELETE /v1/workspace/{workspace}/project/{id}/keys/{key_id} — revoke a key.
 async fn revoke_app_key(
     State(state): State<Arc<AppState>>,
-    Path((app_id, ws_id, key_id)): Path<(String, String, String)>,
+    Path((workspace, ws_id, key_id)): Path<(String, String, String)>,
 ) -> Result<Json<ApiResponse<()>>, AppError> {
-    load_app_workspace(&state, &app_id, &ws_id).await?;
+    load_app_project(&state, &workspace, &ws_id).await?;
     state.auth_store.revoke_workspace_key(&key_id).await?;
     Ok(Json(ApiResponse::ok(())))
 }
@@ -505,17 +561,18 @@ impl AppDataset {
     }
 }
 
-/// POST /v1/apps/{app_id}/workspaces/{id}/datasets — create a dataset (db ws).
+/// POST /v1/workspace/{workspace}/project/{id}/datasets — create a dataset (db
+/// project only).
 async fn create_app_dataset(
     State(state): State<Arc<AppState>>,
-    Path((app_id, ws_id)): Path<(String, String)>,
+    Path((workspace, ws_id)): Path<(String, String)>,
     gw: GatewayUser,
     Json(body): Json<serde_json::Value>,
 ) -> Result<(StatusCode, Json<ApiResponse<AppDataset>>), AppError> {
-    crate::platform::authorize(gw.cookie(), "workspace-create", &app_id, gw.user_name()).await?;
-    let ws = load_app_workspace(&state, &app_id, &ws_id).await?;
+    crate::platform::authorize(gw.cookie(), "workspace-create", &workspace, gw.user_name()).await?;
+    let ws = load_app_project(&state, &workspace, &ws_id).await?;
     if ws.status != veda_types::WorkspaceStatus::Active {
-        return Err(VedaError::NotFound(format!("workspace {ws_id}")).into());
+        return Err(VedaError::NotFound(format!("project {ws_id}")).into());
     }
     if ws.kind != veda_types::WorkspaceKind::Db {
         return Err(VedaError::WorkspaceKindMismatch.into());
@@ -557,13 +614,14 @@ async fn create_app_dataset(
     ))
 }
 
-/// GET /v1/apps/{app_id}/workspaces/{id}/datasets — list datasets (with creator).
+/// GET /v1/workspace/{workspace}/project/{id}/datasets — list datasets (with
+/// creator).
 async fn list_app_datasets(
     State(state): State<Arc<AppState>>,
-    Path((app_id, ws_id)): Path<(String, String)>,
+    Path((workspace, ws_id)): Path<(String, String)>,
     Query(q): Query<AppPageQuery>,
 ) -> Result<Json<CompanyPage<AppDataset>>, AppError> {
-    load_app_workspace(&state, &app_id, &ws_id).await?;
+    load_app_project(&state, &workspace, &ws_id).await?;
     let (page, size, order_by, order) = q.resolved();
     let offset = (page - 1) * size;
     let (rows, total) = state
@@ -581,9 +639,10 @@ async fn list_app_datasets(
 
 /// Rewrite veda's native response body into the OnePaaS company format for the
 /// AI Workbench frontend, leaving REST status untouched:
-///   success → `{ data:[...], page, size, order_by, order, total, total_page,
-///               has_next_page, has_prev_page }` (data is always an array;
-///               single objects become a one-element array)
+///   list    → `{ data:[...], page, size, order_by, order, total, total_page,
+///               has_next_page, has_prev_page }`
+///   single  → the object **as-is** (no `data` wrapper, no pagination)
+///   no body → `{}` (delete / revoke)
 ///   error   → `{ error: { code, reason, message, external } }`
 /// Applied only to the apps router via `from_fn`; the data plane keeps veda's
 /// native `{success,data}` / `error_code` shape.
@@ -609,8 +668,8 @@ async fn company_envelope(
 
 fn map_to_company(v: serde_json::Value) -> serde_json::Value {
     use serde_json::json;
-    // Already a company envelope (apps list handlers return `CompanyPage`, which
-    // has no `success` field) — pass through untouched, keeping its real
+    // Already a company page (apps list handlers return `CompanyPage`, which has
+    // no `success` field) — pass through untouched, keeping its real
     // page/total. Only veda's `ApiResponse` bodies (always carry `success`) are
     // transformed below.
     if v.get("success").is_none() {
@@ -626,26 +685,31 @@ fn map_to_company(v: serde_json::Value) -> serde_json::Value {
         return json!({ "error": { "code": code, "reason": "", "message": message, "external": {} } });
     }
     let data = v.get("data").cloned().unwrap_or(serde_json::Value::Null);
-    if let Some(obj) = data.as_object() {
-        // veda PaginatedResponse: `{ items, has_more, next_cursor }`.
-        if let Some(items) = obj.get("items").and_then(|i| i.as_array()) {
-            let has_more = obj.get("has_more").and_then(|b| b.as_bool()).unwrap_or(false);
-            return company_page(items.clone(), has_more);
-        }
-        return company_page(vec![data], false); // single object
-    }
     match data {
-        serde_json::Value::Array(arr) => company_page(arr, false), // bare list (keys)
-        serde_json::Value::Null => company_page(vec![], false),    // 200-with-null (delete)
-        other => company_page(vec![other], false),
+        // Bare list (e.g. keys) → company page envelope.
+        serde_json::Value::Array(arr) => company_page(arr, false),
+        // No content (delete / revoke) → bare empty object, no `data` wrapper.
+        serde_json::Value::Null => json!({}),
+        other => {
+            // veda PaginatedResponse `{ items, has_more, next_cursor }` is still
+            // a list — unwrap into a page. (Apps surface doesn't currently emit
+            // this, but keep the mapping coherent.)
+            if let Some(items) = other.get("items").and_then(|i| i.as_array()) {
+                let has_more = other.get("has_more").and_then(|b| b.as_bool()).unwrap_or(false);
+                return company_page(items.clone(), has_more);
+            }
+            // Single object (create / update / getToken) → returned as-is,
+            // directly expanded with no `data` wrapper or pagination.
+            other
+        }
     }
 }
 
-/// Build the company page envelope. `total` / `page` are best-effort (the
-/// current page's count) — exact totals need offset+count, which veda's cursor
-/// lists don't carry; `has_next_page` is authoritative from the cursor's
-/// `has_more`. Apps tenants are typically single-page, so this is accurate in
-/// the common case; exact offset pagination is a follow-up.
+/// Build the company page envelope for a list. `total` / `page` are best-effort
+/// (the current page's count) — exact totals need offset+count, which veda's
+/// cursor lists don't carry; `has_next_page` is authoritative from the cursor's
+/// `has_more`. Apps list endpoints that need exact totals return `CompanyPage`
+/// directly (passed through above); this covers the bare-array fallbacks.
 fn company_page(data: Vec<serde_json::Value>, has_more: bool) -> serde_json::Value {
     let size = data.len();
     serde_json::json!({
@@ -678,14 +742,21 @@ mod tests {
     }
 
     #[test]
-    fn envelope_single_object_becomes_one_element_array() {
-        let out = map_to_company(json!({ "success": true, "data": { "id": "w1", "kind": "db" } }));
-        assert_eq!(out["data"].as_array().unwrap().len(), 1);
-        assert_eq!(out["data"][0]["id"], "w1");
-        assert_eq!(out["page"], 1);
-        assert_eq!(out["total"], 1);
-        assert_eq!(out["has_next_page"], false);
-        assert!(out.get("success").is_none(), "no success field in company envelope");
+    fn envelope_single_object_expanded_no_wrapper() {
+        let out = map_to_company(json!({ "success": true, "data": { "id": "p1", "kind": "db" } }));
+        // Non-list single object is returned as-is: no `data` wrapper, no page.
+        assert_eq!(out["id"], "p1");
+        assert_eq!(out["kind"], "db");
+        assert!(out.get("data").is_none(), "single object is not wrapped in data");
+        assert!(out.get("page").is_none(), "single object carries no pagination");
+        assert!(out.get("success").is_none(), "no success field leaks");
+    }
+
+    #[test]
+    fn envelope_get_token_expanded() {
+        let out = map_to_company(json!({ "success": true, "data": { "token": "wk_abc" } }));
+        assert_eq!(out["token"], "wk_abc");
+        assert!(out.get("data").is_none(), "token object expanded directly");
     }
 
     #[test]
@@ -702,17 +773,17 @@ mod tests {
     }
 
     #[test]
-    fn envelope_bare_array_passes_through() {
+    fn envelope_bare_array_is_list_page() {
         let out = map_to_company(json!({ "success": true, "data": [{"k":1}] }));
         assert_eq!(out["data"].as_array().unwrap().len(), 1);
         assert_eq!(out["total"], 1);
     }
 
     #[test]
-    fn envelope_null_data_is_empty_array() {
+    fn envelope_null_data_is_empty_object() {
         let out = map_to_company(json!({ "success": true, "data": null }));
-        assert_eq!(out["data"].as_array().unwrap().len(), 0);
-        assert_eq!(out["total"], 0);
+        assert!(out.is_object(), "no-content response is an object");
+        assert_eq!(out.as_object().unwrap().len(), 0, "empty object, no data/page");
     }
 
     #[test]

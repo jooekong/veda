@@ -568,6 +568,23 @@ pub trait AuthStore: Send + Sync {
         creator_name: Option<&str>,
     ) -> Result<()>;
 
+    /// Update a workspace's mutable fields (apps surface): `name` + `description`
+    /// (`kind` is immutable). A name collision with another workspace under the
+    /// same account surfaces as `AlreadyExists` (UNIQUE(account_id, name)).
+    async fn update_workspace(
+        &self,
+        id: &str,
+        name: &str,
+        description: Option<&str>,
+    ) -> Result<()>;
+
+    /// Fetch a workspace's creator identity (apps surface): `(creator,
+    /// creator_name)`; `(None, None)` when unset or the workspace is absent.
+    async fn get_workspace_creator(
+        &self,
+        id: &str,
+    ) -> Result<(Option<String>, Option<String>)>;
+
     /// Offset-paginated list of an account's active workspaces WITH creator
     /// identity (apps surface). Returns `(page items, total count)`. `order_by`
     /// (`created_at` | `id`) and `order` (`asc` | `desc`) are whitelisted by the

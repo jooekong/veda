@@ -379,12 +379,13 @@ async fn vectors_http_e2e_suite() {
     sub_vector_metrics(&state);
 }
 
-/// app_id-scoped control plane (`/v1/apps/{app_id}/workspaces`) with NO bearer
-/// — auth is externalized to the platform. Asserts: first POST auto-provisions
-/// the tenant account (and mints NO `vk_`) and returns 201; a second POST under
-/// the same app_id reuses the account (no 409); list scopes to the app; an
-/// unknown app_id lists empty WITHOUT provisioning (GET has no side effects);
-/// a different tenant cannot delete this app's workspace (cross-tenant → 404).
+/// workspace-scoped control plane (`/v1/workspace/{workspace}/projects`) with NO
+/// bearer — auth is externalized to the platform. Asserts: first POST
+/// auto-provisions the tenant account (and mints NO `vk_`) and returns 201; a
+/// second POST under the same workspace reuses the account (no 409); list scopes
+/// to the workspace; an unknown workspace lists empty WITHOUT provisioning (GET
+/// has no side effects); a different tenant cannot delete this workspace's
+/// project (cross-tenant → 404).
 async fn sub_app_auto_provision(state: &Arc<AppState>, mysql: &MysqlStore, router: axum::Router) {
     let app_id = format!("apps-it-{}", &Uuid::new_v4().simple().to_string()[..8]);
     let other_app = format!("apps-it-{}", &Uuid::new_v4().simple().to_string()[..8]);
@@ -395,7 +396,7 @@ async fn sub_app_auto_provision(state: &Arc<AppState>, mysql: &MysqlStore, route
         async move {
             let req = Request::builder()
                 .method("POST")
-                .uri(format!("/v1/apps/{app}/workspaces"))
+                .uri(format!("/v1/workspace/{app}/projects"))
                 .header("content-type", "application/json")
                 .body(Body::from(body.to_string()))
                 .unwrap();
@@ -407,7 +408,7 @@ async fn sub_app_auto_provision(state: &Arc<AppState>, mysql: &MysqlStore, route
         async move {
             let req = Request::builder()
                 .method("GET")
-                .uri(format!("/v1/apps/{app}/workspaces"))
+                .uri(format!("/v1/workspace/{app}/projects"))
                 .body(Body::empty())
                 .unwrap();
             router.oneshot(req).await.unwrap()
@@ -418,7 +419,7 @@ async fn sub_app_auto_provision(state: &Arc<AppState>, mysql: &MysqlStore, route
         async move {
             let req = Request::builder()
                 .method("DELETE")
-                .uri(format!("/v1/apps/{app}/workspaces/{ws}"))
+                .uri(format!("/v1/workspace/{app}/project/{ws}"))
                 .body(Body::empty())
                 .unwrap();
             router.oneshot(req).await.unwrap()
@@ -429,11 +430,11 @@ async fn sub_app_auto_provision(state: &Arc<AppState>, mysql: &MysqlStore, route
     let resp = post_ws(app_id.clone(), json!({"name": "idx-a", "kind": "db"})).await;
     assert_eq!(resp.status(), StatusCode::CREATED, "first app workspace → 201");
     let j = body_json(resp.into_body()).await;
-    // Company envelope (stage 6): success body is `{data:[...], page, ...}`,
-    // single objects become a one-element `data` array; no `success` field.
-    assert_eq!(j["data"][0]["kind"], "db");
-    assert_eq!(j["data"][0]["workspace"], app_id);
-    let ws_db = j["data"][0]["id"].as_str().unwrap().to_string();
+    // Company envelope (stage 6): a single object is returned expanded — no
+    // `data` wrapper, no pagination, no `success` field.
+    assert_eq!(j["kind"], "db");
+    assert_eq!(j["workspace"], app_id);
+    let ws_db = j["id"].as_str().unwrap().to_string();
 
     // Account auto-created for the app_id, with NO vk_ minted (A drops account keys).
     let acct = state
@@ -449,7 +450,7 @@ async fn sub_app_auto_provision(state: &Arc<AppState>, mysql: &MysqlStore, route
     let resp = post_ws(app_id.clone(), json!({"name": "idx-b", "kind": "fs"})).await;
     assert_eq!(resp.status(), StatusCode::CREATED, "second create reuses tenant");
     let j = body_json(resp.into_body()).await;
-    let ws_fs = j["data"][0]["id"].as_str().unwrap().to_string();
+    let ws_fs = j["id"].as_str().unwrap().to_string();
     let acct2 = state
         .auth_store
         .get_account_by_app_id(&app_id)
@@ -486,7 +487,7 @@ async fn sub_app_auto_provision(state: &Arc<AppState>, mysql: &MysqlStore, route
     //    (cross-tenant id is hidden, not 403, so it can't be used as a probe).
     let resp = post_ws(rival_app.clone(), json!({"name": "rival", "kind": "fs"})).await;
     assert_eq!(resp.status(), StatusCode::CREATED);
-    let rival_ws = body_json(resp.into_body()).await["data"][0]["id"]
+    let rival_ws = body_json(resp.into_body()).await["id"]
         .as_str()
         .unwrap()
         .to_string();
@@ -572,11 +573,11 @@ async fn apps_mgmt_company_envelope_e2e() {
         }
     };
 
-    // 1. Create db workspace → company envelope (data is a 1-element array, no
-    //    `success`), workspace = app, creator/creator_name from the header.
+    // 1. Create db project → single object returned expanded (no `data` wrapper,
+    //    no `success`), workspace = app, creator/creator_name from the header.
     let resp = send(
         "POST",
-        format!("/v1/apps/{app}/workspaces"),
+        format!("/v1/workspace/{app}/projects"),
         Some(json!({"name":"idx","kind":"db"})),
         Some(user),
     )
@@ -584,41 +585,57 @@ async fn apps_mgmt_company_envelope_e2e() {
     assert_eq!(resp.status(), StatusCode::CREATED);
     let j = body_json(resp.into_body()).await;
     assert!(j.get("success").is_none(), "company envelope drops `success`");
-    assert_eq!(j["data"][0]["kind"], "db");
-    assert_eq!(j["data"][0]["workspace"], app);
-    assert_eq!(j["data"][0]["creator"], "zhangsan");
-    assert_eq!(j["data"][0]["creator_name"], "张三");
-    assert_eq!(j["total"], 1);
-    let ws = j["data"][0]["id"].as_str().unwrap().to_string();
+    assert!(j.get("data").is_none(), "single object is not wrapped in data");
+    assert_eq!(j["kind"], "db");
+    assert_eq!(j["workspace"], app);
+    assert_eq!(j["creator"], "zhangsan");
+    assert_eq!(j["creator_name"], "张三");
+    let ws = j["id"].as_str().unwrap().to_string();
 
-    // 2. Create key → token MASKED, creator stamped.
+    // 1b. PATCH update name + description → single object reflects new values;
+    //     kind is immutable, id unchanged.
+    let resp = send(
+        "PATCH",
+        format!("/v1/workspace/{app}/project/{ws}"),
+        Some(json!({"name":"idx-renamed","description":"updated desc"})),
+        Some(user),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK, "update → 200");
+    let j = body_json(resp.into_body()).await;
+    assert_eq!(j["name"], "idx-renamed");
+    assert_eq!(j["description"], "updated desc");
+    assert_eq!(j["kind"], "db", "kind is immutable");
+    assert_eq!(j["id"].as_str().unwrap(), ws, "same project id");
+
+    // 2. Create key → token MASKED, creator stamped (single object expanded).
     let resp = send(
         "POST",
-        format!("/v1/apps/{app}/workspaces/{ws}/keys"),
+        format!("/v1/workspace/{app}/project/{ws}/keys"),
         Some(json!({"permission":"readwrite"})),
         Some(user),
     )
     .await;
     assert_eq!(resp.status(), StatusCode::CREATED);
     let j = body_json(resp.into_body()).await;
-    let masked = j["data"][0]["token"].as_str().unwrap().to_string();
+    let masked = j["token"].as_str().unwrap().to_string();
     assert!(
         masked.starts_with("wk_") && masked.contains('…'),
         "token masked on create: {masked}"
     );
-    assert_eq!(j["data"][0]["creator"], "zhangsan");
-    let key_id = j["data"][0]["id"].as_str().unwrap().to_string();
+    assert_eq!(j["creator"], "zhangsan");
+    let key_id = j["id"].as_str().unwrap().to_string();
 
     // 3. getToken → full plaintext (valid wk_, not masked).
     let resp = send(
         "GET",
-        format!("/v1/apps/{app}/workspaces/{ws}/keys/{key_id}/token"),
+        format!("/v1/workspace/{app}/project/{ws}/keys/{key_id}/token"),
         None,
         None,
     )
     .await;
     assert_eq!(resp.status(), StatusCode::OK);
-    let real = body_json(resp.into_body()).await["data"][0]["token"]
+    let real = body_json(resp.into_body()).await["token"]
         .as_str()
         .unwrap()
         .to_string();
@@ -631,15 +648,15 @@ async fn apps_mgmt_company_envelope_e2e() {
     for name in ["products", "faq"] {
         let resp = send(
             "POST",
-            format!("/v1/apps/{app}/workspaces/{ws}/datasets"),
+            format!("/v1/workspace/{app}/project/{ws}/datasets"),
             Some(json!({ "name": name })),
             Some(user),
         )
         .await;
         assert_eq!(resp.status(), StatusCode::CREATED);
         let j = body_json(resp.into_body()).await;
-        assert_eq!(j["data"][0]["name"], name);
-        assert_eq!(j["data"][0]["creator"], "zhangsan");
+        assert_eq!(j["name"], name);
+        assert_eq!(j["creator"], "zhangsan");
     }
 
     // 5. List datasets with real offset pagination (page/size → total /
@@ -647,7 +664,7 @@ async fn apps_mgmt_company_envelope_e2e() {
     //    `default` dataset, so total >= 3 (default + products + faq).
     let resp = send(
         "GET",
-        format!("/v1/apps/{app}/workspaces/{ws}/datasets?page=1&size=2"),
+        format!("/v1/workspace/{app}/project/{ws}/datasets?page=1&size=2"),
         None,
         None,
     )
@@ -663,7 +680,7 @@ async fn apps_mgmt_company_envelope_e2e() {
     // Page 2 carries the rest and flips has_prev_page; total is stable.
     let resp = send(
         "GET",
-        format!("/v1/apps/{app}/workspaces/{ws}/datasets?page=2&size=2"),
+        format!("/v1/workspace/{app}/project/{ws}/datasets?page=2&size=2"),
         None,
         None,
     )
@@ -677,7 +694,7 @@ async fn apps_mgmt_company_envelope_e2e() {
     // 6. Error envelope: bad permission → {error:{code:INVALID_INPUT}}, no data.
     let resp = send(
         "POST",
-        format!("/v1/apps/{app}/workspaces/{ws}/keys"),
+        format!("/v1/workspace/{app}/project/{ws}/keys"),
         Some(json!({"permission":"bad"})),
         None,
     )
@@ -743,7 +760,7 @@ async fn apps_authz_and_workspace_name_e2e() {
     //    201; workspace_name resolved from the platform.
     let resp = send(
         "POST",
-        format!("/v1/apps/{app}/workspaces"),
+        format!("/v1/workspace/{app}/projects"),
         json!({"name":"authz-idx","kind":"db"}),
         cookie.clone(),
     )
@@ -751,17 +768,17 @@ async fn apps_authz_and_workspace_name_e2e() {
     assert_eq!(resp.status(), StatusCode::CREATED, "authorized create → 201");
     let j = body_json(resp.into_body()).await;
     assert_eq!(
-        j["data"][0]["workspace_name"], "DBPaaS 测试",
+        j["workspace_name"], "DBPaaS 测试",
         "workspace_name resolved from the platform"
     );
-    assert_eq!(j["data"][0]["creator"], "konglingqiao");
-    let ws = j["data"][0]["id"].as_str().unwrap().to_string();
+    assert_eq!(j["creator"], "konglingqiao");
+    let ws = j["id"].as_str().unwrap().to_string();
 
     // 2. Unauthorized: a workspace the user has no perm on → 403 (authz denies,
     //    fail-closed, before any provisioning).
     let resp = send(
         "POST",
-        "/v1/apps/no-such-ws-xyz/workspaces".to_string(),
+        "/v1/workspace/no-such-ws-xyz/projects".to_string(),
         json!({"name":"x","kind":"fs"}),
         cookie.clone(),
     )

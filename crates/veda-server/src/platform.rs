@@ -3,7 +3,7 @@
 //! The OnePaaS gateway forwards caller identity in a base64-encoded `user`
 //! header and routes per `ai_workspace`. On direct (non-gateway) access these
 //! are absent, so every field is optional and handlers fall back to native
-//! `wk_` / `vk_` auth. Used by the `/v1/apps/*` management surface to stamp
+//! `wk_` / `vk_` auth. Used by the `/v1/workspace/*` management surface to stamp
 //! `creator` / `creator_name` and to drive the external authorization check.
 
 use std::convert::Infallible;

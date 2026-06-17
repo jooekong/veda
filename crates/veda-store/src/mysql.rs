@@ -2566,6 +2566,49 @@ impl AuthStore for MysqlStore {
         Ok(())
     }
 
+    async fn update_workspace(
+        &self,
+        id: &str,
+        name: &str,
+        description: Option<&str>,
+    ) -> Result<()> {
+        let res = sqlx::query(
+            r#"UPDATE veda_workspaces SET name = ?, description = ?, updated_at = ? WHERE id = ?"#,
+        )
+        .bind(name)
+        .bind(description)
+        .bind(Utc::now().naive_utc())
+        .bind(id)
+        .execute(&self.pool)
+        .await;
+        // UNIQUE(account_id, name) collision on rename → 409, mirroring create.
+        match res {
+            Ok(_) => Ok(()),
+            Err(e) if is_mysql_duplicate(&e) => {
+                Err(VedaError::AlreadyExists("workspace name already exists".into()))
+            }
+            Err(e) => Err(storage_err(e)),
+        }
+    }
+
+    async fn get_workspace_creator(
+        &self,
+        id: &str,
+    ) -> Result<(Option<String>, Option<String>)> {
+        let row = sqlx::query("SELECT creator, creator_name FROM veda_workspaces WHERE id = ?")
+            .bind(id)
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(storage_err)?;
+        match row {
+            Some(r) => Ok((
+                r.try_get("creator").map_err(storage_err)?,
+                r.try_get("creator_name").map_err(storage_err)?,
+            )),
+            None => Ok((None, None)),
+        }
+    }
+
     async fn list_app_workspaces(
         &self,
         account_id: &str,

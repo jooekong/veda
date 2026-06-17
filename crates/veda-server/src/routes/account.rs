@@ -353,11 +353,11 @@ async fn create_workspace(
 
 /// Build a workspace (fs or db) under an already-resolved `account_id`. Shared
 /// by the `vk_` control plane (`POST /v1/workspaces`, account from the bearer)
-/// and the `app_id` control plane (`POST /v1/apps/{app_id}/workspaces`, account
-/// auto-provisioned from the path). For `kind=db`, commits the workspace +
+/// and the workspace-scoped control plane (`POST /v1/workspace/{workspace}/projects`,
+/// account auto-provisioned from the path). For `kind=db`, commits the workspace +
 /// bootstrap `default` dataset in one tx, then provisions the Milvus collection
 /// with rollback on failure. `req.app_id` is the workspace's governance label;
-/// the app_id-plane handler sets it to the path `app_id`.
+/// the workspace-plane handler sets it to the path workspace code.
 pub(crate) async fn create_workspace_under(
     state: &AppState,
     account_id: String,
