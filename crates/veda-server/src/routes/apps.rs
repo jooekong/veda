@@ -531,7 +531,11 @@ async fn list_app_keys(
 async fn get_app_key_token(
     State(state): State<Arc<AppState>>,
     Path((workspace, ws_id, key_id)): Path<(String, String, String)>,
+    gw: GatewayUser,
 ) -> Result<Json<ApiResponse<serde_json::Value>>, AppError> {
+    // Revealing the full token hands out data-plane access — gate it with the
+    // same external authz as minting a key.
+    crate::platform::authorize(gw.cookie(), "workspace-create", &workspace, gw.user_name()).await?;
     load_app_project(&state, &workspace, &ws_id).await?;
     let token = state
         .auth_store
