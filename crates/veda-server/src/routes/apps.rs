@@ -367,8 +367,12 @@ async fn update_app_project(
 async fn delete_app_project(
     State(state): State<Arc<AppState>>,
     Path((workspace, ws_id)): Path<(String, String)>,
+    gw: GatewayUser,
 ) -> Result<Json<ApiResponse<()>>, AppError> {
     let workspace = require_workspace(&workspace)?;
+    // Same external authz as the other mutating handlers: deleting a project
+    // archives the workspace + revokes its keys, so gate it like create.
+    crate::platform::authorize(gw.cookie(), "workspace-create", workspace, gw.user_name()).await?;
     let account = lookup_active_account(&state, workspace)
         .await?
         .ok_or_else(|| VedaError::NotFound(format!("project {ws_id}")))?;
@@ -549,9 +553,15 @@ async fn get_app_key_token(
 async fn revoke_app_key(
     State(state): State<Arc<AppState>>,
     Path((workspace, ws_id, key_id)): Path<(String, String, String)>,
+    gw: GatewayUser,
 ) -> Result<Json<ApiResponse<()>>, AppError> {
+    // Revoking a key cuts data-plane access — gate it with the same external
+    // authz as minting one (mirrors get_app_key_token).
+    crate::platform::authorize(gw.cookie(), "workspace-create", &workspace, gw.user_name()).await?;
     load_app_project(&state, &workspace, &ws_id).await?;
-    state.auth_store.revoke_workspace_key(&key_id).await?;
+    // Scope the revoke to this project: a bare key_id from another tenant's
+    // workspace simply matches no row (authz alone doesn't tie key_id to ws_id).
+    state.auth_store.revoke_workspace_key(&key_id, &ws_id).await?;
     Ok(Json(ApiResponse::ok(())))
 }
 

@@ -3096,12 +3096,15 @@ impl AuthStore for MysqlStore {
         Ok((items?, total))
     }
 
-    async fn revoke_workspace_key(&self, id: &str) -> Result<()> {
-        sqlx::query(r#"UPDATE veda_workspace_keys SET status = 'revoked' WHERE id = ?"#)
-            .bind(id)
-            .execute(&self.pool)
-            .await
-            .map_err(storage_err)?;
+    async fn revoke_workspace_key(&self, id: &str, workspace_id: &str) -> Result<()> {
+        sqlx::query(
+            r#"UPDATE veda_workspace_keys SET status = 'revoked' WHERE id = ? AND workspace_id = ?"#,
+        )
+        .bind(id)
+        .bind(workspace_id)
+        .execute(&self.pool)
+        .await
+        .map_err(storage_err)?;
         Ok(())
     }
 }

@@ -19,6 +19,7 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use axum::{Json, Router};
 use serde::Serialize;
+use tower_http::timeout::TimeoutLayer;
 use veda_types::ApiResponse;
 
 const READY_TIMEOUT: Duration = Duration::from_secs(3);
@@ -29,7 +30,11 @@ const READY_TIMEOUT: Duration = Duration::from_secs(3);
 const INSTALL_SH: &str = include_str!("../../../../install.sh");
 
 pub fn build_router(state: Arc<AppState>) -> Router {
-    Router::new()
+    // Everything except the SSE stream gets a wall-clock request timeout so a
+    // runaway query / hung upstream can't pin a request task forever. `/v1/events`
+    // is a long-lived SSE stream — a 30s timeout would cut every client off, so
+    // it's merged in *after* the layer and runs untimed.
+    let timed = Router::new()
         .route("/healthz", get(healthz))
         .route("/install.sh", get(install_script))
         .route("/capabilities", get(capabilities))
@@ -42,10 +47,16 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .merge(datasets::routes())
         .merge(vectors::routes())
         .merge(fs::routes())
-        .merge(events::routes())
         .merge(search::routes())
         .merge(collection::routes())
         .merge(sql::routes())
+        .layer(TimeoutLayer::with_status_code(
+            StatusCode::REQUEST_TIMEOUT,
+            Duration::from_secs(30),
+        ));
+
+    timed
+        .merge(events::routes())
         .with_state(state)
 }
 

@@ -712,7 +712,9 @@ pub trait AuthStore: Send + Sync {
     async fn create_workspace_key(&self, key: &WorkspaceKey) -> Result<()>;
     async fn get_workspace_key_by_hash(&self, key_hash: &str) -> Result<Option<WorkspaceKey>>;
     async fn list_workspace_keys(&self, workspace_id: &str) -> Result<Vec<WorkspaceKey>>;
-    async fn revoke_workspace_key(&self, id: &str) -> Result<()>;
+    /// Revoke a key, scoped to its workspace so a caller can't revoke a key by
+    /// bare id under a workspace they don't own (mirrors `get_workspace_key_token`).
+    async fn revoke_workspace_key(&self, id: &str, workspace_id: &str) -> Result<()>;
 }
 
 // ── Embedding Service ──────────────────────────────────

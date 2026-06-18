@@ -27,7 +27,7 @@ base64 = "0.22"
 async-stream = "0.3"
 futures = "0.3"
 tower = "0.5"
-tower-http = { version = "0.6", features = ["cors", "trace"] }
+tower-http = { version = "0.6", features = ["cors", "trace", "timeout", "catch-panic"] }
 tokio-util = "0.7"
 jsonwebtoken = "9"
 argon2 = "0.5"

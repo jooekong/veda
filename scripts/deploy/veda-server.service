@@ -19,9 +19,15 @@ WorkingDirectory=/data/veda
 User=veda
 Group=veda
 NoNewPrivileges=true
-# Stricter sandboxing if desired (verify /etc/ddmc/env.yaml stays readable):
-# ProtectSystem=strict
-# ReadWritePaths=/data/veda
+# Sandboxing: keep the binary + config read-only so a compromised query (e.g.
+# a SQL COPY escape) can't overwrite ExecStart, and cap RSS so a runaway query
+# can't OOM the box. Only the data dir is writable. On-box verify after enabling:
+# /etc/ddmc/env.yaml stays readable and the server starts + serves cleanly.
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=/data/veda/data
+MemoryMax=4G
 Restart=always
 RestartSec=2
 # SIGTERM -> graceful shutdown: stop accepting (the socket itself stays open

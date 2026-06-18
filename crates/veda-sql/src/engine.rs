@@ -1,6 +1,9 @@
 use std::sync::Arc;
+use std::time::Duration;
 
 use arrow::array::RecordBatch;
+use datafusion::execution::memory_pool::GreedyMemoryPool;
+use datafusion::execution::runtime_env::RuntimeEnvBuilder;
 use datafusion::logical_expr::ScalarUDF;
 use datafusion::prelude::*;
 use veda_core::service::fs::FsService;
@@ -17,6 +20,14 @@ use crate::fs_table::VedaFsTableFactory;
 use crate::fs_udf::{self, FsUdfContext};
 use crate::search_table::VedaSearchFactory;
 use crate::storage_stats_table::VedaStorageStatsFactory;
+
+/// Bounded memory for one SQL query. DataFusion's default runtime uses an
+/// unbounded pool, so a cross-join / large sort could OOM the whole node;
+/// 256 MB is far above any legitimate tenant query and aborts the rest.
+const SQL_MEM_POOL_BYTES: usize = 256 * 1024 * 1024;
+/// Wall-clock cap on a single SQL query's execution (`collect`). Planning is
+/// bounded and cheap for veda's registered-table SELECTs, so it stays outside.
+const SQL_QUERY_TIMEOUT: Duration = Duration::from_secs(30);
 
 pub struct VedaSqlEngine {
     meta: Arc<dyn MetadataStore>,
@@ -52,7 +63,12 @@ impl VedaSqlEngine {
         read_only: bool,
         sql: &str,
     ) -> veda_types::Result<Vec<RecordBatch>> {
-        let ctx = SessionContext::new();
+        // Bound query memory so one tenant's cross-join can't OOM the node.
+        let runtime = RuntimeEnvBuilder::new()
+            .with_memory_pool(Arc::new(GreedyMemoryPool::new(SQL_MEM_POOL_BYTES)))
+            .build_arc()
+            .map_err(|e| VedaError::Storage(e.to_string()))?;
+        let ctx = SessionContext::new_with_config_rt(SessionConfig::new(), runtime);
 
         let files = FilesTable::new(self.meta.clone(), workspace_id.to_string());
         ctx.register_table("files", Arc::new(files))
@@ -112,13 +128,27 @@ impl VedaSqlEngine {
             }),
         );
 
+        // Gate the planner: tenants may only run SELECT (plus `veda_*` write
+        // UDFs, which go through Projection + their own read_only check).
+        // Blocking DDL/DML/statements kills `COPY ... TO` and `CREATE EXTERNAL
+        // TABLE`, which would otherwise read/write arbitrary host files as the
+        // server uid. Unconditional — `read_only` governs the UDFs, not the planner.
+        let opts = SQLOptions::new()
+            .with_allow_ddl(false)
+            .with_allow_dml(false)
+            .with_allow_statements(false);
         let df = ctx
-            .sql(sql)
+            .sql_with_options(sql, opts)
             .await
             .map_err(|e| VedaError::Storage(e.to_string()))?;
-        let batches = df
-            .collect()
+        let batches = tokio::time::timeout(SQL_QUERY_TIMEOUT, df.collect())
             .await
+            .map_err(|_| {
+                VedaError::Storage(format!(
+                    "sql query exceeded {}s",
+                    SQL_QUERY_TIMEOUT.as_secs()
+                ))
+            })?
             .map_err(|e| VedaError::Storage(e.to_string()))?;
         Ok(batches)
     }

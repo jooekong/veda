@@ -148,16 +148,25 @@ async fn build_test_app() -> (Arc<AppState>, Arc<MysqlStore>, axum::Router) {
         vector_embedding,
         embedding_dim: cfg.embedding.dimension,
         sql_engine,
-        // `install()` registers the global Prometheus recorder. Each
-        // integration test file runs in its own binary, so this is safe
-        // here (would panic if called twice in the same process).
-        metrics: veda_server::obs::install(),
+        // `install()` sets the *global* Prometheus recorder (once per process),
+        // but several #[ignore]d tests in this binary each build an app — so
+        // install once and share the (Clone) handle.
+        metrics: test_metrics(),
         metrics_token: None,
         summary_enabled: false,
         draining: std::sync::atomic::AtomicBool::new(false),
     });
     let router = build_router(state.clone());
     (state, mysql, router)
+}
+
+/// Install the global Prometheus recorder at most once per test process and
+/// hand out clones — `obs::install()` panics if the global recorder is already
+/// set, which happens when multiple tests in this binary each build an app.
+fn test_metrics() -> veda_server::obs::MetricsHandle {
+    use std::sync::OnceLock;
+    static METRICS: OnceLock<veda_server::obs::MetricsHandle> = OnceLock::new();
+    METRICS.get_or_init(veda_server::obs::install).clone()
 }
 
 struct TestSetup {
@@ -546,6 +555,7 @@ async fn sub_app_auto_provision(state: &Arc<AppState>, mysql: &MysqlStore, route
 /// + dataset, all carrying `creator` from the gateway `user` header, plus the
 /// error envelope. MySQL + Milvus only (no embedding), so it's fast and stable.
 #[tokio::test]
+#[ignore] // needs real MySQL/Milvus — run explicitly with `--ignored`
 async fn apps_mgmt_company_envelope_e2e() {
     let (state, mysql, router) = build_test_app().await;
     let app = format!("apps-mgmt-{}", &Uuid::new_v4().simple().to_string()[..8]);
@@ -736,6 +746,7 @@ async fn apps_mgmt_company_envelope_e2e() {
 /// real workspace `dbpaas-test`, where the cookie's user (`konglingqiao`) has
 /// `workspace-create`.
 #[tokio::test]
+#[ignore] // needs real AI Workbench platform (VEDA_PLATFORM_BASE + cookie)
 async fn apps_authz_and_workspace_name_e2e() {
     let cookie = match std::env::var("VEDA_TEST_COOKIE") {
         Ok(c) if !c.is_empty() => c,

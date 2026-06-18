@@ -5,6 +5,7 @@ use std::sync::Arc;
 use axum::http::{header, HeaderValue, Method};
 use tokio::net::TcpListener;
 use tokio::sync::watch;
+use tower_http::catch_panic::CatchPanicLayer;
 use tower_http::cors::CorsLayer;
 use tower_http::trace::TraceLayer;
 use tracing::info;
@@ -326,6 +327,9 @@ async fn main() -> anyhow::Result<()> {
     let drain_secs = cfg.drain_secs;
     let drain_state = app_state.clone();
     let app = routes::build_router(app_state)
+        // Innermost: turn a handler panic (e.g. inside DataFusion) into a 500
+        // instead of a reset connection, so `track_http` still records it.
+        .layer(CatchPanicLayer::new())
         .layer(axum::middleware::from_fn(obs::track_http))
         .layer(TraceLayer::new_for_http())
         .layer(cors);

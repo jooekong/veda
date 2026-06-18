@@ -1254,7 +1254,7 @@ async fn mysql_workspace_key_crud() {
     let keys = store.list_workspace_keys(&ws_id).await.unwrap();
     assert_eq!(keys.len(), 1);
 
-    store.revoke_workspace_key(&wk_id).await.unwrap();
+    store.revoke_workspace_key(&wk_id, &ws_id).await.unwrap();
     let revoked = store.get_workspace_key_by_hash(wk_hash).await.unwrap();
     assert!(revoked.is_none());
 

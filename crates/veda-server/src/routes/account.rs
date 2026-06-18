@@ -582,7 +582,7 @@ async fn delete_workspace_key(
     if !keys.iter().any(|k| k.id == key_id) {
         return Err(VedaError::NotFound(format!("workspace key {key_id}")).into());
     }
-    state.auth_store.revoke_workspace_key(&key_id).await?;
+    state.auth_store.revoke_workspace_key(&key_id, &ws_id).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 

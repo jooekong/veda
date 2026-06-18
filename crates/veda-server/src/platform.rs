@@ -8,6 +8,8 @@
 
 use std::convert::Infallible;
 use std::future::Future;
+use std::sync::LazyLock;
+use std::time::Duration;
 
 use axum::extract::FromRequestParts;
 use axum::http::request::Parts;
@@ -93,6 +95,16 @@ fn decode_user_header(parts: &Parts) -> Option<PlatformUser> {
     serde_json::from_slice(&bytes).ok()
 }
 
+/// Shared HTTP client for platform calls, with a hard timeout so a hung gateway
+/// (accepts but never responds) can't park request tasks forever. `authorize`
+/// fails closed and `resolve_workspace_name` returns `None` on timeout.
+static PLATFORM_HTTP: LazyLock<reqwest::Client> = LazyLock::new(|| {
+    reqwest::Client::builder()
+        .timeout(Duration::from_secs(3))
+        .build()
+        .expect("build platform HTTP client")
+});
+
 /// Platform API base, e.g. `https://paas-api-test.ddmc-inc.com/proxy/llm`. Read
 /// from `VEDA_PLATFORM_BASE`. When unset, external authz is **not enforced** and
 /// workspace-name lookup is skipped — so dev / integration without the platform
@@ -125,7 +137,7 @@ pub async fn authorize(
         _ => return Err(veda_types::VedaError::PermissionDenied.into()),
     };
     let url = format!("{base}/open/v1/auth/service/veda-reach/action/{action}");
-    let allowed = reqwest::Client::new()
+    let allowed = PLATFORM_HTTP
         .get(&url)
         .query(&[("workspace", workspace), ("user", user)])
         .header("Cookie", cookie)
@@ -152,7 +164,7 @@ pub async fn resolve_workspace_name(cookie: Option<&str>, code: &str) -> Option<
     let base = platform_base()?;
     let cookie = cookie?;
     let url = format!("{base}/open/v1/workspace/{code}");
-    let resp = reqwest::Client::new()
+    let resp = PLATFORM_HTTP
         .get(&url)
         .header("Cookie", cookie)
         .send()
