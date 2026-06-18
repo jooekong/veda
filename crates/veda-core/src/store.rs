@@ -599,6 +599,18 @@ pub trait AuthStore: Send + Sync {
         order: &str,
     ) -> Result<(Vec<(Workspace, Option<String>, Option<String>)>, i64)>;
 
+    /// Like `list_app_workspaces` but flattened across several accounts — a
+    /// user's projects span every workspace they can access. Empty
+    /// `account_ids` → empty page (no query).
+    async fn list_app_workspaces_for_accounts(
+        &self,
+        account_ids: &[String],
+        offset: u32,
+        size: u32,
+        order_by: &str,
+        order: &str,
+    ) -> Result<(Vec<(Workspace, Option<String>, Option<String>)>, i64)>;
+
     /// Create a workspace key on the apps surface, persisting the plaintext
     /// `token` (for getToken) and creator identity alongside the hash.
     async fn create_app_workspace_key(

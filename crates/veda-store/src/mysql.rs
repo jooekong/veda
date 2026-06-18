@@ -2649,6 +2649,54 @@ impl AuthStore for MysqlStore {
         Ok((items?, total))
     }
 
+    async fn list_app_workspaces_for_accounts(
+        &self,
+        account_ids: &[String],
+        offset: u32,
+        size: u32,
+        order_by: &str,
+        order: &str,
+    ) -> Result<(Vec<(Workspace, Option<String>, Option<String>)>, i64)> {
+        if account_ids.is_empty() {
+            return Ok((Vec::new(), 0));
+        }
+        let cols = "id, account_id, name, status, kind, app_id, description, created_at, updated_at, creator, creator_name";
+        let (ob, od) = order_clause(order_by, order);
+        let ph = vec!["?"; account_ids.len()].join(",");
+        let sql = format!(
+            "SELECT {cols} FROM veda_workspaces \
+             WHERE account_id IN ({ph}) AND status = 'active' ORDER BY {ob} {od} LIMIT ? OFFSET ?"
+        );
+        let mut q = sqlx::query(&sql);
+        for id in account_ids {
+            q = q.bind(id);
+        }
+        let rows = q
+            .bind(size as i64)
+            .bind(offset as i64)
+            .fetch_all(&self.pool)
+            .await
+            .map_err(storage_err)?;
+        let count_sql = format!(
+            "SELECT COUNT(*) FROM veda_workspaces WHERE account_id IN ({ph}) AND status = 'active'"
+        );
+        let mut cq = sqlx::query_scalar::<_, i64>(&count_sql);
+        for id in account_ids {
+            cq = cq.bind(id);
+        }
+        let total: i64 = cq.fetch_one(&self.pool).await.map_err(storage_err)?;
+        let items: Result<Vec<_>> = rows
+            .iter()
+            .map(|r| {
+                let ws = row_to_workspace(r)?;
+                let creator: Option<String> = r.try_get("creator").map_err(storage_err)?;
+                let creator_name: Option<String> = r.try_get("creator_name").map_err(storage_err)?;
+                Ok((ws, creator, creator_name))
+            })
+            .collect();
+        Ok((items?, total))
+    }
+
     async fn create_db_workspace(
         &self,
         workspace: &Workspace,

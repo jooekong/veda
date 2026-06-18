@@ -177,6 +177,54 @@ pub async fn resolve_workspace_name(cookie: Option<&str>, code: &str) -> Option<
     v.get("name").and_then(|n| n.as_str()).map(String::from)
 }
 
+/// List the platform workspaces a user can access — `GET {base}/open/v1/workspace?username=<user>&size=200`,
+/// forwarding the request cookie so the platform authenticates the call as that
+/// user. Returns each live (non-removed) workspace's `(code, name)`; empty on any
+/// failure or when the platform isn't configured. `size=200` pulls every
+/// workspace in one call (no real user has more).
+pub async fn list_user_workspaces(cookie: Option<&str>, username: &str) -> Vec<(String, String)> {
+    let base = match platform_base() {
+        Some(b) => b,
+        None => return Vec::new(),
+    };
+    let cookie = match cookie {
+        Some(c) => c,
+        None => return Vec::new(),
+    };
+    let url = format!("{base}/open/v1/workspace");
+    let resp = match PLATFORM_HTTP
+        .get(&url)
+        .query(&[("username", username), ("size", "200")])
+        .header("Cookie", cookie)
+        .send()
+        .await
+    {
+        Ok(r) if r.status().is_success() => r,
+        _ => return Vec::new(),
+    };
+    let body: serde_json::Value = match resp.json().await {
+        Ok(v) => v,
+        Err(_) => return Vec::new(),
+    };
+    body.get("data")
+        .and_then(|d| d.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter(|w| w.get("removed_at").map_or(true, |v| v.is_null()))
+                .filter_map(|w| {
+                    let code = w.get("code")?.as_str()?.to_string();
+                    let name = w
+                        .get("name")
+                        .and_then(|n| n.as_str())
+                        .unwrap_or("")
+                        .to_string();
+                    Some((code, name))
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

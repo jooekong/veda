@@ -142,6 +142,8 @@ impl AppProject {
 
 pub fn routes() -> Router<Arc<AppState>> {
     Router::new()
+        // Cross-workspace: the current gateway user's projects, flattened.
+        .route("/v1/my/projects", get(list_my_projects))
         .route(
             "/v1/workspace/{workspace}/projects",
             post(create_app_project).get(list_app_projects),
@@ -288,6 +290,51 @@ async fn list_app_projects(
         .into_iter()
         .map(|(ws, creator, creator_name)| {
             AppProject::build(ws, workspace_name.clone(), creator, creator_name)
+        })
+        .collect();
+    Ok(Json(CompanyPage::new(data, page, size, order_by, order, total)))
+}
+
+/// GET /v1/my/projects — list, flattened + paginated, the projects across every
+/// workspace the *current gateway user* can access. The user→workspace mapping
+/// lives in the platform, so we ask it (`/open/v1/workspace?username=`) with the
+/// gateway user's own name — a client can't pass someone else's username. No
+/// gateway user (or platform unconfigured/unreachable) → empty page. Pagination
+/// (`page`/`size`/`order_by`/`order` + `CompanyPage`) matches the project list.
+async fn list_my_projects(
+    State(state): State<Arc<AppState>>,
+    gw: GatewayUser,
+    Query(q): Query<AppPageQuery>,
+) -> Result<Json<CompanyPage<AppProject>>, AppError> {
+    let (page, size, order_by, order) = q.resolved();
+    let username = match gw.user_name() {
+        Some(u) => u,
+        None => return Ok(Json(CompanyPage::new(Vec::new(), page, size, order_by, order, 0))),
+    };
+    // The user's accessible workspaces (code -> display name), from the platform.
+    let workspaces = crate::platform::list_user_workspaces(gw.cookie(), username).await;
+    if workspaces.is_empty() {
+        return Ok(Json(CompanyPage::new(Vec::new(), page, size, order_by, order, 0)));
+    }
+    let name_by_code: std::collections::HashMap<String, String> =
+        workspaces.iter().cloned().collect();
+    // Resolve each accessible workspace to its veda account (skip un-provisioned).
+    let mut account_ids = Vec::with_capacity(workspaces.len());
+    for (code, _) in &workspaces {
+        if let Some(acc) = lookup_active_account(&state, code).await? {
+            account_ids.push(acc.id);
+        }
+    }
+    let offset = (page - 1) * size;
+    let (rows, total) = state
+        .auth_store
+        .list_app_workspaces_for_accounts(&account_ids, offset, size, &order_by, &order)
+        .await?;
+    let data = rows
+        .into_iter()
+        .map(|(ws, creator, creator_name)| {
+            let ws_name = ws.app_id.as_ref().and_then(|c| name_by_code.get(c)).cloned();
+            AppProject::build(ws, ws_name, creator, creator_name)
         })
         .collect();
     Ok(Json(CompanyPage::new(data, page, size, order_by, order, total)))
