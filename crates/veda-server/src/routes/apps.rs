@@ -45,6 +45,8 @@ struct AppPageQuery {
     size: Option<u32>,
     order_by: Option<String>,
     order: Option<String>,
+    /// Case-insensitive substring filter on project `name`; absent/blank = no filter.
+    keyword: Option<String>,
 }
 
 impl AppPageQuery {
@@ -56,6 +58,15 @@ impl AppPageQuery {
             self.order_by.clone().unwrap_or_else(|| "created_at".into()),
             self.order.clone().unwrap_or_else(|| "desc".into()),
         )
+    }
+
+    /// Trimmed keyword, `None` if absent or blank (= no filter).
+    fn keyword(&self) -> Option<String> {
+        self.keyword
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
     }
 }
 
@@ -307,6 +318,7 @@ async fn list_my_projects(
     Query(q): Query<AppPageQuery>,
 ) -> Result<Json<CompanyPage<AppProject>>, AppError> {
     let (page, size, order_by, order) = q.resolved();
+    let keyword = q.keyword();
     let username = match gw.user_name() {
         Some(u) => u,
         None => return Ok(Json(CompanyPage::new(Vec::new(), page, size, order_by, order, 0))),
@@ -328,7 +340,7 @@ async fn list_my_projects(
     let offset = (page - 1) * size;
     let (rows, total) = state
         .auth_store
-        .list_app_workspaces_for_accounts(&account_ids, offset, size, &order_by, &order)
+        .list_app_workspaces_for_accounts(&account_ids, keyword.as_deref(), offset, size, &order_by, &order)
         .await?;
     let data = rows
         .into_iter()

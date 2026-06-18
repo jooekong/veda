@@ -605,6 +605,7 @@ pub trait AuthStore: Send + Sync {
     async fn list_app_workspaces_for_accounts(
         &self,
         account_ids: &[String],
+        keyword: Option<&str>,
         offset: u32,
         size: u32,
         order_by: &str,

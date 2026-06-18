@@ -2652,6 +2652,7 @@ impl AuthStore for MysqlStore {
     async fn list_app_workspaces_for_accounts(
         &self,
         account_ids: &[String],
+        keyword: Option<&str>,
         offset: u32,
         size: u32,
         order_by: &str,
@@ -2663,13 +2664,20 @@ impl AuthStore for MysqlStore {
         let cols = "id, account_id, name, status, kind, app_id, description, created_at, updated_at, creator, creator_name";
         let (ob, od) = order_clause(order_by, order);
         let ph = vec!["?"; account_ids.len()].join(",");
+        // Optional case-insensitive name filter (ci collation). Bound param, so
+        // the value is escaped; `%`/`_` in the keyword act as LIKE wildcards.
+        let kw_clause = if keyword.is_some() { " AND name LIKE ?" } else { "" };
+        let like = keyword.map(|k| format!("%{k}%"));
         let sql = format!(
             "SELECT {cols} FROM veda_workspaces \
-             WHERE account_id IN ({ph}) AND status = 'active' ORDER BY {ob} {od} LIMIT ? OFFSET ?"
+             WHERE account_id IN ({ph}) AND status = 'active'{kw_clause} ORDER BY {ob} {od} LIMIT ? OFFSET ?"
         );
         let mut q = sqlx::query(&sql);
         for id in account_ids {
             q = q.bind(id);
+        }
+        if let Some(ref l) = like {
+            q = q.bind(l);
         }
         let rows = q
             .bind(size as i64)
@@ -2678,11 +2686,14 @@ impl AuthStore for MysqlStore {
             .await
             .map_err(storage_err)?;
         let count_sql = format!(
-            "SELECT COUNT(*) FROM veda_workspaces WHERE account_id IN ({ph}) AND status = 'active'"
+            "SELECT COUNT(*) FROM veda_workspaces WHERE account_id IN ({ph}) AND status = 'active'{kw_clause}"
         );
         let mut cq = sqlx::query_scalar::<_, i64>(&count_sql);
         for id in account_ids {
             cq = cq.bind(id);
+        }
+        if let Some(ref l) = like {
+            cq = cq.bind(l);
         }
         let total: i64 = cq.fetch_one(&self.pool).await.map_err(storage_err)?;
         let items: Result<Vec<_>> = rows
