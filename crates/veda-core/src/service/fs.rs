@@ -12,7 +12,10 @@ use crate::store::{MetadataStore, MetadataTx};
 const INLINE_THRESHOLD: i64 = 256 * 1024;
 const CHUNK_SIZE: usize = 256 * 1024;
 const MAX_FILE_BYTES: i64 = 50 * 1024 * 1024;
-const MAX_LINE_RANGE: i32 = 100_000;
+/// Max lines a single `read_file_lines` request may return. The fs route
+/// also uses it to bound an open-ended `start:` range (start..EOF) to the
+/// same window. Public so routes can keep the two in lockstep.
+pub const MAX_LINE_RANGE: i32 = 100_000;
 /// Hard cap on entries loaded into memory for a single recursive
 /// delete/rename. Operations on larger subtrees should be batched by
 /// the caller — a single transaction holding millions of locks would

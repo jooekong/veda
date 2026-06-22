@@ -148,7 +148,11 @@ pub struct WriteFileResponse {
 
 // ── Search ─────────────────────────────────────────────
 
+// deny_unknown_fields: reject typo'd / unsupported fields (e.g. min_score,
+// which is a db-vector-plane feature) with a 4xx instead of silently
+// dropping them and running an unfiltered search that looks like success.
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct SearchApiRequest {
     pub query: String,
     pub mode: Option<SearchMode>,

@@ -1232,7 +1232,7 @@ impl MetadataStore for MysqlStore {
             r#"SELECT
                 COUNT(CASE WHEN d.is_dir = false THEN 1 END) AS total_files,
                 COUNT(CASE WHEN d.is_dir = true THEN 1 END) AS total_directories,
-                COALESCE(SUM(f.size_bytes), 0) AS total_bytes
+                CAST(COALESCE(SUM(f.size_bytes), 0) AS SIGNED) AS total_bytes
                FROM veda_dentries d
                LEFT JOIN veda_files f ON d.file_id = f.id
                WHERE d.workspace_id = ?"#,
@@ -1245,7 +1245,11 @@ impl MetadataStore for MysqlStore {
         Ok(StorageStats {
             total_files: row.try_get::<i64, _>("total_files").unwrap_or(0),
             total_directories: row.try_get::<i64, _>("total_directories").unwrap_or(0),
-            total_bytes: row.try_get::<i64, _>("total_bytes").unwrap_or(0),
+            // Surface decode errors instead of silently swallowing to 0. The
+            // CAST(... AS SIGNED) above keeps this an i64-decodable column;
+            // the prior COALESCE(SUM(...)) returned DECIMAL, which
+            // try_get::<i64> rejected and unwrap_or(0) hid → always-0 bytes.
+            total_bytes: row.try_get::<i64, _>("total_bytes").map_err(storage_err)?,
         })
     }
 
@@ -2427,15 +2431,17 @@ impl AuthStore for MysqlStore {
         .map_err(storage_err)?;
 
         sqlx::query(
-            r#"INSERT INTO veda_workspace_keys (id, workspace_id, name, key_hash, permission, status, created_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?)"#,
+            r#"INSERT INTO veda_workspace_keys (id, workspace_id, account_id, name, key_hash, permission, status, kind, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)"#,
         )
         .bind(&ws_key.id)
         .bind(&ws_key.workspace_id)
+        .bind(&ws_key.account_id)
         .bind(&ws_key.name)
         .bind(&ws_key.key_hash)
         .bind(db_enum_str(&ws_key.permission))
         .bind(db_enum_str(&ws_key.status))
+        .bind(db_enum_str(&ws_key.kind))
         .bind(ws_key.created_at.naive_utc())
         .execute(&mut *tx)
         .await

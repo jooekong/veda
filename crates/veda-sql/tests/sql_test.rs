@@ -1886,11 +1886,29 @@ async fn read_only_rejects_write_udf() {
     let result = engine
         .execute("ws1", true, "SELECT veda_write('/x.txt', 'data')")
         .await;
-    assert!(result.is_err(), "write UDF should fail with read_only=true");
-    let err_msg = result.unwrap_err().to_string();
+    // Must surface the *typed* PermissionDenied (→ HTTP 403 PERMISSION_DENIED),
+    // not collapse to a generic Storage/500. Pins the engine's typed-error
+    // recovery across the DataFusion error boundary.
     assert!(
-        err_msg.contains("permission denied") || err_msg.contains("read-only"),
-        "error should mention permission: {err_msg}"
+        matches!(result, Err(VedaError::PermissionDenied)),
+        "read-only write UDF must return typed PermissionDenied, got: {result:?}"
+    );
+}
+
+#[tokio::test]
+async fn plan_error_maps_to_invalid_input_not_internal() {
+    // A user query error (unknown column) must classify as InvalidInput
+    // (→ HTTP 400), not Storage/500. Pins the variant-based plan-error
+    // classification so genuine client mistakes don't pollute 5xx metrics.
+    let meta = Arc::new(MockMetaFull::new());
+    let engine = make_full_engine(meta);
+
+    let result = engine
+        .execute("ws1", false, "SELECT no_such_column FROM files")
+        .await;
+    assert!(
+        matches!(result, Err(VedaError::InvalidInput(_))),
+        "unknown column should be InvalidInput, got: {result:?}"
     );
 }
 

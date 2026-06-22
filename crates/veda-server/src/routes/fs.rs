@@ -14,7 +14,12 @@ use crate::auth::AuthWorkspace;
 use crate::error::AppError;
 use crate::state::AppState;
 
-const MAX_BODY_MB: usize = 50;
+// 1 MiB of headroom over the 50 MiB MAX_FILE_BYTES quota (veda-core
+// service::fs) so an over-quota write buffers and hits the in-handler
+// quota check (→ 429 QUOTA_EXCEEDED) instead of being rejected by axum's
+// body-buffer limit first (→ generic 413). Genuinely huge bodies still
+// trip the limit, preserving DoS protection.
+const MAX_BODY_MB: usize = 51;
 
 pub fn routes() -> Router<Arc<AppState>> {
     let upload_routes = Router::new()
@@ -196,9 +201,20 @@ async fn read_file(
         let start: i32 = parts[0]
             .parse()
             .map_err(|_| VedaError::InvalidInput("invalid line number".into()))?;
-        let end: i32 = parts[1]
-            .parse()
-            .map_err(|_| VedaError::InvalidInput("invalid line number".into()))?;
+        // Open-ended `start:` (empty end) means "to end-of-file" — the CLI
+        // documents and forwards the `42:` form. Bound it to the same
+        // MAX_LINE_RANGE window the service enforces (read_file_lines then
+        // clamps to the file's real line count). Computing the concrete end
+        // here — rather than passing a magic sentinel — keeps an explicit
+        // oversized end (e.g. `1:2147483647`) on the normal "range too large"
+        // rejection path instead of being mistaken for open-ended.
+        let end: i32 = if parts[1].is_empty() {
+            start.saturating_add(veda_core::service::fs::MAX_LINE_RANGE - 1)
+        } else {
+            parts[1]
+                .parse()
+                .map_err(|_| VedaError::InvalidInput("invalid line number".into()))?
+        };
         let content = state
             .fs_service
             .read_file_lines(&auth.workspace_id, &path, start, end)

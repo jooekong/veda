@@ -2,6 +2,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use arrow::array::RecordBatch;
+use datafusion::error::DataFusionError;
 use datafusion::execution::memory_pool::GreedyMemoryPool;
 use datafusion::execution::runtime_env::RuntimeEnvBuilder;
 use datafusion::logical_expr::ScalarUDF;
@@ -140,7 +141,7 @@ impl VedaSqlEngine {
         let df = ctx
             .sql_with_options(sql, opts)
             .await
-            .map_err(|e| VedaError::Storage(e.to_string()))?;
+            .map_err(df_error_to_veda)?;
         let batches = tokio::time::timeout(SQL_QUERY_TIMEOUT, df.collect())
             .await
             .map_err(|_| {
@@ -149,7 +150,36 @@ impl VedaSqlEngine {
                     SQL_QUERY_TIMEOUT.as_secs()
                 ))
             })?
-            .map_err(|e| VedaError::Storage(e.to_string()))?;
+            .map_err(df_error_to_veda)?;
         Ok(batches)
+    }
+}
+
+/// Map a DataFusion error to a `VedaError` with the right HTTP status.
+///
+/// 1. **Recover typed errors**: a UDF/UDTF that surfaced a `VedaError` via
+///    `External` (e.g. the read-only write guard → `PermissionDenied`) keeps
+///    its real status instead of collapsing to 500. `find_root()` digs through
+///    every wrapper variant (`Context`/`Diagnostic`/`Shared`/`Collection`),
+///    so recovery is robust to however DataFusion nests the error.
+/// 2. **Classify by variant** (not by plan-vs-exec phase): planning/analysis
+///    errors — bad SQL, unknown table/column, unsupported feature — are user
+///    query errors → `InvalidInput` (4xx). Everything else — crucially the
+///    `Execution(String)` that UDTFs (`veda_fs`/`search`) emit when a backend
+///    (MySQL/Milvus/embedding) fails — stays `Storage` (5xx), so backend
+///    failures are neither mislabeled 4xx nor leaked to the caller.
+fn df_error_to_veda(err: DataFusionError) -> VedaError {
+    let root = err.find_root();
+    if let DataFusionError::External(b) = root {
+        if let Some(ve) = b.downcast_ref::<VedaError>() {
+            return ve.clone();
+        }
+    }
+    match root {
+        DataFusionError::Plan(_)
+        | DataFusionError::SchemaError(..)
+        | DataFusionError::SQL(..)
+        | DataFusionError::NotImplemented(_) => VedaError::InvalidInput(root.to_string()),
+        _ => VedaError::Storage(root.to_string()),
     }
 }

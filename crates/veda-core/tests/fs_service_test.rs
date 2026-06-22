@@ -323,6 +323,28 @@ async fn read_lines_clamps_end_to_eof() {
 }
 
 #[tokio::test]
+async fn read_lines_open_ended_window_clamps_to_eof() {
+    // The fs route turns an open-ended `start:` (CLI `--range "3:"`) into the
+    // bounded window `start ..= start + MAX_LINE_RANGE - 1` (routes/fs.rs),
+    // which the service then clamps to EOF — yielding start..end-of-file
+    // without tripping the range-too-large cap. Pins that contract with the
+    // real constant so the two stay in lockstep.
+    use veda_core::service::fs::MAX_LINE_RANGE;
+    let (svc, _) = make_service();
+    svc.write_file("ws1", "/f.txt", "a\nb\nc\nd\ne", None, None)
+        .await
+        .unwrap();
+
+    let end = 3i32.saturating_add(MAX_LINE_RANGE - 1);
+    let lines = svc.read_file_lines("ws1", "/f.txt", 3, end).await.unwrap();
+    assert_eq!(lines, "c\nd\ne");
+
+    let end1 = 1i32.saturating_add(MAX_LINE_RANGE - 1);
+    let all = svc.read_file_lines("ws1", "/f.txt", 1, end1).await.unwrap();
+    assert_eq!(all, "a\nb\nc\nd\ne");
+}
+
+#[tokio::test]
 async fn read_lines_invalid_range_rejected() {
     let (svc, _) = make_service();
     svc.write_file("ws1", "/f.txt", "a\nb", None, None)

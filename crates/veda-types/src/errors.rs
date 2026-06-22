@@ -1,6 +1,6 @@
 use std::fmt;
 
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, Clone, thiserror::Error)]
 pub enum VedaError {
     #[error("not found: {0}")]
     NotFound(String),

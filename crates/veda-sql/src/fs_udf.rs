@@ -151,9 +151,12 @@ pub(crate) fn bounded_read_file(
 
 fn check_write_allowed(ctx: &FsUdfContext) -> Result<()> {
     if ctx.read_only {
-        return Err(datafusion::error::DataFusionError::Execution(
-            "permission denied: write UDF not allowed with read-only key".to_string(),
-        ));
+        // Surface a *typed* PermissionDenied via External so the engine's
+        // error boundary recovers it to a 403 PERMISSION_DENIED instead of
+        // collapsing every SQL execution error to a 500 INTERNAL.
+        return Err(datafusion::error::DataFusionError::External(Box::new(
+            VedaError::PermissionDenied,
+        )));
     }
     Ok(())
 }
