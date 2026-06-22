@@ -2670,9 +2670,15 @@ impl AuthStore for MysqlStore {
         let cols = "id, account_id, name, status, kind, app_id, description, created_at, updated_at, creator, creator_name";
         let (ob, od) = order_clause(order_by, order);
         let ph = vec!["?"; account_ids.len()].join(",");
-        // Optional case-insensitive name filter (ci collation). Bound param, so
-        // the value is escaped; `%`/`_` in the keyword act as LIKE wildcards.
-        let kw_clause = if keyword.is_some() { " AND name LIKE ?" } else { "" };
+        // Optional case-insensitive keyword filter over name OR description
+        // (ci collation). Bound param, so the value is escaped; `%`/`_` in the
+        // keyword act as LIKE wildcards. A NULL description simply doesn't match
+        // — the OR still lets a name hit through. Bound twice (name + desc).
+        let kw_clause = if keyword.is_some() {
+            " AND (name LIKE ? OR description LIKE ?)"
+        } else {
+            ""
+        };
         let like = keyword.map(|k| format!("%{k}%"));
         let sql = format!(
             "SELECT {cols} FROM veda_workspaces \
@@ -2683,7 +2689,8 @@ impl AuthStore for MysqlStore {
             q = q.bind(id);
         }
         if let Some(ref l) = like {
-            q = q.bind(l);
+            // two placeholders: name LIKE ? OR description LIKE ?
+            q = q.bind(l).bind(l);
         }
         let rows = q
             .bind(size as i64)
@@ -2699,7 +2706,7 @@ impl AuthStore for MysqlStore {
             cq = cq.bind(id);
         }
         if let Some(ref l) = like {
-            cq = cq.bind(l);
+            cq = cq.bind(l).bind(l);
         }
         let total: i64 = cq.fetch_one(&self.pool).await.map_err(storage_err)?;
         let items: Result<Vec<_>> = rows
