@@ -54,7 +54,7 @@ The company AI Platform uses a separate `app_id`-keyed control plane at `/v1/app
 
 ### Base URL
 
-`<BASE>` depends on the deployment. Company deployment example: `https://veda.dbpaas.dingdongxiaoqu.com`. The server listens on `0.0.0.0:3000` by default. Examples below use `$BASE` throughout. Business endpoints all live under `/v1/*` or `/admin/v1/*`.
+`<BASE>` depends on the deployment. Company deployment example: `https://veda.ddmc-inc.com`. The server listens on `0.0.0.0:3000` by default. Examples below use `$BASE` throughout. Business endpoints all live under `/v1/*` or `/admin/v1/*`.
 
 ### Response envelope
 
@@ -359,6 +359,6 @@ An honest list of what it's not good at today and what to watch before going to 
 
 - **Java SDK**: `sdk/java` (Java 8 + Jackson + OkHttp), wraps the 4 vector data-plane endpoints. ⚠️ Still pending adaptation to the 2026-06 `wk_` contract.
 - **Python example**: `examples/python_pinecone_demo.py` (no SDK, raw HTTP).
-- **CLI**: `curl -fsSL https://veda.dbpaas.dingdongxiaoqu.com/install.sh | sh` — see [CLI reference](#/docs/cli).
+- **CLI**: `curl -fsSL https://veda.ddmc-inc.com/install.sh | sh` — see [CLI reference](#/docs/cli).
 
 Found a problem? File an issue at [git.ddxq.mobi/middleware/dbpaas/veda](http://git.ddxq.mobi/middleware/dbpaas/veda).

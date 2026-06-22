@@ -9,7 +9,7 @@ Veda ships an agent-facing [`skill.md`](http://git.ddxq.mobi/middleware/dbpaas/v
 `install.sh` detects `~/.claude` and drops the skill into Claude Code's skill directory automatically:
 
 ```bash
-curl -fsSL https://veda.dbpaas.dingdongxiaoqu.com/install.sh | sh
+curl -fsSL https://veda.ddmc-inc.com/install.sh | sh
 ```
 
 Verify:
@@ -92,7 +92,7 @@ curl -fsSL http://git.ddxq.mobi/middleware/dbpaas/veda/-/raw/main/skill.md \
 Yes. `skill.md` lives in the GitLab repo and ships with each Veda release (new commands, new behavior, new error codes). Re-fetch when you upgrade the CLI:
 
 ```bash
-curl -fsSL https://veda.dbpaas.dingdongxiaoqu.com/install.sh | sh
+curl -fsSL https://veda.ddmc-inc.com/install.sh | sh
 # Re-installs CLI + rewrites ~/.claude/skills/veda/SKILL.md
 ```
 

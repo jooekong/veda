@@ -8,7 +8,7 @@
 
 ```bash
 # 一次装好 veda + veda-fuse
-curl -fsSL https://veda.dbpaas.dingdongxiaoqu.com/install.sh | sh -s -- --with-fuse
+curl -fsSL https://veda.ddmc-inc.com/install.sh | sh -s -- --with-fuse
 ```
 
 宿主机还要装 FUSE：
@@ -32,7 +32,7 @@ brew install --cask macfuse
 ```bash
 mkdir -p ~/veda
 veda-fuse mount \
-  --server https://veda.dbpaas.dingdongxiaoqu.com \
+  --server https://veda.ddmc-inc.com \
   --key wk_xxx \
   ~/veda
 ```

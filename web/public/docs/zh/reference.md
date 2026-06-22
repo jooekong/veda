@@ -54,7 +54,7 @@
 
 ### Base URL
 
-`<BASE>` 由部署决定。公司部署示例：`https://veda.dbpaas.dingdongxiaoqu.com`。server 默认监听 `0.0.0.0:3000`。下文示例统一用 `$BASE`。业务路径都在 `/v1/*` 或 `/admin/v1/*` 下。
+`<BASE>` 由部署决定。公司部署示例：`https://veda.ddmc-inc.com`。server 默认监听 `0.0.0.0:3000`。下文示例统一用 `$BASE`。业务路径都在 `/v1/*` 或 `/admin/v1/*` 下。
 
 ### 响应信封
 
@@ -359,6 +359,6 @@ app_id 账号是 passwordless 的：不能 login、不能 claim，`app_id` 与 `
 
 - **Java SDK**：`sdk/java`（Java 8 + Jackson + OkHttp），封装向量库数据面 4 端点。⚠️ 仍待适配 2026-06 的 `wk_` 契约。
 - **Python 示例**：`examples/python_pinecone_demo.py`（无 SDK，裸 HTTP）。
-- **CLI**：`curl -fsSL https://veda.dbpaas.dingdongxiaoqu.com/install.sh | sh`，详见 [CLI 速查](#/docs/cli)。
+- **CLI**：`curl -fsSL https://veda.ddmc-inc.com/install.sh | sh`，详见 [CLI 速查](#/docs/cli)。
 
 发现问题去 [git.ddxq.mobi/middleware/dbpaas/veda](http://git.ddxq.mobi/middleware/dbpaas/veda) 提 issue。

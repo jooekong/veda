@@ -8,7 +8,7 @@
 
 ## 1. 协议与约定
 
-- HTTP + JSON（UTF-8），`Content-Type: application/json`。业务路径在 `/v1/*` 或 `/admin/v1/*` 下。`<BASE>` 由部署决定（示例：`https://veda.dbpaas.dingdongxiaoqu.com`），下文用 `$BASE`。
+- HTTP + JSON（UTF-8），`Content-Type: application/json`。业务路径在 `/v1/*` 或 `/admin/v1/*` 下。`<BASE>` 由部署决定（示例：`https://veda.ddmc-inc.com`），下文用 `$BASE`。
 - **响应信封**：成功 `{ "success": true, "data": {…} }`；失败 `{ "success": false, "error_code": "INVALID_INPUT", "error": "text: must not be empty" }`。`error_code` 是稳定机器码，**客户端只匹配它，别解析 `error` 文案**。部分删除接口返回 `204 No Content` 无体。
 - **时间字段两种格式**：控制面对象（Workspace / Dataset 的 `created_at` / `updated_at`）是 **RFC3339 字符串**；向量 hit 的 `created_at` / `updated_at`、`upsert` 的 `commit_ts`、铸 token 的 `expires_at` 是 **int64 毫秒 epoch**。反序列化时别统一。
 

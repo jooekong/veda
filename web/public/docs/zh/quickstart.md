@@ -22,7 +22,7 @@ Veda 有两种 workspace，先想清楚你要哪种，再跟对应那一节走�
 ### 2. 装 CLI
 
 ```bash
-curl -fsSL https://veda.dbpaas.dingdongxiaoqu.com/install.sh | sh
+curl -fsSL https://veda.ddmc-inc.com/install.sh | sh
 ```
 
 二进制装到 `/usr/local/bin/`（root）或 `~/.local/bin/`（非 root）。重开终端让它进 `PATH`，然后 `veda --help` 验证。
@@ -30,7 +30,7 @@ curl -fsSL https://veda.dbpaas.dingdongxiaoqu.com/install.sh | sh
 ### 3. 连上你的账号
 
 ```bash
-veda init --server https://veda.dbpaas.dingdongxiaoqu.com --import-key vk_xxx
+veda init --server https://veda.ddmc-inc.com --import-key vk_xxx
 ```
 
 配置写到 `~/.config/veda/config.toml`（已有文件会先备份成 `config.toml.bak.<时间戳>`）。
@@ -71,12 +71,12 @@ veda sql "SELECT path, size_bytes FROM files ORDER BY created_at DESC LIMIT 5"
 
 ## B. 向量库：业务接入
 
-向量库面向业务 app，走 HTTP / SDK。`<BASE>` 用部署地址，示例：`https://veda.dbpaas.dingdongxiaoqu.com`。
+向量库面向业务 app，走 HTTP / SDK。`<BASE>` 用部署地址，示例：`https://veda.ddmc-inc.com`。
 
 业务 app 通常**只拿一把 `wk_`**（平台 / 控制台为某个 db workspace 签发）。拿到后直接打数据面：
 
 ```bash
-BASE=https://veda.dbpaas.dingdongxiaoqu.com
+BASE=https://veda.ddmc-inc.com
 WK=wk_...        # 平台发给你的 workspace key（请求体不带 workspace_id）
 
 # 写入：text 由服务端自动嵌入

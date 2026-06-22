@@ -14,7 +14,7 @@
 确认 `~/.config/veda/config.toml` 的 `server_url` 对。或者命令级覆盖：
 
 ```bash
-veda --server https://veda.dbpaas.dingdongxiaoqu.com ls
+veda --server https://veda.ddmc-inc.com ls
 ```
 
 ## 搜索返回空

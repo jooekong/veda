@@ -8,7 +8,7 @@ Mount your Veda workspace as a local directory. Edit files with any editor; chan
 
 ```bash
 # Install veda + veda-fuse together
-curl -fsSL https://veda.dbpaas.dingdongxiaoqu.com/install.sh | sh -s -- --with-fuse
+curl -fsSL https://veda.ddmc-inc.com/install.sh | sh -s -- --with-fuse
 ```
 
 You'll also need FUSE on the host:
@@ -32,7 +32,7 @@ brew install --cask macfuse
 ```bash
 mkdir -p ~/veda
 veda-fuse mount \
-  --server https://veda.dbpaas.dingdongxiaoqu.com \
+  --server https://veda.ddmc-inc.com \
   --key wk_xxx \
   ~/veda
 ```

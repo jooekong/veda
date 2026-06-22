@@ -14,7 +14,7 @@ The config file is at `~/.config/veda/config.toml`. Editing the `api_key` direct
 Make sure `~/.config/veda/config.toml` has the right `server_url`. Override per-command:
 
 ```bash
-veda --server https://veda.dbpaas.dingdongxiaoqu.com ls
+veda --server https://veda.ddmc-inc.com ls
 ```
 
 ## Search returns nothing

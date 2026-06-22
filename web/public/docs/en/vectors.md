@@ -8,7 +8,7 @@ A **Vector Workspace** is a Veda workspace of `kind=db`: Pinecone-style managed 
 
 ## 1. Conventions
 
-- HTTP + JSON (UTF-8), `Content-Type: application/json`. Business paths live under `/v1/*` or `/admin/v1/*`. `<BASE>` is deployment-defined (example: `https://veda.dbpaas.dingdongxiaoqu.com`); examples below use `$BASE`.
+- HTTP + JSON (UTF-8), `Content-Type: application/json`. Business paths live under `/v1/*` or `/admin/v1/*`. `<BASE>` is deployment-defined (example: `https://veda.ddmc-inc.com`); examples below use `$BASE`.
 - **Response envelope**: success `{ "success": true, "data": {…} }`; failure `{ "success": false, "error_code": "INVALID_INPUT", "error": "text: must not be empty" }`. `error_code` is a stable machine-readable code — **clients match on it only, never parse the `error` text**. Some delete endpoints return `204 No Content` with no body.
 - **Two time formats**: control-plane objects (Workspace / Dataset `created_at` / `updated_at`) are **RFC3339 strings**; vector hit `created_at` / `updated_at`, `upsert`'s `commit_ts`, and token-mint `expires_at` are **int64 ms epoch**. Don't unify them when deserializing.
 

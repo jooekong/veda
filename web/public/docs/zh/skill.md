@@ -9,7 +9,7 @@ Veda 把 CLI 用法整理成了一份 [`skill.md`](http://git.ddxq.mobi/middlewa
 `install.sh` 检测到 `~/.claude` 存在时，会自动把 skill 装到 Claude Code 的 skills 目录：
 
 ```bash
-curl -fsSL https://veda.dbpaas.dingdongxiaoqu.com/install.sh | sh
+curl -fsSL https://veda.ddmc-inc.com/install.sh | sh
 ```
 
 装好后：
@@ -35,7 +35,7 @@ ls ~/.claude/skills/veda/SKILL.md      # 验证存在
    # Veda usage rules
    
    When the user mentions veda, file uploads, knowledge base, or semantic search, refer to:
-   <在此粘贴 https://veda.dbpaas.dingdongxiaoqu.com/install.sh 输出里那份 skill.md 的内容>
+   <在此粘贴 https://veda.ddmc-inc.com/install.sh 输出里那份 skill.md 的内容>
    ```
 
 3. 也可以直接：
@@ -93,7 +93,7 @@ curl -fsSL http://git.ddxq.mobi/middleware/dbpaas/veda/-/raw/main/skill.md \
 会。`skill.md` 跟 CLI 一起在 GitLab 仓库里维护，每次 Veda 发版会更新（新命令、新行为、新错误码）。建议每次 CLI 升级一起重 fetch 一份：
 
 ```bash
-curl -fsSL https://veda.dbpaas.dingdongxiaoqu.com/install.sh | sh
+curl -fsSL https://veda.ddmc-inc.com/install.sh | sh
 # 自动重装 CLI + 重写 ~/.claude/skills/veda/SKILL.md
 ```
 

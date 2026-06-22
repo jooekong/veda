@@ -6,10 +6,10 @@
 
 ```bash
 # 用账号 key (vk_…) 连
-veda init --server https://veda.dbpaas.dingdongxiaoqu.com --import-key vk_xxx
+veda init --server https://veda.ddmc-inc.com --import-key vk_xxx
 
 # 或用 workspace key (wk_…)
-veda init --server https://veda.dbpaas.dingdongxiaoqu.com --import-key wk_xxx
+veda init --server https://veda.ddmc-inc.com --import-key wk_xxx
 
 # 直接用 CLI 注册带邮箱的账号
 veda init --email you@example.com --password 'strong-pw'

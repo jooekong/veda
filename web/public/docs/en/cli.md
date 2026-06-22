@@ -6,10 +6,10 @@ Authoritative reference is `veda --help` and `veda <subcommand> --help`. This pa
 
 ```bash
 # Connect with an account key (vk_…)
-veda init --server https://veda.dbpaas.dingdongxiaoqu.com --import-key vk_xxx
+veda init --server https://veda.ddmc-inc.com --import-key vk_xxx
 
 # Or with a workspace key (wk_…)
-veda init --server https://veda.dbpaas.dingdongxiaoqu.com --import-key wk_xxx
+veda init --server https://veda.ddmc-inc.com --import-key wk_xxx
 
 # Register a named account from the CLI directly
 veda init --email you@example.com --password 'strong-pw'

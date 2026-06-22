@@ -22,7 +22,7 @@ The `wk_` is shown **only once** — copy both keys somewhere safe before leavin
 ### 2. Install the CLI
 
 ```bash
-curl -fsSL https://veda.dbpaas.dingdongxiaoqu.com/install.sh | sh
+curl -fsSL https://veda.ddmc-inc.com/install.sh | sh
 ```
 
 The binary goes into `/usr/local/bin/` (root) or `~/.local/bin/` (non-root). Reopen your terminal so it's on `PATH`, then verify with `veda --help`.
@@ -30,7 +30,7 @@ The binary goes into `/usr/local/bin/` (root) or `~/.local/bin/` (non-root). Reo
 ### 3. Connect the CLI to your account
 
 ```bash
-veda init --server https://veda.dbpaas.dingdongxiaoqu.com --import-key vk_xxx
+veda init --server https://veda.ddmc-inc.com --import-key vk_xxx
 ```
 
 Config is written to `~/.config/veda/config.toml` (an existing file is backed up to `config.toml.bak.<timestamp>` first).
@@ -71,12 +71,12 @@ veda sql "SELECT path, size_bytes FROM files ORDER BY created_at DESC LIMIT 5"
 
 ## B. Vector Workspace: app integration
 
-The Vector Workspace is for business apps, over HTTP / SDK. `<BASE>` is your deployment address, e.g. `https://veda.dbpaas.dingdongxiaoqu.com`.
+The Vector Workspace is for business apps, over HTTP / SDK. `<BASE>` is your deployment address, e.g. `https://veda.ddmc-inc.com`.
 
 A business app usually holds **just one `wk_`** (issued by the platform / console for a given db workspace). With it, hit the data plane directly:
 
 ```bash
-BASE=https://veda.dbpaas.dingdongxiaoqu.com
+BASE=https://veda.ddmc-inc.com
 WK=wk_...        # workspace key issued to you by the platform (no workspace_id in the request body)
 
 # upsert: text is embedded server-side automatically

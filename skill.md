@@ -15,7 +15,7 @@ one CLI. Interact via the `veda` binary; never construct HTTP requests directly.
 ## Quick start
 
 ```sh
-which veda || curl -fL https://veda.dbpaas.dingdongxiaoqu.com/install.sh | sh
+which veda || curl -fL https://veda.ddmc-inc.com/install.sh | sh
 veda init       # zero-prompt anonymous onboard; writes ~/.config/veda/config.toml
 veda ls /       # empty listing on first run is expected
 ```
@@ -330,6 +330,6 @@ FUSE-specific errors are in the "FUSE error handling" sub-section above.
 ## Reference
 
 - Repo: https://github.com/jooekong/veda
-- Server (alpha): https://veda.dbpaas.dingdongxiaoqu.com
+- Server (production): https://veda.ddmc-inc.com
 - Changelog: [CHANGELOG.md](./CHANGELOG.md)
 - Issues: contact Joe
