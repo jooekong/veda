@@ -478,7 +478,7 @@ fn mask_token(token: &str) -> String {
 /// account must exist (active) and own the project. A missing workspace, missing
 /// project, or cross-tenant id all collapse to the same `NOT_FOUND` so a probe
 /// can't learn another tenant's project ids.
-async fn load_app_project(
+pub(crate) async fn load_app_project(
     state: &AppState,
     workspace: &str,
     ws_id: &str,
@@ -738,9 +738,10 @@ async fn list_app_datasets(
 ///   single  → the object **as-is** (no `data` wrapper, no pagination)
 ///   no body → `{}` (delete / revoke)
 ///   error   → `{ error: { code, reason, message, external } }`
-/// Applied only to the apps router via `from_fn`; the data plane keeps veda's
-/// native `{success,data}` / `error_code` shape.
-async fn company_envelope(
+/// Applied via `from_fn` to the management router (apps) and the platform data
+/// plane (project_data). The `wk_` data plane keeps veda's native
+/// `{success,data}` / `error_code` shape.
+pub(crate) async fn company_envelope(
     req: axum::extract::Request,
     next: axum::middleware::Next,
 ) -> axum::response::Response {

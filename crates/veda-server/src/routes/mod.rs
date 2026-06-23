@@ -6,6 +6,7 @@ pub mod collection;
 pub mod datasets;
 pub mod events;
 pub mod fs;
+pub mod project_data;
 pub mod reconcile;
 pub mod search;
 pub mod sql;
@@ -48,6 +49,7 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .merge(reconcile::routes())
         .merge(datasets::routes())
         .merge(vectors::routes())
+        .merge(project_data::routes())
         .merge(fs::routes())
         .merge(search::routes())
         .merge(collection::routes())

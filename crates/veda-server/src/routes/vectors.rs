@@ -55,13 +55,26 @@ async fn upsert_vectors(
     auth: AuthDbWorkspace,
     Json(req): Json<UpsertRequest>,
 ) -> Result<Json<ApiResponse<UpsertResponse>>, AppError> {
+    auth.require_write()?;
+    let resp = do_upsert(&state, &auth.workspace_id, req).await?;
+    Ok(Json(ApiResponse::ok(resp)))
+}
+
+/// Core upsert: validate → dedupe → embed → write. Shared by the `wk_` data
+/// plane (`upsert_vectors` above) and the platform-gateway surface
+/// (`project_data.rs`). The caller enforces write permission (wk_ via
+/// `require_write`, gateway via external authz).
+pub(crate) async fn do_upsert(
+    state: &AppState,
+    workspace_id: &str,
+    req: UpsertRequest,
+) -> Result<UpsertResponse, AppError> {
     let mut timer = VectorReqTimer::start(
         "upsert",
-        &auth.workspace_id,
+        workspace_id,
         req.dataset.as_deref().unwrap_or(validate::DEFAULT_DATASET),
         "none",
     );
-    auth.require_write()?;
     if req.records.is_empty() {
         return Err(VedaError::InvalidInput("records must not be empty".into()).into());
     }
@@ -73,9 +86,8 @@ async fn upsert_vectors(
         .into());
     }
 
-    // Workspace comes from the wk_ bearer; resolve + verify the dataset.
     let dataset_name =
-        resolve_dataset(&state, &auth.workspace_id, req.dataset.as_deref()).await?;
+        resolve_dataset(state, workspace_id, req.dataset.as_deref()).await?;
     timer.set_dataset(&dataset_name);
 
     // 4. Validate every record and resolve defaults BEFORE the embedding
@@ -163,18 +175,18 @@ async fn upsert_vectors(
     if !upsert_batch.is_empty() {
         commit_ts = state
             .vector_workspace_store
-            .upsert_records(&auth.workspace_id, &upsert_batch)
+            .upsert_records(workspace_id, &upsert_batch)
             .await?;
     }
     if !insert_batch.is_empty() {
         commit_ts = state
             .vector_workspace_store
-            .insert_records(&auth.workspace_id, &insert_batch)
+            .insert_records(workspace_id, &insert_batch)
             .await?;
     }
 
     timer.success();
-    Ok(Json(ApiResponse::ok(UpsertResponse { ids, commit_ts })))
+    Ok(UpsertResponse { ids, commit_ts })
 }
 
 /// Resolved input ready to be paired with an embedding.
@@ -258,9 +270,20 @@ async fn search_vectors(
     auth: AuthDbWorkspace,
     Json(req): Json<VectorSearchRequest>,
 ) -> Result<Json<ApiResponse<VectorSearchResponse>>, AppError> {
+    let resp = do_search(&state, &auth.workspace_id, req).await?;
+    Ok(Json(ApiResponse::ok(resp)))
+}
+
+/// Core search: validate → embed → store search → relevance floor. Shared by
+/// the `wk_` data plane (above) and the platform gateway (`project_data.rs`).
+pub(crate) async fn do_search(
+    state: &AppState,
+    workspace_id: &str,
+    req: VectorSearchRequest,
+) -> Result<VectorSearchResponse, AppError> {
     let mut timer = VectorReqTimer::start(
         "search",
-        &auth.workspace_id,
+        workspace_id,
         req.dataset.as_deref().unwrap_or(validate::DEFAULT_DATASET),
         req.mode.map(search_mode_label).unwrap_or("hybrid"),
     );
@@ -285,7 +308,7 @@ async fn search_vectors(
     };
 
     let dataset_name =
-        resolve_dataset(&state, &auth.workspace_id, req.dataset.as_deref()).await?;
+        resolve_dataset(state, workspace_id, req.dataset.as_deref()).await?;
     timer.set_dataset(&dataset_name);
 
     // Default is explicit (NOT `unwrap_or_default()`): even though
@@ -348,7 +371,7 @@ async fn search_vectors(
     let mut hits = state
         .vector_workspace_store
         .search_vectors(
-            &auth.workspace_id,
+            workspace_id,
             &dataset_name,
             search_query,
             top_k,
@@ -362,7 +385,7 @@ async fn search_vectors(
         hits.retain(|h| h.score >= ms);
     }
     timer.success();
-    Ok(Json(ApiResponse::ok(VectorSearchResponse { hits })))
+    Ok(VectorSearchResponse { hits })
 }
 
 /// Cap on `ids` for query/delete. Matches MAX_RECORDS_PER_UPSERT so
@@ -374,9 +397,19 @@ async fn query_vectors(
     auth: AuthDbWorkspace,
     Json(req): Json<VectorQueryRequest>,
 ) -> Result<Json<ApiResponse<VectorQueryResponse>>, AppError> {
+    let resp = do_query(&state, &auth.workspace_id, req).await?;
+    Ok(Json(ApiResponse::ok(resp)))
+}
+
+/// Core query-by-id. Shared by the `wk_` data plane and the platform gateway.
+pub(crate) async fn do_query(
+    state: &AppState,
+    workspace_id: &str,
+    req: VectorQueryRequest,
+) -> Result<VectorQueryResponse, AppError> {
     let mut timer = VectorReqTimer::start(
         "query",
-        &auth.workspace_id,
+        workspace_id,
         req.dataset.as_deref().unwrap_or(validate::DEFAULT_DATASET),
         "none",
     );
@@ -391,7 +424,7 @@ async fn query_vectors(
         .into());
     }
     let dataset_name =
-        resolve_dataset(&state, &auth.workspace_id, req.dataset.as_deref()).await?;
+        resolve_dataset(state, workspace_id, req.dataset.as_deref()).await?;
     timer.set_dataset(&dataset_name);
     if let Some(fields) = req.output_fields.as_deref() {
         validate::validate_output_fields(fields)?;
@@ -399,10 +432,10 @@ async fn query_vectors(
     let pks = build_pks(&dataset_name, &req.ids)?;
     let hits = state
         .vector_workspace_store
-        .query_vectors_by_pk(&auth.workspace_id, &pks, req.output_fields.as_deref())
+        .query_vectors_by_pk(workspace_id, &pks, req.output_fields.as_deref())
         .await?;
     timer.success();
-    Ok(Json(ApiResponse::ok(VectorQueryResponse { hits })))
+    Ok(VectorQueryResponse { hits })
 }
 
 async fn delete_vectors(
@@ -410,13 +443,23 @@ async fn delete_vectors(
     auth: AuthDbWorkspace,
     Json(req): Json<VectorDeleteRequest>,
 ) -> Result<Json<ApiResponse<VectorDeleteResponse>>, AppError> {
+    auth.require_write()?;
+    let resp = do_delete(&state, &auth.workspace_id, req).await?;
+    Ok(Json(ApiResponse::ok(resp)))
+}
+
+/// Core delete-by-id. Shared by the `wk_` data plane and the platform gateway.
+pub(crate) async fn do_delete(
+    state: &AppState,
+    workspace_id: &str,
+    req: VectorDeleteRequest,
+) -> Result<VectorDeleteResponse, AppError> {
     let mut timer = VectorReqTimer::start(
         "delete",
-        &auth.workspace_id,
+        workspace_id,
         req.dataset.as_deref().unwrap_or(validate::DEFAULT_DATASET),
         "none",
     );
-    auth.require_write()?;
     if req.ids.is_empty() {
         return Err(VedaError::InvalidInput("ids must not be empty".into()).into());
     }
@@ -428,15 +471,15 @@ async fn delete_vectors(
         .into());
     }
     let dataset_name =
-        resolve_dataset(&state, &auth.workspace_id, req.dataset.as_deref()).await?;
+        resolve_dataset(state, workspace_id, req.dataset.as_deref()).await?;
     timer.set_dataset(&dataset_name);
     let pks = build_pks(&dataset_name, &req.ids)?;
     let delete_count = state
         .vector_workspace_store
-        .delete_vectors_by_pk(&auth.workspace_id, &pks)
+        .delete_vectors_by_pk(workspace_id, &pks)
         .await?;
     timer.success();
-    Ok(Json(ApiResponse::ok(VectorDeleteResponse { delete_count })))
+    Ok(VectorDeleteResponse { delete_count })
 }
 
 fn build_pks(dataset: &str, ids: &[String]) -> Result<Vec<String>, AppError> {
