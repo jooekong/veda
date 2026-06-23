@@ -130,6 +130,7 @@ async fn main() -> anyhow::Result<()> {
         sql_engine,
         metrics: metrics.clone(),
         metrics_token: cfg.metrics_token.clone(),
+        admin_token: cfg.admin_token.clone(),
         summary_enabled: cfg.llm.is_some(),
         draining: std::sync::atomic::AtomicBool::new(false),
     });

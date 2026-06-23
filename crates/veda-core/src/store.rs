@@ -685,6 +685,16 @@ pub trait AuthStore: Send + Sync {
     /// Return the IDs of all active workspaces across all accounts.
     /// Used by the reconciler to iterate workspaces during drift detection.
     async fn list_active_workspace_ids(&self) -> Result<Vec<String>>;
+
+    /// Admin surface: every active workspace across all accounts, each with
+    /// its active dataset + key counts and creator identity, sorted newest
+    /// first. Powers the admin dashboard's cross-tenant overview — the only
+    /// list that ignores account boundaries. Tuple is
+    /// `(workspace, dataset_count, key_count, creator, creator_name)`.
+    #[allow(clippy::type_complexity)]
+    async fn list_all_workspaces_with_counts(
+        &self,
+    ) -> Result<Vec<(Workspace, i64, i64, Option<String>, Option<String>)>>;
     async fn delete_workspace(&self, id: &str) -> Result<()>;
     /// Hard-delete a workspace row by id. Used only for rollback during
     /// db-kind workspace provisioning (see routes/account.rs::create_workspace).
@@ -828,6 +838,13 @@ pub trait VectorWorkspaceStore: Send + Sync {
         workspace_id: &str,
         pks: &[String],
     ) -> Result<usize>;
+
+    /// Count active records in one dataset of a workspace's collection
+    /// (admin/stats surface). Uses Milvus `count(*)` over the
+    /// `dataset == "<name>" && status == "active"` filter. Errors (e.g. the
+    /// collection not yet provisioned) propagate — the admin handler decides
+    /// whether to surface them as "unknown" rather than failing the page.
+    async fn count_vectors(&self, workspace_id: &str, dataset: &str) -> Result<i64>;
 }
 
 // ── LLM Service (for L0/L1 summary generation) ────────

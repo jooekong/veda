@@ -35,6 +35,11 @@ pub struct AppState {
     /// Bearer token required to read `/v1/metrics`. `None` disables the
     /// endpoint entirely (returns 404). See `ServerConfig::metrics_token`.
     pub metrics_token: Option<String>,
+    /// Bearer token gating the read-only admin surface (`/admin/v1/*`).
+    /// `None` disables it entirely — every admin route 404s, so an
+    /// unconfigured node exposes no cross-tenant data. See
+    /// `ServerConfig::admin_token`.
+    pub admin_token: Option<String>,
     /// Whether [llm] is configured. When false, summary generation is
     /// permanently disabled, and `GET /v1/summary/...` returns 501 Not
     /// Implemented instead of the misleading 202 "pending".

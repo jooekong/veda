@@ -10,6 +10,7 @@ export default defineConfig({
   server: {
     proxy: {
       "/v1": { target: upstream, changeOrigin: false },
+      "/admin": { target: upstream, changeOrigin: false },
       "/healthz": { target: upstream, changeOrigin: false },
       "/install.sh": { target: upstream, changeOrigin: false },
       "/capabilities": { target: upstream, changeOrigin: false },

@@ -1,4 +1,5 @@
 import { marked } from "marked";
+import { renderAdmin } from "./admin";
 
 // ── Auth state ────────────────────────────────────────────────────────────
 type Auth = { vk: string };
@@ -388,6 +389,7 @@ async function render() {
   const r = currentRoute();
   if (r.startsWith("/console")) await renderConsole(app);
   else if (r.startsWith("/docs")) await renderDocs(app);
+  else if (r.startsWith("/admin")) await renderAdmin(app);
   else await renderLanding(app);
 }
 

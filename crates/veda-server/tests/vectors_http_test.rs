@@ -153,6 +153,7 @@ async fn build_test_app() -> (Arc<AppState>, Arc<MysqlStore>, axum::Router) {
         // install once and share the (Clone) handle.
         metrics: test_metrics(),
         metrics_token: None,
+        admin_token: None,
         summary_enabled: false,
         draining: std::sync::atomic::AtomicBool::new(false),
     });

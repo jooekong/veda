@@ -910,6 +910,30 @@ impl MilvusStore {
         rows.iter().map(Self::row_to_vector_record_hit).collect()
     }
 
+    /// Count active rows in one dataset via Milvus `count(*)`. The query
+    /// requests the `count(*)` aggregate output field over the dataset+active
+    /// filter; Milvus returns a single row `{"count(*)": N}`. Strong
+    /// consistency so a count right after upsert sees the write (same
+    /// read-your-writes contract as the other read paths). An absent/oddly-
+    /// shaped count field falls back to 0 rather than erroring.
+    pub async fn count_vector_records(&self, workspace_id: &str, dataset: &str) -> Result<i64> {
+        let name = vector_collection_name(workspace_id);
+        let filter = Self::build_dataset_active_filter(dataset);
+        let body = json!({
+            "collectionName": &name,
+            "filter": filter,
+            "outputFields": ["count(*)"],
+            "consistencyLevel": "Strong",
+        });
+        let resp = self.post("/v2/vectordb/entities/query", body).await?;
+        let count = flatten_entity_rows(resp.get("data"))
+            .first()
+            .and_then(|r| r.get("count(*)"))
+            .and_then(|v| v.as_i64())
+            .unwrap_or(0);
+        Ok(count)
+    }
+
     pub async fn delete_vector_records_by_pk(
         &self,
         workspace_id: &str,
@@ -1487,6 +1511,13 @@ impl VectorWorkspaceStore for MilvusStore {
         let started = std::time::Instant::now();
         let result = MilvusStore::delete_vector_records_by_pk(self, workspace_id, pks).await;
         record_vector_store_op("delete", workspace_id, "none", "none", result.is_ok(), started);
+        result
+    }
+
+    async fn count_vectors(&self, workspace_id: &str, dataset: &str) -> Result<i64> {
+        let started = std::time::Instant::now();
+        let result = MilvusStore::count_vector_records(self, workspace_id, dataset).await;
+        record_vector_store_op("count", workspace_id, dataset, "none", result.is_ok(), started);
         result
     }
 }

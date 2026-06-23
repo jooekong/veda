@@ -2850,6 +2850,40 @@ impl AuthStore for MysqlStore {
         Ok(rows.into_iter().map(|(id,)| id).collect())
     }
 
+    async fn list_all_workspaces_with_counts(
+        &self,
+    ) -> Result<Vec<(Workspace, i64, i64, Option<String>, Option<String>)>> {
+        // Correlated COUNT subqueries keep this a single round-trip over the
+        // small control-plane tables (no Milvus / dentry scan here — fs byte
+        // stats are fetched per-workspace by the handler). dataset/key counts
+        // are scoped to active rows to match what the data plane can reach.
+        let rows = sqlx::query(
+            r#"SELECT w.id, w.account_id, w.name, w.status, w.kind, w.app_id,
+                      w.description, w.created_at, w.updated_at,
+                      w.creator, w.creator_name,
+                      (SELECT COUNT(*) FROM veda_datasets d
+                         WHERE d.workspace_id = w.id AND d.status = 'active') AS dataset_count,
+                      (SELECT COUNT(*) FROM veda_workspace_keys k
+                         WHERE k.workspace_id = w.id AND k.status = 'active') AS key_count
+               FROM veda_workspaces w
+               WHERE w.status = 'active'
+               ORDER BY w.created_at DESC"#,
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map_err(storage_err)?;
+        rows.iter()
+            .map(|r| {
+                let ws = row_to_workspace(r)?;
+                let dataset_count: i64 = r.try_get("dataset_count").map_err(storage_err)?;
+                let key_count: i64 = r.try_get("key_count").map_err(storage_err)?;
+                let creator: Option<String> = r.try_get("creator").map_err(storage_err)?;
+                let creator_name: Option<String> = r.try_get("creator_name").map_err(storage_err)?;
+                Ok((ws, dataset_count, key_count, creator, creator_name))
+            })
+            .collect()
+    }
+
     async fn delete_workspace(&self, id: &str) -> Result<()> {
         // Archive the workspace AND revoke its wk_ keys in one transaction.
         // wk_ auth no longer checks workspace.status (see

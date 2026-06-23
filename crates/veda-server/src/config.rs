@@ -22,6 +22,12 @@ pub struct ServerConfig {
     /// `bearer_token_file`) directive.
     #[serde(default)]
     pub metrics_token: Option<String>,
+    /// Bearer token gating the read-only admin surface (`/admin/v1/*`). When
+    /// `None`, every admin route returns 404 — the dashboard is opt-in and
+    /// off by default, so an unconfigured deploy exposes nothing across
+    /// tenants. Env override: `VEDA_ADMIN_TOKEN`.
+    #[serde(default)]
+    pub admin_token: Option<String>,
     /// When true, an unset `allowed_origins` falls back to permissive CORS.
     /// Defaults to false: production must list explicit origins, otherwise
     /// the server denies cross-origin browser requests. Toggle on only for
@@ -326,6 +332,14 @@ impl ServerConfig {
             // we don't allow — empty or unset both leave the endpoint 404.
             if !v.is_empty() {
                 self.metrics_token = Some(v);
+            }
+        }
+
+        if let Ok(v) = std::env::var("VEDA_ADMIN_TOKEN") {
+            // Empty env disables the admin surface, same as unset (every
+            // admin route 404s).
+            if !v.is_empty() {
+                self.admin_token = Some(v);
             }
         }
     }

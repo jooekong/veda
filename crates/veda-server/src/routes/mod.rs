@@ -1,4 +1,5 @@
 pub mod account;
+pub mod admin;
 pub mod admin_tokens;
 pub mod apps;
 pub mod collection;
@@ -43,6 +44,7 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .merge(account::routes())
         .merge(apps::routes())
         .merge(admin_tokens::routes())
+        .merge(admin::routes())
         .merge(reconcile::routes())
         .merge(datasets::routes())
         .merge(vectors::routes())
@@ -112,7 +114,7 @@ pub(crate) fn metrics_auth_ok(
     constant_time_eq(presented.as_bytes(), expected.as_bytes())
 }
 
-fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+pub(crate) fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
     if a.len() != b.len() {
         return false;
     }
