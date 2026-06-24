@@ -1,7 +1,4 @@
 //! Pinecone-style vectors data plane (db-kind workspaces only).
-//!
-//! Stage 4.2 lands `POST /v1/vectors/upsert` only. Stage 4.3 will add
-//! search / query / delete in the same module.
 
 use std::sync::Arc;
 

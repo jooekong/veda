@@ -29,10 +29,6 @@ fn storage_err(e: impl std::fmt::Display) -> VedaError {
     VedaError::Storage(msg)
 }
 
-/// Variant of `storage_err` for UPDATEs on `veda_accounts.email` where
-/// the unique index can fire on a race. Maps MySQL 1062 (ER_DUP_ENTRY)
-/// to a typed `AlreadyExists`; everything else falls through to the
-/// generic translator.
 /// True if the error is a MySQL UNIQUE/duplicate-key violation (errno 1062).
 /// Uses `number()`, NOT `code()`: sqlx's `code()` returns the SQLSTATE
 /// ("23000" for a dup key), never "1062", so a `code()=="1062"` check is dead.
@@ -43,6 +39,10 @@ fn is_mysql_duplicate(e: &sqlx::Error) -> bool {
             .unwrap_or(false))
 }
 
+/// Variant of `storage_err` for UPDATEs on `veda_accounts.email` where
+/// the unique index can fire on a race. Maps MySQL 1062 (ER_DUP_ENTRY)
+/// to a typed `AlreadyExists`; everything else falls through to the
+/// generic translator.
 fn translate_account_email_conflict(e: sqlx::Error) -> VedaError {
     if is_mysql_duplicate(&e) {
         return VedaError::AlreadyExists("email already registered".into());
@@ -334,17 +334,6 @@ impl Default for PoolConfig {
 impl MysqlStore {
     pub async fn new(database_url: &str) -> Result<Self> {
         Self::with_pool_config(database_url, PoolConfig::default()).await
-    }
-
-    pub async fn with_max_connections(database_url: &str, max_connections: u32) -> Result<Self> {
-        Self::with_pool_config(
-            database_url,
-            PoolConfig {
-                max_connections,
-                ..Default::default()
-            },
-        )
-        .await
     }
 
     pub async fn with_pool_config(database_url: &str, cfg: PoolConfig) -> Result<Self> {
@@ -1838,20 +1827,6 @@ impl MetadataTx for MysqlMetadataTx {
             .await
             .map_err(storage_err)?;
         Ok(())
-    }
-
-    async fn get_last_file_chunk(&mut self, file_id: &str) -> Result<Option<FileChunk>> {
-        let t = self.tx_mut()?;
-        let row = sqlx::query(
-            r#"SELECT file_id, chunk_index, start_line, line_count, byte_len, chunk_sha256, content
-               FROM veda_file_chunks WHERE file_id = ?
-               ORDER BY chunk_index DESC LIMIT 1"#,
-        )
-        .bind(file_id)
-        .fetch_optional(t.as_mut())
-        .await
-        .map_err(storage_err)?;
-        row.map(|r| row_to_file_chunk(&r)).transpose()
     }
 
     async fn insert_outbox(&mut self, event: &OutboxEvent) -> Result<()> {

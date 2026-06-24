@@ -434,14 +434,6 @@ impl ShadowStore {
         self.total_bytes
     }
 
-    pub fn max_per_file(&self) -> usize {
-        self.max_per_file
-    }
-
-    pub fn max_total(&self) -> usize {
-        self.max_total
-    }
-
     /// Snapshot the data + seq + base_rev under a single borrow. The
     /// commit-queue worker captures this, drops the lock, then makes
     /// the blocking HTTP call.

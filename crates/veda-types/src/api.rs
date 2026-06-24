@@ -107,12 +107,6 @@ pub struct CreateWorkspaceRequest {
     pub description: Option<String>,
 }
 
-#[derive(Debug, Serialize)]
-pub struct WorkspaceTokenResponse {
-    pub token: String,
-    pub expires_at: DateTime<Utc>,
-}
-
 // ── File System ────────────────────────────────────────
 
 #[derive(Debug, Serialize)]
@@ -390,12 +384,6 @@ pub struct CreateTokenResponse {
 #[derive(Debug, Deserialize)]
 pub struct SqlRequest {
     pub sql: String,
-}
-
-#[derive(Debug, Serialize)]
-pub struct SqlResponse {
-    pub columns: Vec<String>,
-    pub rows: Vec<Vec<serde_json::Value>>,
 }
 
 #[cfg(test)]

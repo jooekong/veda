@@ -336,9 +336,6 @@ pub trait MetadataTx: Send {
     /// append to prune the trailing chunk(s) before re-inserting rebalanced ones.
     async fn delete_file_chunks_from(&mut self, file_id: &str, from_chunk_index: i32)
         -> Result<()>;
-    /// Return the chunk with the largest `chunk_index`, or `None` for an
-    /// empty/inline file. Used to seed the incremental append path.
-    async fn get_last_file_chunk(&mut self, file_id: &str) -> Result<Option<FileChunk>>;
 
     // outbox
     async fn insert_outbox(&mut self, event: &OutboxEvent) -> Result<()>;

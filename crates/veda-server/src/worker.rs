@@ -392,65 +392,6 @@ impl Worker {
         Ok(())
     }
 
-    /// Burst-aware enqueue of a SummarySync. Currently unused — the
-    /// service layer (`FsService::write_file`) inserts SummarySync
-    /// directly in the same tx as ChunkSync now, so the worker no
-    /// longer needs to enqueue summary work post-embed. Kept for
-    /// reconciler / debug paths that may want burst-debounced
-    /// summary triggering without the dedup overhead of going through
-    /// outbox.
-    #[allow(dead_code)]
-    async fn enqueue_summary_sync(
-        &self,
-        workspace_id: &str,
-        file_id: &str,
-    ) -> veda_types::Result<()> {
-        // Burst detection uses `summary.updated_at` (when the previous LLM
-        // run finished) — not file.updated_at. Trade-off: the very first
-        // edit after a long quiet period generates a summary immediately
-        // (no debounce, since no prior summary exists), and the second
-        // edit within ~5min sees that fresh summary and gets debounced.
-        // A back-to-back burst on a never-summarized file produces 2 LLM
-        // calls, not 1; subsequent bursts coalesce as expected. The
-        // has_pending_event dedup in enqueue_dedup already collapses
-        // repeats arriving while a task is queued — the only leak is the
-        // first edit of a brand-new file, accepted.
-        let now = Utc::now();
-        let in_burst = self
-            .meta
-            .get_summary_by_file(file_id)
-            .await?
-            .map(|s| (now - s.updated_at).num_seconds() < SUMMARY_BURST_WINDOW_SECS)
-            .unwrap_or(false);
-        let available_at = if in_burst {
-            now + chrono::Duration::seconds(SUMMARY_DEBOUNCE_SECS)
-        } else {
-            now
-        };
-        let inserted = enqueue_dedup(
-            &*self.task_queue,
-            workspace_id,
-            OutboxEventType::SummarySync,
-            "file_id",
-            file_id,
-            serde_json::json!({"file_id": file_id}),
-            available_at,
-        )
-        .await?;
-        if !inserted {
-            info!(file_id, "summary_sync already pending, skipping enqueue");
-            return Ok(());
-        }
-        let debounce_secs = if in_burst { SUMMARY_DEBOUNCE_SECS } else { 0 };
-        debug!(file_id, in_burst, debounce_secs, "enqueued summary_sync");
-        ::metrics::counter!(
-            "veda_summary_enqueue_total",
-            "burst" => if in_burst { "in_burst" } else { "isolated" },
-        )
-        .increment(1);
-        Ok(())
-    }
-
     async fn handle_summary_sync(
         &self,
         workspace_id: &str,

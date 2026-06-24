@@ -114,7 +114,7 @@ impl<T> CompanyPage<T> {
 struct AppProject {
     /// Platform workspace code (gateway tenant; stored internally as `app_id`).
     workspace: Option<String>,
-    /// Platform workspace display name (looked up; null until lookup is wired).
+    /// Platform workspace display name (looked up from the platform; null when the platform is unconfigured or unreachable).
     workspace_name: Option<String>,
     /// veda's own project (vector / file library) id.
     id: String,

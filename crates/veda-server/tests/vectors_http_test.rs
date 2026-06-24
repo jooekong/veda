@@ -2085,9 +2085,9 @@ async fn sub_dataset_delete_guard(state: &Arc<AppState>, mysql: &MysqlStore, rou
 }
 
 /// Accounts register + login against the production `account.rs` handlers
-/// (server_test.rs exercises mock handlers; this file otherwise mints via
-/// direct store inserts). Covers registration, duplicate-email conflict,
-/// login success, wrong-password rejection, and that the returned key works.
+/// (this suite otherwise mints keys via direct store inserts). Covers
+/// registration, duplicate-email conflict, login success, wrong-password
+/// rejection, and that the returned key works.
 async fn sub_accounts_auth(_state: &Arc<AppState>, mysql: &MysqlStore, router: axum::Router) {
     let email = format!("acct-{}@test.com", Uuid::new_v4().simple());
     let password = "correct-horse-battery";

@@ -930,14 +930,6 @@ impl Filesystem for VedaFs {
                 Some(p) => p,
                 None => { reply.error(libc::ENOENT); return; }
             };
-            // Writeback path: truncate via the shadow buffer so a
-            // subsequent flush carries the correct (truncated) bytes
-            // with the correct base_rev. The legacy sync-PUT below
-            // would race the commit queue: server gets the empty
-            // body but shadow still holds Dirty data tagged with the
-            // pre-truncate revision, and every later commit returns
-            // 412. Reproducer: `>file` on an open writeback handle
-            // ate every subsequent edit because of this exact race.
             if self.is_writeback() {
                 // Writeback: truncate in the shadow so a later flush
                 // carries the correct (truncated) bytes with the

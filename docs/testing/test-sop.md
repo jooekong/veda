@@ -108,8 +108,10 @@ cargo test -p veda-store --test milvus_test -- --ignored --test-threads=1    # �
 cargo test -p veda-pipeline -- --ignored
 
 # veda-server：MySQL + Milvus + Embedding（worker/reconciler 用例还需 [llm]）
-# 用 --test 指定套件，避免连带触发 remote_e2e_test（默认打 alpha 部署）
-cargo test -p veda-server --test server_test -- --ignored
+# in-process build_router 套件，避免连带触发 remote_e2e_test（默认打 alpha 部署）
+cargo test -p veda-server --test vectors_http_test -- --ignored
+cargo test -p veda-server --test project_data_test -- --ignored
+cargo test -p veda-server --test admin_http_test -- --ignored
 ```
 
 单跑一个测试：
@@ -175,8 +177,8 @@ cargo test -p veda-core
 # MySQL 集成测试
 cargo test -p veda-store --test mysql_test -- --ignored
 
-# Server 端到端（本地）
-cargo test -p veda-server --test server_test -- --ignored
+# Server 端到端（本地，in-process build_router）
+cargo test -p veda-server --test vectors_http_test -- --ignored
 
 # 全量集成测试
 cargo test --workspace -- --ignored --test-threads=1

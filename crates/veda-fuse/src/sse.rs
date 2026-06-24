@@ -19,7 +19,6 @@ const SSE_REQUEST_TIMEOUT: Duration = Duration::from_secs(120);
 
 #[derive(Debug, serde::Deserialize)]
 struct SseEvent {
-    #[allow(dead_code)]
     id: i64,
     event_type: String,
     path: String,

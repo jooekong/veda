@@ -400,9 +400,6 @@ impl MetadataTx for MockMetaFullTx {
     async fn delete_file_chunks_from(&mut self, _id: &str, _from: i32) -> Result<()> {
         Ok(())
     }
-    async fn get_last_file_chunk(&mut self, _id: &str) -> Result<Option<FileChunk>> {
-        Ok(None)
-    }
     async fn insert_outbox(&mut self, _event: &OutboxEvent) -> Result<()> {
         Ok(())
     }

@@ -289,13 +289,6 @@ enum ConfigCmd {
     Set { key: String, value: String },
 }
 
-/// Destructiveness levels for [`confirm_or_announce`].
-enum WriteAction {
-    /// User-visible verb for the prompt / announcement banner.
-    /// Examples: "delete", "move", "copy to".
-    Verb(&'static str),
-}
-
 /// Resolve the global `--workspace <alias>` flag against the parsed
 /// config + command. Returns the validated alias to use as the
 /// in-memory active profile (or `None` if the flag wasn't given).
@@ -350,12 +343,11 @@ fn announce_text(verb: &str, path: &str, workspace_alias: &str) -> String {
 /// `confirm=false` and just announce; `rm` passes `confirm=true`.
 fn confirm_or_announce(
     workspace_alias: &str,
-    action: WriteAction,
+    verb: &str,
     path: &str,
     confirm: bool,
 ) -> anyhow::Result<()> {
     use std::io::{IsTerminal, Write};
-    let WriteAction::Verb(verb) = action;
     // TTY check on stdin, not stdout: `veda rm /x > out.log` keeps
     // stdin attached to the terminal but redirects stdout, and the
     // user still wants the confirmation prompt to fire. Looking at
@@ -1357,7 +1349,7 @@ async fn main() -> anyhow::Result<()> {
             // so a wrong workspace is recoverable. Skip the blocking
             // prompt but still print the workspace alias.
             let active = cfg.active_alias().unwrap_or("?").to_string();
-            confirm_or_announce(&active, WriteAction::Verb("copy to"), &dst, false)?;
+            confirm_or_announce(&active, "copy to", &dst, false)?;
             if src == "-" {
                 use std::io::Read;
                 let mut buf = String::new();
@@ -1427,7 +1419,7 @@ async fn main() -> anyhow::Result<()> {
             let active = cfg.active_alias().unwrap_or("?").to_string();
             confirm_or_announce(
                 &active,
-                WriteAction::Verb("move into"),
+                "move into",
                 &format!("{src} → {dst}"),
                 false,
             )?;
@@ -1439,7 +1431,7 @@ async fn main() -> anyhow::Result<()> {
             // against the wrong workspace, so this is the one we ask
             // for explicit y/N confirmation on a TTY.
             let active = cfg.active_alias().unwrap_or("?").to_string();
-            confirm_or_announce(&active, WriteAction::Verb("delete"), &path, true)?;
+            confirm_or_announce(&active, "delete", &path, true)?;
             c.delete_file(cfg.active_wk()?, &path).await?;
             println!("Deleted {path}");
         }
