@@ -1352,9 +1352,9 @@ async fn main() -> anyhow::Result<()> {
             confirm_or_announce(&active, "copy to", &dst, false)?;
             if src == "-" {
                 use std::io::Read;
-                let mut buf = String::new();
-                std::io::stdin().read_to_string(&mut buf)?;
-                let resp = c.write_file(cfg.active_wk()?, &dst, &buf).await?;
+                let mut buf = Vec::new();
+                std::io::stdin().read_to_end(&mut buf)?;
+                let resp = c.write_file(cfg.active_wk()?, &dst, buf).await?;
                 println!("Written: revision {}", resp["data"]["revision"]);
             } else {
                 let src_path = std::path::Path::new(&src);
@@ -1362,8 +1362,8 @@ async fn main() -> anyhow::Result<()> {
                     let n = cp_dir_recursive(&c, cfg.active_wk()?, src_path, &dst).await?;
                     println!("Uploaded {n} file(s) under {dst}");
                 } else {
-                    let content = read_utf8_text_or_bail(&src)?;
-                    let resp = c.write_file(cfg.active_wk()?, &dst, &content).await?;
+                    let content = read_file_bytes(&src)?;
+                    let resp = c.write_file(cfg.active_wk()?, &dst, content).await?;
                     println!("Written: revision {}", resp["data"]["revision"]);
                 }
             }
@@ -1376,7 +1376,12 @@ async fn main() -> anyhow::Result<()> {
             // server-side, so it goes through the slice-after-fetch
             // path.
             if let Some(n) = tail {
-                let content = c.read_file(cfg.active_wk()?, &path, None).await?;
+                let bytes = c.read_file(cfg.active_wk()?, &path, None).await?;
+                let content = String::from_utf8(bytes).map_err(|_| {
+                    anyhow::anyhow!(
+                        "'{path}' is binary; --tail needs text. Redirect the whole file instead: veda cat {path} > out"
+                    )
+                })?;
                 let lines: Vec<&str> = content.lines().collect();
                 let start = lines.len().saturating_sub(n);
                 // Print in original order, preserving a trailing
@@ -1389,10 +1394,23 @@ async fn main() -> anyhow::Result<()> {
                     (None, Some(n)) => Some(format!("1:{n}")),
                     (None, None) => None,
                 };
-                let content = c
+                let bytes = c
                     .read_file(cfg.active_wk()?, &path, line_spec.as_deref())
                     .await?;
-                print!("{content}");
+                if line_spec.is_some() {
+                    // Line slicing implies text; the server already rejects
+                    // line reads on a binary blob, but guard the local decode.
+                    let content = String::from_utf8(bytes).map_err(|_| {
+                        anyhow::anyhow!("'{path}' is binary; --range/--head need text")
+                    })?;
+                    print!("{content}");
+                } else {
+                    // Whole-file read: write raw bytes so binary (pdf/image/jar)
+                    // round-trips losslessly when redirected to a file; text
+                    // prints as before.
+                    use std::io::Write;
+                    std::io::stdout().write_all(&bytes)?;
+                }
             }
         }
         Commands::Ls { path } => {
@@ -1690,39 +1708,12 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Read a local file as UTF-8 text, failing fast on binary input with a
-/// clear "not a text file" message before any bytes leave the client.
-///
-/// Two checks layered:
-///   1. **NUL byte sniff** over the full content. Catches binaries
-///      (PDFs, JPEGs, ELF executables, etc.) whose first chunk happens
-///      to look like valid UTF-8 — most have at least one NUL.
-///   2. **`String::from_utf8` validation**. Catches non-NUL but
-///      non-UTF-8 inputs (UTF-16 with BOM, ISO-8859-1 with high-bit
-///      bytes, mojibake from a wrong save).
-///
-/// `std::fs::read_to_string` already does (2) implicitly but returns
-/// the generic `std::io::ErrorKind::InvalidData` with no path or
-/// remediation hint; the explicit path here gives the user something
-/// they can act on.
-fn read_utf8_text_or_bail(src: impl AsRef<std::path::Path>) -> anyhow::Result<String> {
+/// Read a local file's raw bytes for upload — text and binary alike. The
+/// server sniffs UTF-8 to decide text vs blob storage, so the client no
+/// longer pre-validates encoding (PDFs / images / jars upload as-is).
+fn read_file_bytes(src: impl AsRef<std::path::Path>) -> anyhow::Result<Vec<u8>> {
     let src = src.as_ref();
-    let bytes = std::fs::read(src)
-        .map_err(|e| anyhow::anyhow!("read {} failed: {e}", src.display()))?;
-    if bytes.contains(&0) {
-        anyhow::bail!(
-            "'{}' looks binary (contains NUL bytes); veda only accepts UTF-8 text \
-             (PDFs / images / executables aren't supported)",
-            src.display()
-        );
-    }
-    String::from_utf8(bytes).map_err(|e| {
-        anyhow::anyhow!(
-            "'{}' is not valid UTF-8 ({}); veda only accepts UTF-8 text",
-            src.display(),
-            e.utf8_error()
-        )
-    })
+    std::fs::read(src).map_err(|e| anyhow::anyhow!("read {} failed: {e}", src.display()))
 }
 
 /// Recursively upload every file under `src_root` to `dst_root` on the server.
@@ -1747,8 +1738,8 @@ async fn cp_dir_recursive(
             .collect::<Vec<_>>()
             .join("/");
         let remote = format!("{dst_root}/{rel_str}");
-        let content = read_utf8_text_or_bail(f)?;
-        client.write_file(ws_key, &remote, &content).await?;
+        let content = read_file_bytes(f)?;
+        client.write_file(ws_key, &remote, content).await?;
         println!("  {} -> {remote}", f.display());
         count += 1;
     }
@@ -1777,71 +1768,42 @@ fn collect_files(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) -> st
 }
 
 #[cfg(test)]
-mod cp_utf8_tests {
-    //! `veda cp` rejects binary input before any HTTP call. The
-    //! previous behavior — `std::fs::read_to_string` returning a
-    //! generic `InvalidData` — gave users an opaque "stream did not
-    //! contain valid UTF-8" with no path or remediation hint.
-    use super::read_utf8_text_or_bail;
+mod cp_bytes_tests {
+    //! `veda cp` uploads raw bytes for both text and binary; the server
+    //! sniffs UTF-8 to pick text vs blob storage. The client no longer
+    //! rejects binary before the HTTP call.
+    use super::read_file_bytes;
     use std::io::Write;
     use tempfile::NamedTempFile;
 
     #[test]
-    fn plain_ascii_text_passes() {
-        let mut f = NamedTempFile::new().unwrap();
-        f.write_all(b"hello, world\n").unwrap();
-        let out = read_utf8_text_or_bail(f.path()).unwrap();
-        assert_eq!(out, "hello, world\n");
-    }
-
-    #[test]
-    fn utf8_with_multibyte_passes() {
+    fn reads_utf8_text_bytes() {
         let mut f = NamedTempFile::new().unwrap();
         f.write_all("中文 ✓ 🎉".as_bytes()).unwrap();
-        let out = read_utf8_text_or_bail(f.path()).unwrap();
-        assert_eq!(out, "中文 ✓ 🎉");
+        let out = read_file_bytes(f.path()).unwrap();
+        assert_eq!(out, "中文 ✓ 🎉".as_bytes());
     }
 
     #[test]
-    fn nul_byte_in_middle_is_rejected_as_binary() {
-        // PDF / PNG / ELF all contain NUL bytes; this is the
-        // fast-fail signal even when the prefix happens to be ASCII.
+    fn reads_binary_with_nul_verbatim() {
+        // PDF / PNG / ELF contain NUL bytes — previously rejected client-side,
+        // now read as-is for blob upload.
         let mut f = NamedTempFile::new().unwrap();
-        f.write_all(b"text\0more text").unwrap();
-        let err = read_utf8_text_or_bail(f.path()).unwrap_err();
-        let msg = err.to_string();
-        assert!(msg.contains("looks binary"), "msg: {msg}");
-        assert!(msg.contains("NUL"), "msg: {msg}");
-        // Error must mention the path so a `for f in *.bin; do veda cp` loop
-        // doesn't leave the user guessing which file tripped it.
-        assert!(msg.contains(&f.path().display().to_string()), "msg: {msg}");
+        f.write_all(b"%PDF-1.7\0\xff\xc0binary").unwrap();
+        let out = read_file_bytes(f.path()).unwrap();
+        assert_eq!(out, b"%PDF-1.7\0\xff\xc0binary");
     }
 
     #[test]
-    fn invalid_utf8_without_nul_is_rejected() {
-        // ISO-8859-1 / Windows-1252 / a stray UTF-16 BOM: bytes with
-        // the high bit set that don't form valid UTF-8 sequences.
-        // 0xFF 0xFE is the UTF-16-LE BOM; 0xC3 alone is a UTF-8
-        // continuation prefix without its trailing byte.
-        let mut f = NamedTempFile::new().unwrap();
-        f.write_all(&[0xFF, 0xFE, b'a', b'b', 0xC3]).unwrap();
-        let err = read_utf8_text_or_bail(f.path()).unwrap_err();
-        let msg = err.to_string();
-        assert!(msg.contains("not valid UTF-8"), "msg: {msg}");
-    }
-
-    #[test]
-    fn empty_file_passes() {
+    fn empty_file_reads_empty() {
         let f = NamedTempFile::new().unwrap();
-        let out = read_utf8_text_or_bail(f.path()).unwrap();
-        assert_eq!(out, "");
+        let out = read_file_bytes(f.path()).unwrap();
+        assert!(out.is_empty());
     }
 
     #[test]
     fn missing_path_yields_read_error() {
-        // Should fail at the read step with a clear "read … failed"
-        // message, not a panic or a UTF-8-shaped error.
-        let err = read_utf8_text_or_bail("/nonexistent/path/abc.txt").unwrap_err();
+        let err = read_file_bytes("/nonexistent/path/abc.txt").unwrap_err();
         let msg = err.to_string();
         assert!(msg.contains("read") && msg.contains("/nonexistent"), "msg: {msg}");
     }

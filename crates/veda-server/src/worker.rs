@@ -11,6 +11,7 @@ use tracing::{debug, error, info, warn};
 
 use veda_core::store::{EmbeddingService, LlmService, MetadataStore, TaskQueue, VectorStore};
 use veda_pipeline::chunking::{is_binary_content, semantic_chunk};
+use veda_pipeline::extraction::extract_text;
 use veda_pipeline::summary;
 use veda_types::*;
 
@@ -237,6 +238,11 @@ impl Worker {
                     .await?;
                 self.task_queue.complete(task.id, &self.owner).await?;
             }
+            OutboxEventType::ExtractSync => {
+                self.handle_extract_sync(&task.workspace_id, file_id, force_reembed)
+                    .await?;
+                self.task_queue.complete(task.id, &self.owner).await?;
+            }
         }
         Ok(())
     }
@@ -274,6 +280,9 @@ impl Worker {
                 }
                 Ok(buf)
             }
+            StorageType::Blob => Err(VedaError::InvalidInput(
+                "binary blob has no text content".into(),
+            )),
         }
     }
 
@@ -291,6 +300,17 @@ impl Worker {
             self.vector.delete_chunks(workspace_id, file_id).await?;
             return Ok(());
         };
+
+        // A queued ChunkSync can race a rewrite that turned the file into a
+        // binary blob (or be a stale / misrouted event). Blobs aren't text-
+        // indexed here — drop this as a no-op instead of Err-ing into the dead
+        // letters via load_full_content. Vector cleanup for type changes is
+        // owned by the ChunkDelete enqueued at rewrite time; PDF vectors are
+        // owned by ExtractSync, so we must NOT delete here.
+        if file.storage_type == StorageType::Blob {
+            debug!(file_id, "chunk_sync skipped: file is a binary blob");
+            return Ok(());
+        }
 
         // Skip the entire embed pipeline if the content has not changed since
         // the last successful Milvus upsert. The watermark below is written at
@@ -334,13 +354,26 @@ impl Worker {
         // Drop the assembled file buffer before the embed loop allocates per-batch
         // text clones. semantic_chunk has already copied the bytes it needs.
         drop(content);
+        self.embed_and_watermark(workspace_id, file_id, &file.checksum_sha256, sem_chunks)
+            .await
+    }
+
+    /// Embed semantic chunks in batches, upsert to Milvus, sweep stale tail
+    /// chunks, then advance the content-hash watermark. Shared by chunk_sync
+    /// (text files) and extract_sync (pdf text layer).
+    ///
+    /// Empty input = "nothing to index": clear Milvus chunks and still
+    /// watermark so the same content doesn't re-enter the queue.
+    async fn embed_and_watermark(
+        &self,
+        workspace_id: &str,
+        file_id: &str,
+        checksum: &str,
+        sem_chunks: Vec<SemanticChunk>,
+    ) -> veda_types::Result<()> {
         if sem_chunks.is_empty() {
             self.vector.delete_chunks(workspace_id, file_id).await?;
-            // Empty content is "embedded as nothing"; record the watermark so
-            // re-embedding the same empty file short-circuits.
-            self.meta
-                .update_file_content_hash(file_id, &file.checksum_sha256)
-                .await?;
+            self.meta.update_file_content_hash(file_id, checksum).await?;
             return Ok(());
         }
 
@@ -363,7 +396,7 @@ impl Worker {
         let max_chunk_index = sem_chunks
             .last()
             .map(|c| c.index)
-            .expect("sem_chunks empty handled above");
+            .expect("sem_chunks non-empty checked above");
         for batch in sem_chunks.chunks(EMBED_BATCH) {
             let texts: Vec<String> = batch.iter().map(|c| c.content.clone()).collect();
             let embeddings = self.embedding.embed(&texts).await?;
@@ -387,9 +420,73 @@ impl Worker {
         // Watermark only after Milvus upsert succeeds. If this update fails,
         // the next claim retries embed+upsert (wasted) but data stays correct.
         self.meta
-            .update_file_content_hash(file_id, &file.checksum_sha256)
+            .update_file_content_hash(file_id, checksum)
             .await?;
         Ok(())
+    }
+
+    /// Extract a binary blob's text layer (pdf) and embed it into Milvus for
+    /// search. The original blob stays in storage untouched — only its
+    /// extracted text is indexed. Extraction runs on the blocking pool;
+    /// failures and panics (malformed pdf) are treated as "nothing to index"
+    /// (skip + watermark), never dead-lettering, so the blob stays
+    /// downloadable regardless.
+    async fn handle_extract_sync(
+        &self,
+        workspace_id: &str,
+        file_id: &str,
+        force_reembed: bool,
+    ) -> veda_types::Result<()> {
+        let Some(file) = self.meta.get_file(file_id).await? else {
+            warn!(workspace_id, file_id, "extract_sync skipped: file no longer exists");
+            self.vector.delete_chunks(workspace_id, file_id).await?;
+            return Ok(());
+        };
+
+        if !force_reembed
+            && file.last_embedded_content_hash.as_deref() == Some(file.checksum_sha256.as_str())
+        {
+            debug!(file_id, "extract_sync skipped: content unchanged since last embed");
+            return Ok(());
+        }
+
+        let Some(data) = self.meta.get_file_blob(file_id).await? else {
+            warn!(workspace_id, file_id, "extract_sync skipped: blob missing");
+            return Ok(());
+        };
+
+        // PDF parsing is CPU-heavy and can panic on malformed input. Run it on
+        // the blocking pool; a panic surfaces as a JoinError and is handled as
+        // a skip rather than crashing the worker or dead-lettering the file.
+        let mime = file.mime_type.clone();
+        let extracted = tokio::task::spawn_blocking(move || extract_text(&data, &mime)).await;
+        let text = match extracted {
+            Ok(Ok(t)) => t,
+            Ok(Err(e)) => {
+                warn!(workspace_id, file_id, error = %e, "extract_sync skipped: extraction failed");
+                // Drop any vectors from a prior successful extract so a PDF
+                // rewritten into an unextractable one stops serving stale hits,
+                // then watermark so we don't retry the doomed extract forever.
+                self.vector.delete_chunks(workspace_id, file_id).await?;
+                self.meta
+                    .update_file_content_hash(file_id, &file.checksum_sha256)
+                    .await?;
+                return Ok(());
+            }
+            Err(join_err) => {
+                warn!(workspace_id, file_id, error = %join_err, "extract_sync skipped: extractor panicked");
+                self.vector.delete_chunks(workspace_id, file_id).await?;
+                self.meta
+                    .update_file_content_hash(file_id, &file.checksum_sha256)
+                    .await?;
+                return Ok(());
+            }
+        };
+
+        let sem_chunks = semantic_chunk(&text, 2048);
+        drop(text);
+        self.embed_and_watermark(workspace_id, file_id, &file.checksum_sha256, sem_chunks)
+            .await
     }
 
     async fn handle_summary_sync(
@@ -629,6 +726,7 @@ fn outbox_event_label(event: OutboxEventType) -> &'static str {
         OutboxEventType::ChunkDelete => "chunk_delete",
         OutboxEventType::SummarySync => "summary_sync",
         OutboxEventType::DirSummarySync => "dir_summary_sync",
+        OutboxEventType::ExtractSync => "extract_sync",
     }
 }
 

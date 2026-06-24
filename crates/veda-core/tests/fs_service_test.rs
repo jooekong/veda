@@ -26,6 +26,101 @@ async fn write_and_read() {
 }
 
 #[tokio::test]
+async fn blob_roundtrip_lossless() {
+    let (svc, state) = make_service();
+    // ZIP/jar magic (PK\x03\x04) + NUL + high bytes: not valid UTF-8.
+    let data = b"PK\x03\x04\x00\x01\xff\xfe\0jar\0bytes\xc0here".to_vec();
+    let resp = svc
+        .write_blob("ws1", "/app.jar", data.clone(), None)
+        .await
+        .unwrap();
+    assert!(!resp.content_unchanged);
+
+    // Bytes come back identical, with a non-text mime.
+    let (bytes, mime) = svc.read_file_raw("ws1", "/app.jar").await.unwrap();
+    assert_eq!(bytes, data);
+    assert_ne!(mime, "text/plain");
+
+    let st = state.lock().unwrap();
+    let f = st.files.iter().find(|f| f.id == resp.file_id).unwrap();
+    assert_eq!(f.storage_type, StorageType::Blob);
+    assert_eq!(f.source_type, SourceType::Binary);
+}
+
+#[tokio::test]
+async fn blob_pdf_detected_enqueues_extract() {
+    let (svc, state) = make_service();
+    let data = b"%PDF-1.7\n%\xe2\xe3\xcf\xd3\nbinary pdf body".to_vec();
+    let resp = svc.write_blob("ws1", "/doc.pdf", data, None).await.unwrap();
+
+    let st = state.lock().unwrap();
+    let f = st.files.iter().find(|f| f.id == resp.file_id).unwrap();
+    assert_eq!(f.mime_type, "application/pdf");
+    assert_eq!(f.source_type, SourceType::Pdf);
+    // PDF enqueues ExtractSync (text-extract → embed), not ChunkSync.
+    assert!(st
+        .outbox
+        .iter()
+        .any(|e| e.event_type == OutboxEventType::ExtractSync));
+    assert!(!st
+        .outbox
+        .iter()
+        .any(|e| e.event_type == OutboxEventType::ChunkSync));
+}
+
+#[tokio::test]
+async fn blob_image_stored_not_indexed() {
+    let (svc, state) = make_service();
+    // PNG magic.
+    let data = b"\x89PNG\r\n\x1a\n\0\0\0\rIHDRpng".to_vec();
+    let resp = svc.write_blob("ws1", "/pic.png", data, None).await.unwrap();
+
+    let st = state.lock().unwrap();
+    let f = st.files.iter().find(|f| f.id == resp.file_id).unwrap();
+    assert_eq!(f.source_type, SourceType::Image);
+    assert!(f.mime_type.starts_with("image/"));
+    // Images are stored but not indexed: no extract/chunk events.
+    assert!(!st.outbox.iter().any(|e| matches!(
+        e.event_type,
+        OutboxEventType::ChunkSync | OutboxEventType::ExtractSync
+    )));
+}
+
+#[tokio::test]
+async fn blob_rejected_by_text_read() {
+    let (svc, _state) = make_service();
+    let data = b"\x89PNG\r\n\x1a\nbinary".to_vec();
+    svc.write_blob("ws1", "/pic.png", data, None).await.unwrap();
+    // The text read API refuses a binary file (callers must use read_file_raw).
+    let err = svc.read_file("ws1", "/pic.png").await.unwrap_err();
+    assert!(matches!(err, VedaError::InvalidInput(_)));
+}
+
+#[tokio::test]
+async fn text_overwritten_by_blob_purges_stale_index() {
+    let (svc, state) = make_service();
+    svc.write_file("ws1", "/f", "hello text", None, None)
+        .await
+        .unwrap();
+    let data = b"\x89PNG\r\n\x1a\nbinary".to_vec();
+    svc.write_blob("ws1", "/f", data.clone(), None)
+        .await
+        .unwrap();
+
+    // Now reads back as the blob bytes with an image mime.
+    let (bytes, mime) = svc.read_file_raw("ws1", "/f").await.unwrap();
+    assert_eq!(bytes, data);
+    assert!(mime.starts_with("image/"));
+
+    let st = state.lock().unwrap();
+    // The text→image type change enqueues a ChunkDelete to purge stale vectors.
+    assert!(st
+        .outbox
+        .iter()
+        .any(|e| e.event_type == OutboxEventType::ChunkDelete));
+}
+
+#[tokio::test]
 async fn write_creates_parent_dirs() {
     let (svc, state) = make_service();
     svc.write_file("ws1", "/a/b/c.txt", "deep", None, None)

@@ -16,6 +16,7 @@ tracing.workspace = true
 metrics = "0.24"
 moka.workspace = true
 unicode-normalization.workspace = true
+pdf-extract = "0.10.0"
 
 [dev-dependencies]
 toml.workspace = true

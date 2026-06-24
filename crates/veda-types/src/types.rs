@@ -55,6 +55,8 @@ pub enum KeyPermission {
 pub enum StorageType {
     Inline,
     Chunked,
+    /// Raw bytes in `veda_file_blobs` (binary: pdf/image/jar/...). Not UTF-8 text.
+    Blob,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -63,6 +65,8 @@ pub enum SourceType {
     Text,
     Pdf,
     Image,
+    /// Opaque binary (jar/exe/zip/...): stored as blob, not indexed.
+    Binary,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -72,6 +76,8 @@ pub enum OutboxEventType {
     ChunkDelete,
     SummarySync,
     DirSummarySync,
+    /// Extract text from a binary blob (pdf) → embed into Milvus for search.
+    ExtractSync,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

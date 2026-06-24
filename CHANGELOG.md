@@ -9,7 +9,30 @@ that matters.
 
 ## [Unreleased]
 
+### Added
+- **Binary blob storage + PDF text extraction.** `PUT /v1/fs/{path}` now sniffs
+  the body: valid UTF-8 stays on the existing text path (LONGTEXT, chunked,
+  grep/SQL/line reads — unchanged); non-UTF-8 is stored verbatim as a blob in a
+  new `veda_file_blobs` (LONGBLOB) table with `storage_type=blob` and a real
+  `mime_type` detected from magic bytes (`infer`). PDFs additionally enqueue an
+  `ExtractSync` outbox event — a worker extracts the text layer (`pdf-extract`,
+  pure-Rust) and embeds it into Milvus, so the original PDF stays downloadable
+  byte-for-byte while its content becomes searchable. Images / jars / other
+  binaries are stored but not indexed. `GET /v1/fs/{path}` returns the raw bytes
+  with the real `Content-Type`; byte-range reads work on blobs, line reads
+  reject them. The new table is created via `CREATE TABLE IF NOT EXISTS` (no
+  migration step). Adds deps `infer` + `pdf-extract`.
+
 ### Changed
+- **CLI (`veda`) now handles binary.** `veda cp` uploads raw bytes for both text
+  and binary (the old client-side "looks binary" rejection is gone) — PDFs /
+  images / jars upload as-is and the server decides text-vs-blob. `veda cat`
+  writes raw bytes for whole-file reads (binary round-trips losslessly when
+  redirected to a file) and errors clearly instead of garbling on
+  `--head/--tail/--range` over a binary file. **Compatibility**: `cp`/`cat` of
+  binary needs a server at this version or newer — `cp` of a binary against an
+  older server returns 400; text usage is unchanged and back-compatible.
+  `veda-fuse` needs no change (it already sent raw bytes).
 - **Drift reconcile is now on-demand, not a 6h background loop.** The periodic
   reconciler (`[reconciler]` config, `VEDA_RECONCILER_*`) is removed. Rationale:
   the file write and its ChunkSync/SummarySync enqueue commit in one MySQL

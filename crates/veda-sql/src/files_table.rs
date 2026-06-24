@@ -50,6 +50,7 @@ fn storage_type_str(s: veda_types::StorageType) -> &'static str {
     match s {
         veda_types::StorageType::Inline => "inline",
         veda_types::StorageType::Chunked => "chunked",
+        veda_types::StorageType::Blob => "blob",
     }
 }
 
@@ -58,6 +59,7 @@ fn source_type_str(s: veda_types::SourceType) -> &'static str {
         veda_types::SourceType::Text => "text",
         veda_types::SourceType::Pdf => "pdf",
         veda_types::SourceType::Image => "image",
+        veda_types::SourceType::Binary => "binary",
     }
 }
 

@@ -30,6 +30,8 @@ struct WriteMeta {
     sha256: String,
     size: i64,
     line_count: i32,
+    mime_type: String,
+    source_type: SourceType,
     payload: WritePayload,
 }
 
@@ -38,6 +40,8 @@ enum WritePayload {
     Inline { content: String },
     /// size > INLINE_THRESHOLD → chunked; `file_id` is empty and must be set by caller.
     Chunked { chunks: Vec<FileChunk> },
+    /// Raw binary bytes (pdf/image/jar/...). Stored verbatim in veda_file_blobs.
+    Blob { data: Vec<u8> },
 }
 
 impl WriteMeta {
@@ -45,6 +49,15 @@ impl WriteMeta {
         match self.payload {
             WritePayload::Inline { .. } => StorageType::Inline,
             WritePayload::Chunked { .. } => StorageType::Chunked,
+            WritePayload::Blob { .. } => StorageType::Blob,
+        }
+    }
+
+    /// Line count is only meaningful for text; binary blobs report None.
+    fn line_count_opt(&self) -> Option<i32> {
+        match self.payload {
+            WritePayload::Blob { .. } => None,
+            _ => Some(self.line_count),
         }
     }
 }
@@ -57,6 +70,42 @@ async fn compute_write_meta(content: String) -> Result<WriteMeta> {
     })
     .await
     .map_err(|e| VedaError::Internal(format!("hash task join failed: {e}")))?
+}
+
+/// Detect MIME type and source category from a binary blob's magic bytes.
+/// PDF → Pdf (text-extractable); images → Image; everything else → Binary.
+fn detect_mime_and_source(data: &[u8]) -> (String, SourceType) {
+    match infer::get(data) {
+        Some(t) if t.mime_type() == "application/pdf" => {
+            ("application/pdf".to_string(), SourceType::Pdf)
+        }
+        Some(t) if t.matcher_type() == infer::MatcherType::Image => {
+            (t.mime_type().to_string(), SourceType::Image)
+        }
+        Some(t) => (t.mime_type().to_string(), SourceType::Binary),
+        None => ("application/octet-stream".to_string(), SourceType::Binary),
+    }
+}
+
+/// Build write metadata for a binary blob: full-content sha256 + detected
+/// mime/source. Hashing runs on the blocking pool off the runtime threads.
+async fn compute_blob_meta(data: Vec<u8>) -> Result<WriteMeta> {
+    tokio::task::spawn_blocking(move || {
+        let mut hasher = Sha256::new();
+        hasher.update(&data);
+        let sha256 = format!("{:x}", hasher.finalize());
+        let (mime_type, source_type) = detect_mime_and_source(&data);
+        WriteMeta {
+            sha256,
+            size: data.len() as i64,
+            line_count: 0,
+            mime_type,
+            source_type,
+            payload: WritePayload::Blob { data },
+        }
+    })
+    .await
+    .map_err(|e| VedaError::Internal(format!("blob hash task join failed: {e}")))
 }
 
 /// Single-pass metadata computation.
@@ -83,6 +132,8 @@ fn compute_write_meta_blocking(
             sha256,
             size,
             line_count,
+            mime_type: "text/plain".to_string(),
+            source_type: SourceType::Text,
             payload: WritePayload::Inline { content },
         });
     }
@@ -93,6 +144,8 @@ fn compute_write_meta_blocking(
         sha256: full_sha,
         size,
         line_count,
+        mime_type: "text/plain".to_string(),
+        source_type: SourceType::Text,
         payload: WritePayload::Chunked { chunks },
     })
 }
@@ -277,6 +330,32 @@ impl FsService {
             .await
     }
 
+    /// Write a binary file: stored verbatim as a blob, mime/source detected
+    /// from magic bytes. PDFs get an ExtractSync (text → Milvus); images and
+    /// other binaries are stored but not indexed. Shares `write_file_once`
+    /// with the text path — only the precomputed `WriteMeta` differs.
+    pub async fn write_blob(
+        &self,
+        workspace_id: &str,
+        raw_path: &str,
+        data: Vec<u8>,
+        expected_revision: Option<i32>,
+    ) -> Result<api::WriteFileResponse> {
+        let size = data.len() as i64;
+        if size > MAX_FILE_BYTES {
+            return Err(VedaError::QuotaExceeded(format!(
+                "file size {}MB exceeds {}MB limit",
+                size / 1024 / 1024,
+                MAX_FILE_BYTES / 1024 / 1024,
+            )));
+        }
+        let meta = Arc::new(compute_blob_meta(data).await?);
+        let ws = workspace_id.to_string();
+        let p = raw_path.to_string();
+        retry_on_deadlock(|| self.write_file_once(&ws, &p, Arc::clone(&meta), expected_revision))
+            .await
+    }
+
     async fn write_file_once(
         &self,
         workspace_id: &str,
@@ -338,10 +417,10 @@ impl FsService {
             id: file_id.clone(),
             workspace_id: workspace_id.to_string(),
             size_bytes: meta.size,
-            mime_type: "text/plain".to_string(),
+            mime_type: meta.mime_type.clone(),
             storage_type: meta.storage_type(),
-            source_type: SourceType::Text,
-            line_count: Some(meta.line_count),
+            source_type: meta.source_type,
+            line_count: meta.line_count_opt(),
             checksum_sha256: meta.sha256.clone(),
             revision: 1,
             ref_count: 1,
@@ -370,16 +449,7 @@ impl FsService {
             tx.insert_dentry(&dentry).await?;
         }
 
-        let outbox = make_outbox(workspace_id, OutboxEventType::ChunkSync, &file_id);
-        tx.try_insert_outbox_for_file(&outbox, &file_id).await?;
-        // Summary generation runs independently of embedding. Embedding
-        // can fail (e.g. content > embedding API's per-input token cap,
-        // status 400) — without an independent SummarySync trigger,
-        // the file's L0/L1 would never be computed, and the parent
-        // directory's aggregate would silently miss this file's
-        // contribution.
-        let summary_outbox = make_outbox(workspace_id, OutboxEventType::SummarySync, &file_id);
-        tx.try_insert_outbox_for_file(&summary_outbox, &file_id).await?;
+        enqueue_index_outbox(&mut *tx, workspace_id, file.source_type, &file_id).await?;
 
         let evt = make_fs_event(workspace_id, FsEventType::Create, &norm, Some(&file_id));
         tx.insert_fs_event(&evt).await?;
@@ -430,7 +500,44 @@ impl FsService {
                 let chunks = self.meta.get_file_chunks(&file_id, None, None).await?;
                 Ok(chunks.into_iter().map(|c| c.content).collect::<String>())
             }
+            StorageType::Blob => Err(VedaError::InvalidInput(
+                "binary file; use raw byte read".into(),
+            )),
         }
+    }
+
+    /// Read a file as raw bytes plus its mime type, regardless of storage.
+    /// Text (inline/chunked) returns its UTF-8 bytes with the stored mime;
+    /// blobs return the verbatim binary with the detected mime.
+    pub async fn read_file_raw(
+        &self,
+        workspace_id: &str,
+        raw_path: &str,
+    ) -> Result<(Vec<u8>, String)> {
+        let (file_id, file) = self.resolve_file(workspace_id, raw_path).await?;
+        let bytes = match file.storage_type {
+            StorageType::Inline => self
+                .meta
+                .get_file_content(&file_id)
+                .await?
+                .ok_or_else(|| VedaError::NotFound(format!("content for {file_id}")))?
+                .into_bytes(),
+            StorageType::Chunked => {
+                let chunks = self.meta.get_file_chunks(&file_id, None, None).await?;
+                let total: usize = chunks.iter().map(|c| c.content.len()).sum();
+                let mut buf = Vec::with_capacity(total);
+                for c in chunks {
+                    buf.extend_from_slice(c.content.as_bytes());
+                }
+                buf
+            }
+            StorageType::Blob => self
+                .meta
+                .get_file_blob(&file_id)
+                .await?
+                .ok_or_else(|| VedaError::NotFound(format!("blob for {file_id}")))?,
+        };
+        Ok((bytes, file.mime_type))
     }
 
     /// Query file system events since a given ID.
@@ -499,6 +606,19 @@ impl FsService {
         let (file_id, file) = self.resolve_file(workspace_id, raw_path).await?;
 
         match file.storage_type {
+            StorageType::Blob => {
+                let data = self
+                    .meta
+                    .get_file_blob(&file_id)
+                    .await?
+                    .ok_or_else(|| VedaError::NotFound(format!("blob for {file_id}")))?;
+                let total = data.len() as u64;
+                if offset >= total {
+                    return Ok((Vec::new(), total));
+                }
+                let end = std::cmp::min(offset.saturating_add(length), total) as usize;
+                Ok((data[offset as usize..end].to_vec(), total))
+            }
             StorageType::Inline => {
                 let content = self
                     .meta
@@ -601,6 +721,9 @@ impl FsService {
         let take = (effective_end - start + 1) as usize;
 
         match file.storage_type {
+            StorageType::Blob => Err(VedaError::InvalidInput(
+                "cannot read lines from a binary file".into(),
+            )),
             StorageType::Inline => {
                 let content = self
                     .meta
@@ -1016,6 +1139,7 @@ impl FsService {
                 if remaining <= 0 {
                     tx.delete_file_content(old_fid).await?;
                     tx.delete_file_chunks(old_fid).await?;
+                    tx.delete_file_blob(old_fid).await?;
                     let outbox = make_outbox(workspace_id, OutboxEventType::ChunkDelete, old_fid);
                     tx.insert_outbox(&outbox).await?;
                     tx.delete_file(old_fid).await?;
@@ -1209,6 +1333,8 @@ impl FsService {
             &append_meta.sha256,
             Some(append_meta.line_count),
             StorageType::Chunked,
+            "text/plain",
+            SourceType::Text,
         )
         .await?;
 
@@ -1374,6 +1500,7 @@ async fn cleanup_file_if_orphan(
     if remaining <= 0 {
         tx.delete_file_content(file_id).await?;
         tx.delete_file_chunks(file_id).await?;
+        tx.delete_file_blob(file_id).await?;
         let outbox = make_outbox(workspace_id, OutboxEventType::ChunkDelete, file_id);
         tx.insert_outbox(&outbox).await?;
         tx.delete_file(file_id).await?;
@@ -1401,7 +1528,40 @@ async fn persist_write_meta(
                 .collect();
             tx.insert_file_chunks(&with_id).await
         }
+        WritePayload::Blob { data } => tx.insert_file_blob(file_id, data).await,
     }
+}
+
+/// Enqueue the indexing outbox events appropriate for a file's source type.
+///
+/// - `Text` → `ChunkSync` (embed) + `SummarySync` (L0/L1). Summary is
+///   enqueued independently because embedding can fail (e.g. content over the
+///   embedding API's per-input token cap, status 400) — without an
+///   independent trigger the file's L0/L1 and the parent dir's aggregate
+///   would silently never compute.
+/// - `Pdf` → `ExtractSync`: worker extracts the text layer then embeds it
+///   into Milvus for search. The original PDF bytes stay in the blob store.
+/// - `Image` / `Binary` → none: stored verbatim, not indexed.
+async fn enqueue_index_outbox(
+    tx: &mut dyn MetadataTx,
+    workspace_id: &str,
+    source_type: SourceType,
+    file_id: &str,
+) -> Result<()> {
+    match source_type {
+        SourceType::Text => {
+            let outbox = make_outbox(workspace_id, OutboxEventType::ChunkSync, file_id);
+            tx.try_insert_outbox_for_file(&outbox, file_id).await?;
+            let summary = make_outbox(workspace_id, OutboxEventType::SummarySync, file_id);
+            tx.try_insert_outbox_for_file(&summary, file_id).await?;
+        }
+        SourceType::Pdf => {
+            let outbox = make_outbox(workspace_id, OutboxEventType::ExtractSync, file_id);
+            tx.try_insert_outbox_for_file(&outbox, file_id).await?;
+        }
+        SourceType::Image | SourceType::Binary => {}
+    }
+    Ok(())
 }
 
 /// Read a file's full content regardless of storage type.
@@ -1410,8 +1570,8 @@ async fn read_full_content(
     file_id: &str,
     file: &FileRecord,
 ) -> Result<String> {
-    Ok(match file.storage_type {
-        StorageType::Inline => tx.get_file_content(file_id).await?.unwrap_or_default(),
+    match file.storage_type {
+        StorageType::Inline => Ok(tx.get_file_content(file_id).await?.unwrap_or_default()),
         StorageType::Chunked => {
             let chunks = tx.get_file_chunks(file_id, None, None).await?;
             let total: usize = chunks.iter().map(|c| c.content.len()).sum();
@@ -1419,9 +1579,12 @@ async fn read_full_content(
             for c in chunks {
                 s.push_str(&c.content);
             }
-            s
+            Ok(s)
         }
-    })
+        StorageType::Blob => Err(VedaError::InvalidInput(
+            "cannot read binary file as text".into(),
+        )),
+    }
 }
 
 /// Apply a fresh [`WriteMeta`] to an existing dentry, handling ref_count-driven
@@ -1441,10 +1604,10 @@ async fn finalize_full_rewrite(
             id: new_file_id.clone(),
             workspace_id: workspace_id.to_string(),
             size_bytes: meta.size,
-            mime_type: old_file.mime_type.clone(),
+            mime_type: meta.mime_type.clone(),
             storage_type: meta.storage_type(),
-            source_type: old_file.source_type,
-            line_count: Some(meta.line_count),
+            source_type: meta.source_type,
+            line_count: meta.line_count_opt(),
             checksum_sha256: meta.sha256.clone(),
             revision: old_file.revision + 1,
             ref_count: 1,
@@ -1458,10 +1621,7 @@ async fn finalize_full_rewrite(
         tx.update_dentry_file_id(workspace_id, norm_path, &new_file_id)
             .await?;
 
-        let outbox = make_outbox(workspace_id, OutboxEventType::ChunkSync, &new_file_id);
-        tx.try_insert_outbox_for_file(&outbox, &new_file_id).await?;
-        let summary_outbox = make_outbox(workspace_id, OutboxEventType::SummarySync, &new_file_id);
-        tx.try_insert_outbox_for_file(&summary_outbox, &new_file_id).await?;
+        enqueue_index_outbox(&mut *tx, workspace_id, new_file.source_type, &new_file_id).await?;
         let evt = make_fs_event(
             workspace_id,
             FsEventType::Update,
@@ -1480,6 +1640,28 @@ async fn finalize_full_rewrite(
     let new_rev = old_file.revision + 1;
     tx.delete_file_content(old_file_id).await?;
     tx.delete_file_chunks(old_file_id).await?;
+    tx.delete_file_blob(old_file_id).await?;
+    // Purge stale Milvus vectors only when the file leaves an indexed type
+    // (text/pdf) for an unindexed one (image/binary): nothing re-indexes it,
+    // so the vectors would orphan. Index→index rewrites (text↔pdf) skip this —
+    // the new ChunkSync/ExtractSync upserts over the old vectors and sweeps the
+    // tail, and an independent ChunkDelete would race that index event under
+    // the worker's concurrent dispatch.
+    //
+    // SINGLE-WORKER ASSUMPTION: this ChunkDelete correctly clears the old text
+    // vectors only because the worker drains a claimed batch before the next
+    // claim — a still-pending stale ChunkSync for this file is then either
+    // already finished, or (running after this rewrite committed) hits the
+    // storage_type==Blob early-return in handle_chunk_sync and does not
+    // re-embed. Under multi-worker concurrency that ordering isn't guaranteed:
+    // a stale ChunkSync could re-upsert old text vectors after this delete.
+    // Revisit before scaling the worker horizontally.
+    if matches!(old_file.source_type, SourceType::Text | SourceType::Pdf)
+        && matches!(meta.source_type, SourceType::Image | SourceType::Binary)
+    {
+        let del = make_outbox(workspace_id, OutboxEventType::ChunkDelete, old_file_id);
+        tx.insert_outbox(&del).await?;
+    }
     persist_write_meta(&mut *tx, old_file_id, meta).await?;
     tx.update_file_revision(
         old_file_id,
@@ -1487,15 +1669,14 @@ async fn finalize_full_rewrite(
         new_rev,
         meta.size,
         &meta.sha256,
-        Some(meta.line_count),
+        meta.line_count_opt(),
         meta.storage_type(),
+        &meta.mime_type,
+        meta.source_type,
     )
     .await?;
 
-    let outbox = make_outbox(workspace_id, OutboxEventType::ChunkSync, old_file_id);
-    tx.try_insert_outbox_for_file(&outbox, old_file_id).await?;
-    let summary_outbox = make_outbox(workspace_id, OutboxEventType::SummarySync, old_file_id);
-    tx.try_insert_outbox_for_file(&summary_outbox, old_file_id).await?;
+    enqueue_index_outbox(&mut *tx, workspace_id, meta.source_type, old_file_id).await?;
     let evt = make_fs_event(
         workspace_id,
         FsEventType::Update,

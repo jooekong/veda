@@ -101,24 +101,33 @@ async fn write_file(
     body: Bytes,
 ) -> Result<Response, AppError> {
     auth.require_write()?;
-    let body = std::str::from_utf8(&body).map_err(|_| {
-        AppError(VedaError::InvalidInput(
-            "file content must be valid UTF-8".into(),
-        ))
-    })?;
     let path = format!("/{path}");
     let expected_rev = parse_if_match(&headers)?;
-    let if_none_match = parse_if_none_match_sha256(&headers);
-    let resp = state
-        .fs_service
-        .write_file(
-            &auth.workspace_id,
-            &path,
-            body,
-            expected_rev,
-            if_none_match.as_deref(),
-        )
-        .await?;
+
+    // Content sniff: valid UTF-8 → text (full chunk/embed/grep/SQL feature
+    // set); otherwise → binary blob (stored verbatim; PDFs get text-extracted
+    // for search, images/jars stored but not indexed).
+    let resp = match std::str::from_utf8(&body) {
+        Ok(text) => {
+            let if_none_match = parse_if_none_match_sha256(&headers);
+            state
+                .fs_service
+                .write_file(
+                    &auth.workspace_id,
+                    &path,
+                    text,
+                    expected_rev,
+                    if_none_match.as_deref(),
+                )
+                .await?
+        }
+        Err(_) => {
+            state
+                .fs_service
+                .write_blob(&auth.workspace_id, &path, body.to_vec(), expected_rev)
+                .await?
+        }
+    };
 
     let mut r = Json(ApiResponse::ok(resp.clone())).into_response();
     r.headers_mut().insert(
@@ -254,11 +263,11 @@ async fn read_file(
         }
     }
 
-    let content = state
+    let (bytes, mime) = state
         .fs_service
-        .read_file(&auth.workspace_id, &path)
+        .read_file_raw(&auth.workspace_id, &path)
         .await?;
-    Ok(content.into_response())
+    Ok(([(header::CONTENT_TYPE, mime)], bytes).into_response())
 }
 
 /// Parse "bytes=start-end" or "bytes=start-" range header.

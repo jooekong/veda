@@ -75,6 +75,8 @@ pub trait MetadataStore: Send + Sync {
         Ok(results)
     }
     async fn get_file_content(&self, file_id: &str) -> Result<Option<String>>;
+    /// Read raw blob bytes for a binary file (storage_type = Blob).
+    async fn get_file_blob(&self, file_id: &str) -> Result<Option<Vec<u8>>>;
     async fn get_file_chunks(
         &self,
         file_id: &str,
@@ -315,6 +317,8 @@ pub trait MetadataTx: Send {
         checksum: &str,
         line_count: Option<i32>,
         storage_type: StorageType,
+        mime_type: &str,
+        source_type: SourceType,
     ) -> Result<()>;
     async fn decrement_ref_count(&mut self, file_id: &str) -> Result<i32>;
     async fn increment_ref_count(&mut self, file_id: &str) -> Result<()>;
@@ -330,6 +334,8 @@ pub trait MetadataTx: Send {
     ) -> Result<Vec<FileChunk>>;
     async fn insert_file_content(&mut self, file_id: &str, content: &str) -> Result<()>;
     async fn delete_file_content(&mut self, file_id: &str) -> Result<()>;
+    async fn insert_file_blob(&mut self, file_id: &str, data: &[u8]) -> Result<()>;
+    async fn delete_file_blob(&mut self, file_id: &str) -> Result<()>;
     async fn insert_file_chunks(&mut self, chunks: &[FileChunk]) -> Result<()>;
     async fn delete_file_chunks(&mut self, file_id: &str) -> Result<()>;
     /// Delete chunks with `chunk_index >= from_chunk_index`. Used by incremental

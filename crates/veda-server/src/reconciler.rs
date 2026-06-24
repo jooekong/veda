@@ -26,7 +26,7 @@ use serde::Serialize;
 use tracing::{debug, info, warn};
 
 use veda_core::store::{AuthStore, MetadataStore, TaskQueue, VectorStore};
-use veda_types::{Dentry, OutboxEventType};
+use veda_types::{Dentry, OutboxEventType, SourceType};
 
 use crate::outbox::enqueue_dedup;
 
@@ -288,10 +288,22 @@ impl Reconciler {
         // For reconciler-driven repairs we explicitly bypass the watermark
         // so the worker actually rebuilds the chunks.
         for fid in mysql_ids.difference(&milvus_ids) {
+            // Route the repair by source type. Image/binary blobs are never
+            // indexed, so their absence from Milvus is expected — skip them
+            // (otherwise the worker would dead-letter a ChunkSync it can't run).
+            // PDFs are indexed via ExtractSync, text via ChunkSync.
+            let event_type = match self.meta.get_file(fid).await? {
+                Some(f) => match f.source_type {
+                    SourceType::Text => OutboxEventType::ChunkSync,
+                    SourceType::Pdf => OutboxEventType::ExtractSync,
+                    SourceType::Image | SourceType::Binary => continue,
+                },
+                None => continue, // file vanished since the snapshot
+            };
             if dry_run {
-                info!(workspace_id, file_id = %fid, "dry-run: would enqueue ChunkSync (missing in Milvus)");
+                info!(workspace_id, file_id = %fid, ?event_type, "dry-run: would enqueue repair (missing in Milvus)");
             } else {
-                self.enqueue_chunk_sync_force(workspace_id, fid).await?;
+                self.enqueue_index_force(workspace_id, fid, event_type).await?;
             }
             report.chunk_missing += 1;
         }
@@ -568,15 +580,16 @@ impl Reconciler {
     /// to bypass the watermark short-circuit; without it, a "Milvus chunks
     /// gone but watermark says embedded" file would be reported as healed
     /// but never actually re-embedded.
-    async fn enqueue_chunk_sync_force(
+    async fn enqueue_index_force(
         &self,
         workspace_id: &str,
         file_id: &str,
+        event_type: OutboxEventType,
     ) -> veda_types::Result<()> {
         enqueue_dedup(
             &*self.task_queue,
             workspace_id,
-            OutboxEventType::ChunkSync,
+            event_type,
             "file_id",
             file_id,
             serde_json::json!({

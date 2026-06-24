@@ -86,6 +86,9 @@ impl MetadataStore for MockMetaFull {
     async fn get_file_content(&self, id: &str) -> Result<Option<String>> {
         Ok(self.file_contents.lock().unwrap().get(id).cloned())
     }
+    async fn get_file_blob(&self, _id: &str) -> Result<Option<Vec<u8>>> {
+        Ok(None)
+    }
     async fn get_file_chunks(
         &self,
         _id: &str,
@@ -342,6 +345,8 @@ impl MetadataTx for MockMetaFullTx {
         cksum: &str,
         lc: Option<i32>,
         st: StorageType,
+        mime: &str,
+        src: SourceType,
     ) -> Result<()> {
         if let Some(f) = self.files.lock().unwrap().iter_mut().find(|f| f.id == id) {
             f.revision = rev;
@@ -349,6 +354,9 @@ impl MetadataTx for MockMetaFullTx {
             f.checksum_sha256 = cksum.to_string();
             f.line_count = lc;
             f.storage_type = st;
+            f.mime_type = mime.to_string();
+            f.source_type = src;
+            f.last_embedded_content_hash = None;
         }
         Ok(())
     }
@@ -389,6 +397,12 @@ impl MetadataTx for MockMetaFullTx {
     }
     async fn delete_file_content(&mut self, id: &str) -> Result<()> {
         self.file_contents.lock().unwrap().remove(id);
+        Ok(())
+    }
+    async fn insert_file_blob(&mut self, _id: &str, _data: &[u8]) -> Result<()> {
+        Ok(())
+    }
+    async fn delete_file_blob(&mut self, _id: &str) -> Result<()> {
         Ok(())
     }
     async fn insert_file_chunks(&mut self, _chunks: &[FileChunk]) -> Result<()> {
@@ -521,6 +535,9 @@ impl MetadataStore for MockMeta {
         Ok(None)
     }
     async fn get_file_content(&self, _id: &str) -> Result<Option<String>> {
+        Ok(None)
+    }
+    async fn get_file_blob(&self, _id: &str) -> Result<Option<Vec<u8>>> {
         Ok(None)
     }
     async fn get_file_chunks(

@@ -165,19 +165,20 @@ impl Client {
         &self,
         ws_key: &str,
         path: &str,
-        content: &str,
+        content: Vec<u8>,
     ) -> Result<serde_json::Value> {
         let path = path.trim_start_matches('/');
         // Pre-hash and send If-None-Match so the server can short-circuit the
         // write when the content already matches what's stored (no dedup of
-        // chunks, no revision bump).
-        let digest = sha256_hex(content.as_bytes());
+        // chunks, no revision bump). The server sniffs UTF-8 to pick text vs
+        // blob storage, so we upload raw bytes for both.
+        let digest = sha256_hex(&content);
         let resp = self
             .http
             .put(format!("{}/v1/fs/{path}", self.base))
             .bearer_auth(ws_key)
             .header("If-None-Match", format!("\"{digest}\""))
-            .body(content.to_string())
+            .body(content)
             .send()
             .await?;
         Self::check(resp).await
@@ -200,7 +201,9 @@ impl Client {
         Self::check(resp).await
     }
 
-    pub async fn read_file(&self, ws_key: &str, path: &str, lines: Option<&str>) -> Result<String> {
+    /// Read raw bytes so binary files (pdf/image/jar) round-trip losslessly.
+    /// Callers that need text (line slicing) decode with `String::from_utf8`.
+    pub async fn read_file(&self, ws_key: &str, path: &str, lines: Option<&str>) -> Result<Vec<u8>> {
         let path = path.trim_start_matches('/');
         let mut url = format!("{}/v1/fs/{path}", self.base);
         if let Some(l) = lines {
@@ -211,7 +214,7 @@ impl Client {
             let text = resp.text().await?;
             bail!("read failed: {text}");
         }
-        Ok(resp.text().await?)
+        Ok(resp.bytes().await?.to_vec())
     }
 
     pub async fn list_dir(&self, ws_key: &str, path: &str) -> Result<serde_json::Value> {

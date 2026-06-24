@@ -12,6 +12,7 @@ pub struct MockState {
     pub dentries: Vec<Dentry>,
     pub files: Vec<FileRecord>,
     pub file_contents: HashMap<String, String>,
+    pub file_blobs: HashMap<String, Vec<u8>>,
     pub file_chunks: Vec<FileChunk>,
     pub outbox: Vec<OutboxEvent>,
     pub fs_events: Vec<FsEvent>,
@@ -116,6 +117,11 @@ impl MetadataStore for MockMetadataStore {
     async fn get_file_content(&self, file_id: &str) -> Result<Option<String>> {
         let st = self.state.lock().unwrap();
         Ok(st.file_contents.get(file_id).cloned())
+    }
+
+    async fn get_file_blob(&self, file_id: &str) -> Result<Option<Vec<u8>>> {
+        let st = self.state.lock().unwrap();
+        Ok(st.file_blobs.get(file_id).cloned())
     }
 
     async fn get_file_chunks(
@@ -465,6 +471,8 @@ impl MetadataTx for MockTx {
         checksum: &str,
         line_count: Option<i32>,
         storage_type: StorageType,
+        mime_type: &str,
+        source_type: SourceType,
     ) -> Result<()> {
         let mut st = self.state.lock().unwrap();
         if let Some(f) = st.files.iter_mut().find(|f| f.id == file_id) {
@@ -479,6 +487,9 @@ impl MetadataTx for MockTx {
             f.checksum_sha256 = checksum.to_string();
             f.line_count = line_count;
             f.storage_type = storage_type;
+            f.mime_type = mime_type.to_string();
+            f.source_type = source_type;
+            f.last_embedded_content_hash = None;
             f.updated_at = chrono::Utc::now();
         }
         Ok(())
@@ -539,6 +550,18 @@ impl MetadataTx for MockTx {
     async fn delete_file_content(&mut self, file_id: &str) -> Result<()> {
         let mut st = self.state.lock().unwrap();
         st.file_contents.remove(file_id);
+        Ok(())
+    }
+
+    async fn insert_file_blob(&mut self, file_id: &str, data: &[u8]) -> Result<()> {
+        let mut st = self.state.lock().unwrap();
+        st.file_blobs.insert(file_id.to_string(), data.to_vec());
+        Ok(())
+    }
+
+    async fn delete_file_blob(&mut self, file_id: &str) -> Result<()> {
+        let mut st = self.state.lock().unwrap();
+        st.file_blobs.remove(file_id);
         Ok(())
     }
 

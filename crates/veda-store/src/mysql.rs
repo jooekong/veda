@@ -7,7 +7,8 @@ use sqlx::{MySqlPool, Row, Transaction};
 use veda_core::store::{AuthStore, CollectionMetaStore, MetadataStore, MetadataTx, TaskQueue};
 use veda_types::{
     Account, ApiKeyRecord, CollectionSchema, Dataset, Dentry, FileChunk, FileRecord, FileSummary,
-    FsEvent, OutboxEvent, OutboxEventType, OutboxStatus, Result, StorageStats, StorageType,
+    FsEvent, OutboxEvent, OutboxEventType, OutboxStatus, Result, SourceType, StorageStats,
+    StorageType,
     SummaryStatus, VedaError, Workspace, WorkspaceKey,
 };
 
@@ -406,6 +407,10 @@ impl MysqlStore {
             r#"CREATE TABLE IF NOT EXISTS veda_file_contents (
     file_id VARCHAR(36) PRIMARY KEY,
     content LONGTEXT NOT NULL
+)"#,
+            r#"CREATE TABLE IF NOT EXISTS veda_file_blobs (
+    file_id VARCHAR(36) PRIMARY KEY,
+    data LONGBLOB NOT NULL
 )"#,
             r#"CREATE TABLE IF NOT EXISTS veda_file_chunks (
     file_id VARCHAR(36) NOT NULL,
@@ -978,6 +983,18 @@ impl MetadataStore for MysqlStore {
             .map_err(storage_err)?;
         Ok(row
             .map(|r| r.try_get::<String, _>("content"))
+            .transpose()
+            .map_err(storage_err)?)
+    }
+
+    async fn get_file_blob(&self, file_id: &str) -> Result<Option<Vec<u8>>> {
+        let row = sqlx::query(r#"SELECT data FROM veda_file_blobs WHERE file_id = ?"#)
+            .bind(file_id)
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(storage_err)?;
+        Ok(row
+            .map(|r| r.try_get::<Vec<u8>, _>("data"))
             .transpose()
             .map_err(storage_err)?)
     }
@@ -1658,11 +1675,13 @@ impl MetadataTx for MysqlMetadataTx {
         checksum: &str,
         line_count: Option<i32>,
         storage_type: StorageType,
+        mime_type: &str,
+        source_type: SourceType,
     ) -> Result<()> {
         let t = self.tx_mut()?;
         let r = sqlx::query(
             r#"UPDATE veda_files
-               SET revision = ?, size_bytes = ?, checksum_sha256 = ?, line_count = ?, storage_type = ?
+               SET revision = ?, size_bytes = ?, checksum_sha256 = ?, line_count = ?, storage_type = ?, mime_type = ?, source_type = ?, last_embedded_content_hash = NULL
                WHERE id = ? AND revision = ?"#,
         )
         .bind(new_rev)
@@ -1670,6 +1689,8 @@ impl MetadataTx for MysqlMetadataTx {
         .bind(checksum)
         .bind(line_count)
         .bind(db_enum_str(&storage_type))
+        .bind(mime_type)
+        .bind(db_enum_str(&source_type))
         .bind(file_id)
         .bind(expected_rev)
         .execute(t.as_mut())
@@ -1768,6 +1789,30 @@ impl MetadataTx for MysqlMetadataTx {
     async fn delete_file_content(&mut self, file_id: &str) -> Result<()> {
         let t = self.tx_mut()?;
         sqlx::query(r#"DELETE FROM veda_file_contents WHERE file_id = ?"#)
+            .bind(file_id)
+            .execute(t.as_mut())
+            .await
+            .map_err(storage_err)?;
+        Ok(())
+    }
+
+    async fn insert_file_blob(&mut self, file_id: &str, data: &[u8]) -> Result<()> {
+        let t = self.tx_mut()?;
+        sqlx::query(
+            r#"INSERT INTO veda_file_blobs (file_id, data) VALUES (?, ?)
+               ON DUPLICATE KEY UPDATE data = VALUES(data)"#,
+        )
+        .bind(file_id)
+        .bind(data)
+        .execute(t.as_mut())
+        .await
+        .map_err(storage_err)?;
+        Ok(())
+    }
+
+    async fn delete_file_blob(&mut self, file_id: &str) -> Result<()> {
+        let t = self.tx_mut()?;
+        sqlx::query(r#"DELETE FROM veda_file_blobs WHERE file_id = ?"#)
             .bind(file_id)
             .execute(t.as_mut())
             .await
