@@ -75,7 +75,7 @@ rejected as an invalid character.
 ## File operations
 
 ```sh
-veda cp ./README.md /docs/readme.md      # upload (UTF-8 text only)
+veda cp ./README.md /docs/readme.md      # upload (text or binary)
 veda cp ./src /code                       # directory — recursion auto on dir src
 veda cp - /notes/scratch < input.txt     # from stdin (use "-" as src)
 veda ls /docs                             # list dir
@@ -90,8 +90,15 @@ veda mkdir /new-dir                       # create directory
 veda append /notes/log "entry"            # append (use "-" for stdin)
 ```
 
-`veda cp` rejects non-UTF-8 input client-side with a path-aware error
-(NUL-byte sniff + UTF-8 validation, before any HTTP call).
+`veda cp` uploads raw bytes for text **and** binary (PDF / image / jar):
+the server sniffs UTF-8 to pick storage — valid UTF-8 → text (chunked,
+grep / SQL / line reads); non-UTF-8 → blob, stored verbatim with a real
+MIME type. **PDFs** additionally get their text layer extracted (async)
+and embedded, so the original downloads byte-for-byte while its content
+becomes searchable; images / jars / other binaries are stored but **not**
+indexed. `veda cat` returns raw bytes (redirect binary to a file);
+`--head` / `--tail` / `--range` reject a binary file. Binary `cp` / `cat`
+need a server at v0.1.15+ (older servers return 400 on binary `cp`).
 
 ## Search
 
@@ -320,7 +327,8 @@ FUSE-specific errors are in the "FUSE error handling" sub-section above.
 
 ## Don't do
 
-- Upload binaries — PDFs/images aren't supported (no extraction backend).
+- Expect images / jars to be searchable — only **PDFs** are text-extracted
+  and indexed; other binaries are stored but not searchable.
 - Use `veda search` for exact path lookups — use `ls` / `cat`.
 - Write to `/` root — pick a semantic prefix (`/notes/`, `/code/`, `/docs/`).
 - Repeat the user's password / API key in chat — they live in
