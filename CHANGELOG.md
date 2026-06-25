@@ -24,6 +24,13 @@ that matters.
   migration step). Adds deps `infer` + `pdf-extract`.
 
 ### Changed
+- **CLI Linux binary is now static musl.** The release `veda` CLI for Linux
+  ships as `x86_64-unknown-linux-musl` (statically linked) instead of `…-gnu`,
+  so it runs on any Linux regardless of host glibc version — no more
+  `version 'GLIBC_2.xx' not found` on older boxes (e.g. the glibc-2.34 alpha
+  box). `veda-fuse` stays gnu (it dynamically links libfuse3). `install.sh`
+  resolves the musl CLI artifact automatically; on Linux the binary names now
+  diverge (`veda-…-musl` vs `veda-fuse-…-gnu`).
 - **CLI (`veda`) now handles binary.** `veda cp` uploads raw bytes for both text
   and binary (the old client-side "looks binary" rejection is gone) — PDFs /
   images / jars upload as-is and the server decides text-vs-blob. `veda cat`

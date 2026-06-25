@@ -59,13 +59,24 @@ log()  { printf '%s\n' "$*" >&2; }
 err()  { log "error: $*"; exit 1; }
 warn() { log "warn: $*"; }
 
+# $1/$2 override os/arch (tests inject them). $3 is the binary kind: the CLI
+# ("veda") ships as a static musl binary so it runs on any Linux glibc;
+# veda-fuse stays gnu (it dynamically links libfuse3). macOS is one target
+# for both binaries.
 detect_platform() {
     os="${1:-$(uname -s)}"
     arch="${2:-$(uname -m)}"
+    kind="${3:-veda}"
     case "$os-$arch" in
         Darwin-x86_64) echo "x86_64-apple-darwin" ;;
         Darwin-arm64)  echo "aarch64-apple-darwin" ;;
-        Linux-x86_64)  echo "x86_64-unknown-linux-gnu" ;;
+        Linux-x86_64)
+            if [ "$kind" = "veda-fuse" ]; then
+                echo "x86_64-unknown-linux-gnu"
+            else
+                echo "x86_64-unknown-linux-musl"
+            fi
+            ;;
         *) err "unsupported platform: $os-$arch (supported: macOS Intel/Apple Silicon, Linux x86_64)" ;;
     esac
 }
@@ -438,28 +449,31 @@ EOF
         log "→ $VERSION"
     fi
 
-    target=$(detect_platform)
-    install_binary "veda" "$target"
+    cli_target=$(detect_platform "" "" veda)
+    install_binary "veda" "$cli_target"
 
     if [ "$WITH_FUSE" -eq 1 ]; then
-        # Probe whether veda-fuse-$target exists on this release. Avoids
+        # veda-fuse links libfuse3, so on Linux it's gnu while the CLI is musl —
+        # resolve its target separately.
+        fuse_target=$(detect_platform "" "" veda-fuse)
+        # Probe whether veda-fuse-$fuse_target exists on this release. Avoids
         # hardcoding which platforms ship a prebuilt fuse binary; if a
         # release predates a target's fuse support (the GitLab CI matrix
         # only added aarch64-darwin fuse in 0.1.10), the probe falls
         # through to source-build instructions.
-        fuse_url=$(asset_url "veda-fuse-$target")
+        fuse_url=$(asset_url "veda-fuse-$fuse_target")
         if ! curl_with_auth -fsIL -o /dev/null --max-time 10 "$fuse_url"; then
             log ""
             log "veda CLI is installed."
-            log "veda-fuse-$target is not in release $VERSION on $SOURCE."
-            log "To get veda-fuse on $target, compile from source:"
+            log "veda-fuse-$fuse_target is not in release $VERSION on $SOURCE."
+            log "To get veda-fuse on $fuse_target, compile from source:"
             log "  git clone https://github.com/$GITHUB_REPO.git"
             log "  cd veda && cargo build --release -p veda-fuse"
             log "  cp target/release/veda-fuse $DEST/"
             exit 0
         fi
         preflight_fuse
-        install_binary "veda-fuse" "$target"
+        install_binary "veda-fuse" "$fuse_target"
     fi
 
     install_skill

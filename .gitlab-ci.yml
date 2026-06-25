@@ -2,7 +2,8 @@
 # Triggers on tag push (e.g. `git tag 0.1.0 && git push ddxq 0.1.0`).
 #
 # Matrix:
-#   - x86_64-unknown-linux-gnu  — docker rust:1.90 on the linux runner
+#   - linux: veda (CLI) → x86_64-unknown-linux-musl (static, runs on any
+#     glibc); veda-fuse → x86_64-unknown-linux-gnu (libfuse3). docker rust:1.90
 #   - aarch64-apple-darwin      — shell executor on the arm64 mac runner
 #     (runner 314 joe-mbp-arm64-darwin since 2026-06-11; the old intel
 #     runner 313 is retired)
@@ -27,13 +28,22 @@ build:linux:
     - release
     - veda
   variables:
-    TARGET: x86_64-unknown-linux-gnu
+    # CLI ships as a static musl binary so it runs on any Linux regardless of
+    # host glibc (avoids the .89 glibc-2.34 forward-compat trap). veda-fuse
+    # stays gnu: it links libfuse3 (C) and is host-kernel-bound anyway.
+    CLI_TARGET: x86_64-unknown-linux-musl
+    FUSE_TARGET: x86_64-unknown-linux-gnu
     # CARGO_HOME under CI_PROJECT_DIR so the future cache: block can
     # reach the registry — the default $HOME/.cargo lives outside the
     # cached path. (Cache backend not yet configured on the runner,
     # see config.toml `[runners.cache]`.)
     CARGO_HOME: "${CI_PROJECT_DIR}/.cargo"
     CARGO_NET_GIT_FETCH_WITH_CLI: "true"
+    # `rustup target add` (musl) downloads rust-std; without a mirror it stalls
+    # on static.rust-lang.org from the in-China runner (verified on .161: ~18min
+    # hang). apt/cargo mirrors don't cover rustup — point it at rsproxy too.
+    RUSTUP_DIST_SERVER: "https://rsproxy.cn"
+    RUSTUP_UPDATE_ROOT: "https://rsproxy.cn/rustup"
   before_script:
     # Swap to in-region apt + cargo mirrors before any network fetch.
     # aliyun debian: ~26 MB/s vs ~22 KB/s upstream.
@@ -55,24 +65,27 @@ build:linux:
       registry = "sparse+https://rsproxy.cn/index/"
       EOF
     - apt-get update
-    - apt-get install -y --no-install-recommends libfuse3-dev pkg-config
+    # libfuse3-dev/pkg-config: veda-fuse (gnu). musl-tools (musl-gcc): ring's
+    # C build under the musl target for the CLI.
+    - apt-get install -y --no-install-recommends libfuse3-dev pkg-config musl-tools
+    - rustup target add "${CLI_TARGET}"
   script:
-    - cargo build --release --bin veda
+    - cargo build --release --target "${CLI_TARGET}" --bin veda
     - cargo build --release -p veda-fuse --bin veda-fuse
-    - mv "target/release/veda"      "veda-${TARGET}"
-    - mv "target/release/veda-fuse" "veda-fuse-${TARGET}"
-    - sha256sum "veda-${TARGET}"      > "veda-${TARGET}.sha256"
-    - sha256sum "veda-fuse-${TARGET}" > "veda-fuse-${TARGET}.sha256"
+    - mv "target/${CLI_TARGET}/release/veda" "veda-${CLI_TARGET}"
+    - mv "target/release/veda-fuse"          "veda-fuse-${FUSE_TARGET}"
+    - sha256sum "veda-${CLI_TARGET}"       > "veda-${CLI_TARGET}.sha256"
+    - sha256sum "veda-fuse-${FUSE_TARGET}" > "veda-fuse-${FUSE_TARGET}.sha256"
     # rust:1.90-bookworm sets umask 027 — without this chmod, the
     # binaries land 0750 and the sha256 files 0640, root-owned. The
     # publish stage's curlimages/curl runs as USER curl_user (UID 100)
     # and can't open them. `a+rX` adds world-read to files and
     # exec-where-already-exec to dirs/binaries.
-    - chmod a+rX "veda-${TARGET}" "veda-${TARGET}.sha256" "veda-fuse-${TARGET}" "veda-fuse-${TARGET}.sha256"
+    - chmod a+rX "veda-${CLI_TARGET}" "veda-${CLI_TARGET}.sha256" "veda-fuse-${FUSE_TARGET}" "veda-fuse-${FUSE_TARGET}.sha256"
   artifacts:
     paths:
-      - veda-x86_64-unknown-linux-gnu
-      - veda-x86_64-unknown-linux-gnu.sha256
+      - veda-x86_64-unknown-linux-musl
+      - veda-x86_64-unknown-linux-musl.sha256
       - veda-fuse-x86_64-unknown-linux-gnu
       - veda-fuse-x86_64-unknown-linux-gnu.sha256
       - skill.md
@@ -221,7 +234,7 @@ release:create:
   script:
     - |
       release-cli create --name "Veda ${CI_COMMIT_TAG}" --tag-name "${CI_COMMIT_TAG}" \
-        --assets-link "{\"name\":\"veda-x86_64-linux\",\"url\":\"${REGISTRY}/veda-x86_64-unknown-linux-gnu\",\"link_type\":\"package\"}" \
+        --assets-link "{\"name\":\"veda-x86_64-linux\",\"url\":\"${REGISTRY}/veda-x86_64-unknown-linux-musl\",\"link_type\":\"package\"}" \
         --assets-link "{\"name\":\"veda-fuse-x86_64-linux\",\"url\":\"${REGISTRY}/veda-fuse-x86_64-unknown-linux-gnu\",\"link_type\":\"package\"}" \
         --assets-link "{\"name\":\"veda-x86_64-darwin\",\"url\":\"${REGISTRY}/veda-x86_64-apple-darwin\",\"link_type\":\"package\"}" \
         --assets-link "{\"name\":\"veda-fuse-x86_64-darwin\",\"url\":\"${REGISTRY}/veda-fuse-x86_64-apple-darwin\",\"link_type\":\"package\"}" \

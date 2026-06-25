@@ -24,6 +24,12 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          # CLI ships as static musl so it runs on any Linux glibc; built via
+          # zigbuild (cross). veda-fuse (libfuse3) stays gnu on the row below.
+          - target: x86_64-unknown-linux-musl
+            runs-on: ubuntu-latest
+            cross: true
+            with-fuse: false
           - target: x86_64-unknown-linux-gnu
             runs-on: ubuntu-latest
             cross: false
