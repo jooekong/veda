@@ -25,8 +25,9 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde::Deserialize;
 use veda_types::api::{
-    DirEntry, GrepHit, GrepRequest, SearchApiRequest, SqlRequest, UpsertRequest, UpsertResponse,
-    VectorDeleteRequest, VectorDeleteResponse, VectorQueryRequest, VectorSearchRequest,
+    DirEntry, FilePreview, GrepHit, GrepRequest, SearchApiRequest, SqlRequest, UpsertRequest,
+    UpsertResponse, VectorDeleteRequest, VectorDeleteResponse, VectorQueryRequest,
+    VectorSearchRequest,
 };
 use veda_types::{
     ApiResponse, DetailLevel, SearchHit, SearchMode, VectorRecordHit, VectorSearchHit, VedaError,
@@ -209,14 +210,6 @@ struct FileQuery {
     path: String,
 }
 
-#[derive(serde::Serialize)]
-struct FilePreview {
-    path: String,
-    size: u64,
-    truncated: bool,
-    content: String,
-}
-
 async fn fs_file(
     State(state): State<Arc<AppState>>,
     Path((workspace, id)): Path<(String, String)>,
@@ -224,16 +217,11 @@ async fn fs_file(
     Query(q): Query<FileQuery>,
 ) -> Result<Json<ApiResponse<FilePreview>>, AppError> {
     let ws = authz_and_load(&state, &gw, &workspace, &id, WorkspaceKind::Fs).await?;
-    let (bytes, total) = state
+    let preview = state
         .fs_service
-        .read_file_range(&ws.id, &q.path, 0, MAX_PREVIEW_BYTES)
+        .read_file_preview(&ws.id, &q.path, MAX_PREVIEW_BYTES)
         .await?;
-    Ok(Json(ApiResponse::ok(FilePreview {
-        path: q.path,
-        size: total,
-        truncated: total > MAX_PREVIEW_BYTES,
-        content: String::from_utf8_lossy(&bytes).into_owned(),
-    })))
+    Ok(Json(ApiResponse::ok(preview)))
 }
 
 async fn fs_sql(

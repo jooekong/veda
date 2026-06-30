@@ -541,6 +541,41 @@ impl FsService {
         Ok((bytes, file.mime_type))
     }
 
+    /// Read a file for the data-plane preview endpoint. Text (inline/
+    /// chunked) returns up to `max_bytes` of UTF-8 (lossy) content; binary
+    /// (blob) files return empty content with `is_binary = true`, so the
+    /// caller shows a download affordance instead of garbled replacement
+    /// chars. Always reports the file's real `size` and `mime_type`.
+    pub async fn read_file_preview(
+        &self,
+        workspace_id: &str,
+        raw_path: &str,
+        max_bytes: u64,
+    ) -> Result<api::FilePreview> {
+        let (_file_id, file) = self.resolve_file(workspace_id, raw_path).await?;
+        if matches!(file.storage_type, StorageType::Blob) {
+            return Ok(api::FilePreview {
+                path: raw_path.to_string(),
+                size: file.size_bytes.max(0) as u64,
+                truncated: false,
+                mime_type: file.mime_type,
+                is_binary: true,
+                content: String::new(),
+            });
+        }
+        let (bytes, total) = self
+            .read_file_range(workspace_id, raw_path, 0, max_bytes)
+            .await?;
+        Ok(api::FilePreview {
+            path: raw_path.to_string(),
+            size: total,
+            truncated: total > max_bytes,
+            mime_type: file.mime_type,
+            is_binary: false,
+            content: String::from_utf8_lossy(&bytes).into_owned(),
+        })
+    }
+
     /// Query file system events since a given ID.
     pub async fn query_events(
         &self,

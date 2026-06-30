@@ -97,6 +97,46 @@ async fn blob_rejected_by_text_read() {
 }
 
 #[tokio::test]
+async fn read_file_preview_text_vs_binary() {
+    let (svc, _) = make_service();
+    // Text file: real content, not flagged binary.
+    svc.write_file("ws1", "/a.txt", "hello world", None, None)
+        .await
+        .unwrap();
+    let p = svc
+        .read_file_preview("ws1", "/a.txt", 256 * 1024)
+        .await
+        .unwrap();
+    assert!(!p.is_binary);
+    assert_eq!(p.content, "hello world");
+    assert_eq!(p.size, 11);
+    assert_eq!(p.mime_type, "text/plain");
+    assert!(!p.truncated);
+
+    // Binary (blob) file: empty content, is_binary=true, real mime/size —
+    // no garbled UTF-8-lossy bytes.
+    let png = b"\x89PNG\r\n\x1a\n\0\0\0\rIHDRpng".to_vec();
+    let n = png.len() as u64;
+    svc.write_blob("ws1", "/pic.png", png, None).await.unwrap();
+    let pb = svc
+        .read_file_preview("ws1", "/pic.png", 256 * 1024)
+        .await
+        .unwrap();
+    assert!(pb.is_binary);
+    assert_eq!(pb.content, "");
+    assert!(pb.mime_type.starts_with("image/"));
+    assert_eq!(pb.size, n);
+    assert!(!pb.truncated);
+
+    // Truncated text: content capped at max_bytes (tiny cap forces it).
+    let pt = svc.read_file_preview("ws1", "/a.txt", 5).await.unwrap();
+    assert!(pt.truncated);
+    assert_eq!(pt.size, 11);
+    assert_eq!(pt.content, "hello");
+    assert!(!pt.is_binary);
+}
+
+#[tokio::test]
 async fn text_overwritten_by_blob_purges_stale_index() {
     let (svc, state) = make_service();
     svc.write_file("ws1", "/f", "hello text", None, None)

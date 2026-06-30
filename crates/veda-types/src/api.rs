@@ -140,6 +140,19 @@ pub struct WriteFileResponse {
     pub content_unchanged: bool,
 }
 
+/// File preview for the data-plane `/file` endpoint. Binary files
+/// (`is_binary = true`) return empty `content` so the frontend renders a
+/// download affordance instead of garbled UTF-8-lossy replacement chars.
+#[derive(Debug, Serialize)]
+pub struct FilePreview {
+    pub path: String,
+    pub size: u64,
+    pub truncated: bool,
+    pub mime_type: String,
+    pub is_binary: bool,
+    pub content: String,
+}
+
 // ── Search ─────────────────────────────────────────────
 
 // deny_unknown_fields: reject typo'd / unsupported fields (e.g. min_score,
