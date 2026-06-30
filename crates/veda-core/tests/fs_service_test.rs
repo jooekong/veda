@@ -274,6 +274,31 @@ async fn mkdir_and_list() {
 }
 
 #[tokio::test]
+async fn list_dir_carries_mime_and_size() {
+    let (svc, _) = make_service();
+    svc.mkdir("ws1", "/docs").await.unwrap();
+    svc.mkdir("ws1", "/docs/sub").await.unwrap();
+    svc.write_file("ws1", "/docs/a.txt", "hello", None, None)
+        .await
+        .unwrap();
+
+    let entries = svc.list_dir("ws1", "/docs").await.unwrap();
+    // File entries now carry real metadata instead of null.
+    let a = entries.iter().find(|e| e.name == "a.txt").unwrap();
+    assert!(
+        a.mime_type.is_some(),
+        "mime_type should be populated, got {:?}",
+        a.mime_type
+    );
+    assert_eq!(a.size_bytes, Some(5));
+    // Directory entries have no file_id and stay null.
+    let sub = entries.iter().find(|e| e.name == "sub").unwrap();
+    assert!(sub.is_dir);
+    assert_eq!(sub.mime_type, None);
+    assert_eq!(sub.size_bytes, None);
+}
+
+#[tokio::test]
 async fn mkdir_idempotent() {
     let (svc, _) = make_service();
     svc.mkdir("ws1", "/foo").await.unwrap();

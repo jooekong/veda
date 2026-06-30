@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use chrono::Utc;
@@ -767,16 +768,28 @@ impl FsService {
             }
         }
         let dentries = self.meta.list_dentries(workspace_id, &norm).await?;
+
+        // Batch-fetch file metadata so list entries carry real mime_type /
+        // size_bytes instead of null. One query for all files in this dir;
+        // directories have no file_id and stay null.
+        let file_ids: Vec<String> = dentries.iter().filter_map(|d| d.file_id.clone()).collect();
+        let files = self.meta.get_files_batch(&file_ids).await?;
+        let by_id: HashMap<&str, &FileRecord> =
+            files.iter().map(|f| (f.id.as_str(), f)).collect();
+
         Ok(dentries
             .into_iter()
-            .map(|d| api::DirEntry {
-                name: d.name,
-                path: d.path,
-                is_dir: d.is_dir,
-                size_bytes: None,
-                mime_type: None,
-                created_at: d.created_at,
-                updated_at: d.updated_at,
+            .map(|d| {
+                let file = d.file_id.as_deref().and_then(|fid| by_id.get(fid).copied());
+                api::DirEntry {
+                    name: d.name,
+                    path: d.path,
+                    is_dir: d.is_dir,
+                    size_bytes: file.map(|f| f.size_bytes),
+                    mime_type: file.map(|f| f.mime_type.clone()),
+                    created_at: d.created_at,
+                    updated_at: d.updated_at,
+                }
             })
             .collect())
     }
