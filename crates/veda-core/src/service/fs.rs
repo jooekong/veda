@@ -543,9 +543,10 @@ impl FsService {
 
     /// Read a file for the data-plane preview endpoint. Text (inline/
     /// chunked) returns up to `max_bytes` of UTF-8 (lossy) content; binary
-    /// (blob) files return empty content with `is_binary = true`, so the
-    /// caller shows a download affordance instead of garbled replacement
-    /// chars. Always reports the file's real `size` and `mime_type`.
+    /// (blob) files return a short localized "preview not supported" message
+    /// as `content` with `is_binary = true`, so the caller can show it
+    /// directly (and offer download) instead of garbled replacement chars.
+    /// Always reports the file's real `size` and `mime_type`.
     pub async fn read_file_preview(
         &self,
         workspace_id: &str,
@@ -554,13 +555,29 @@ impl FsService {
     ) -> Result<api::FilePreview> {
         let (_file_id, file) = self.resolve_file(workspace_id, raw_path).await?;
         if matches!(file.storage_type, StorageType::Blob) {
+            // Map the raw mime to a user-friendly Chinese kind for the
+            // unsupported-preview message; fall back to a generic label.
+            let kind = match file.mime_type.as_str() {
+                m if m.starts_with("image/") => "图片",
+                m if m.starts_with("audio/") => "音频",
+                m if m.starts_with("video/") => "视频",
+                "application/pdf" => "PDF",
+                "application/zip" | "application/gzip" | "application/x-tar"
+                | "application/x-7z-compressed" | "application/x-rar-compressed" => "压缩包",
+                "application/java-archive" => "JAR 包",
+                "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+                | "application/msword" => "Word 文档",
+                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                | "application/vnd.ms-excel" => "Excel 表格",
+                _ => "二进制文件",
+            };
             return Ok(api::FilePreview {
                 path: raw_path.to_string(),
                 size: file.size_bytes.max(0) as u64,
                 truncated: false,
-                mime_type: file.mime_type,
                 is_binary: true,
-                content: String::new(),
+                content: format!("暂不支持预览该格式（{kind}）"),
+                mime_type: file.mime_type,
             });
         }
         let (bytes, total) = self

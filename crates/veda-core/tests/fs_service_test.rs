@@ -123,8 +123,10 @@ async fn read_file_preview_text_vs_binary() {
         .await
         .unwrap();
     assert!(pb.is_binary);
-    assert_eq!(pb.content, "");
     assert!(pb.mime_type.starts_with("image/"));
+    // content carries a localized unsupported-preview message with a friendly
+    // kind ("图片" for images, not the raw mime).
+    assert_eq!(pb.content, "暂不支持预览该格式（图片）");
     assert_eq!(pb.size, n);
     assert!(!pb.truncated);
 
