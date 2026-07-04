@@ -4,9 +4,9 @@
 
 ---
 
-## 现状：Phase 1-7 已完成
+## 现状：Phase 1-9 已完成
 
-基础层、存储层、Pipeline、HTTP 层、SQL 引擎、CLI 全部实现，含单元测试和集成测试。Phase 7 新增 Tiered Context Loading（三层信息模型）。
+基础层、存储层、Pipeline、HTTP 层、SQL 引擎、CLI、FUSE、三层信息模型全部实现，含单元测试和集成测试。Phase 8 完成 alpha 稳定化；Phase 9 承接公司向量服务（db kind / `wk_` 数据面 / 平台网关面 / OTLP / Java SDK），生产节点已部署。Phase 索引见 `docs/design/plans.md`。
 
 ---
 
@@ -30,7 +30,7 @@ veda-fuse       FUSE 挂载                           (已实现)
 - `veda-store`：MysqlStore（MetadataStore + MetadataTx + TaskQueue + AuthStore + CollectionMetaStore 实现，启动时 schema bootstrap (`CREATE TABLE IF NOT EXISTS`)，含 veda_summaries 表；`insert_dentry` 使用 MySQL errno 1062 精确匹配 duplicate entry；`claim()` 重入不重复递增 retry_count）；MilvusStore（VectorStore + CollectionVectorStore 实现，REST v2 client，新增 veda_summaries 集合，`post()` 含 3 次指数退避重试）；10 个 MySQL 集成测试 + 2 个 Milvus 集成测试
 - `veda-pipeline`：EmbeddingProvider（OpenAI 兼容 HTTP，100/batch 自动分批 + exponential backoff 重试，基于 HTTP status code 判断 retryable）；LlmProvider（OpenAI-compatible chat completions，含 3 次指数退避重试，429/5xx/连接错误自动重试）；semantic_chunk（heading-based + sliding window）；storage_chunk（256KB 边界 + start_line）；extract_text（text/plain 占位）；summary 模块（generate_l0/generate_l1/aggregate_dir_summary + prompt 模板）；6 个 chunking 单元测试 + 3 个 summary 单元测试 + 4 个 embedding 单元测试 + 4 个 embedding 集成测试
 - `veda-sql`：VedaSqlEngine（DataFusion session 管理）；FilesTable（递归 dentry 枚举）；CollectionTable（Milvus 查询 → Arrow）；8 个 FS SQL 标量函数（veda_read/write/append/exists/size/mtime/remove/mkdir，友好错误消息）；`embedding()` UDF（文本 → JSON 向量）；`veda_fs()` Table Function（目录列举 / 文件读取 / glob 匹配，CSV/TSV/JSONL/plain text 自动解析）；`search()` UDTF（向量搜索，支持 hybrid/semantic/fulltext 模式 + limit 参数）；`veda_fs_events()` Table Function（事件查询，支持 since_id/path_prefix/limit）；`veda_storage_stats()` Table Function（文件/目录/字节统计）；支持 SELECT/WHERE/COUNT/JOIN 等标准 SQL；37 个 mock 单元测试
-- `veda-server`：ServerConfig（TOML 加载 + `VEDA_` 环境变量覆盖，新增 LlmConfig/allowed_origins）；API key（`vk_`）+ workspace key（`wk_`）认证中间件（workspace-key 路径自动填充 account_id；JWT 曾有、2026-06 整体移除）；Account/Workspace/File/Search/Collection/SQL 全部 REST 路由；Worker（outbox 消费 + chunk sync + summary sync + dir summary sync）；`GET /v1/summary/{path}` 摘要查询端点；搜索 API 支持 `detail_level` 参数（limit 上限 100）；`/v1/ready` 检查 MySQL+Milvus 可用性（返回 200/503）；SQL 路由使用 Arrow ArrayWriter 直接序列化 JSON；CORS 可配置白名单（`allowed_origins`，默认 permissive）；graceful shutdown；4 个 HTTP 端到端集成测试
+- `veda-server`：ServerConfig（TOML 加载 + `VEDA_` 环境变量覆盖，新增 LlmConfig/allowed_origins）；API key（`vk_`）+ workspace key（`wk_`）认证中间件（workspace-key 路径自动填充 account_id；JWT 曾有、2026-06 整体移除）；Account/Workspace/File/Search/Collection/SQL 全部 REST 路由；Worker（outbox 消费 + chunk sync + extract sync + summary sync + dir summary sync）；`GET /v1/summary/{path}` 摘要查询端点；搜索 API 支持 `detail_level` 参数（limit 上限 100）；`/v1/ready` 检查 MySQL+Milvus 可用性（返回 200/503）；SQL 路由使用 Arrow ArrayWriter 直接序列化 JSON；CORS 可配置白名单（`allowed_origins`，默认 permissive）；graceful shutdown；4 个 HTTP 端到端集成测试
 - `veda-server`：新增 `POST /v1/fs/{path}` append 路由
 - `veda-cli`：clap 命令行解析；account create/login；workspace create/list/use；cp/cat/ls/mv/rm/mkdir/append；search（支持 --detail-level abstract/overview/full）；summary（查看文件/目录摘要）；collection CRUD；sql；config 管理；$HOME/.config/veda/config.toml 持久化；HTTP client 带 connect 10s / request 60s 超时
 - `veda-fuse`：FUSE 文件系统挂载（fuser 0.14），需要 macFUSE（macOS）或 libfuse（Linux）
@@ -50,6 +50,21 @@ veda-fuse       FUSE 挂载                           (已实现)
   - 配置：`embedding.batch_size`（含 `VEDA_EMBEDDING_BATCH_SIZE`），`last_embedded_content_hash` 水印 + `force_reembed` 标志
   - CLI：`veda --version`，`veda cp -r` 递归目录上传（跳 symlink），`veda grep`，`veda abstract` (L0) + `veda overview` (L1) 两个独立子命令
   - CLI 初始化：单子命令 `veda init` 五模式互斥分发（anonymous / named `--email` / `--login` / `--upgrade` / `--import-key`），`veda status`（配置健康度 + server reachability ping）。`--import-key` 接 `vk_*` 或 `wk_*`，覆写前自动把旧 `config.toml` 备份成 `config.toml.bak.<unix-ts>`
+- v0.1.14–0.1.16 批：
+  - **二进制 blob + PDF 提取**：`PUT /v1/fs/{path}` 按 body sniff——合法 UTF-8 走原文本路径不变；非 UTF-8 原样存进新表 `veda_file_blobs`（LONGBLOB，`storage_type=blob`），MIME 从 magic bytes 判定（`infer`）。PDF 额外入队 `ExtractSync`：worker 用 `pdf-extract`（纯 Rust）抽文本层 embed 进 Milvus——原件 byte-for-byte 可下载，内容可搜索；图片/jar 等其他二进制只存不索引。`GET` 回真实 `Content-Type`，blob 支持 byte-range、拒绝行读。预览路径（平台数据面/admin）对二进制返回 `is_binary=true` + 本地化「暂不支持预览」提示而非乱码；`list_dir` 返回真实 `mime_type`/`size_bytes`。覆盖写 index→noindex（text/pdf→image 等）会先清旧向量防 orphan
+  - **CLI 二进制支持**：`veda cp` 文本二进制都传原始字节（客户端"looks binary"拒绝已删），`veda cat` 整读回原始字节（重定向即无损 round-trip），`--head/--tail/--range` 对二进制明确报错。二进制 cp/cat 需要 server ≥0.1.15（旧 server 对二进制 cp 返 400）
+  - **Linux CLI 改 musl 静态产物**：`x86_64-unknown-linux-musl`，任意 glibc 可跑；`veda-fuse` 仍 gnu（动态链 libfuse3）
+  - **server 自带安装器**：`GET /install.sh` 返回构建时嵌入的安装脚本；`GET /capabilities` 无鉴权能力探针（FUSE 用它决定是否暴露 summary sidecar）
+
+## 平台网关面（AI Workbench / OnePaaS）
+
+公司 AI 平台把 veda 作为存储底座的专用 surface，与原生 `vk_`/`wk_` 面并存：
+
+- **控制面 `apps.rs`**（`/v1/workspace/{workspace}/...`）：`{workspace}` 是平台侧 workspace code（内部存 `app_id`），其下 veda 自己的 workspace 改叫 **project**（按 `id` 定位）。project/dataset/key 生命周期 CRUD + `GET /v1/my/projects`（当前网关用户的项目扁平列表，keyword 过滤 name/description，offset 分页 `page/size/order_by/order`）。**无 veda 凭证**——鉴权外置给平台网关
+- **数据面 `project_data.rs`**（`/v1/workspace/{workspace}/project/{id}/...`）：把 `wk_` 数据面（vectors upsert/search/query/delete + fs search/files/file/sql/grep）包装到网关 surface，前端不持 `wk_`。**读写都过外部 authz**（`authz_and_load`，2026-06-23 定）：数据面暴露实际内容，不依赖网关限路径，veda 独立验证用户在该 workspace 的权限。文件预览截断 256KB，二进制返回 `is_binary` 标识
+- **`platform.rs`**：网关在 base64 `user` header 里传身份（`GatewayUser`，取 `name`/`displayName` 落 `creator`/`creator_name`），Cookie 透传给平台 authz/workspace-lookup API；直连（无 header）自动回退原生 key 鉴权。首次 `POST` 按 workspace code 自动开户
+- **company envelope 中间件**：handler 返 veda `ApiResponse<T>`，中间件改写成公司规范（`Vec<_>` → `{data:[...], page,...}`；单对象 → bare object；create 返 200 非 201）
+- **admin surface `admin.rs`**（`/admin/v1/...`，独立 `admin_token` 门控，fail-closed：未配 token 404）：跨租户只读 dashboard（workspaces/files/file 预览/vectors search）+ db 向量写控制台（vectors upsert）；前端在 `web/src/admin.ts`
 
 ## Workspace kinds: fs vs db
 
@@ -95,7 +110,7 @@ Vector dataset 是 db workspace 内的逻辑分组（内部物理 pk = `{dataset
 
 ## 待实现
 
-- PDF text extraction / Image OCR
+- Image OCR（PDF 文本层提取已实现，见 v0.1.14–0.1.16 批）
 - CLI/FUSE 端到端测试、K8s Helm chart
 - OTLP trace 二期（协议事实见 `docs/archive/plans/observability-otlp-plan.md` §0）
 
@@ -105,7 +120,7 @@ Vector dataset 是 db workspace 内的逻辑分组（内部物理 pk = `{dataset
 
 - MySQL = control plane (元数据、认证、outbox)
 - Milvus = data plane (向量搜索、structured collection 数据)
-- 文件分层存储：≤256KB inline，>256KB chunked
+- 文件分层存储：UTF-8 文本 ≤256KB inline，>256KB chunked；非 UTF-8 存 `veda_file_blobs`（LONGBLOB，magic-byte 判 MIME）
 - Content-addressed dedup (SHA256)
 - Outbox pattern 实现最终一致性。文件写入与其 ChunkSync/SummarySync 入队在**同一 MySQL 事务**提交，写路径不会漂移。残余漂移来源只有死信任务（`veda_outbox_dead_total` + `veda_outbox_depth{status}` 暴露，告警在 Monitor 平台配）和 Milvus 侧数据丢失（磁盘/运维/破坏式迁移）。**不再有 6h 后台 reconcile loop**；改为按需 `POST /admin/v1/reconcile/{workspace_id}?dry_run=`（ops `metrics_token` 鉴权，默认 dry_run=true 只报告，失败响亮返回 500）
 - Account → Workspace 多租户；控制面 `vk_`、数据面 `wk_`，纯 key 校验（JWT 已移除）

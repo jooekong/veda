@@ -10,6 +10,24 @@ that matters.
 ## [Unreleased]
 
 ### Added
+- **Platform gateway surface (AI Workbench).** A new API family under
+  `/v1/workspace/{workspace}/...` lets the company AI platform embed veda with
+  auth externalized to the platform gateway (identity via a base64 `user`
+  header + cookie-forwarded external authz; no veda credential). Control
+  plane: project (= veda workspace) / dataset / key lifecycle, plus
+  `GET /v1/my/projects` (the gateway user's projects, flattened, keyword
+  filter on name/description, offset pagination). Data plane:
+  `/project/{id}/vectors/{upsert,search,query,delete}` (db projects) and
+  `/project/{id}/{search,files,file,sql,grep}` (fs projects) — every op,
+  read and write, passes the external authz check. Responses are rewritten
+  to the company envelope (`{data:[...], page,...}` for lists). File preview
+  returns `is_binary` + a localized "preview unavailable" notice for binary
+  files instead of mojibake; `files` listing now reports real
+  `mime_type`/`size_bytes`.
+- **Read-only admin dashboard + db vector write console** under
+  `/admin/v1/...` (frontend in `web/`), gated by a dedicated `admin_token`
+  (fail-closed: 404 when unset). Cross-tenant workspace/file browsing,
+  vector search, and a manual vector upsert console for ops.
 - **Binary blob storage + PDF text extraction.** `PUT /v1/fs/{path}` now sniffs
   the body: valid UTF-8 stays on the existing text path (LONGTEXT, chunked,
   grep/SQL/line reads — unchanged); non-UTF-8 is stored verbatim as a blob in a

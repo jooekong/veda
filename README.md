@@ -1,73 +1,112 @@
 # Veda
 
-A programmable knowledge store that unifies filesystem, vector search, and SQL queries. Store files, search by meaning, query with SQL — all through one API.
+English | [简体中文](README.zh-CN.md)
 
-## What is Veda?
+A programmable knowledge store that unifies filesystem, vector search, and SQL — one server, one API, one CLI. Write a file and it becomes searchable by meaning; create a collection and every row is auto-embedded; point SQL at any of it.
 
-Veda is the successor to vecfs, rebuilt from the ground up with multi-tenancy, structured collections, and a cleaner architecture:
+## The Problem
 
-- **Filesystem** — store text files via familiar `cp`, `cat`, `ls`, `rm` operations (PDF/OCR planned)
-- **Vector search** — every file is automatically chunked, embedded, and indexed for semantic + full-text hybrid search
-- **Structured collections** — create tables with auto-embedding, like a vector-native database
-- **Vector workspaces** — a Pinecone-style raw-vector data plane (`kind=db`) for company apps
-- **SQL queries** — query files and collections with DataFusion SQL engine
-- **Multi-tenant** — Account → Workspace isolation; account key (`vk_`) drives the control plane, workspace key (`wk_`) the data plane
+Building anything retrieval-heavy (an AI agent's memory, a RAG backend, an internal semantic search) means assembling the same stack every time: object storage for the documents, a chunking + embedding ETL pipeline you write and babysit yourself, a vector database, a full-text engine because vectors alone miss exact identifiers, a relational store for structured data, and key management for multi-tenancy. Each seam is yours to keep consistent — when a document changes, nothing re-embeds it unless you built that.
 
-## Architecture
+Veda collapses this pipeline into one service:
 
-```
-           CLI (veda)                REST API / SSE
-               │                          │
-               └────────┬────────────────┘
-                        │
-                  veda-server (Axum)
-                  ┌─────┴─────┐
-                  │           │
-               MySQL       Milvus
-          (control plane)  (data plane)
-          ┌────────────┐  ┌───────────────────┐
-          │ accounts   │  │ veda_chunks        │
-          │ workspaces │  │   - fs chunks      │
-          │ dentries   │  │   - BM25 index     │
-          │ files      │  │ veda_summaries     │
-          │ outbox     │  │ veda_coll_{id}     │
-          │ datasets   │  │   - structured     │
-          │ schemas    │  │ ws_<hash>_default  │
-          └────────────┘  │   - db vectors     │
-                  │       └───────────────────┘
-          Embedding Worker
-          (tokio task)
-          OpenAI-compat
+```bash
+veda cp ./design.pdf /docs/design.pdf        # store (text or binary; PDFs get their text extracted)
+veda search "why did we pick an outbox"      # hybrid semantic + BM25 search, a few seconds later
+veda sql "SELECT path, size_bytes FROM files WHERE path LIKE '/docs/%'"
 ```
 
-- **MySQL** — control plane: accounts, file metadata, path tree, outbox task queue (ACID)
-- **Milvus** — data plane: chunked content + embeddings (ANN + BM25), structured collections, and one raw-vector collection per `kind=db` workspace
-- **Embedding Worker** — background tokio task that consumes outbox events; drift repair is an on-demand admin endpoint (`POST /admin/v1/reconcile/{ws}`), not a background loop
-- **DataFusion** — embedded SQL engine for querying files and collections
+Chunking, embedding, indexing, and summarization happen server-side and asynchronously. Consistency between the file store and the vector index is the server's job, not yours: file writes and their sync tasks commit in a single MySQL transaction (outbox pattern), and a background worker keeps Milvus caught up.
+
+## Use Cases
+
+- **AI agent memory / knowledge base** — agents talk to it through the `veda` CLI (an agent-facing `skill.md` ships with the installer). Tiered summaries (L0 one-liner → L1 overview → full content) let an agent triage many files without burning tokens on full reads.
+- **RAG backend** — upload documents (Markdown, source code, PDFs), get hybrid search with relevance scores over chunks; no separate ETL to operate.
+- **Self-hosted vector database** — `kind=db` workspaces expose a Pinecone-style raw-vector data plane (upsert/search/query/delete + metadata filters) for apps that just need vectors, with a Java SDK available.
+- **A filesystem you can grep by meaning** — mount a workspace with FUSE and edit it with vim/IDE like a local directory, while everything stays semantically indexed; or use `veda grep` for literal matches and `veda search` for conceptual ones.
+- **Platform building block** — a gateway-facing surface (`/v1/workspace/{workspace}/project/...`) lets an AI platform embed veda as its storage layer, with auth externalized to the platform gateway.
+
+## Features
+
+- **Filesystem** — `cp`, `cat`, `ls`, `mv`, `rm`, `append`, `mkdir` over plain absolute paths. Text is chunked and indexed; binary files (PDF/images/jars) are stored verbatim as blobs with real MIME types. PDFs additionally get their text layer extracted and embedded, so the original stays byte-for-byte downloadable while its content becomes searchable.
+- **Hybrid search** — every text file is automatically chunked, embedded, and BM25-indexed. Three modes: `hybrid` (dense + BM25 fused with RRF, default), `semantic`, `fulltext`. Chinese tokenization via jieba.
+- **Tiered summaries** — an LLM generates an L0 abstract (~100 tokens) and L1 overview (~2k tokens) per file, aggregated bottom-up for directories. Search can return any tier via `detail_level`.
+- **Structured collections** — schema-first tables with one auto-embedded field; insert JSON rows, search them semantically, filter them with SQL.
+- **Vector workspaces** — a raw-vector data plane (`kind=db`) for apps that bring their own records: upsert/search/query/delete with metadata filters and `write_mode=insert` for ~3× bulk-load throughput.
+- **SQL** — an embedded DataFusion engine queries files and collections (`SELECT`, `WHERE`, `JOIN`, aggregates), plus UDFs for filesystem ops and vector search inside SQL.
+- **FUSE mount** — `veda-fuse mount` exposes a workspace as a local directory: native tools just work, a write-back mode debounces editor noise (vim swap files, git lockfiles), and SSE keeps caches consistent with remote changes.
+- **Multi-tenant** — Account → Workspace hierarchy. Account key (`vk_`) drives the control plane; per-workspace keys (`wk_`, revocable, read-only variant available) drive the data plane. Plain key auth, no JWT.
+
+## How It Works
+
+```
+    CLI (veda)     FUSE mount     REST / SSE      Platform gateway
+        │              │              │                  │
+        └──────────────┴──────┬───────┴──────────────────┘
+                              │
+                      veda-server (Axum)
+              auth: vk_ (control) / wk_ (data plane)
+                    ┌─────────┴─────────┐
+                    │                   │
+                  MySQL              Milvus
+             (control plane)      (data plane)
+             ┌──────────────┐   ┌────────────────────────┐
+             │ accounts     │   │ veda_chunks            │
+             │ workspaces   │   │   dense + BM25 sparse  │
+             │ dentries     │   │ veda_summaries         │
+             │ files        │   │   L0 abstracts         │
+             │ file_blobs   │   │ veda_coll_{id}         │
+             │ summaries    │   │   structured rows      │
+             │ outbox       │   │ ws_<hash>_default      │
+             │ datasets     │   │   raw vectors (db ws)  │
+             │ schemas      │   └────────────────────────┘
+             └──────────────┘
+                    │
+             Worker (tokio task, outbox consumer)
+             chunk → embed → summarize (LLM) → index
+```
+
+| Component | Technology | Role |
+|-----------|-----------|------|
+| HTTP layer | Rust, Axum | REST API, SSE events, auth middleware |
+| Control plane | MySQL 8 | Accounts, keys, path tree, file content, outbox task queue (ACID) |
+| Data plane | Milvus 2.5+ | Dense ANN + BM25 sparse vectors, RRF hybrid search |
+| SQL engine | DataFusion (Arrow) | Embedded, queries files + collections, no extra service |
+| Embedding / LLM | Any OpenAI-compatible API | Chunk embeddings, L0/L1 summaries (LLM optional) |
+| FUSE client | fuser | Local mount with read cache + write-back buffering |
+| Observability | Prometheus + OTLP bridge | `/v1/metrics` exporter, optional OTLP gRPC push |
 
 ### Key Design Decisions
 
-- **Layered file storage**: ≤256KB inline in MySQL `file_contents`, >256KB chunked in `file_chunks`
-- **Content-addressed dedup**: SHA256 fingerprint skips writes when content hasn't changed
-- **Outbox pattern**: file writes and their sync tasks commit in one MySQL transaction; Milvus catches up asynchronously
-- **Text-first storage**: text files only in v0; PDF/OCR extraction planned, no binary blobs
-- **Structured collections**: data stored directly in Milvus with synchronous embedding, MySQL only stores schema metadata
+- **Outbox pattern for consistency**: a file write and its sync tasks (ChunkSync / SummarySync / ExtractSync) commit in one MySQL transaction; a background worker replays them into Milvus. Eventual consistency by default, on-demand drift reconcile (`POST /admin/v1/reconcile/{ws}`) for disasters. Lease fencing makes the outbox safe for multiple servers sharing one MySQL.
+- **Storage tiers by content**: UTF-8 text ≤256KB inline, >256KB chunked; non-UTF-8 stored as blobs with MIME sniffed from magic bytes. Content-addressed dedup (SHA256) skips writes when nothing changed.
+- **Search that admits keyword search matters**: dense vectors for meaning, BM25 for identifiers and exact terms, RRF to fuse them — per-query mode selection instead of pretending one ranker fits all.
+- **Tiered context loading**: L0/L1 summaries are first-class stored objects (searchable in Milvus, not computed on read), designed for agents that need to triage before they read.
+- **Two workspace kinds, one auth model**: `fs` workspaces carry files + collections + summaries; `db` workspaces carry only raw vectors. Both authenticate data-plane requests with a single-lookup `wk_` key check.
+- **Simplicity bias**: MySQL over Kafka, single binary over microservices, plain keys over JWT.
 
 ## Quick Start
 
 ### Prerequisites
 
-- Rust toolchain
+- Rust toolchain (server build)
 - MySQL 8.0+
-- Milvus 2.6+ (BM25 hybrid search relies on Milvus functions; verified against 2.6.14)
+- Milvus 2.5+ (hybrid search relies on the BM25 Function, absent in 2.4.x; the bundled compose pins v2.5.5, also verified against 2.6.14)
 - An OpenAI-compatible embedding API
+- Optional: an OpenAI-compatible chat API for L0/L1 summaries (feature auto-disables without it)
 
 ### 1. Start dependencies
 
 ```bash
-docker run -d --name mysql -e MYSQL_ROOT_PASSWORD=password -e MYSQL_DATABASE=veda -p 3306:3306 mysql:8
-docker run -d --name milvus -p 19530:19530 milvusdb/milvus:latest standalone
+# MySQL + Milvus (etcd/minio come along via depends_on)
+cd deploy && cp .env.example .env   # set passwords + embedding key
+docker compose up -d mysql milvus
+cd ..
 ```
+
+Prefer everything in containers? `docker compose up -d` builds and runs the
+full single-host stack (dependencies + veda-server + Prometheus) — then skip
+steps 2 and 3.
 
 ### 2. Configure
 
@@ -92,11 +131,16 @@ api_url = "https://api.openai.com/v1/embeddings"
 api_key = "sk-your-key"
 model = "text-embedding-3-small"
 dimension = 1024
+
+# Optional — enables L0/L1 summaries
+# [llm]
+# api_url = "https://api.openai.com/v1/chat/completions"
+# api_key = "sk-your-key"
+# model = "gpt-4o-mini"
 ```
 
 Values can be overridden via `VEDA_*` environment variables. The MySQL schema
-bootstraps itself on first start. For a full stack (Prometheus/Grafana
-included) see `deploy/docker-compose.yml`.
+bootstraps itself on first start (`CREATE TABLE IF NOT EXISTS`, no migration step).
 
 ### 3. Build and run
 
@@ -105,7 +149,16 @@ cargo build --release
 ./target/release/veda-server
 ```
 
-### 4. Create account and workspace
+### 4. Install the CLI
+
+Build from source (`cargo build --release -p veda-cli`), or pull a prebuilt
+binary from a running server — every server serves its own installer:
+
+```bash
+curl -fL http://<your-server>/install.sh | sh        # add --with-fuse for the FUSE client
+```
+
+### 5. Create account and workspace
 
 ```bash
 # Zero-input anonymous onboard: server mints account + default workspace + keys
@@ -123,37 +176,44 @@ another machine? `veda init --import-key vk_…` (auto-backs up old config).
 ### File Operations
 
 ```bash
-# Upload (local → remote; "-" reads stdin)
+# Upload (local → remote; "-" reads stdin). Text and binary both work:
+# the server sniffs UTF-8 — text is chunked + indexed, binary is stored
+# as a blob, PDFs get their text layer extracted and indexed.
 veda cp ./README.md /docs/readme.md
+veda cp ./design.pdf /docs/design.pdf
+veda cp -r ./src /code                   # recursive directory upload
 
 # Browse
 veda ls /docs
 veda cat /docs/readme.md
 veda cat /docs/readme.md --range 10:20   # line slice; also --head N / --tail N
-
-# Download = cat into a local file
-veda cat /docs/readme.md > ./readme.md
+veda cat /docs/design.pdf > local.pdf    # binary round-trips byte-for-byte
 
 # Organize
 veda mv /docs/old.md /archive/old.md
-veda rm /tmp        # delete file or directory (directories delete recursively)
+veda rm /tmp                             # delete file or directory (recursive)
 ```
 
-### Search
+### Search, Grep, Summaries
 
 ```bash
 # Hybrid search (semantic + BM25, default)
 veda search "how does authentication work"
 
-# Semantic only
+# Single-mode
 veda search "error handling patterns" --mode semantic
-
-# Full-text only
 veda search "TODO fix" --mode fulltext
 
-# Scope to a subtree / literal substring scan
+# Scope to a subtree / control result granularity
 veda search "auth" --path /docs
+veda search "outbox" --detail-level abstract    # return L0 summaries instead of chunks
+
+# Literal substring scan (synchronous, no embedding lag)
 veda grep "TODO" /src
+
+# Tiered summaries (LLM-generated, async)
+veda abstract /docs/design.pdf    # L0 — one sentence
+veda overview /docs               # L1 — structured overview, directories aggregate bottom-up
 ```
 
 ### Structured Collections
@@ -177,10 +237,23 @@ veda collection search articles "systems programming" --limit 10
 veda sql "SELECT title, category FROM articles WHERE category = 'tech' LIMIT 5"
 ```
 
+### FUSE Mount
+
+```bash
+veda-fuse mount ~/veda-mount             # uses the CLI config's active workspace
+vim ~/veda-mount/docs/notes.md           # native tools just work
+cat ~/veda-mount/docs/.abstract          # read-only summary sidecars per directory
+veda-fuse umount ~/veda-mount
+```
+
+Default is daemon mode with a read cache and SSE-driven invalidation.
+`--write-mode=writeback` buffers writes locally (5s debounce) so editor
+temp files never reach the server.
+
 ### Vector Workspaces (Pinecone-style)
 
-Veda also offers a Pinecone-style data plane on `kind=db` workspaces — designed
-for company apps that need cheap raw-vector storage without the file abstraction.
+Veda also offers a raw-vector data plane on `kind=db` workspaces — designed
+for apps that need vector storage without the file abstraction.
 Schema, defaults, and contracts: [`docs/api/vectors.md`](docs/api/vectors.md).
 
 ```bash
@@ -210,7 +283,9 @@ curl -sS -X POST http://localhost:3000/v1/vectors/search \
        "filter":{"must":[{"field":"meta.price","op":"lt","value":1500}]}}'
 ```
 
-Python client example: [`examples/python_pinecone_demo.py`](examples/python_pinecone_demo.py).
+Java SDK: [`sdk/java`](sdk/java) (`upsert`/`search`/`query`/`delete`, typed
+exceptions, idempotency-aware retry). Python example:
+[`examples/python_pinecone_demo.py`](examples/python_pinecone_demo.py).
 
 ## Project Structure
 
@@ -220,13 +295,13 @@ veda/
 │   ├── veda-types/      # Domain types, error definitions (zero dep)
 │   ├── veda-core/       # Traits + business logic (no storage impl)
 │   ├── veda-store/      # MySQL + Milvus implementations
-│   ├── veda-pipeline/   # Embedding, chunking, text extraction (PDF/OCR planned)
+│   ├── veda-pipeline/   # Embedding, chunking, PDF text extraction, LLM summaries
 │   ├── veda-sql/        # DataFusion SQL engine
-│   ├── veda-server/     # Axum HTTP server (thin shell)
+│   ├── veda-server/     # Axum HTTP server (thin shell) + outbox worker
 │   ├── veda-cli/        # CLI client (binary name: veda)
 │   └── veda-fuse/       # FUSE mount (workspace member; install via --with-fuse)
 ├── sdk/java/            # Java SDK for the db-workspace data plane
-├── web/                 # Console + user docs site
+├── web/                 # Landing page + user docs site + admin console
 ├── deploy/              # Dockerfile, docker-compose, systemd units
 ├── docs/
 │   ├── api/             # API contracts (db-workspace, vectors)
@@ -251,6 +326,11 @@ Scores aren't comparable across `score_type`. `min_score` (a relevance floor)
 applies only to `semantic`/`fulltext`; passing it with `hybrid` returns 400
 (RRF rank isn't a relevance score). Full contract:
 [`docs/api/db-workspace-api.md`](docs/api/db-workspace-api.md).
+
+## Status
+
+Alpha. Minor versions can break compatibility — see [`CHANGELOG.md`](CHANGELOG.md).
+Not yet implemented: image OCR, K8s Helm chart.
 
 ## License
 
