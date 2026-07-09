@@ -1,0 +1,37 @@
+# veda-tunnel config — copy to config/tunnel.toml and fill in.
+# Bots are managed at RUNTIME (admin API / veda web admin console) and
+# persisted in MySQL (table `veda_tunnel_bots`). The [[wecom.bot]] list at the
+# bottom is only a first-run SEED: imported into an empty table on first
+# start, then ignored (the DB is the source of truth afterwards).
+
+# veda data-plane base URL (internal). Point at the node this tunnel searches
+# against (prod .85 internal / test .161). Bots use fs-workspace `wk_` keys.
+veda_base_url = "http://10.79.55.85:3000"
+
+[mysql]
+# Same MySQL instance as veda; tunnel bootstraps its own `veda_tunnel_bots`
+# table (CREATE TABLE IF NOT EXISTS).
+database_url = "mysql://user:pass@host:3306/veda"
+
+[admin]
+# Control surface. Default binds localhost only. For the veda web console,
+# set token = VEDA_ADMIN_TOKEN and reverse-proxy in nginx:
+#   location /tunnel/v1/ { proxy_pass http://127.0.0.1:9100/admin/; }
+listen = "127.0.0.1:9100"
+# Fail-closed: if unset/empty, every /admin/* route 404s (only /healthz open).
+token = "REPLACE_ME"
+
+# ── Optional first-run seed ─────────────────────────────
+# Uncomment to auto-create bots on first start; afterwards manage them in the
+# console. bot_id + secret come from the WeCom admin console (智能机器人 →
+# 长连接接入); veda_key is a read-only fs-workspace wk_.
+#
+# [[wecom.bot]]
+# name      = "hr-helper"      # human-readable, shown in admin + logs
+# bot_id    = "REPLACE_ME"
+# secret    = "REPLACE_ME"
+# veda_key  = "wk_REPLACE_ME"
+# workspace = "hr-kb"          # display-only label
+# project   = "hr"             # optional, display-only
+# mode      = "hybrid"         # optional: hybrid | semantic | fulltext
+# limit     = 8                # optional, default 8

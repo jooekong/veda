@@ -9,6 +9,7 @@ members = [
     "crates/veda-server",
     "crates/veda-cli",
     "crates/veda-fuse",
+    "crates/veda-tunnel",
 ]
 
 [workspace.package]

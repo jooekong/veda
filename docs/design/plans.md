@@ -13,9 +13,15 @@
 
 | 计划 | 状态 |
 | --- | --- |
+| [`veda-tunnel-plan.md`](../plans/veda-tunnel-plan.md) | **设计待评审**：独立 tunnel 服务对接外部 IM，一期企微长连接 + 纯检索 + 管控面 |
 | [`db-workspace-followups.md`](../plans/db-workspace-followups.md) | 接业务方前待办：H1 Milvus GC / M1 维度校验 / A1 内存天花板（硬门槛）+ backlog 并入尾巴 |
 | [`embedding-throughput-plan.md`](../plans/embedding-throughput-plan.md) | 已设计未实现，明确"先上线后优化" |
 | [`outbox-dedup-refactor.md`](../plans/outbox-dedup-refactor.md) | 未实现仍有效（A-3 fencing 提交后需重对行号） |
+
+## 方向池
+
+- 未排期的演进方向 + 外部对标结论：[`future-directions.md`](future-directions.md)
+  （tigerfs / drive9 对标；候选：operation log + 版本历史（D1）、`veda skill install`（D2））
 
 ## Phase 历史
 

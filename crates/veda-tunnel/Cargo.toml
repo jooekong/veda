@@ -1,0 +1,42 @@
+[package]
+name = "veda-tunnel"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "veda-tunnel"
+path = "src/main.rs"
+
+[dependencies]
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+anyhow.workspace = true
+toml.workspace = true
+# TTL cache for msgid dedup (WeCom re-pushes on missed 5s ack).
+moka.workspace = true
+# HTTP client for the veda data plane (/v1/search). Shares the workspace's
+# rustls-tls stack — do NOT pull a second TLS backend.
+reqwest.workspace = true
+chrono.workspace = true
+# req_id / stream.id generation.
+uuid.workspace = true
+# Bot config store — same MySQL client + rustls stack as veda-store.
+sqlx = { version = "0.8", features = ["runtime-tokio-rustls", "mysql"] }
+# Admin surface (fail-closed bearer, matches veda-server's admin posture).
+axum = "0.8"
+futures-util = "0.3"
+# tokio-tungstenite's rustls TLS needs a process-level CryptoProvider
+# installed at startup (rustls 0.23; the tree has both aws-lc-rs and ring, so
+# it can't auto-pick). main() installs aws-lc-rs to match reqwest.
+rustls = "0.23"
+# WeCom aibot long connection (WSS). rustls-tls-webpki-roots keeps us on the
+# same TLS stack as reqwest and ships Mozilla roots (no system cert dep).
+tokio-tungstenite = { version = "0.26", default-features = false, features = [
+    "connect",
+    "handshake",
+    "rustls-tls-webpki-roots",
+] }

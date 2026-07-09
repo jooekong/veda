@@ -21,6 +21,7 @@ veda-sql        DataFusion SQL 引擎                 (已实现)
 veda-server     Axum HTTP 层                        (已实现)
 veda-cli        CLI 客户端                          (已实现)
 veda-fuse       FUSE 挂载                           (已实现)
+veda-tunnel     外部 IM 接入（企微长连接）             (骨架，待联调)
 ```
 
 ## 已实现能力
@@ -65,6 +66,18 @@ veda-fuse       FUSE 挂载                           (已实现)
 - **`platform.rs`**：网关在 base64 `user` header 里传身份（`GatewayUser`，取 `name`/`displayName` 落 `creator`/`creator_name`），Cookie 透传给平台 authz/workspace-lookup API；直连（无 header）自动回退原生 key 鉴权。首次 `POST` 按 workspace code 自动开户
 - **company envelope 中间件**：handler 返 veda `ApiResponse<T>`，中间件改写成公司规范（`Vec<_>` → `{data:[...], page,...}`；单对象 → bare object；create 返 200 非 201）
 - **admin surface `admin.rs`**（`/admin/v1/...`，独立 `admin_token` 门控，fail-closed：未配 token 404）：跨租户只读 dashboard（workspaces/files/file 预览/vectors search）+ db 向量写控制台（vectors upsert）；前端在 `web/src/admin.ts`
+
+## veda-tunnel（外部 IM 接入）
+
+独立进程 / crate（`crates/veda-tunnel`，二进制 `veda-tunnel`），把 veda 检索接入外部 IM。veda 数据面的标准 `wk_` 消费者，**veda-server 一行不改**。一期：企业微信智能机器人长连接（WSS `openws.work.weixin.qq.com`）+ 纯检索直出 + 管控面。
+
+- **一 bot 一连接一 key**：每个企微机器人一条长连接 + 一个只读 `wk_`（绑一 workspace）。群 @提问 / 单聊 → 剥 `@` → `POST /v1/search`（Bearer `wk_`）→ 取 top-k `content`+`path` 拼 markdown → 长连接流式回（先 `finish:false` 占位吸收企微 5s 超时，检索完 `finish:true`）。
+- **连接生命周期**（`wecom/conn.rs`）：`aibot_subscribe` 订阅 → 30s `ping` 心跳 → 断线/被踢（`aibot_event_callback` 的 `disconnected_event`）指数退避重连；msgid moka TTL 去重防 5s 重推双查；WS sink 由单写循环独占，读循环 / 心跳 / handler 都经 mpsc 投帧。
+- **bot 管理（MySQL + Web 控制台）**：bot 配置存 MySQL（`veda_tunnel_bots` 表，与 veda 同实例，`store.rs` bootstrap；`config.toml` 的 `[[wecom.bot]]` 仅首次 seed），运行时经 admin CRUD 增删改，**动态 spawn/stop 连接、不重启进程**（control loop 复用）。前端在 veda web admin console `#/admin/tunnel` 页（经 nginx `/tunnel/v1/*` → `:9100/admin/*` 反代，复用 `admin_token`）。
+- **管控面**（`admin.rs`，默认 `127.0.0.1:9100`，fail-closed `admin_token`：未配 404 / 错 401）：`GET /admin/bots`（配置+状态，secret 不返回、`veda_key` 脱敏）、`POST/PUT/DELETE /admin/bots[/{id}]`（CRUD，编辑时 secret/key 留空=保留）、`POST /bots/{id}/reconnect`、`POST /admin/reload`（从 MySQL 全量重载）、`GET /healthz`。
+- **单实例 + adapter 结构**：企微「新连接踢旧」约束决定全局单实例持 bot 连接（多实例选主划到未来）。`wecom/` 是第一个 adapter，`config`/`registry`/`veda`/`admin`/`store` 通用，未来 `feishu/` 平级新增。依赖复用 workspace，新增 `tokio-tungstenite`（rustls，同 reqwest TLS 栈）+ `sqlx`（MySQL bot store，同 veda-store 客户端）。
+
+**状态**：已真机联调通过（2026-07-09）——真实企微机器人订阅/30s 心跳/热切换、fs workspace `wk_` @提问→检索→流式回端到端；bot 管理（MySQL store bootstrap+seed + admin CRUD 增删改动态生连接 + `veda_key` 脱敏 + 唯一约束 + fail-closed）经真实 MySQL 全验证，前端 `tsc`+`vite build` 过、`/tunnel/v1` 路径经 proxy 通。`cargo build` + 20 单测 + clippy 全绿。多 bot per-key 隔离（DoD 5）、前端真机点击（chrome 扩展未连）未测。设计见 `docs/plans/veda-tunnel-plan.md`。
 
 ## Workspace kinds: fs vs db
 

@@ -10,6 +10,26 @@ that matters.
 ## [Unreleased]
 
 ### Added
+- **veda-tunnel — external IM bridge (new crate, scaffold).** An independent
+  process + binary (`crates/veda-tunnel`) that brings veda retrieval into
+  WeCom (企业微信) via the aibot long connection (WSS). A standard `wk_`
+  consumer of the data plane — veda-server is untouched. One bot = one long
+  connection = one read-only `wk_` (one workspace): an `@`-mention/DM is
+  stripped, sent to `POST /v1/search`, and the top hits (content + source
+  `path`) are streamed back (a `finish:false` placeholder absorbs WeCom's 5s
+  deadline, `finish:true` delivers results). Fail-closed admin surface
+  (`GET /admin/bots`, `reconnect`, `reload`, `/healthz`; `admin_token` unset →
+  404) on `127.0.0.1:9100`. Single instance by design (WeCom's
+  new-kicks-old single-connection rule). **Bots are managed at runtime** — stored
+  in MySQL (`veda_tunnel_bots`, same instance as veda; `config.toml` bots are a
+  first-run seed only), CRUD'd via a fail-closed admin API
+  (`GET/POST/PUT/DELETE /admin/bots`; secret never returned, `veda_key` masked,
+  edit keeps secret/key when left blank) that spawns/stops connections
+  dynamically without a restart, plus a management page in the veda web admin
+  console (`#/admin/tunnel`, reached through an nginx `/tunnel/v1/*` reverse
+  proxy). **20 unit tests pass; live-bot + real-MySQL CRUD verified 2026-07-09**
+  (subscribe/30s heartbeat/hot key-swap + fs `wk_` @-mention→search→streamed
+  reply end-to-end). Design: `docs/plans/veda-tunnel-plan.md`.
 - **Platform gateway surface (AI Workbench).** A new API family under
   `/v1/workspace/{workspace}/...` lets the company AI platform embed veda with
   auth externalized to the platform gateway (identity via a base64 `user`

@@ -156,6 +156,10 @@ export async function renderAdmin(app: HTMLElement) {
     return;
   }
   const route = location.hash.replace(/^#/, "");
+  if (route === "/admin/tunnel") {
+    await renderTunnel(app);
+    return;
+  }
   const m = route.match(/^\/admin\/ws\/(.+)$/);
   if (m) await renderDetail(app, decodeURIComponent(m[1]));
   else await renderList(app);
@@ -265,7 +269,10 @@ async function renderList(app: HTMLElement) {
     </div>`
     : `<p class="text-sm text-slate-500 p-4 bg-white border border-slate-200 rounded-lg">没有 workspace。</p>`;
   app.innerHTML = `${header(null, "Workspaces / Projects")}
-    <p class="text-sm text-slate-500 mb-4">本节点共 ${list.length} 个 workspace（跨所有账号/租户）。点击查看详情。</p>
+    <div class="flex items-center justify-between mb-4 gap-4">
+      <p class="text-sm text-slate-500">本节点共 ${list.length} 个 workspace（跨所有账号/租户）。点击查看详情。</p>
+      <a href="#/admin/tunnel" class="text-sm text-blue-600 hover:underline whitespace-nowrap">企微机器人管理 →</a>
+    </div>
     ${table}`;
   bindLogout();
   app.querySelectorAll("tr[data-id]").forEach((el) => {
@@ -668,4 +675,249 @@ function initVectorConsole(wsId: string) {
       }
     });
   }
+}
+
+// ── 企微机器人 (veda-tunnel) ─────────────────────────────
+// Manages WeCom bots on the standalone veda-tunnel service. tunnel's admin
+// API is a separate process (:9100), reached same-origin via an nginx reverse
+// proxy: /tunnel/v1/* → 127.0.0.1:9100/admin/*. Reuses the admin token
+// (configure tunnel's [admin].token = VEDA_ADMIN_TOKEN). Unlike veda-server,
+// tunnel returns bare JSON (no {success,data} envelope), so it has its own
+// fetch wrapper.
+
+const TUNNEL_BASE = "/tunnel/v1";
+
+type TunnelBot = {
+  name: string;
+  bot_id: string;
+  workspace: string;
+  project?: string;
+  mode: string;
+  limit: number;
+  veda_key_masked: string;
+  conn_state?: "connecting" | "subscribed" | "reconnecting" | "down";
+  connected_since?: string;
+  last_msg_at?: string;
+  msg_count: number;
+  error_count: number;
+  last_error?: string;
+};
+
+async function tunnelApi<T = any>(path: string, opts: RequestInit = {}): Promise<T> {
+  const token = getAdminToken();
+  const res = await fetch(TUNNEL_BASE + path, {
+    ...opts,
+    headers: {
+      "Content-Type": "application/json",
+      ...(token ? { Authorization: `Bearer ${token}` } : {}),
+      ...((opts.headers as Record<string, string>) || {}),
+    },
+  });
+  if (res.status === 401) throw new Error("UNAUTHORIZED");
+  const body = await res.json().catch(() => ({}) as any);
+  // 404 with no error body = surface disabled (token unset) or proxy missing.
+  if (res.status === 404 && !body.error) throw new Error("DISABLED");
+  if (!res.ok) throw new Error(body.error || `HTTP ${res.status}`);
+  return body as T;
+}
+
+function tunnelError(app: HTMLElement, e: Error) {
+  if (e.message === "UNAUTHORIZED") {
+    clearAdminToken();
+    renderLogin(app);
+    return;
+  }
+  const msg =
+    e.message === "DISABLED"
+      ? "企微机器人管理未接通：确认 veda-tunnel 在运行、nginx 已反代 /tunnel/v1/ → :9100，且 tunnel 的 admin token 与此处一致。"
+      : `错误：${e.message}`;
+  app.innerHTML = `${header("#/admin", "企微机器人")}<p class="text-red-600 text-sm">${esc(msg)}</p>`;
+  bindLogout();
+}
+
+function connBadge(s?: string): string {
+  const m: Record<string, [string, string]> = {
+    subscribed: ["在线", "bg-emerald-100 text-emerald-700"],
+    connecting: ["连接中", "bg-amber-100 text-amber-700"],
+    reconnecting: ["重连中", "bg-amber-100 text-amber-700"],
+    down: ["离线", "bg-rose-100 text-rose-700"],
+  };
+  const [label, cls] = m[s ?? ""] ?? ["未知", "bg-slate-100 text-slate-500"];
+  return `<span class="text-xs px-1.5 py-0.5 rounded font-medium ${cls}">${label}</span>`;
+}
+
+async function renderTunnel(app: HTMLElement) {
+  app.innerHTML = `${header("#/admin", "企微机器人")}<p class="text-slate-500 text-sm">加载中…</p>`;
+  bindLogout();
+  let bots: TunnelBot[];
+  try {
+    bots = await tunnelApi<TunnelBot[]>("/bots");
+  } catch (e: any) {
+    tunnelError(app, e);
+    return;
+  }
+  const rows = bots
+    .map(
+      (b) => `
+      <tr class="border-t border-slate-100">
+        <td class="px-3 py-2">
+          <div class="font-medium flex items-center gap-2">${esc(b.name)} ${connBadge(b.conn_state)}</div>
+          <div class="text-xs text-slate-400 font-mono">${esc(b.bot_id)}</div>
+        </td>
+        <td class="px-3 py-2 text-sm">${esc(b.workspace)}${b.project ? ` <span class="text-slate-400">/ ${esc(b.project)}</span>` : ""}</td>
+        <td class="px-3 py-2 text-xs font-mono text-slate-500">${esc(b.veda_key_masked)}</td>
+        <td class="px-3 py-2 text-sm whitespace-nowrap">${esc(b.mode)} · ${b.limit}</td>
+        <td class="px-3 py-2 text-sm text-center">${b.msg_count}${b.error_count ? ` <span class="text-rose-500">/${b.error_count}</span>` : ""}</td>
+        <td class="px-3 py-2 text-right whitespace-nowrap">
+          <button data-act="edit" data-id="${attr(b.bot_id)}" class="text-xs text-blue-600 hover:underline">编辑</button>
+          <button data-act="reconnect" data-id="${attr(b.bot_id)}" class="text-xs text-slate-500 hover:underline ml-2">重连</button>
+          <button data-act="delete" data-id="${attr(b.bot_id)}" data-name="${attr(b.name)}" class="text-xs text-rose-600 hover:underline ml-2">删除</button>
+        </td>
+      </tr>`,
+    )
+    .join("");
+  const table = bots.length
+    ? `<div class="bg-white border border-slate-200 rounded-lg overflow-x-auto">
+        <table class="w-full text-left">
+          <thead class="text-xs uppercase tracking-wide text-slate-500">
+            <tr>
+              <th class="px-3 py-2 font-semibold">机器人</th>
+              <th class="px-3 py-2 font-semibold">workspace</th>
+              <th class="px-3 py-2 font-semibold">veda key</th>
+              <th class="px-3 py-2 font-semibold">检索</th>
+              <th class="px-3 py-2 font-semibold text-center">消息/错误</th>
+              <th class="px-3 py-2 font-semibold text-right">操作</th>
+            </tr>
+          </thead>
+          <tbody>${rows}</tbody>
+        </table>
+      </div>`
+    : `<p class="text-sm text-slate-500 p-4 bg-white border border-slate-200 rounded-lg">还没有机器人，点右上「+ 新增」添加。</p>`;
+  const lastErr = bots.find((b) => b.last_error);
+  app.innerHTML = `${header("#/admin", "企微机器人")}
+    <div class="flex items-center justify-between mb-4">
+      <p class="text-sm text-slate-500">共 ${bots.length} 个企微机器人（veda-tunnel 长连接）。</p>
+      <button id="tn-add" class="bg-slate-900 text-white px-3 py-1.5 rounded text-sm font-medium hover:bg-slate-700">+ 新增</button>
+    </div>
+    ${table}
+    ${lastErr ? `<p class="text-xs text-rose-500 mt-3">最近错误（${esc(lastErr.name)}）：${esc(lastErr.last_error)}</p>` : ""}`;
+  bindLogout();
+  document.getElementById("tn-add")!.addEventListener("click", () => openBotForm(app));
+  app.querySelectorAll("button[data-act]").forEach((el) => {
+    const btn = el as HTMLElement;
+    const id = btn.dataset.id!;
+    const act = btn.dataset.act!;
+    btn.addEventListener("click", async () => {
+      if (act === "edit") {
+        const bot = bots.find((b) => b.bot_id === id);
+        if (bot) openBotForm(app, bot);
+      } else if (act === "reconnect") {
+        try {
+          await tunnelApi(`/bots/${encodeURIComponent(id)}/reconnect`, { method: "POST" });
+          renderTunnel(app);
+        } catch (e: any) {
+          alert(`重连失败：${e.message}`);
+        }
+      } else if (act === "delete") {
+        if (!confirm(`删除机器人「${btn.dataset.name}」？连接会立即断开。`)) return;
+        try {
+          await tunnelApi(`/bots/${encodeURIComponent(id)}`, { method: "DELETE" });
+          renderTunnel(app);
+        } catch (e: any) {
+          alert(`删除失败：${e.message}`);
+        }
+      }
+    });
+  });
+}
+
+function tnField(
+  name: string,
+  label: string,
+  value: string,
+  placeholder: string,
+  opts: { readonly?: boolean; type?: string } = {},
+): string {
+  const ro = opts.readonly ? "readonly" : "";
+  const roCls = opts.readonly ? "bg-slate-100 text-slate-500" : "";
+  return `<div>
+    <label class="block text-xs text-slate-500 mb-1">${esc(label)}</label>
+    <input name="${name}" type="${opts.type || "text"}" value="${attr(value)}" placeholder="${attr(placeholder)}" ${ro}
+      class="w-full border border-slate-300 rounded px-2 py-1.5 text-sm ${roCls}">
+  </div>`;
+}
+
+function openBotForm(app: HTMLElement, bot?: TunnelBot) {
+  const editing = !!bot;
+  const title = editing ? `编辑：${bot!.name}` : "新增企微机器人";
+  const body = `
+    <form id="tn-form" class="space-y-3">
+      ${tnField("name", "名称", editing ? bot!.name : "", "hr-helper")}
+      ${tnField("bot_id", "bot_id", editing ? bot!.bot_id : "", "企微机器人 id", { readonly: editing })}
+      ${tnField("secret", "secret", "", editing ? "留空 = 不修改" : "长连接密钥", { type: "password" })}
+      ${tnField("veda_key", "veda key (wk_)", "", editing ? `当前 ${bot!.veda_key_masked}，留空 = 不修改` : "wk_...", { type: "password" })}
+      ${tnField("workspace", "workspace 标注", editing ? bot!.workspace : "", "hr-kb")}
+      ${tnField("project", "project 标注（可选）", editing && bot!.project ? bot!.project : "", "可选")}
+      <div class="flex gap-3">
+        <div class="flex-1">
+          <label class="block text-xs text-slate-500 mb-1">检索模式</label>
+          <select name="mode" class="w-full border border-slate-300 rounded px-2 py-1.5 text-sm">
+            ${["hybrid", "semantic", "fulltext"].map((mo) => `<option value="${mo}" ${editing && bot!.mode === mo ? "selected" : ""}>${mo}</option>`).join("")}
+          </select>
+        </div>
+        <div class="w-24">
+          <label class="block text-xs text-slate-500 mb-1">limit</label>
+          <input name="limit" type="number" min="1" max="100" value="${editing ? bot!.limit : 8}" class="w-full border border-slate-300 rounded px-2 py-1.5 text-sm">
+        </div>
+      </div>
+      <div class="flex items-center gap-3 pt-2">
+        <button type="submit" class="bg-slate-900 text-white px-4 py-1.5 rounded text-sm font-medium hover:bg-slate-700">${editing ? "保存" : "创建"}</button>
+        <span id="tn-form-msg" class="text-xs"></span>
+      </div>
+    </form>`;
+  showModal(title, body);
+  const form = document.getElementById("tn-form") as HTMLFormElement;
+  const msg = document.getElementById("tn-form-msg")!;
+  form.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const fd = new FormData(form);
+    const get = (k: string) => ((fd.get(k) as string) || "").trim();
+    const payload: any = {
+      name: get("name"),
+      bot_id: editing ? bot!.bot_id : get("bot_id"),
+      secret: get("secret"),
+      veda_key: get("veda_key"),
+      workspace: get("workspace"),
+      project: get("project") || undefined,
+      mode: fd.get("mode") as string,
+      limit: parseInt(get("limit"), 10) || 8,
+    };
+    if (!payload.name || !payload.bot_id || !payload.workspace) {
+      msg.textContent = "name / bot_id / workspace 必填";
+      msg.className = "text-xs text-amber-600";
+      return;
+    }
+    if (!editing && (!payload.secret || !payload.veda_key)) {
+      msg.textContent = "新增时 secret / veda_key 必填";
+      msg.className = "text-xs text-amber-600";
+      return;
+    }
+    msg.textContent = "提交中…";
+    msg.className = "text-xs text-slate-500";
+    try {
+      if (editing) {
+        await tunnelApi(`/bots/${encodeURIComponent(bot!.bot_id)}`, {
+          method: "PUT",
+          body: JSON.stringify(payload),
+        });
+      } else {
+        await tunnelApi("/bots", { method: "POST", body: JSON.stringify(payload) });
+      }
+      closeModal();
+      renderTunnel(app);
+    } catch (err: any) {
+      msg.textContent = `失败：${err.message}`;
+      msg.className = "text-xs text-red-600";
+    }
+  });
 }

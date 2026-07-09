@@ -1,0 +1,37 @@
+# veda-tunnel systemd unit — single node, single instance.
+# Unlike veda-server there is NO socket activation: veda-tunnel dials OUT to
+# WeCom (long connection) and only listens on 127.0.0.1 for the admin API, so
+# a restart just re-dials — WeCom's "new connection kicks old" makes failover
+# seamless (§12). Single instance is mandatory (the WeCom single-connection
+# rule); do not run two.
+# Install: cp scripts/deploy/veda-tunnel.service /etc/systemd/system/ &&
+#          systemctl daemon-reload && systemctl enable --now veda-tunnel
+[Unit]
+Description=veda tunnel (WeCom aibot bridge)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/data/veda/bin/veda-tunnel /data/veda/config/tunnel.toml
+WorkingDirectory=/data/veda
+# Reuse veda's unprivileged user. The process holds WeCom secrets + a wk_ and
+# faces the network — do not run it as root.
+User=veda
+Group=veda
+NoNewPrivileges=true
+# Sandbox: the tunnel is stateless (no disk writes), so keep the whole system
+# read-only. Cap RSS — it should stay tiny.
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+MemoryMax=512M
+Restart=always
+RestartSec=2
+# SIGTERM -> graceful stop: flips each bot's shutdown switch, drains in-flight
+# handlers, closes connections. Bots exit within seconds.
+TimeoutStopSec=30
+Environment=RUST_LOG=info
+
+[Install]
+WantedBy=multi-user.target
