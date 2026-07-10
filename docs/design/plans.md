@@ -13,7 +13,8 @@
 
 | 计划 | 状态 |
 | --- | --- |
-| [`veda-tunnel-plan.md`](../plans/veda-tunnel-plan.md) | **设计待评审**：独立 tunnel 服务对接外部 IM，一期企微长连接 + 纯检索 + 管控面 |
+| [`veda-answer-plan.md`](../plans/veda-answer-plan.md) | **已过 Codex 评审（v2），待 Joe 确认开工**：`/v1/answer` RAG 问答（检索+分层组装+LLM 生成带引用答案），P0 约 4-6 工程日 |
+| [`veda-tunnel-plan.md`](../plans/veda-tunnel-plan.md) | 一期已实现并部署 .161 测试（企微长连接 + 检索直出 + MySQL bot 管理）；二期生成式问答依赖 answer-plan |
 | [`db-workspace-followups.md`](../plans/db-workspace-followups.md) | 接业务方前待办：H1 Milvus GC / M1 维度校验 / A1 内存天花板（硬门槛）+ backlog 并入尾巴 |
 | [`embedding-throughput-plan.md`](../plans/embedding-throughput-plan.md) | 已设计未实现，明确"先上线后优化" |
 | [`outbox-dedup-refactor.md`](../plans/outbox-dedup-refactor.md) | 未实现仍有效（A-3 fencing 提交后需重对行号） |
