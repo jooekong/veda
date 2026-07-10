@@ -140,10 +140,16 @@ async fn main() -> anyhow::Result<()> {
                 max_output_tokens: llm_cfg.answer_max_output_tokens,
                 ..Default::default()
             };
+            // Same call as the worker's chunk_sync (`semantic_chunk(_, 2048)`)
+            // — the answer path rebuilds these chunks to resolve neighbour
+            // windows, so algorithm and size MUST stay in lockstep.
+            let chunker: veda_core::service::answer::Chunker =
+                Arc::new(|text: &str| veda_pipeline::chunking::semantic_chunk(text, 2048));
             Some(Arc::new(AnswerService::new(
                 search_service.clone(),
                 mysql.clone(),
                 llm.clone(),
+                chunker,
                 params,
             )))
         }

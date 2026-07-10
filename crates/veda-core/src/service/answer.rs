@@ -15,10 +15,21 @@ use std::time::Duration;
 
 use tracing::debug;
 use veda_types::api::{AnswerCitation, ChunkSpan};
-use veda_types::{DetailLevel, FileRecord, SearchHit, SearchMode, SummaryStatus, VedaError};
+use veda_types::{
+    DetailLevel, FileRecord, SearchHit, SearchMode, SemanticChunk, SummaryStatus, VedaError,
+};
 
 use crate::service::search::SearchService;
 use crate::store::{LlmService, MetadataStore};
+
+/// Re-chunks full file content with the SAME algorithm + size the indexer
+/// used (`semantic_chunk(content, 2048)` in the worker's chunk_sync), so the
+/// resulting indices line up with the `chunk_index` carried by Milvus hits.
+/// Injected from the server binary — veda-pipeline depends on veda-core, so
+/// core can't call `semantic_chunk` directly without a dependency cycle.
+/// Index alignment only holds while file content is unchanged, which is
+/// exactly what the watermark guard checks.
+pub type Chunker = Arc<dyn Fn(&str) -> Vec<SemanticChunk> + Send + Sync>;
 
 /// Fixed phrase returned when there is nothing to answer from. Also used to
 /// detect a legitimate LLM refusal so it is not treated as "ungrounded".
@@ -114,6 +125,7 @@ pub struct AnswerService {
     search: SearchService,
     meta: Arc<dyn MetadataStore>,
     llm: Arc<dyn LlmService>,
+    chunker: Chunker,
     params: AnswerParams,
 }
 
@@ -122,11 +134,13 @@ impl AnswerService {
         search: SearchService,
         meta: Arc<dyn MetadataStore>,
         llm: Arc<dyn LlmService>,
+        chunker: Chunker,
         params: AnswerParams,
     ) -> Self {
         Self {
             search,
             meta,
+            chunker,
             llm,
             params,
         }
@@ -236,29 +250,60 @@ impl AnswerService {
             let indices: Vec<i32> = ghits.iter().map(|h| h.chunk_index.unwrap()).collect();
             let spans_idx = merge_spans(hit_windows(&indices, radius));
 
-            let mut spans: Vec<SpanContent> = Vec::with_capacity(spans_idx.len());
-            if guarded {
-                // Content comes straight from the Milvus hit text.
-                let by_idx: HashMap<i32, String> = ghits
+            // Milvus hit text by semantic index — the guarded / fallback source.
+            let by_idx: HashMap<i32, String> = ghits
+                .iter()
+                .map(|h| (h.chunk_index.unwrap(), h.content.clone()))
+                .collect();
+            let hit_only_spans = |spans_idx: &[(i32, i32)]| -> Vec<SpanContent> {
+                spans_idx
                     .iter()
-                    .map(|h| (h.chunk_index.unwrap(), h.content.clone()))
-                    .collect();
-                for (lo, hi) in spans_idx {
-                    let text = (lo..=hi)
-                        .filter_map(|i| by_idx.get(&i).cloned())
-                        .collect::<Vec<_>>()
-                        .join("\n");
-                    spans.push(SpanContent { lo, hi, text });
-                }
+                    .map(|&(lo, hi)| SpanContent {
+                        lo,
+                        hi,
+                        text: (lo..=hi)
+                            .filter_map(|i| by_idx.get(&i).cloned())
+                            .collect::<Vec<_>>()
+                            .join("\n"),
+                    })
+                    .collect()
+            };
+
+            let mut spans: Vec<SpanContent>;
+            if guarded {
+                spans = hit_only_spans(&spans_idx);
             } else {
-                for (lo, hi) in spans_idx {
-                    let chunks = self.meta.get_chunks_in_index_range(fid, lo, hi).await?;
-                    let text = chunks
-                        .into_iter()
-                        .map(|c| c.content)
-                        .collect::<Vec<_>>()
-                        .join("\n");
-                    spans.push(SpanContent { lo, hi, text });
+                // Neighbour content must come from the SEMANTIC chunk space the
+                // hit indices live in. `veda_file_chunks` holds 256KB *storage*
+                // chunks — a different index space — so we rebuild the indexer's
+                // semantic chunks from the full content (storage chunks
+                // concatenated) with the injected chunker. Deterministic: same
+                // algorithm + size as the worker, and the watermark guard has
+                // already established the content is what Milvus indexed.
+                let storage = self.meta.get_file_chunks(fid, None, None).await?;
+                let full: String = storage.into_iter().map(|c| c.content).collect();
+                let sem = (self.chunker)(&full);
+                if sem.is_empty() {
+                    // No reconstructable content (e.g. missing storage rows) —
+                    // degrade to the raw hit text rather than dropping the doc.
+                    spans = hit_only_spans(&spans_idx);
+                } else {
+                    spans = Vec::with_capacity(spans_idx.len());
+                    let max_idx = (sem.len() - 1) as i32;
+                    for (lo, hi) in spans_idx {
+                        // Defensive clamp; equality of chunk counts is implied
+                        // by the watermark match.
+                        let hi_c = hi.min(max_idx);
+                        if hi_c < lo {
+                            continue;
+                        }
+                        let text = sem[lo as usize..=hi_c as usize]
+                            .iter()
+                            .map(|c| c.content.as_str())
+                            .collect::<Vec<_>>()
+                            .join("\n");
+                        spans.push(SpanContent { lo, hi: hi_c, text });
+                    }
                 }
             }
 
