@@ -57,6 +57,15 @@ veda-tunnel     外部 IM 接入（企微长连接）             (骨架，待�
   - **Linux CLI 改 musl 静态产物**：`x86_64-unknown-linux-musl`，任意 glibc 可跑；`veda-fuse` 仍 gnu（动态链 libfuse3）
   - **server 自带安装器**：`GET /install.sh` 返回构建时嵌入的安装脚本；`GET /capabilities` 无鉴权能力探针（FUSE 用它决定是否暴露 summary sidecar）
 
+## RAG 问答 `/v1/answer`（2026-07-10，P0）
+
+fs 数据面新增知识库问答：检索 → 分层上下文组装 → LLM 生成**带可验证引用**的答案。设计+评审+实现记录见 `docs/plans/veda-answer-plan.md`。
+
+- **`veda-core/service/answer.rs`**：`AnswerService`（依赖 SearchService/MetadataStore/LlmService 全 trait）。组装：过滤 detached 命中 → 按 file_id 聚合 + per-doc cap 3 → 邻居 ±1 区间合并（不连续 span 插省略标记）→ **水印守卫**（`last_embedded_content_hash != checksum` 的文件禁邻居扩展、只用 Milvus 命中原文防 revision 混杂）→ L0 批取（仅 Ready 非空）→ 展开后按估算 token 预算裁整 span（L0 最后裁）。引用后处理：`[n]` 与资料块对齐生成 `citations[{index,path,spans}]`，无效编号剔除，零有效引用→citations 回退全部资料块+`ungrounded` 指标。`LlmService` trait 新增 `complete()`（与 `summarize` 并列）。
+- **`veda-server/routes/answer.rs`**：`POST /v1/answer`（`AuthWorkspace`，fs only）。挂在 30s TimeoutLayer **之外**、自带 45s 总 deadline（LLM 单次 20s×2 尝试）；per-workspace 并发信号量（`answer_concurrency` 默认 2，超出 429）；query ≤1024 字符；错误映射 501 `FEATURE_DISABLED`+no-store（无 `[llm]`）/ 502 `LLM_UNAVAILABLE` / 504 `ANSWER_TIMEOUT`；空召回 200 固定话术不调 LLM。配置：`[llm]` 下 `answer_max_context_tokens`(6000)/`answer_max_output_tokens`(1024)/`answer_concurrency`(2)。指标 `veda_answer_request_seconds{outcome}` 等。
+- **veda-tunnel 接入**：`[answer] enabled`（默认 true，改动需重启）走 `/v1/answer`（单请求 60s 超时），回复=答案正文+出处列表；false 回退纯检索直出。错误话术：501→「问答未启用」、429→「太频繁」、502/504→「暂时不可用」。
+- **验收**（真实 veda_it MySQL+测试 Milvus+airouter）：端到端带引用答案 3.5s；不编造（无关问题固定拒答）；400/501/kind-mismatch 负向全过。P1（SSE 流式、L1 全局题路径）、v1.5（db kind）见 plan §12。
+
 ## 平台网关面（AI Workbench / OnePaaS）
 
 公司 AI 平台把 veda 作为存储底座的专用 surface，与原生 `vk_`/`wk_` 面并存：

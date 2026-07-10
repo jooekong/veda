@@ -1,6 +1,7 @@
 pub mod account;
 pub mod admin;
 pub mod admin_tokens;
+pub mod answer;
 pub mod apps;
 pub mod collection;
 pub mod datasets;
@@ -61,6 +62,12 @@ pub fn build_router(state: Arc<AppState>) -> Router {
 
     timed
         .merge(events::routes())
+        // `/v1/answer` carries its own 45s deadline (LLM generation runs up to
+        // 20s/attempt × 2), so it must NOT sit under the 30s TimeoutLayer above
+        // — that would cut a legitimate answer off mid-generation. Same
+        // rationale as the SSE stream: merged in after the layer, untimed at the
+        // tower level, self-limited inside the handler.
+        .merge(answer::routes())
         .with_state(state)
 }
 

@@ -9,6 +9,7 @@ use tower_http::catch_panic::CatchPanicLayer;
 use tower_http::cors::CorsLayer;
 use tower_http::trace::TraceLayer;
 use tracing::info;
+use veda_core::service::answer::{AnswerParams, AnswerService};
 use veda_core::service::collection::CollectionService;
 use veda_core::service::fs::FsService;
 use veda_core::service::search::SearchService;
@@ -116,6 +117,40 @@ async fn main() -> anyhow::Result<()> {
         0,
     ));
 
+    let llm: Option<Arc<dyn LlmService>> = match &cfg.llm {
+        Some(llm_cfg) => {
+            let provider = LlmProvider::new(&llm_cfg.api_url, &llm_cfg.api_key, &llm_cfg.model)?;
+            info!(model = %llm_cfg.model, "LLM summary service enabled");
+            Some(Arc::new(provider))
+        }
+        None => {
+            info!("LLM config not set, summary generation disabled");
+            None
+        }
+    };
+
+    // RAG answer service (retrieve → tiered assembly → LLM). Present only when
+    // [llm] is configured; a `None` here is the source of the 501 the
+    // `/v1/answer` route returns. Token budgets come from [llm], timeout/retry
+    // from AnswerParams defaults (20s attempt × 1 retry).
+    let answer_service: Option<Arc<AnswerService>> = match (&cfg.llm, &llm) {
+        (Some(llm_cfg), Some(llm)) => {
+            let params = AnswerParams {
+                max_context_tokens: llm_cfg.answer_max_context_tokens,
+                max_output_tokens: llm_cfg.answer_max_output_tokens,
+                ..Default::default()
+            };
+            Some(Arc::new(AnswerService::new(
+                search_service.clone(),
+                mysql.clone(),
+                llm.clone(),
+                params,
+            )))
+        }
+        _ => None,
+    };
+    let answer_concurrency = cfg.llm.as_ref().map(|c| c.answer_concurrency).unwrap_or(2);
+
     let app_state = Arc::new(AppState {
         fs_service,
         search_service,
@@ -132,22 +167,12 @@ async fn main() -> anyhow::Result<()> {
         metrics_token: cfg.metrics_token.clone(),
         admin_token: cfg.admin_token.clone(),
         summary_enabled: cfg.llm.is_some(),
+        answer_service,
+        answer_concurrency,
         draining: std::sync::atomic::AtomicBool::new(false),
     });
 
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
-
-    let llm: Option<Arc<dyn LlmService>> = match &cfg.llm {
-        Some(llm_cfg) => {
-            let provider = LlmProvider::new(&llm_cfg.api_url, &llm_cfg.api_key, &llm_cfg.model)?;
-            info!(model = %llm_cfg.model, "LLM summary service enabled");
-            Some(Arc::new(provider))
-        }
-        None => {
-            info!("LLM config not set, summary generation disabled");
-            None
-        }
-    };
 
     let worker_handle = if cfg.worker.enabled {
         let max_overview_tokens = cfg

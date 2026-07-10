@@ -187,6 +187,46 @@ pub struct OverviewResponse {
     pub l1_overview: String,
 }
 
+// ── Answer (RAG) ───────────────────────────────────────
+
+// deny_unknown_fields mirrors SearchApiRequest: reject typo'd fields with a
+// 4xx instead of silently ignoring them.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AnswerApiRequest {
+    pub query: String,
+    pub path_prefix: Option<String>,
+    pub limit: Option<usize>,
+}
+
+/// Response for `POST /v1/answer`. `answer` is the generated text with inline
+/// `[n]` markers; `citations` maps each `[n]` to a document span the reader
+/// can open to verify. `estimated_context_tokens` is a conservative estimate
+/// (not a real tokenizer count) of the assembled context.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct AnswerApiResponse {
+    pub answer: String,
+    pub citations: Vec<AnswerCitation>,
+    pub hit_count: usize,
+    pub estimated_context_tokens: usize,
+}
+
+/// One `[n]` reference. In P0 each citation covers exactly one contiguous
+/// span (`spans.len() == 1`); the field is a `Vec` so a future revision can
+/// group several spans of one document under a single marker.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct AnswerCitation {
+    pub index: usize,
+    pub path: String,
+    pub spans: Vec<ChunkSpan>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ChunkSpan {
+    pub start_chunk_index: i32,
+    pub end_chunk_index: i32,
+}
+
 // ── Collection ─────────────────────────────────────────
 
 #[derive(Debug, Deserialize)]

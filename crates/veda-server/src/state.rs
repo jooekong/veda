@@ -44,6 +44,14 @@ pub struct AppState {
     /// permanently disabled, and `GET /v1/summary/...` returns 501 Not
     /// Implemented instead of the misleading 202 "pending".
     pub summary_enabled: bool,
+    /// RAG answer service (retrieve → tiered assembly → LLM). `None` when
+    /// [llm] is unconfigured — `POST /v1/answer` then returns 501
+    /// FEATURE_DISABLED (same source of truth as `summary_enabled`).
+    pub answer_service: Option<Arc<veda_core::service::answer::AnswerService>>,
+    /// Per-workspace concurrency ceiling for `/v1/answer` (semaphore permits).
+    /// From `[llm].answer_concurrency`. A read-only `wk_` can still drive LLM
+    /// cost, so in-flight answers per workspace are capped.
+    pub answer_concurrency: usize,
     /// Flipped by the SIGTERM handler at the start of the drain window
     /// (`ServerConfig::drain_secs`). While set, `/v1/ready` reports 503
     /// "draining" so the LB pulls this node, but the listener keeps

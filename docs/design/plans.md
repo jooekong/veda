@@ -13,7 +13,7 @@
 
 | 计划 | 状态 |
 | --- | --- |
-| [`veda-answer-plan.md`](../plans/veda-answer-plan.md) | **已过 Codex 评审（v2），待 Joe 确认开工**：`/v1/answer` RAG 问答（检索+分层组装+LLM 生成带引用答案），P0 约 4-6 工程日 |
+| [`veda-answer-plan.md`](../plans/veda-answer-plan.md) | **P0 已实现+真实环境验收通过（未部署）**：`/v1/answer` RAG 问答；余 DAL 真题评审（DoD-4）+ P1 流式/L1 |
 | [`veda-tunnel-plan.md`](../plans/veda-tunnel-plan.md) | 一期已实现并部署 .161 测试（企微长连接 + 检索直出 + MySQL bot 管理）；二期生成式问答依赖 answer-plan |
 | [`db-workspace-followups.md`](../plans/db-workspace-followups.md) | 接业务方前待办：H1 Milvus GC / M1 维度校验 / A1 内存天花板（硬门槛）+ backlog 并入尾巴 |
 | [`embedding-throughput-plan.md`](../plans/embedding-throughput-plan.md) | 已设计未实现，明确"先上线后优化" |

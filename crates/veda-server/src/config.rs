@@ -225,10 +225,35 @@ pub struct LlmConfig {
     pub model: String,
     #[serde(default = "default_max_summary_tokens")]
     pub max_summary_tokens: usize,
+    /// `/v1/answer` assembled-context token budget (estimated, see answer
+    /// plan §4). Higher = more context per answer, more LLM cost/latency.
+    #[serde(default = "default_answer_max_context_tokens")]
+    pub answer_max_context_tokens: usize,
+    /// `/v1/answer` output token ceiling for the LLM completion.
+    #[serde(default = "default_answer_max_output_tokens")]
+    pub answer_max_output_tokens: usize,
+    /// Per-workspace in-flight `/v1/answer` concurrency (semaphore permits).
+    /// A read-only `wk_` can still burn LLM budget, so this caps concurrent
+    /// answers per workspace. No env override (LLM sub-fields are TOML-only,
+    /// matching `max_summary_tokens`).
+    #[serde(default = "default_answer_concurrency")]
+    pub answer_concurrency: usize,
 }
 
 fn default_max_summary_tokens() -> usize {
     2048
+}
+
+fn default_answer_max_context_tokens() -> usize {
+    6000
+}
+
+fn default_answer_max_output_tokens() -> usize {
+    1024
+}
+
+fn default_answer_concurrency() -> usize {
+    2
 }
 
 fn default_listen() -> String {
@@ -290,6 +315,9 @@ impl ServerConfig {
                     api_key: String::new(),
                     model: String::new(),
                     max_summary_tokens: default_max_summary_tokens(),
+                    answer_max_context_tokens: default_answer_max_context_tokens(),
+                    answer_max_output_tokens: default_answer_max_output_tokens(),
+                    answer_concurrency: default_answer_concurrency(),
                 })
                 .api_url = v;
         }

@@ -855,4 +855,11 @@ pub trait VectorWorkspaceStore: Send + Sync {
 #[async_trait]
 pub trait LlmService: Send + Sync {
     async fn summarize(&self, content: &str, max_tokens: usize) -> Result<String>;
+    /// One-shot completion for the RAG answer path (`AnswerService`). Unlike
+    /// `summarize` (worker-driven L0/L1), this runs on the request path with
+    /// a fully-assembled prompt. The caller owns the per-attempt timeout and
+    /// retry budget; implementations should just issue the underlying chat
+    /// call. Kept separate from `summarize` so the two call sites can evolve
+    /// (temperature, retry policy) independently.
+    async fn complete(&self, prompt: &str, max_tokens: usize) -> Result<String>;
 }

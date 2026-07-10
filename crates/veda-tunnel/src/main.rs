@@ -27,12 +27,18 @@ struct BotHandle {
     join: JoinHandle<()>,
 }
 
-fn spawn_bot(bot: BotConfig, veda: Arc<VedaClient>, reg: Registry) -> BotHandle {
+fn spawn_bot(
+    bot: BotConfig,
+    veda: Arc<VedaClient>,
+    reg: Registry,
+    answer_enabled: bool,
+) -> BotHandle {
     let (sd_tx, sd_rx) = watch::channel(false);
     let rt = BotRuntime {
         bot: Arc::new(bot),
         veda,
         registry: reg,
+        answer_enabled,
     };
     let join = tokio::spawn(run_bot(rt, sd_rx));
     BotHandle {
@@ -71,9 +77,13 @@ async fn main() -> anyhow::Result<()> {
         .nth(1)
         .unwrap_or_else(|| "config/tunnel.toml".to_string());
     let cfg = TunnelConfig::load(&config_path)?;
+    // Process-wide answer switch; read once here (Reload doesn't re-read the
+    // config file, so a toggle needs a restart — see config::AnswerConfig).
+    let answer_enabled = cfg.answer.enabled;
     info!(
         veda = %cfg.veda_base_url,
         admin = %cfg.admin.listen,
+        answer_enabled,
         "starting veda-tunnel"
     );
 
@@ -99,7 +109,7 @@ async fn main() -> anyhow::Result<()> {
     for b in &bot_cfgs {
         bots.insert(
             b.bot_id.clone(),
-            spawn_bot(b.clone(), veda.clone(), reg.clone()),
+            spawn_bot(b.clone(), veda.clone(), reg.clone(), answer_enabled),
         );
     }
     info!(bots = bot_cfgs.len(), "bots spawned from store");
@@ -129,7 +139,7 @@ async fn main() -> anyhow::Result<()> {
                 break;
             }
             Some(cmd) = control_rx.recv() => {
-                handle_control(cmd, &store, &veda, &reg, &mut bots).await;
+                handle_control(cmd, &store, &veda, &reg, &mut bots, answer_enabled).await;
             }
         }
     }
@@ -150,6 +160,7 @@ async fn handle_control(
     veda: &Arc<VedaClient>,
     reg: &Registry,
     bots: &mut HashMap<String, BotHandle>,
+    answer_enabled: bool,
 ) {
     match cmd {
         ControlCmd::AddBot { bot, reply } => match store.add(&bot).await {
@@ -157,7 +168,7 @@ async fn handle_control(
                 registry::insert(reg, &bot);
                 bots.insert(
                     bot.bot_id.clone(),
-                    spawn_bot(bot, veda.clone(), reg.clone()),
+                    spawn_bot(bot, veda.clone(), reg.clone(), answer_enabled),
                 );
                 let _ = reply.send(Ok(()));
             }
@@ -177,7 +188,7 @@ async fn handle_control(
                         registry::insert(reg, &full);
                         bots.insert(
                             full.bot_id.clone(),
-                            spawn_bot(full, veda.clone(), reg.clone()),
+                            spawn_bot(full, veda.clone(), reg.clone(), answer_enabled),
                         );
                         let _ = reply.send(Ok(()));
                     }
@@ -219,7 +230,7 @@ async fn handle_control(
                 Ok(Some(bot)) => {
                     bots.insert(
                         bot_id.clone(),
-                        spawn_bot(bot, veda.clone(), reg.clone()),
+                        spawn_bot(bot, veda.clone(), reg.clone(), answer_enabled),
                     );
                     info!(bot_id = %bot_id, "reconnect: respawned");
                     let _ = reply.send(true);
@@ -246,7 +257,7 @@ async fn handle_control(
             for b in &bot_cfgs {
                 bots.insert(
                     b.bot_id.clone(),
-                    spawn_bot(b.clone(), veda.clone(), reg.clone()),
+                    spawn_bot(b.clone(), veda.clone(), reg.clone(), answer_enabled),
                 );
             }
             let n = bot_cfgs.len();

@@ -155,6 +155,8 @@ async fn build_test_app() -> (Arc<AppState>, Arc<MysqlStore>, axum::Router) {
         metrics_token: None,
         admin_token: None,
         summary_enabled: false,
+        answer_service: None,
+        answer_concurrency: 2,
         draining: std::sync::atomic::AtomicBool::new(false),
     });
     let router = build_router(state.clone());

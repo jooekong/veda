@@ -258,7 +258,15 @@ citations 丢弃（正文保留）。**零有效引用的取舍（已定，真�
 2. **组装默认值**（limit 12 / 预算 6k / per-doc cap 3 / 并发 2）：拍的，DAL 真题跑完调。
 3. **零引用回退策略**：已按 §5 定（返回+回退 citations+指标），真题评审后复审是否收紧。
 
-## 14. 评审记录（2026-07-10，Codex xhigh）
+## 14. 实现与验收记录（2026-07-10）
+
+**P0 已实现并通过验收。** 实现由两个 Opus 4.8 max agent 完成（server 侧：trait `complete`/DTO/`AnswerService` 902 行组装逻辑+51 单测、路由壳+接线；tunnel 侧：`answer()` 客户端 60s 超时/错误五分支/`[answer] enabled` 开关），Claude 定细则并验收。
+
+**验收中修正 2 处**（server agent 撞会话限额死于自验前）：测试夹具 `SourceType::User`→`Text`；预算裁剪测试漏算块头/L0/省略标记开销（预算 320→380，实现无错）。
+
+**验收结果**：全 workspace build + 全部单测（core 51+61 / server 100 / tunnel 26 / types 3）+ clippy（新增文件零告警）；真实环境端到端（veda_it MySQL + 测试 Milvus + airouter deepseek-v4-flash）——上传两文档→`/v1/answer`「如何申请测试数据库」3.5s 返回正确综合答案+`[1]`引用（spans 0-3，未混入无关文档）；负向全过：1025 字符 400、无关问题固定拒答零引用（不编造）、db key 400 `WORKSPACE_KIND_MISMATCH`、无 `[llm]` 实例 501+`Cache-Control: no-store`。429/504 由单测覆盖。**待做**：20 个 DAL 真题评审（需部署测试节点后进行，见 §11 DoD-4）。
+
+## 15. 评审记录（2026-07-10，Codex xhigh）
 
 verdict=**需修改后可行**。2 BLOCKER（引用粒度失真、超时/错误映射与现有 TimeoutLayer/LlmProvider
 冲突）+ 一批 MAJOR，均已按上文修订（citations spans、45s 独立 deadline、区间合并后预算、

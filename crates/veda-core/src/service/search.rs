@@ -5,6 +5,9 @@ use veda_types::*;
 
 use crate::store::{EmbeddingService, MetadataStore, VectorStore};
 
+/// Cloneable: every field is an `Arc`, so cloning is cheap ref-count bumps.
+/// `AnswerService` holds its own clone rather than an `Arc<SearchService>`.
+#[derive(Clone)]
 pub struct SearchService {
     meta: Arc<dyn MetadataStore>,
     vector: Arc<dyn VectorStore>,

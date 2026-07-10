@@ -10,6 +10,19 @@ that matters.
 ## [Unreleased]
 
 ### Added
+- **`POST /v1/answer` — RAG knowledge-base Q&A (P0, fs workspaces).** Retrieval
+  → tiered context assembly → LLM answer with verifiable citations
+  (`citations[{index,path,spans}]` map each inline `[n]` to the exact chunk
+  range backing it). Assembly: neighbor-window merge with ellipsis markers,
+  per-doc cap, index-freshness watermark guard, Ready-only L0 abstracts, and
+  post-expansion whole-span budget trimming. Route runs outside the 30s
+  TimeoutLayer with its own 45s deadline, per-workspace concurrency gate
+  (429), 501+`no-store` when `[llm]` is absent, explicit 502/504 mapping, and
+  never calls the LLM on empty recall. veda-tunnel routes questions through it
+  by default (`[answer] enabled`, falls back to raw search when off). Verified
+  end-to-end against real MySQL/Milvus/airouter: grounded cited answers,
+  refusal (not hallucination) on out-of-scope questions. Design + review log:
+  `docs/plans/veda-answer-plan.md`.
 - **veda-tunnel — external IM bridge (new crate, scaffold).** An independent
   process + binary (`crates/veda-tunnel`) that brings veda retrieval into
   WeCom (企业微信) via the aibot long connection (WSS). A standard `wk_`

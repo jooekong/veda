@@ -232,6 +232,9 @@ mod tests {
         async fn summarize(&self, content: &str, _max_tokens: usize) -> Result<String> {
             Ok(format!("SUMMARY: {}", &content[..content.len().min(50)]))
         }
+        async fn complete(&self, prompt: &str, _max_tokens: usize) -> Result<String> {
+            Ok(format!("ANSWER: {}", &prompt[..prompt.len().min(50)]))
+        }
     }
 
     #[test]

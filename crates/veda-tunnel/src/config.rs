@@ -24,6 +24,9 @@ pub struct TunnelConfig {
     /// list is ignored. May be omitted entirely.
     #[serde(default)]
     pub wecom: WecomConfig,
+    /// `[answer]` feature switch — see [`AnswerConfig`].
+    #[serde(default)]
+    pub answer: AnswerConfig,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -53,6 +56,33 @@ impl Default for AdminConfig {
 
 fn default_admin_listen() -> String {
     "127.0.0.1:9100".to_string()
+}
+
+/// `[answer]` section — a process-wide switch (not per-bot). When `enabled`,
+/// text questions are routed through veda's `/v1/answer` RAG endpoint;
+/// otherwise the tunnel falls back to raw `/v1/search` + snippet rendering.
+///
+/// NOTE: read once at process start. The admin Reload only re-reads the MySQL
+/// bot list, not this config file, so changing `enabled` requires a process
+/// restart to take effect.
+#[derive(Debug, Clone, Deserialize)]
+pub struct AnswerConfig {
+    /// Route questions through `/v1/answer` when true. A missing `[answer]`
+    /// section and a missing `enabled` key both default to true.
+    #[serde(default = "default_answer_enabled")]
+    pub enabled: bool,
+}
+
+impl Default for AnswerConfig {
+    fn default() -> Self {
+        Self {
+            enabled: default_answer_enabled(),
+        }
+    }
+}
+
+fn default_answer_enabled() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -255,5 +285,25 @@ mod tests {
         )
         .unwrap_err();
         assert!(err.to_string().contains("invalid mode"));
+    }
+
+    #[test]
+    fn answer_enabled_defaults_true() {
+        // No [answer] section at all → the whole section defaults on.
+        let cfg = parse(r#"veda_base_url = "http://x:3000""#).unwrap();
+        assert!(cfg.answer.enabled);
+    }
+
+    #[test]
+    fn answer_can_be_disabled() {
+        let cfg = parse(
+            r#"
+            veda_base_url = "http://x:3000"
+            [answer]
+            enabled = false
+            "#,
+        )
+        .unwrap();
+        assert!(!cfg.answer.enabled);
     }
 }

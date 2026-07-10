@@ -43,6 +43,8 @@ pub struct BotRuntime {
     pub bot: Arc<BotConfig>,
     pub veda: Arc<VedaClient>,
     pub registry: Registry,
+    /// Global answer switch, forwarded to every handler ctx.
+    pub answer_enabled: bool,
 }
 
 fn new_req_id() -> String {
@@ -246,6 +248,7 @@ async fn handle_frame(
                 veda: rt.veda.clone(),
                 registry: rt.registry.clone(),
                 outbound: out_tx.clone(),
+                answer_enabled: rt.answer_enabled,
             };
             tokio::spawn(handle_message(ctx, raw.headers.req_id, body));
             false

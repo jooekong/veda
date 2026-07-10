@@ -160,4 +160,11 @@ impl LlmService for LlmProvider {
         .increment(1);
         result
     }
+
+    // The private `chat()` (internal retry + backoff) is the implementation.
+    // The answer path wraps each `complete()` call in its own per-attempt
+    // timeout and outer deadline, so no extra retry policy lives here.
+    async fn complete(&self, prompt: &str, max_tokens: usize) -> Result<String> {
+        self.chat(prompt, max_tokens).await
+    }
 }

@@ -16,7 +16,7 @@ use tracing::{info, warn};
 use super::protocol::{respond_stream_frame, MsgCallbackBody, MSGTYPE_TEXT};
 use crate::config::BotConfig;
 use crate::registry::{self, Registry};
-use crate::veda::{Hit, SearchError, VedaClient};
+use crate::veda::{AnswerData, Hit, SearchError, VedaClient};
 
 /// Everything a handler task needs. All fields are cheap to clone (Arc /
 /// channel sender / Arc-backed registry).
@@ -26,6 +26,9 @@ pub struct HandlerCtx {
     pub veda: Arc<VedaClient>,
     pub registry: Registry,
     pub outbound: mpsc::Sender<Value>,
+    /// Global answer switch (`[answer] enabled`): true → route through
+    /// `/v1/answer`, false → raw search. Process-wide, not per-bot.
+    pub answer_enabled: bool,
 }
 
 pub async fn handle_message(ctx: HandlerCtx, req_id: String, body: MsgCallbackBody) {
@@ -62,9 +65,21 @@ pub async fn handle_message(ctx: HandlerCtx, req_id: String, body: MsgCallbackBo
     });
 
     let started = std::time::Instant::now();
-    let reply = match ctx
+    let reply = if ctx.answer_enabled {
+        answer_reply(&ctx, &query, started).await
+    } else {
+        search_reply(&ctx, &query, started).await
+    };
+
+    send_final(&ctx, &req_id, &stream_id, &reply).await;
+}
+
+/// Pre-answer path: raw `/v1/search` + snippet rendering. Behaviour is
+/// unchanged from before the answer switch existed.
+async fn search_reply(ctx: &HandlerCtx, query: &str, started: std::time::Instant) -> String {
+    match ctx
         .veda
-        .search(&ctx.bot.veda_key, &query, &ctx.bot.mode, ctx.bot.limit)
+        .search(&ctx.bot.veda_key, query, &ctx.bot.mode, ctx.bot.limit)
         .await
     {
         Ok(hits) => {
@@ -95,9 +110,65 @@ pub async fn handle_message(ctx: HandlerCtx, req_id: String, body: MsgCallbackBo
             warn!(bot = %ctx.bot.name, error = %e, "search unavailable");
             "知识库暂时不可用，请稍后再试".to_string()
         }
-    };
+        // search() only maps 401→Unauthorized and everything else→Unavailable,
+        // so these answer-only variants never reach here; treat them as
+        // unavailable to keep the match exhaustive.
+        Err(SearchError::Disabled) | Err(SearchError::Throttled) => {
+            "知识库暂时不可用，请稍后再试".to_string()
+        }
+    }
+}
 
-    send_final(&ctx, &req_id, &stream_id, &reply).await;
+/// Answer path: veda's `/v1/answer` RAG endpoint — body + a verifiable
+/// citation list, with per-error fallbacks (§8). A failed call is recorded on
+/// the bot's error counters, matching the search path.
+async fn answer_reply(ctx: &HandlerCtx, query: &str, started: std::time::Instant) -> String {
+    match ctx.veda.answer(&ctx.bot.veda_key, query).await {
+        Ok(data) => {
+            info!(
+                bot = %ctx.bot.name,
+                query = %query,
+                citations = data.citations.len(),
+                ms = started.elapsed().as_millis() as u64,
+                "answer ok"
+            );
+            render_answer(&data)
+        }
+        Err(SearchError::Disabled) => {
+            registry::update(&ctx.registry, &ctx.bot.bot_id, |s| {
+                s.error_count += 1;
+                s.last_error = Some("answer disabled (501)".to_string());
+            });
+            warn!(bot = %ctx.bot.name, "answer disabled (501)");
+            "知识库问答未启用".to_string()
+        }
+        Err(SearchError::Throttled) => {
+            registry::update(&ctx.registry, &ctx.bot.bot_id, |s| {
+                s.error_count += 1;
+                s.last_error = Some("answer throttled (429)".to_string());
+            });
+            warn!(bot = %ctx.bot.name, "answer throttled (429)");
+            "提问太频繁，请稍后再试".to_string()
+        }
+        Err(SearchError::Unauthorized) => {
+            registry::update(&ctx.registry, &ctx.bot.bot_id, |s| {
+                s.error_count += 1;
+                s.last_error = Some("answer 401 (key invalid/revoked)".to_string());
+            });
+            // Keep the WeCom connection alive — a bad key is not a reason to
+            // drop the long connection (§9).
+            warn!(bot = %ctx.bot.name, "answer unauthorized (401)");
+            "知识库鉴权失败，请联系管理员".to_string()
+        }
+        Err(SearchError::Unavailable(e)) => {
+            registry::update(&ctx.registry, &ctx.bot.bot_id, |s| {
+                s.error_count += 1;
+                s.last_error = Some(truncate(&e, 200));
+            });
+            warn!(bot = %ctx.bot.name, error = %e, "answer unavailable");
+            "知识库暂时不可用，请稍后再试".to_string()
+        }
+    }
 }
 
 async fn send_final(ctx: &HandlerCtx, req_id: &str, stream_id: &str, content: &str) {
@@ -135,6 +206,28 @@ fn render_markdown(hits: &[Hit]) -> String {
     out.trim_end().to_string()
 }
 
+/// Render a `/v1/answer` result for WeCom: the answer body, then a separator
+/// and a "出处：" list of `[n] path` lines. `[n]` reuses the server-assigned
+/// citation index so it lines up with the `[n]` markers in the body.
+/// Citations without a resolvable path are skipped; if none remain, only the
+/// body is sent.
+fn render_answer(data: &AnswerData) -> String {
+    let body = data.answer.trim();
+    let cited: Vec<(usize, &str)> = data
+        .citations
+        .iter()
+        .filter_map(|c| c.path.as_deref().map(|p| (c.index, p)))
+        .collect();
+    if cited.is_empty() {
+        return body.to_string();
+    }
+    let mut out = format!("{body}\n\n———\n出处：\n");
+    for (idx, path) in cited {
+        out.push_str(&format!("[{idx}] `{path}`\n"));
+    }
+    out.trim_end().to_string()
+}
+
 /// Char-based truncation (never splits a multi-byte UTF-8 boundary).
 pub(crate) fn truncate(s: &str, max: usize) -> String {
     if s.chars().count() <= max {
@@ -148,6 +241,7 @@ pub(crate) fn truncate(s: &str, max: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::veda::AnswerCitation;
 
     #[test]
     fn strips_leading_mention() {
@@ -198,5 +292,73 @@ mod tests {
     fn truncate_multibyte_safe() {
         assert_eq!(truncate("你好世界", 2), "你好…");
         assert_eq!(truncate("abc", 5), "abc");
+    }
+
+    #[test]
+    fn render_answer_with_citations() {
+        let data = AnswerData {
+            answer: "接入分三步[1]，多活需额外申请[2]".to_string(),
+            citations: vec![
+                AnswerCitation {
+                    index: 1,
+                    path: Some("/a/接入.md".to_string()),
+                },
+                AnswerCitation {
+                    index: 2,
+                    path: Some("/b/多活.md".to_string()),
+                },
+            ],
+        };
+        let out = render_answer(&data);
+        assert!(out.contains("接入分三步[1]"));
+        assert!(out.contains("———"));
+        assert!(out.contains("出处："));
+        assert!(out.contains("[1] `/a/接入.md`"));
+        assert!(out.contains("[2] `/b/多活.md`"));
+    }
+
+    #[test]
+    fn render_answer_no_citations_body_only() {
+        let data = AnswerData {
+            answer: "知识库中没有找到相关内容".to_string(),
+            citations: vec![],
+        };
+        let out = render_answer(&data);
+        assert_eq!(out, "知识库中没有找到相关内容");
+        assert!(!out.contains("出处："));
+    }
+
+    #[test]
+    fn render_answer_skips_none_path() {
+        // Citation with index 1 has no path → dropped from the 出处 list; its
+        // 1-based index is preserved for the ones that remain.
+        let data = AnswerData {
+            answer: "答案[1][2]".to_string(),
+            citations: vec![
+                AnswerCitation {
+                    index: 1,
+                    path: None,
+                },
+                AnswerCitation {
+                    index: 2,
+                    path: Some("/b.md".to_string()),
+                },
+            ],
+        };
+        let out = render_answer(&data);
+        assert!(!out.contains("[1] `"));
+        assert!(out.contains("[2] `/b.md`"));
+    }
+
+    #[test]
+    fn render_answer_all_none_paths_body_only() {
+        let data = AnswerData {
+            answer: "答案".to_string(),
+            citations: vec![AnswerCitation {
+                index: 1,
+                path: None,
+            }],
+        };
+        assert_eq!(render_answer(&data), "答案");
     }
 }
