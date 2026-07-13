@@ -10,6 +10,13 @@ that matters.
 ## [Unreleased]
 
 ### Added
+- **Platform fs file upload/download.** The AI Workbench data plane gains
+  `PUT /v1/workspace/{ws}/project/{id}/file?path=` (raw-byte body, same
+  UTF-8-vs-blob content sniff as the `wk_` plane, parents auto-created,
+  overwrite bumps revision, 50MB quota) and
+  `GET .../file/content?path=` (raw byte stream with stored MIME +
+  RFC 5987 attachment filename). Both behind external authz; fs-only.
+  Contract: APIDoc `docs/veda/fs-data-api.md` §6–7.
 - **Platform tunnel-bot API — attach a WeCom bot to an fs project from the AI
   Workbench.** New apps-surface CRUD
   `/v1/workspace/{ws}/project/{id}/tunnel/bots` (fs-only; gateway authz +

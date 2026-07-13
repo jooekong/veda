@@ -359,3 +359,88 @@ async fn platform_data_plane_roundtrip() {
     assert_eq!(body["delete_count"], 1, "bare delete_count: {body}");
     assert!(body.get("data").is_none(), "delete回执 is bare: {body}");
 }
+
+/// Raw-byte GET (no JSON parse) for the download endpoint.
+async fn get_raw(router: &axum::Router, path: &str) -> (StatusCode, Vec<u8>, String, String) {
+    let req = Request::builder().method("GET").uri(path).body(Body::empty()).unwrap();
+    let resp = router.clone().oneshot(req).await.unwrap();
+    let status = resp.status();
+    let ctype = resp
+        .headers()
+        .get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or_default()
+        .to_string();
+    let dispo = resp
+        .headers()
+        .get("content-disposition")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or_default()
+        .to_string();
+    let bytes = to_bytes(resp.into_body(), usize::MAX).await.unwrap().to_vec();
+    (status, bytes, ctype, dispo)
+}
+
+async fn put_bytes(router: &axum::Router, path: &str, body: Vec<u8>) -> (StatusCode, Value) {
+    let req = Request::builder()
+        .method("PUT")
+        .uri(path)
+        .header("content-type", "application/octet-stream")
+        .body(Body::from(body))
+        .unwrap();
+    send(router, req).await
+}
+
+#[tokio::test]
+#[ignore = "needs real MySQL + Milvus + embedding (config/test.toml); run with --ignored"]
+async fn platform_fs_upload_download() {
+    let (state, router) = build_test_app().await;
+    let s = provision(&state).await;
+    let fs = |p: &str| format!("/v1/workspace/{}/project/{}{}", s.app_id, s.fs_ws_id, p);
+    let db = |p: &str| format!("/v1/workspace/{}/project/{}{}", s.app_id, s.db_ws_id, p);
+
+    // ── text upload → bare WriteFileResponse; parents auto-created ──
+    let text = "# 平台上传\n\n中文内容 roundtrip 测试。\n";
+    let (st, body) = put_bytes(&router, &fs("/file?path=/docs/说明.md"), text.as_bytes().to_vec()).await;
+    assert_eq!(st, StatusCode::OK, "text upload: {body}");
+    assert_eq!(body["revision"], 1, "first write revision: {body}");
+    assert!(body["file_id"].is_string(), "bare object with file_id: {body}");
+
+    // ── download round-trips the exact bytes with attachment headers ──
+    let (st, bytes, ctype, dispo) = get_raw(&router, &fs("/file/content?path=/docs/%E8%AF%B4%E6%98%8E.md")).await;
+    assert_eq!(st, StatusCode::OK);
+    assert_eq!(bytes, text.as_bytes(), "downloaded bytes identical");
+    assert!(ctype.contains("markdown") || ctype.contains("text"), "mime: {ctype}");
+    assert!(dispo.contains("attachment") && dispo.contains("filename*=UTF-8''"), "disposition: {dispo}");
+
+    // ── overwrite bumps revision (last-write-wins, no preconditions) ──
+    let (st, body) = put_bytes(&router, &fs("/file?path=/docs/说明.md"), b"v2".to_vec()).await;
+    assert_eq!(st, StatusCode::OK, "overwrite: {body}");
+    assert_eq!(body["revision"], 2, "overwrite bumps revision: {body}");
+
+    // ── binary upload (invalid UTF-8) → blob path; byte-exact download ──
+    let png: Vec<u8> = vec![0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0xFF, 0x00, 0xFE];
+    let (st, body) = put_bytes(&router, &fs("/file?path=/img/logo.png"), png.clone()).await;
+    assert_eq!(st, StatusCode::OK, "binary upload: {body}");
+    let (st, bytes, ctype, _) = get_raw(&router, &fs("/file/content?path=/img/logo.png")).await;
+    assert_eq!(st, StatusCode::OK);
+    assert_eq!(bytes, png, "binary bytes identical");
+    assert!(ctype.contains("png") || ctype.contains("octet"), "binary mime: {ctype}");
+
+    // ── uploaded file shows up in the existing listing/preview surface ──
+    let (st, body) = get(&router, &fs("/files?path=/docs")).await;
+    assert_eq!(st, StatusCode::OK);
+    assert!(
+        body["data"].as_array().unwrap().iter().any(|e| e["name"] == "说明.md"),
+        "uploaded file listed: {body}"
+    );
+
+    // ── kind gate: upload to a db project → WORKSPACE_KIND_MISMATCH ──
+    let (st, body) = put_bytes(&router, &db("/file?path=/x.md"), b"x".to_vec()).await;
+    assert_eq!(st, StatusCode::BAD_REQUEST, "db upload: {body}");
+    assert_eq!(body["error"]["code"], "WORKSPACE_KIND_MISMATCH");
+
+    // ── download of a missing path → NOT_FOUND error envelope ──
+    let (st, bytes, _, _) = get_raw(&router, &fs("/file/content?path=/nope.md")).await;
+    assert_eq!(st, StatusCode::NOT_FOUND, "missing file: {}", String::from_utf8_lossy(&bytes));
+}

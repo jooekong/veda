@@ -69,7 +69,17 @@ pub fn routes() -> Router<Arc<AppState>> {
             post(fs_search),
         )
         .route("/v1/workspace/{workspace}/project/{id}/files", get(fs_files))
-        .route("/v1/workspace/{workspace}/project/{id}/file", get(fs_file))
+        // GET = JSON preview (truncated), PUT = upload. The raw byte stream
+        // lives under /file/content so a JSON-expecting preview client never
+        // receives a 40MB binary by accident.
+        .route(
+            "/v1/workspace/{workspace}/project/{id}/file",
+            get(fs_file).put(fs_upload),
+        )
+        .route(
+            "/v1/workspace/{workspace}/project/{id}/file/content",
+            get(fs_download),
+        )
         .route("/v1/workspace/{workspace}/project/{id}/sql", post(fs_sql))
         .route("/v1/workspace/{workspace}/project/{id}/grep", post(fs_grep))
         // Same company-envelope rewrite as the management surface.
@@ -222,6 +232,71 @@ async fn fs_file(
         .read_file_preview(&ws.id, &q.path, MAX_PREVIEW_BYTES)
         .await?;
     Ok(Json(ApiResponse::ok(preview)))
+}
+
+/// PUT /v1/workspace/{workspace}/project/{id}/file?path=/a/b.md — upload a
+/// file (create or overwrite; parents auto-created; overwrite bumps
+/// `revision`). Same content sniff as the `wk_` plane (fs.rs::write_file):
+/// valid UTF-8 → text (chunked/embedded/searchable), anything else → binary
+/// blob (stored verbatim; PDFs get text-extracted for search, images stored
+/// but not indexed). No If-Match/rev preconditions on this surface — the
+/// workbench "upload" gesture is last-write-wins by design.
+async fn fs_upload(
+    State(state): State<Arc<AppState>>,
+    Path((workspace, id)): Path<(String, String)>,
+    gw: GatewayUser,
+    Query(q): Query<FileQuery>,
+    body: axum::body::Bytes,
+) -> Result<Json<ApiResponse<veda_types::api::WriteFileResponse>>, AppError> {
+    let ws = authz_and_load(&state, &gw, &workspace, &id, WorkspaceKind::Fs).await?;
+    let resp = match std::str::from_utf8(&body) {
+        Ok(text) => {
+            state
+                .fs_service
+                .write_file(&ws.id, &q.path, text, None, None)
+                .await?
+        }
+        Err(_) => {
+            state
+                .fs_service
+                .write_blob(&ws.id, &q.path, body.to_vec(), None)
+                .await?
+        }
+    };
+    Ok(Json(ApiResponse::ok(resp)))
+}
+
+/// GET /v1/workspace/{workspace}/project/{id}/file/content?path=/a/b.md —
+/// download the raw bytes (text or binary) with the stored MIME type and an
+/// attachment disposition. Non-JSON, so the company envelope passes it
+/// through untouched.
+async fn fs_download(
+    State(state): State<Arc<AppState>>,
+    Path((workspace, id)): Path<(String, String)>,
+    gw: GatewayUser,
+    Query(q): Query<FileQuery>,
+) -> Result<axum::response::Response, AppError> {
+    use axum::response::IntoResponse;
+    let ws = authz_and_load(&state, &gw, &workspace, &id, WorkspaceKind::Fs).await?;
+    let (bytes, mime) = state.fs_service.read_file_raw(&ws.id, &q.path).await?;
+    let filename = q.path.rsplit('/').next().filter(|s| !s.is_empty()).unwrap_or("file");
+    // RFC 5987 filename* carries UTF-8 names (percent-encoded → the header
+    // value stays ASCII); a plain-ASCII fallback filename= keeps ancient
+    // clients working.
+    let ascii_fallback: String = filename
+        .chars()
+        .map(|c| if c.is_ascii_graphic() && c != '"' && c != '\\' { c } else { '_' })
+        .collect();
+    let encoded = percent_encoding::utf8_percent_encode(filename, percent_encoding::NON_ALPHANUMERIC);
+    let disposition = format!("attachment; filename=\"{ascii_fallback}\"; filename*=UTF-8''{encoded}");
+    Ok((
+        [
+            (axum::http::header::CONTENT_TYPE, mime),
+            (axum::http::header::CONTENT_DISPOSITION, disposition),
+        ],
+        bytes,
+    )
+        .into_response())
 }
 
 async fn fs_sql(

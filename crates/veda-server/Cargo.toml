@@ -54,6 +54,9 @@ reqwest = { workspace = true }
 # Promoted from dev-dependencies: the platform tunnel-bot API writes the
 # shared veda_tunnel_bots table directly (see src/tunnel_bots.rs).
 sqlx = { version = "0.8", features = ["mysql", "chrono", "json", "runtime-tokio-rustls"] }
+# RFC 5987 filename* encoding for platform file downloads (already in the
+# dep tree via axum).
+percent-encoding = "2"
 
 [dev-dependencies]
 toml = "0.8"
