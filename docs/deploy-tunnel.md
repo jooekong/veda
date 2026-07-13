@@ -14,7 +14,7 @@
                  ├─ MySQL → veda.mysql.srv.mc.dd/veda (veda_tunnel_bots, 与生产 veda-server 同库)
                  └─ admin 0.0.0.0:9110 (Bearer=生产 admin token)
                           ↑
-  nginx (10.79.55.161) /tunnel/v1/ → 10.79.52.95:9110/admin/  ← 目标态，见「历史与注意」
+  nginx (10.79.51.161, tdct-dbpaas-ai-service-4) /tunnel/v1/ → 10.79.52.95:9110/admin/
     ├─ veda-prod.dbpaas.dingdongxiaoqu.com  → 管理页 #/admin/tunnel（生产 token 登录）
     └─ veda-test.dbpaas.dingdongxiaoqu.com  → 同一后端（页面会提示需生产 token）
 ```
@@ -95,6 +95,7 @@ enabled = true            # 改动需重启（进程启动时读一次）
 
 ## 历史与注意
 
-- 2026-07-13 前 tunnel 跑在 .161（测试机、连 veda_it 测试库）。迁移当天 .161 sshd 全天不可达（诊断：除 nginx 外 sshd/node_exporter/dogfood/旧 tunnel 全部死亡，疑似 OOM），迁移经旧 tunnel admin API 删 bot 完成切换，**三件收尾挂起，.161 恢复后必须做**：① `systemctl stop && systemctl disable veda-tunnel`（旧进程已死但 service 仍 enabled；veda_it 表留有 placeholder 行防 seed，重启拉起也无害，但要正式停用）② 两个入口 conf（`veda-alpha.conf` / `veda-prod.conf`，均在 `/etc/nginx/conf.d/`）的 `/tunnel/v1/` 从 `127.0.0.1:9110` 切到 `10.79.52.95:9110`（未切前 console 的 tunnel 页不可用，bot 管理走 .95 本机 admin API）③ 清掉 .161 tunnel.toml 里的 `[[wecom.bot]]` seed 段。**不要再在 .161 起 tunnel**（互踢）。
+- 2026-07-13 前 tunnel 跑在 .161（入口机、连 veda_it 测试库）；迁移当天已收尾：旧 `veda-tunnel.service` stop+disable、tunnel.toml 的 `[[wecom.bot]]` seed 段注释（另有 veda_it 表 placeholder 行双保险）、nginx 双入口 conf 切 `10.79.52.95:9110`（备份 `.bak-tunnel95`）。**不要再在 .161 起 tunnel**（互踢）。
+- **⚠️ .161 的真实 IP = `10.79.51.161`**（`tdct-dbpaas-ai-service-4`，51 网段）——`.89/.85` 是 `10.79.55.x`，但 .161 不是！迁移当天曾按 `10.79.55.161` 连了一天连不上并误诊为整机故障（那是台不相干的机器）。SSH 走 inner-gw 跳板。
 - 首次启动会自动 `CREATE TABLE IF NOT EXISTS` + 按 information_schema 补新列，无需手工建表。
 - 升级 veda-server 平台 API（写共享表的那侧）与 tunnel 的顺序无要求——两边都带同一份幂等 schema 迁移。
