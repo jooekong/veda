@@ -722,15 +722,16 @@ async function tunnelApi<T = any>(path: string, opts: RequestInit = {}): Promise
 }
 
 function tunnelError(app: HTMLElement, e: Error) {
-  if (e.message === "UNAUTHORIZED") {
-    clearAdminToken();
-    renderLogin(app);
-    return;
-  }
+  // Unlike the console-wide 401 handling, a tunnel 401 must NOT clear the
+  // stored token: the console and the tunnel are different backends, and if
+  // their tokens ever diverge, clearing would trap the user in a
+  // login-kick loop. Show an inline hint instead.
   const msg =
-    e.message === "DISABLED"
-      ? "企微机器人管理未接通：确认 veda-tunnel 在运行、nginx 已反代 /tunnel/v1/ → :9100，且 tunnel 的 admin token 与此处一致。"
-      : `错误：${e.message}`;
+    e.message === "UNAUTHORIZED"
+      ? "当前登录的 admin token 对企微管理面无效（tunnel 使用生产 admin token）。请退出后用生产 token 重新登录。"
+      : e.message === "DISABLED"
+        ? "企微机器人管理未接通：确认 veda-tunnel 在运行、nginx 已反代 /tunnel/v1/，且 tunnel 的 admin token 与此处一致。"
+        : `错误：${e.message}`;
   app.innerHTML = `${header("#/admin", "企微机器人")}<p class="text-red-600 text-sm">${esc(msg)}</p>`;
   bindLogout();
 }
