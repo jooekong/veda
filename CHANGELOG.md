@@ -9,6 +9,8 @@ that matters.
 
 ## [Unreleased]
 
+## [0.1.17] — 2026-07-13
+
 ### Added
 - **Platform fs file upload/download.** The AI Workbench data plane gains
   `PUT /v1/workspace/{ws}/project/{id}/file?path=` (raw-byte body, same
