@@ -20,7 +20,9 @@ const BLOCK_SIZE: u32 = 512;
 
 /// Sidecar entries injected into every directory's readdir output.
 /// Both are read-only — see [`is_magic_name`] and the lookup / write
-/// branches in `Filesystem` below. Order is fixed (.abstract before
+/// branches in `Filesystem` below. One deliberate exception: unlink
+/// on a sidecar is a no-op success (not EROFS) so `rm -rf` over a
+/// directory completes cleanly. Order is fixed (.abstract before
 /// .overview) so behaviour is deterministic across runs.
 pub(crate) const MAGIC_NAMES: &[(&str, SummaryKind)] = &[
     (".abstract", SummaryKind::Abstract),
@@ -1754,8 +1756,15 @@ impl Filesystem for VedaFs {
         let name_str = match name.to_str() {
             Some(s) => s, None => { reply.error(libc::EINVAL); return; }
         };
+        // Sidecars are synthetic: report success without touching
+        // anything so `rm -rf dir` completes cleanly instead of
+        // erroring on entries the user never created. The name
+        // "reappears" on the next lookup, which is consistent — the
+        // summary exists as long as its directory does. rmdir's
+        // emptiness check asks the server (which never counts
+        // sidecars), so deleting the parent still works after this.
         if is_magic_name(name_str).is_some() {
-            reply.error(libc::EROFS);
+            reply.ok();
             return;
         }
         let parent_path = match self.inode_get_path(parent) {
@@ -1821,11 +1830,10 @@ impl Filesystem for VedaFs {
             Some(s) => s, None => { reply.error(libc::EINVAL); return; }
         };
         if is_magic_name(name_str).is_some() {
-            // Symmetric with unlink/create/rename: sidecars aren't
-            // directories anyway, so the server would 404, but
-            // returning EROFS locally keeps the contract uniform and
-            // saves a round-trip.
-            reply.error(libc::EROFS);
+            // Sidecars are regular files, so rmdir on one is a type
+            // error per POSIX. (unlink above is the no-op success
+            // path; recursive deletes go through unlink, not here.)
+            reply.error(libc::ENOTDIR);
             return;
         }
         let parent_path = match self.inode_get_path(parent) {

@@ -147,6 +147,15 @@ that matters.
   failures surface as errors — no silent fallback to semantic.
 
 ### Fixed
+- **FUSE: `rm -rf` no longer trips over summary sidecars.** Deleting a
+  directory used to error with `rm: dir/.abstract: Read-only file system`
+  and leave the directory shell behind, because unlink on the synthetic
+  `.abstract` / `.overview` entries returned EROFS. unlink on a sidecar is
+  now a no-op success (the summary lives as long as its directory; it
+  reappears on the next lookup), so recursive deletes finish cleanly and
+  the directory itself is removed. Sidecars stay read-only otherwise:
+  write / create / rename onto them still fail, and `rmdir` on one now
+  returns the POSIX-accurate ENOTDIR instead of EROFS.
 - **Outbox lease fencing (A-3)**: workers on multiple servers can now safely
   share one MySQL. `claim()` stamps a `lease_owner` (`host:pid`); complete /
   fail / renew are fenced on `owner + status='processing'`, so a stale executor
