@@ -266,3 +266,26 @@ workspace = "eng-kb"
 - **部署**：nginx 反代 `location /tunnel/v1/ { proxy_pass http://127.0.0.1:9100/admin/; }`，前端 fetch `/tunnel/v1/*` 同源；tunnel `[admin].token` 配成 = `VEDA_ADMIN_TOKEN`（一个 token 走两后端）。
 
 **联调（2026-07-09，真实 veda_it MySQL）**：连接→建表→seed→spawn→订阅全通；CRUD 全过（POST 201 / 重复 bot_id 409 / PUT 保留 key / DELETE / 401 fail-closed）；前端 `tsc`+`vite build` 过、`/tunnel/v1` 经 proxy 通。前端真机点击未测（chrome 扩展未连）。
+
+## 18. 生产迁移 .95 + AI 工作台平台 API（2026-07-13 追加）
+
+**需求**：① tunnel 迁到专用生产机 10.79.52.95；② AI 工作台（只跟 veda-server 交互）能给 fs project 配企微 bot——server 加平台 API，并解决「server 写入、tunnel 怎么感知」。
+
+**架构决策：共享表 + 轮询，进程间零 RPC**
+
+```
+AI 工作台 → 网关 → veda-server /v1/workspace/{ws}/project/{id}/tunnel/bots
+                        │ 直写 veda_tunnel_bots（生产 veda 库，与 tunnel 共享）
+veda-tunnel (.95) ──────┴─ 30s store 轮询：plan() diff → spawn/respawn/stop
+                           └─ conn_state 心跳写回同表 → 平台 GET 可见在线状态
+```
+
+备选（server 代理调 tunnel admin API）被否：多一跳网络依赖 + tunnel 得暴露内网服务面；MySQL 已是两者共同依赖，表即总线（符合「能 MySQL 不上 Kafka」）。
+
+**要点**：
+- **平台 API**（`routes/tunnel_bots.rs` + `tunnel_bots.rs`，apps 面惯例：authz=`workspace-create`、company envelope、跨租户折叠 NOT_FOUND）：POST 自动 mint 只读 `wk_`（用户零 key 管理；insert 撞唯一约束回滚 revoke，不泄漏 key）、PATCH 空 secret=保留、DELETE 连带 revoke key、仅 fs（db → KIND_MISMATCH）。
+- **表 schema 升级**（owner=tunnel `store.rs`，server 复制同一份 DDL+迁移）：+`key_id`（revoke 闭环）、`creator/creator_name`（平台身份）、`conn_state/conn_updated_at`（心跳，UPDATE 时 `updated_at=updated_at` 保配置时间戳语义）。MySQL 8 无 `ADD COLUMN IF NOT EXISTS` → information_schema 判存量列，幂等，**两边谁先部署都行**（集成测试先抓到：veda_it 旧 8 列表 + server 只 CREATE 不迁移 → Unknown column 500）。
+- **tunnel reconcile**（`reconcile.rs` 纯函数 plan + main 执行）：30s interval 进 control loop select；diff 全字段（`BotConfig` derive PartialEq）；stop 先于 spawn（同 tick 删+建同 bot_id 时先释放企微连接）；store 读失败跳过本 tick 不动存量连接。
+- **部署**（`docs/deploy-tunnel.md`）：.95 = EulerOS glibc 2.34（二进制必须 .89 build，Mac 中继）；admin listen 0.0.0.0:9110（nginx 在 .161 跨机反代）+ 生产 token；MySQL 从 veda_it 切生产 veda 库（bot 经 API 重建，不搬数据）；nginx 两入口 `/tunnel/v1` → .95；.161 旧实例 stop+disable（单实例铁律）。
+
+**验收（2026-07-13）**：tunnel 26+ 单测（含 reconcile plan 5 个）+ server 集成测试 `tunnel_bots_test`（真 MySQL：CRUD 全周期 + key mint/revoke 不变量 + 409 回滚 key + db project 400 + 跨 project 404）全绿；clippy 新文件零告警。平台契约文档：APIDoc `docs/veda/tunnel-bot-api.md`。

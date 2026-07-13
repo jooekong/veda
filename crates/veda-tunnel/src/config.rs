@@ -91,7 +91,9 @@ pub struct WecomConfig {
     pub bot: Vec<BotConfig>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+// PartialEq: the store-poll reconciler diffs desired (MySQL) vs running
+// (in-memory) configs to decide which bots to respawn.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
 pub struct BotConfig {
     /// Human-readable name — admin display + logs.
     pub name: String,

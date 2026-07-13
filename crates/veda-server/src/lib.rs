@@ -13,4 +13,5 @@ pub mod platform;
 pub mod reconciler;
 pub mod routes;
 pub mod state;
+pub mod tunnel_bots;
 pub mod worker;

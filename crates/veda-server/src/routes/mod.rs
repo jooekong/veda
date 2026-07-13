@@ -11,6 +11,7 @@ pub mod project_data;
 pub mod reconcile;
 pub mod search;
 pub mod sql;
+pub mod tunnel_bots;
 pub mod vectors;
 
 use std::sync::Arc;
@@ -45,6 +46,7 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/v1/metrics", get(metrics_endpoint))
         .merge(account::routes())
         .merge(apps::routes())
+        .merge(tunnel_bots::routes())
         .merge(admin_tokens::routes())
         .merge(admin::routes())
         .merge(reconcile::routes())

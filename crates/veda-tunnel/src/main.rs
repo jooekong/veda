@@ -16,13 +16,21 @@ use tracing_subscriber::EnvFilter;
 
 use veda_tunnel::admin::{self, AdminState, ControlCmd};
 use veda_tunnel::config::{BotConfig, TunnelConfig};
+use veda_tunnel::reconcile::{self, Action};
 use veda_tunnel::registry::{self, Registry};
 use veda_tunnel::store::BotStore;
 use veda_tunnel::veda::VedaClient;
 use veda_tunnel::wecom::conn::{run_bot, BotRuntime};
 
-/// Handle to one running bot task: its shutdown switch + join handle.
+/// How often the control loop re-reads the store and converges the fleet
+/// (picks up rows written by veda-server's platform API) + writes the
+/// conn_state heartbeat back.
+const STORE_POLL_INTERVAL: Duration = Duration::from_secs(30);
+
+/// Handle to one running bot task: its shutdown switch + join handle + the
+/// config it was spawned with (the reconciler diffs this against the store).
 struct BotHandle {
+    cfg: Arc<BotConfig>,
     shutdown: watch::Sender<bool>,
     join: JoinHandle<()>,
 }
@@ -33,15 +41,17 @@ fn spawn_bot(
     reg: Registry,
     answer_enabled: bool,
 ) -> BotHandle {
+    let bot = Arc::new(bot);
     let (sd_tx, sd_rx) = watch::channel(false);
     let rt = BotRuntime {
-        bot: Arc::new(bot),
+        bot: bot.clone(),
         veda,
         registry: reg,
         answer_enabled,
     };
     let join = tokio::spawn(run_bot(rt, sd_rx));
     BotHandle {
+        cfg: bot,
         shutdown: sd_tx,
         join,
     }
@@ -49,11 +59,18 @@ fn spawn_bot(
 
 async fn stop_bot(h: BotHandle) {
     let _ = h.shutdown.send(true);
-    if tokio::time::timeout(Duration::from_secs(10), h.join)
+    let mut join = h.join;
+    if tokio::time::timeout(Duration::from_secs(10), &mut join)
         .await
         .is_err()
     {
-        warn!("bot task did not stop within 10s");
+        // A task that ignores the grace window (e.g. wedged mid-handshake)
+        // must not outlive its replacement — it could still subscribe later
+        // and kick-war the new connection. Abort is safe: no cross-task
+        // state beyond the registry row, which the caller rewrites anyway.
+        warn!("bot task did not stop within 10s, aborting");
+        join.abort();
+        let _ = join.await;
     }
 }
 
@@ -131,7 +148,11 @@ async fn main() -> anyhow::Result<()> {
         }
     });
 
-    // Control loop: react to Ctrl-C and admin intents.
+    // Control loop: react to Ctrl-C, admin intents, and the store poll.
+    let mut poll = tokio::time::interval(STORE_POLL_INTERVAL);
+    poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    // Last conn_state written per bot — heartbeat only touches MySQL on change.
+    let mut last_conn: HashMap<String, &'static str> = HashMap::new();
     loop {
         tokio::select! {
             _ = tokio::signal::ctrl_c() => {
@@ -140,6 +161,9 @@ async fn main() -> anyhow::Result<()> {
             }
             Some(cmd) = control_rx.recv() => {
                 handle_control(cmd, &store, &veda, &reg, &mut bots, answer_enabled).await;
+            }
+            _ = poll.tick() => {
+                reconcile_store(&store, &veda, &reg, &mut bots, answer_enabled, &mut last_conn).await;
             }
         }
     }
@@ -165,6 +189,13 @@ async fn handle_control(
     match cmd {
         ControlCmd::AddBot { bot, reply } => match store.add(&bot).await {
             Ok(()) => {
+                // The map can still hold a live task for this bot_id (row
+                // deleted elsewhere, poll hasn't swept yet) — stop it before
+                // inserting, or the overwritten handle's task leaks and
+                // fights the new connection.
+                if let Some(old) = bots.remove(&bot.bot_id) {
+                    stop_bot(old).await;
+                }
                 registry::insert(reg, &bot);
                 bots.insert(
                     bot.bot_id.clone(),
@@ -263,6 +294,75 @@ async fn handle_control(
             let n = bot_cfgs.len();
             info!(bots = n, "reload: complete");
             let _ = reply.send(Ok(n));
+        }
+    }
+}
+
+/// One store-poll tick: converge the running fleet onto the MySQL table
+/// (rows written by veda-server's platform API bypass tunnel's admin API,
+/// so this is how they take effect), then write the conn_state heartbeat
+/// back for the platform API to display. A store read failure skips the
+/// tick — never tear down live connections on a DB blip.
+async fn reconcile_store(
+    store: &Arc<BotStore>,
+    veda: &Arc<VedaClient>,
+    reg: &Registry,
+    bots: &mut HashMap<String, BotHandle>,
+    answer_enabled: bool,
+    last_conn: &mut HashMap<String, &'static str>,
+) {
+    let desired = match store.list().await {
+        Ok(d) => d,
+        Err(e) => {
+            warn!(error = %e, "store poll failed, keeping current fleet");
+            return;
+        }
+    };
+    let running: HashMap<String, Arc<BotConfig>> = bots
+        .iter()
+        .map(|(id, h)| (id.clone(), h.cfg.clone()))
+        .collect();
+    for act in reconcile::plan(&desired, &running) {
+        match act {
+            Action::Stop(id) => {
+                if let Some(h) = bots.remove(&id) {
+                    stop_bot(h).await;
+                }
+                registry::remove(reg, &id);
+                last_conn.remove(&id);
+                info!(bot_id = %id, "reconcile: stopped (removed from store)");
+            }
+            Action::Spawn(b) => {
+                info!(bot_id = %b.bot_id, name = %b.name, "reconcile: spawning new bot");
+                registry::insert(reg, &b);
+                bots.insert(
+                    b.bot_id.clone(),
+                    spawn_bot(b, veda.clone(), reg.clone(), answer_enabled),
+                );
+            }
+            Action::Respawn(b) => {
+                info!(bot_id = %b.bot_id, name = %b.name, "reconcile: config changed, respawning");
+                if let Some(h) = bots.remove(&b.bot_id) {
+                    stop_bot(h).await;
+                }
+                registry::insert(reg, &b);
+                bots.insert(
+                    b.bot_id.clone(),
+                    spawn_bot(b, veda.clone(), reg.clone(), answer_enabled),
+                );
+            }
+        }
+    }
+    // Heartbeat: push live conn states into the table, only on change.
+    for st in registry::snapshot(reg) {
+        let s = st.conn_state.as_str();
+        if last_conn.get(&st.bot_id).copied() != Some(s) {
+            match store.set_conn_state(&st.bot_id, s).await {
+                Ok(()) => {
+                    last_conn.insert(st.bot_id.clone(), s);
+                }
+                Err(e) => warn!(bot_id = %st.bot_id, error = %e, "heartbeat write failed"),
+            }
         }
     }
 }

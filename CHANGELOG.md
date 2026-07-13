@@ -10,6 +10,24 @@ that matters.
 ## [Unreleased]
 
 ### Added
+- **Platform tunnel-bot API — attach a WeCom bot to an fs project from the AI
+  Workbench.** New apps-surface CRUD
+  `/v1/workspace/{ws}/project/{id}/tunnel/bots` (fs-only; gateway authz +
+  company envelope): create auto-mints a dedicated read-only `wk_` for the
+  project (revoked again on delete — a conflicting create rolls its key back
+  too), secret is write-only, responses carry tunnel's live `conn_state`
+  heartbeat. veda-server writes the `veda_tunnel_bots` table shared with
+  veda-tunnel (both sides run the same idempotent CREATE+ALTER schema
+  bootstrap, so deploy order is free); the tunnel process converges within
+  one 30s store poll — no RPC between the two. Contract: APIDoc
+  `docs/veda/tunnel-bot-api.md`.
+- **veda-tunnel store-poll reconcile + heartbeat.** The control loop now
+  re-reads the bot table every 30s and diffs desired vs running
+  (`reconcile::plan`: spawn new / respawn changed / stop removed), so rows
+  written by the platform API take effect without a restart; it also writes
+  each bot's connection state back (`conn_state`/`conn_updated_at`, on
+  change only) for the platform API to display. Deployed to the dedicated
+  production box 10.79.52.95 (`docs/deploy-tunnel.md`).
 - **`POST /v1/answer` — RAG knowledge-base Q&A (P0, fs workspaces).** Retrieval
   → tiered context assembly → LLM answer with verifiable citations
   (`citations[{index,path,spans}]` map each inline `[n]` to the exact chunk

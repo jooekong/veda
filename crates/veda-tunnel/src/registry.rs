@@ -24,6 +24,19 @@ pub enum ConnState {
     Down,
 }
 
+impl ConnState {
+    /// Same strings as the serde form — written into
+    /// `veda_tunnel_bots.conn_state` by the heartbeat.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ConnState::Connecting => "connecting",
+            ConnState::Subscribed => "subscribed",
+            ConnState::Reconnecting => "reconnecting",
+            ConnState::Down => "down",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct BotStatus {
     pub name: String,

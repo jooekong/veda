@@ -37,6 +37,7 @@ const DEDUP_TTL_SECS: u64 = 600;
 const OUTBOUND_CAP: usize = 64;
 const MAX_BACKOFF_SECS: u64 = 30;
 const HEALTHY_CONN_SECS: u64 = 5;
+const CONNECT_TIMEOUT_SECS: u64 = 15;
 
 /// Per-bot immutable runtime handles.
 pub struct BotRuntime {
@@ -51,7 +52,15 @@ fn new_req_id() -> String {
     uuid::Uuid::new_v4().to_string()
 }
 
-/// Drive one bot until `shutdown` flips to true.
+/// True when this bot task must stop: the flag flipped, OR the sender side
+/// was dropped (a `bots.insert` overwriting an old handle drops its sender
+/// without sending). Treating closed-as-shutdown is what prevents an orphaned
+/// task from reconnecting forever and kick-warring its replacement.
+fn stop_requested(shutdown: &watch::Receiver<bool>) -> bool {
+    *shutdown.borrow() || shutdown.has_changed().is_err()
+}
+
+/// Drive one bot until `shutdown` flips to true (or its sender is dropped).
 pub async fn run_bot(rt: BotRuntime, mut shutdown: watch::Receiver<bool>) {
     // msgid dedup: WeCom re-pushes a message if it doesn't see our 5s ack.
     // Per-bot cache; the read loop is single-threaded so contains+insert is
@@ -63,7 +72,7 @@ pub async fn run_bot(rt: BotRuntime, mut shutdown: watch::Receiver<bool>) {
 
     let mut backoff = Duration::from_secs(1);
 
-    while !*shutdown.borrow() {
+    while !stop_requested(&shutdown) {
         registry::update(&rt.registry, &rt.bot.bot_id, |s| {
             s.conn_state = ConnState::Connecting;
         });
@@ -71,7 +80,7 @@ pub async fn run_bot(rt: BotRuntime, mut shutdown: watch::Receiver<bool>) {
         let started = std::time::Instant::now();
         let outcome = serve_once(&rt, &dedup, &mut shutdown).await;
 
-        if *shutdown.borrow() {
+        if stop_requested(&shutdown) {
             break;
         }
 
@@ -115,7 +124,16 @@ async fn serve_once(
     dedup: &Cache<String, ()>,
     shutdown: &mut watch::Receiver<bool>,
 ) -> anyhow::Result<()> {
-    let (ws, _) = connect_async(WECOM_WS_URL).await.context("ws connect")?;
+    // The handshake must stay interruptible: without the select, a task stuck
+    // in TCP/TLS connect ignores shutdown past stop_bot's grace window and can
+    // still subscribe AFTER its replacement — a kick-war. The timeout bounds a
+    // black-holed connect (tungstenite has none of its own).
+    let (ws, _) = tokio::select! {
+        r = tokio::time::timeout(Duration::from_secs(CONNECT_TIMEOUT_SECS), connect_async(WECOM_WS_URL)) => {
+            r.context("ws connect timed out")?.context("ws connect")?
+        }
+        _ = shutdown.changed() => return Ok(()),
+    };
     let (mut write, mut read) = ws.split();
 
     let (out_tx, mut out_rx) = mpsc::channel::<Value>(OUTBOUND_CAP);

@@ -52,6 +52,10 @@ pub struct AppState {
     /// From `[llm].answer_concurrency`. A read-only `wk_` can still drive LLM
     /// cost, so in-flight answers per workspace are capped.
     pub answer_concurrency: usize,
+    /// Platform write path into `veda_tunnel_bots` — the WeCom bot table
+    /// shared with the veda-tunnel process (which polls it every 30s). See
+    /// `crate::tunnel_bots`.
+    pub tunnel_bots: Arc<crate::tunnel_bots::TunnelBotStore>,
     /// Flipped by the SIGTERM handler at the start of the drain window
     /// (`ServerConfig::drain_secs`). While set, `/v1/ready` reports 503
     /// "draining" so the LB pulls this node, but the listener keeps

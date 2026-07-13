@@ -444,6 +444,19 @@ async fn delete_app_project(
         return Err(VedaError::NotFound(format!("project {ws_id}")).into());
     }
     state.auth_store.delete_workspace(&ws_id).await?;
+    // Cascade: drop the project's WeCom bot rows so the tunnel closes their
+    // connections on its next poll. Without this a deleted project leaves a
+    // zombie bot pinging WeCom with revoked credentials. Best-effort — the
+    // project deletion itself already committed (keys revoked ⇒ data plane
+    // dead either way); log so ops can clean a leftover row by hand.
+    match state.tunnel_bots.delete_by_project(&ws_id).await {
+        Ok(n) if n > 0 => {
+            tracing::info!(project = %ws_id, bots = n, "project delete: removed tunnel bots")
+        }
+        Ok(_) => {}
+        Err(e) => tracing::warn!(project = %ws_id, error = %e,
+            "project deleted but tunnel bot cascade failed — remove rows manually"),
+    }
     Ok(Json(ApiResponse::ok(())))
 }
 
@@ -466,7 +479,7 @@ struct AppKey {
 
 /// Mask a `wk_` token for console display: keep the `wk_` + 4 leading chars and
 /// the last 4. Tokens are ASCII (`wk_` + hex) so byte-slicing is safe.
-fn mask_token(token: &str) -> String {
+pub(crate) fn mask_token(token: &str) -> String {
     let n = token.len();
     if n <= 12 {
         return "****".to_string();

@@ -1,4 +1,4 @@
-use veda_server::{config, obs, reconciler, routes, state, worker};
+use veda_server::{config, obs, reconciler, routes, state, tunnel_bots, worker};
 
 use std::sync::Arc;
 
@@ -157,6 +157,11 @@ async fn main() -> anyhow::Result<()> {
     };
     let answer_concurrency = cfg.llm.as_ref().map(|c| c.answer_concurrency).unwrap_or(2);
 
+    // Shared WeCom bot table (owner: veda-tunnel). Small dedicated pool on
+    // the same MySQL — see veda_server::tunnel_bots for the topology.
+    let tunnel_bots =
+        Arc::new(tunnel_bots::TunnelBotStore::connect(&cfg.mysql.database_url).await?);
+
     let app_state = Arc::new(AppState {
         fs_service,
         search_service,
@@ -175,6 +180,7 @@ async fn main() -> anyhow::Result<()> {
         summary_enabled: cfg.llm.is_some(),
         answer_service,
         answer_concurrency,
+        tunnel_bots,
         draining: std::sync::atomic::AtomicBool::new(false),
     });
 

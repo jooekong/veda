@@ -154,6 +154,11 @@ async fn build_test_app() -> (Arc<AppState>, axum::Router) {
         summary_enabled: false,
         answer_service: None,
         answer_concurrency: 2,
+        tunnel_bots: Arc::new(
+            veda_server::tunnel_bots::TunnelBotStore::connect(&cfg.mysql.database_url)
+                .await
+                .expect("tunnel bots store"),
+        ),
         draining: std::sync::atomic::AtomicBool::new(false),
     });
     let router = build_router(state.clone());
