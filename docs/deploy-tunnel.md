@@ -118,5 +118,6 @@ enabled = true            # 改动需重启（进程启动时读一次）
 - 2026-07-13 前 tunnel 跑在 .161（入口机、连 veda_it 测试库）；迁移当天已收尾：旧 `veda-tunnel.service` stop+disable、tunnel.toml 的 `[[wecom.bot]]` seed 段注释（另有 veda_it 表 placeholder 行双保险）、nginx 双入口 conf 切 `10.79.52.95:9110`（备份 `.bak-tunnel95`）。**不要再在 .161 起 tunnel**。
 - 2026-07-14 增设测试实例于 .89（平台同事在测试环境建的 bot 此前永远「等待连接」——无实例读测试库）；nginx `veda-alpha.conf` 的 `/tunnel/v1/` 切 `10.79.55.89:9110`（备份 `.bak-tunnel-test89`），veda-test console 自此用**测试** token 管理。二进制直接复用 .89 build 产物（与 .95 生产同 md5）。
 - **⚠️ .161 的真实 IP = `10.79.51.161`**（`tdct-dbpaas-ai-service-4`，51 网段）——`.89/.85` 是 `10.79.55.x`，但 .161 不是！迁移当天曾按 `10.79.55.161` 连了一天连不上并误诊为整机故障（那是台不相干的机器）。SSH 走 inner-gw 跳板。
-- 首次启动会自动 `CREATE TABLE IF NOT EXISTS` + 按 information_schema 补新列，无需手工建表。
+- 首次启动会自动 `CREATE TABLE IF NOT EXISTS` + 按 information_schema 补新列，无需手工建表（bots 表 + `veda_tunnel_qa_log`/`veda_tunnel_qa_feedback` 问答遥测两表同理）。
+- **问答日志含提问与答案原文**（管理员经 console 可见，与知识库内容同级敏感度）；v1 不自动清理，需要时人工：`DELETE FROM veda_tunnel_qa_log WHERE ts < NOW() - INTERVAL 180 DAY;`（feedback 表按 feedback_id 孤儿同理）。
 - 升级 veda-server 平台 API（写共享表的那侧）与 tunnel 的顺序无要求——两边都带同一份幂等 schema 迁移。

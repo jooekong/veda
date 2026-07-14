@@ -10,7 +10,7 @@
 
 use std::sync::Arc;
 
-use axum::extract::{FromRequestParts, Path, State};
+use axum::extract::{FromRequestParts, Path, Query, State};
 use axum::http::request::Parts;
 use axum::http::{header, StatusCode};
 use axum::response::{IntoResponse, Response};
@@ -22,6 +22,7 @@ use serde_json::json;
 use tokio::sync::{mpsc, oneshot};
 
 use crate::config::BotConfig;
+use crate::qa_log::{QaLogFilter, QaLogStore};
 use crate::registry::{self, BotStatus, ConnState, Registry};
 use crate::store::BotStore;
 
@@ -53,6 +54,7 @@ pub enum ControlCmd {
 pub struct AdminState {
     pub registry: Registry,
     pub store: Arc<BotStore>,
+    pub qa_log: Arc<QaLogStore>,
     pub admin_token: Option<String>,
     pub control: mpsc::Sender<ControlCmd>,
 }
@@ -67,6 +69,8 @@ pub fn router(state: AdminState) -> Router {
         )
         .route("/admin/bots/{bot_id}/reconnect", post(reconnect))
         .route("/admin/reload", post(reload))
+        .route("/admin/stats", get(qa_stats))
+        .route("/admin/qa-log", get(qa_log_list))
         .with_state(state)
 }
 
@@ -221,6 +225,54 @@ async fn reload(_: AdminAuth, State(st): State<AdminState>) -> Response {
     }
 }
 
+// ── QA telemetry (docs/plans/veda-tunnel-qa-log.md) ─────
+
+#[derive(serde::Deserialize)]
+struct StatsQuery {
+    days: Option<u32>,
+    bot_id: Option<String>,
+}
+
+/// GET /admin/stats?days=7&bot_id= — totals + outcome distribution +
+/// thumb up/down counts over the window.
+async fn qa_stats(_: AdminAuth, State(st): State<AdminState>, Query(q): Query<StatsQuery>) -> Response {
+    let days = q.days.unwrap_or(7).clamp(1, 90);
+    match st.qa_log.stats(days, q.bot_id.as_deref()).await {
+        Ok(s) => Json(s).into_response(),
+        Err(e) => internal(e.to_string()),
+    }
+}
+
+#[derive(serde::Deserialize)]
+struct QaLogQuery {
+    outcome: Option<String>,
+    /// "1"/"true" → only rows with at least one down-vote.
+    down_voted: Option<bool>,
+    bot_id: Option<String>,
+    page: Option<u32>,
+    size: Option<u32>,
+}
+
+/// GET /admin/qa-log?outcome=&down_voted=&page= — newest-first Q&A rows with
+/// per-row vote counts; the bad-case browsing surface.
+async fn qa_log_list(
+    _: AdminAuth,
+    State(st): State<AdminState>,
+    Query(q): Query<QaLogQuery>,
+) -> Response {
+    let filter = QaLogFilter {
+        outcome: q.outcome.filter(|s| !s.is_empty()),
+        down_voted: q.down_voted.unwrap_or(false),
+        bot_id: q.bot_id.filter(|s| !s.is_empty()),
+        page: q.page.unwrap_or(1),
+        size: q.size.unwrap_or(20),
+    };
+    match st.qa_log.list(&filter).await {
+        Ok(rows) => Json(rows).into_response(),
+        Err(e) => internal(e.to_string()),
+    }
+}
+
 // ── Response helpers ────────────────────────────────────
 
 fn bad_request(msg: String) -> Response {
@@ -261,6 +313,10 @@ struct BotView {
     project: Option<String>,
     mode: String,
     limit: usize,
+    /// Custom answer persona; absent = server default. Round-trips in full
+    /// so the edit form can prefill it (not a secret, unlike veda_key).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    prompt: Option<String>,
     /// Masked (`wk_b36…0f58`) — the plaintext key never leaves the store.
     veda_key_masked: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -284,6 +340,7 @@ impl BotView {
             project: b.project.clone(),
             mode: b.mode.clone(),
             limit: b.limit,
+            prompt: b.prompt.clone(),
             veda_key_masked: mask_key(&b.veda_key),
             conn_state: None,
             connected_since: None,

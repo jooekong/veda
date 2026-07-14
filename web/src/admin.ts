@@ -694,6 +694,7 @@ type TunnelBot = {
   project?: string;
   mode: string;
   limit: number;
+  prompt?: string;
   veda_key_masked: string;
   conn_state?: "connecting" | "subscribed" | "reconnecting" | "down";
   connected_since?: string;
@@ -745,6 +746,135 @@ function connBadge(s?: string): string {
   };
   const [label, cls] = m[s ?? ""] ?? ["未知", "bg-slate-100 text-slate-500"];
   return `<span class="text-xs px-1.5 py-0.5 rounded font-medium ${cls}">${label}</span>`;
+}
+
+// ── 问答统计（qa_log，docs/plans/veda-tunnel-qa-log.md）──
+
+type QaStats = {
+  days: number;
+  total: number;
+  outcomes: Record<string, number>;
+  feedback_up: number;
+  feedback_down: number;
+};
+type QaRow = {
+  id: number;
+  ts: string;
+  user_id: string;
+  query: string;
+  outcome: string;
+  hit_count: number;
+  citation_count: number;
+  latency_ms: number;
+  answer_text: string | null;
+  up_count: number;
+  down_count: number;
+};
+
+const OUTCOME_BADGE: Record<string, [string, string]> = {
+  answered: ["已回答", "bg-emerald-100 text-emerald-700"],
+  no_context: ["无内容", "bg-amber-100 text-amber-800"],
+  ungrounded: ["无引用", "bg-orange-100 text-orange-700"],
+  raw_search: ["纯检索", "bg-sky-100 text-sky-700"],
+  error: ["错误", "bg-rose-100 text-rose-700"],
+  throttled: ["限流", "bg-slate-100 text-slate-500"],
+  disabled: ["未启用", "bg-slate-100 text-slate-500"],
+};
+
+function outcomeBadge(o: string): string {
+  const [label, cls] = OUTCOME_BADGE[o] ?? [o, "bg-slate-100 text-slate-500"];
+  return `<span class="text-xs px-1.5 py-0.5 rounded font-medium ${cls}">${esc(label)}</span>`;
+}
+
+function statCard(label: string, value: string, sub = ""): string {
+  return `<div class="bg-white border border-slate-200 rounded-lg p-4">
+    <div class="text-xs text-slate-500 mb-1">${esc(label)}</div>
+    <div class="text-2xl font-bold">${value}</div>
+    ${sub ? `<div class="text-xs text-slate-400 mt-1">${sub}</div>` : ""}
+  </div>`;
+}
+
+async function renderQaStats(root: HTMLElement) {
+  root.innerHTML = `<p class="text-sm text-slate-400">统计加载中…</p>`;
+  let stats: QaStats;
+  try {
+    stats = await tunnelApi<QaStats>("/stats?days=7");
+  } catch {
+    root.innerHTML = ""; // 老版本 tunnel 无此端点时静默隐藏
+    return;
+  }
+  const noCtx = stats.outcomes["no_context"] ?? 0;
+  const pct = (n: number) => (stats.total ? `${((n / stats.total) * 100).toFixed(0)}%` : "—");
+  root.innerHTML = `
+    <h2 class="text-lg font-semibold mb-3">问答统计（近 7 天）</h2>
+    <div class="grid grid-cols-1 sm:grid-cols-3 gap-3 mb-4">
+      ${statCard("问答总量", String(stats.total), Object.entries(stats.outcomes).map(([k, v]) => `${esc(k)} ${v}`).join(" · "))}
+      ${statCard("知识库无内容", `${noCtx} <span class="text-sm font-normal text-slate-400">(${pct(noCtx)})</span>`, "这些问题就是「缺什么文档」清单")}
+      ${statCard("用户反馈", `👍 ${stats.feedback_up} · 👎 ${stats.feedback_down}`, "点踩的进下方 bad case")}
+    </div>
+    <div class="flex items-center gap-3 mb-2">
+      <h3 class="text-sm font-semibold">问答明细</h3>
+      <select id="qa-outcome" class="text-xs border border-slate-300 rounded px-2 py-1">
+        <option value="">全部结果</option>
+        <option value="no_context">无内容</option>
+        <option value="ungrounded">无引用</option>
+        <option value="answered">已回答</option>
+        <option value="error">错误</option>
+      </select>
+      <label class="text-xs text-slate-600 flex items-center gap-1">
+        <input type="checkbox" id="qa-down"> 仅被踩
+      </label>
+    </div>
+    <div id="qa-rows"></div>`;
+  const refresh = () => {
+    const outcome = (document.getElementById("qa-outcome") as HTMLSelectElement).value;
+    const down = (document.getElementById("qa-down") as HTMLInputElement).checked;
+    void loadQaRows(document.getElementById("qa-rows")!, outcome, down);
+  };
+  document.getElementById("qa-outcome")!.addEventListener("change", refresh);
+  document.getElementById("qa-down")!.addEventListener("change", refresh);
+  refresh();
+}
+
+async function loadQaRows(box: HTMLElement, outcome: string, downVoted: boolean) {
+  box.innerHTML = `<p class="text-sm text-slate-400">加载中…</p>`;
+  let rows: QaRow[];
+  try {
+    const q = new URLSearchParams({ size: "20" });
+    if (outcome) q.set("outcome", outcome);
+    if (downVoted) q.set("down_voted", "true");
+    rows = await tunnelApi<QaRow[]>(`/qa-log?${q}`);
+  } catch (e: any) {
+    box.innerHTML = `<p class="text-sm text-rose-600">加载失败：${esc(e.message)}</p>`;
+    return;
+  }
+  if (!rows.length) {
+    box.innerHTML = `<p class="text-sm text-slate-500 p-3 bg-white border border-slate-200 rounded-lg">没有匹配的记录。</p>`;
+    return;
+  }
+  const tr = rows
+    .map(
+      (r) => `
+    <tr class="border-t border-slate-100 align-top">
+      <td class="px-3 py-2 text-xs text-slate-400 whitespace-nowrap">${esc(new Date(r.ts).toLocaleString("zh-CN", { hour12: false }))}</td>
+      <td class="px-3 py-2 text-sm max-w-md">
+        <div class="font-medium">${esc(r.query)}</div>
+        ${r.answer_text ? `<details class="mt-1"><summary class="text-xs text-slate-400 cursor-pointer">答案</summary><div class="text-xs text-slate-600 whitespace-pre-wrap mt-1">${esc(r.answer_text)}</div></details>` : ""}
+      </td>
+      <td class="px-3 py-2">${outcomeBadge(r.outcome)}</td>
+      <td class="px-3 py-2 text-xs text-slate-500 whitespace-nowrap">${r.citation_count} 引用 · ${(r.latency_ms / 1000).toFixed(1)}s</td>
+      <td class="px-3 py-2 text-xs whitespace-nowrap">${r.up_count ? `👍${r.up_count} ` : ""}${r.down_count ? `<span class="text-rose-600">👎${r.down_count}</span>` : ""}</td>
+    </tr>`,
+    )
+    .join("");
+  box.innerHTML = `<div class="bg-white border border-slate-200 rounded-lg overflow-x-auto">
+    <table class="w-full text-left">
+      <thead class="text-xs uppercase tracking-wide text-slate-500">
+        <tr><th class="px-3 py-2 font-semibold">时间</th><th class="px-3 py-2 font-semibold">问题 / 答案</th><th class="px-3 py-2 font-semibold">结果</th><th class="px-3 py-2 font-semibold">质量</th><th class="px-3 py-2 font-semibold">反馈</th></tr>
+      </thead>
+      <tbody>${tr}</tbody>
+    </table>
+  </div>`;
 }
 
 async function renderTunnel(app: HTMLElement) {
@@ -801,8 +931,10 @@ async function renderTunnel(app: HTMLElement) {
       <button id="tn-add" class="bg-slate-900 text-white px-3 py-1.5 rounded text-sm font-medium hover:bg-slate-700">+ 新增</button>
     </div>
     ${table}
-    ${lastErr ? `<p class="text-xs text-rose-500 mt-3">最近错误（${esc(lastErr.name)}）：${esc(lastErr.last_error)}</p>` : ""}`;
+    ${lastErr ? `<p class="text-xs text-rose-500 mt-3">最近错误（${esc(lastErr.name)}）：${esc(lastErr.last_error)}</p>` : ""}
+    <div id="qa-stats" class="mt-8"></div>`;
   bindLogout();
+  void renderQaStats(document.getElementById("qa-stats")!);
   document.getElementById("tn-add")!.addEventListener("click", () => openBotForm(app));
   app.querySelectorAll("button[data-act]").forEach((el) => {
     const btn = el as HTMLElement;
@@ -871,6 +1003,12 @@ function openBotForm(app: HTMLElement, bot?: TunnelBot) {
           <input name="limit" type="number" min="1" max="100" value="${editing ? bot!.limit : 8}" class="w-full border border-slate-300 rounded px-2 py-1.5 text-sm">
         </div>
       </div>
+      <div>
+        <label class="block text-xs text-slate-500 mb-1">bot prompt（角色/风格，留空 = 服务端默认）</label>
+        <textarea name="prompt" rows="5" maxlength="4000" placeholder="# 角色&#10;DAL 答疑机器人。回答简洁,操作类问题给编号步骤;涉及工单引导到 OnePaaS 平台。"
+          class="w-full border border-slate-300 rounded px-2 py-1.5 text-sm font-mono">${editing && bot!.prompt ? esc(bot!.prompt) : ""}</textarea>
+        <p class="text-[11px] text-slate-400 mt-1">追加在内置知识库协议(检索策略/引用/拒答规则)之后,只定义角色与风格,不会覆盖协议。</p>
+      </div>
       <div class="flex items-center gap-3 pt-2">
         <button type="submit" class="bg-slate-900 text-white px-4 py-1.5 rounded text-sm font-medium hover:bg-slate-700">${editing ? "保存" : "创建"}</button>
         <span id="tn-form-msg" class="text-xs"></span>
@@ -892,6 +1030,9 @@ function openBotForm(app: HTMLElement, bot?: TunnelBot) {
       project: get("project") || undefined,
       mode: fd.get("mode") as string,
       limit: parseInt(get("limit"), 10) || 8,
+      // Whole-config semantics (admin body = BotConfig): empty textarea
+      // clears the persona back to the server default.
+      prompt: ((fd.get("prompt") as string) || "").trim() || undefined,
     };
     if (!payload.name || !payload.bot_id || !payload.workspace) {
       msg.textContent = "name / bot_id / workspace 必填";

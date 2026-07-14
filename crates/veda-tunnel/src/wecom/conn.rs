@@ -28,7 +28,7 @@ use crate::registry::{self, ConnState, Registry};
 use crate::veda::VedaClient;
 use crate::wecom::protocol::{
     ping_frame, subscribe_frame, EventCallbackBody, MsgCallbackBody, RawFrame, CMD_EVENT_CALLBACK,
-    CMD_MSG_CALLBACK, EVENT_DISCONNECTED,
+    CMD_MSG_CALLBACK, EVENT_DISCONNECTED, EVENT_FEEDBACK,
 };
 
 const WECOM_WS_URL: &str = "wss://openws.work.weixin.qq.com";
@@ -46,6 +46,8 @@ pub struct BotRuntime {
     pub registry: Registry,
     /// Global answer switch, forwarded to every handler ctx.
     pub answer_enabled: bool,
+    /// QA telemetry store, forwarded to every handler ctx.
+    pub qa_log: Arc<crate::qa_log::QaLogStore>,
 }
 
 fn new_req_id() -> String {
@@ -267,21 +269,62 @@ async fn handle_frame(
                 registry: rt.registry.clone(),
                 outbound: out_tx.clone(),
                 answer_enabled: rt.answer_enabled,
+                qa_log: rt.qa_log.clone(),
             };
             tokio::spawn(handle_message(ctx, raw.headers.req_id, body));
             false
         }
         Some(CMD_EVENT_CALLBACK) => {
-            let kicked = raw
-                .body
-                .and_then(|b| serde_json::from_value::<EventCallbackBody>(b).ok())
+            let Some(body_val) = raw.body else {
+                return false;
+            };
+            let eventtype = serde_json::from_value::<EventCallbackBody>(body_val.clone())
+                .ok()
                 .and_then(|e| e.event)
-                .map(|ev| ev.eventtype == EVENT_DISCONNECTED)
-                .unwrap_or(false);
-            if kicked {
+                .map(|ev| ev.eventtype)
+                .unwrap_or_default();
+            if eventtype == EVENT_DISCONNECTED {
                 info!(bot = %rt.bot.name, "received disconnected_event (kicked)");
+                return true;
             }
-            kicked
+            if eventtype == EVENT_FEEDBACK {
+                // Thumb up/down on a reply bubble → QA log (plan §8; frame
+                // shape live-verified 2026-07-14).
+                if let Ok(body) = serde_json::from_value::<EventCallbackBody>(body_val) {
+                    let user = body
+                        .from
+                        .and_then(|f| f.userid)
+                        .unwrap_or_default();
+                    if let Some(fe) = body.event.and_then(|e| e.feedback_event) {
+                        info!(
+                            bot = %rt.bot.name,
+                            feedback_id = %fe.id,
+                            kind = fe.kind,
+                            reasons = ?fe.inaccurate_reason_list,
+                            "feedback received"
+                        );
+                        // reason column keeps the first (WeCom sends a list;
+                        // single-select in practice — plan Q4 kept one col).
+                        let reason = fe.inaccurate_reason_list.first().copied();
+                        if let Err(e) =
+                            rt.qa_log.upsert_feedback(&fe.id, &user, fe.kind, reason).await
+                        {
+                            warn!(bot = %rt.bot.name, error = %e, "feedback store failed");
+                        }
+                    }
+                }
+                return false;
+            }
+            // Unhandled event types (enter_chat, …): log the raw body so new
+            // callbacks can be field-mapped from the journal before a typed
+            // handler exists (protocol docs don't spell out every payload).
+            info!(
+                bot = %rt.bot.name,
+                eventtype = %eventtype,
+                body = %truncate(&body_val.to_string(), 800),
+                "unhandled event callback"
+            );
+            false
         }
         Some(other) => {
             debug!(bot = %rt.bot.name, cmd = other, "unhandled frame");

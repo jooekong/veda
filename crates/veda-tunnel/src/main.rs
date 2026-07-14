@@ -16,6 +16,7 @@ use tracing_subscriber::EnvFilter;
 
 use veda_tunnel::admin::{self, AdminState, ControlCmd};
 use veda_tunnel::config::{BotConfig, TunnelConfig};
+use veda_tunnel::qa_log::QaLogStore;
 use veda_tunnel::reconcile::{self, Action};
 use veda_tunnel::registry::{self, Registry};
 use veda_tunnel::store::BotStore;
@@ -40,6 +41,7 @@ fn spawn_bot(
     veda: Arc<VedaClient>,
     reg: Registry,
     answer_enabled: bool,
+    qa_log: Arc<QaLogStore>,
 ) -> BotHandle {
     let bot = Arc::new(bot);
     let (sd_tx, sd_rx) = watch::channel(false);
@@ -48,6 +50,7 @@ fn spawn_bot(
         veda,
         registry: reg,
         answer_enabled,
+        qa_log,
     };
     let join = tokio::spawn(run_bot(rt, sd_rx));
     BotHandle {
@@ -106,6 +109,8 @@ async fn main() -> anyhow::Result<()> {
 
     let veda = Arc::new(VedaClient::new(cfg.veda_base_url.clone())?);
     let store = Arc::new(BotStore::connect(&cfg.mysql.database_url).await?);
+    // QA telemetry rides the bot store's pool (same MySQL, no new conns).
+    let qa_log = Arc::new(QaLogStore::new(store.pool()).await?);
 
     // First-run seed: import tunnel.toml's [[wecom.bot]] into an empty store.
     if store.count().await? == 0 && !cfg.wecom.bot.is_empty() {
@@ -126,7 +131,7 @@ async fn main() -> anyhow::Result<()> {
     for b in &bot_cfgs {
         bots.insert(
             b.bot_id.clone(),
-            spawn_bot(b.clone(), veda.clone(), reg.clone(), answer_enabled),
+            spawn_bot(b.clone(), veda.clone(), reg.clone(), answer_enabled, qa_log.clone()),
         );
     }
     info!(bots = bot_cfgs.len(), "bots spawned from store");
@@ -137,6 +142,7 @@ async fn main() -> anyhow::Result<()> {
     let admin_state = AdminState {
         registry: reg.clone(),
         store: store.clone(),
+        qa_log: qa_log.clone(),
         admin_token: cfg.admin.token.clone(),
         control: control_tx.clone(),
     };
@@ -160,10 +166,10 @@ async fn main() -> anyhow::Result<()> {
                 break;
             }
             Some(cmd) = control_rx.recv() => {
-                handle_control(cmd, &store, &veda, &reg, &mut bots, answer_enabled).await;
+                handle_control(cmd, &store, &veda, &reg, &mut bots, answer_enabled, &qa_log).await;
             }
             _ = poll.tick() => {
-                reconcile_store(&store, &veda, &reg, &mut bots, answer_enabled, &mut last_conn).await;
+                reconcile_store(&store, &veda, &reg, &mut bots, answer_enabled, &qa_log, &mut last_conn).await;
             }
         }
     }
@@ -185,10 +191,12 @@ async fn handle_control(
     reg: &Registry,
     bots: &mut HashMap<String, BotHandle>,
     answer_enabled: bool,
+    qa_log: &Arc<QaLogStore>,
 ) {
     match cmd {
         ControlCmd::AddBot { bot, reply } => match store.add(&bot).await {
             Ok(()) => {
+                info!(bot_id = %bot.bot_id, name = %bot.name, "admin: bot added");
                 // The map can still hold a live task for this bot_id (row
                 // deleted elsewhere, poll hasn't swept yet) — stop it before
                 // inserting, or the overwritten handle's task leaks and
@@ -199,7 +207,7 @@ async fn handle_control(
                 registry::insert(reg, &bot);
                 bots.insert(
                     bot.bot_id.clone(),
-                    spawn_bot(bot, veda.clone(), reg.clone(), answer_enabled),
+                    spawn_bot(bot, veda.clone(), reg.clone(), answer_enabled, qa_log.clone()),
                 );
                 let _ = reply.send(Ok(()));
             }
@@ -213,13 +221,14 @@ async fn handle_control(
                 // stored secret (empty in the request), which spawn needs.
                 match store.get(&bot.bot_id).await {
                     Ok(Some(full)) => {
+                        info!(bot_id = %full.bot_id, name = %full.name, "admin: bot updated, respawning");
                         if let Some(h) = bots.remove(&full.bot_id) {
                             stop_bot(h).await;
                         }
                         registry::insert(reg, &full);
                         bots.insert(
                             full.bot_id.clone(),
-                            spawn_bot(full, veda.clone(), reg.clone(), answer_enabled),
+                            spawn_bot(full, veda.clone(), reg.clone(), answer_enabled, qa_log.clone()),
                         );
                         let _ = reply.send(Ok(()));
                     }
@@ -237,6 +246,7 @@ async fn handle_control(
         },
         ControlCmd::RemoveBot { bot_id, reply } => match store.remove(&bot_id).await {
             Ok(true) => {
+                info!(bot_id = %bot_id, "admin: bot removed (row deleted, stopping task)");
                 if let Some(h) = bots.remove(&bot_id) {
                     stop_bot(h).await;
                 }
@@ -261,7 +271,7 @@ async fn handle_control(
                 Ok(Some(bot)) => {
                     bots.insert(
                         bot_id.clone(),
-                        spawn_bot(bot, veda.clone(), reg.clone(), answer_enabled),
+                        spawn_bot(bot, veda.clone(), reg.clone(), answer_enabled, qa_log.clone()),
                     );
                     info!(bot_id = %bot_id, "reconnect: respawned");
                     let _ = reply.send(true);
@@ -288,7 +298,7 @@ async fn handle_control(
             for b in &bot_cfgs {
                 bots.insert(
                     b.bot_id.clone(),
-                    spawn_bot(b.clone(), veda.clone(), reg.clone(), answer_enabled),
+                    spawn_bot(b.clone(), veda.clone(), reg.clone(), answer_enabled, qa_log.clone()),
                 );
             }
             let n = bot_cfgs.len();
@@ -309,6 +319,7 @@ async fn reconcile_store(
     reg: &Registry,
     bots: &mut HashMap<String, BotHandle>,
     answer_enabled: bool,
+    qa_log: &Arc<QaLogStore>,
     last_conn: &mut HashMap<String, &'static str>,
 ) {
     let desired = match store.list().await {
@@ -337,7 +348,7 @@ async fn reconcile_store(
                 registry::insert(reg, &b);
                 bots.insert(
                     b.bot_id.clone(),
-                    spawn_bot(b, veda.clone(), reg.clone(), answer_enabled),
+                    spawn_bot(b, veda.clone(), reg.clone(), answer_enabled, qa_log.clone()),
                 );
             }
             Action::Respawn(b) => {
@@ -348,7 +359,7 @@ async fn reconcile_store(
                 registry::insert(reg, &b);
                 bots.insert(
                     b.bot_id.clone(),
-                    spawn_bot(b, veda.clone(), reg.clone(), answer_enabled),
+                    spawn_bot(b, veda.clone(), reg.clone(), answer_enabled, qa_log.clone()),
                 );
             }
         }

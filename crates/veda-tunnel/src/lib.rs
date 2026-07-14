@@ -6,6 +6,7 @@
 
 pub mod admin;
 pub mod config;
+pub mod qa_log;
 pub mod reconcile;
 pub mod registry;
 pub mod store;
