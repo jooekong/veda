@@ -888,8 +888,13 @@ async function renderTunnel(app: HTMLElement) {
     return;
   }
   const rows = bots
-    .map(
-      (b) => `
+    .map((b) => {
+      // Lightweight badge + title preview when a custom persona is configured.
+      const promptPreview = b.prompt ? b.prompt.slice(0, 100) + (b.prompt.length > 100 ? "…" : "") : "";
+      const promptBadge = b.prompt
+        ? ` <span class="text-[11px] px-1.5 py-0.5 rounded bg-slate-100 text-slate-500" title="${attr(promptPreview)}">自定义 prompt</span>`
+        : "";
+      return `
       <tr class="border-t border-slate-100">
         <td class="px-3 py-2">
           <div class="font-medium flex items-center gap-2">${esc(b.name)} ${connBadge(b.conn_state)}</div>
@@ -897,15 +902,15 @@ async function renderTunnel(app: HTMLElement) {
         </td>
         <td class="px-3 py-2 text-sm">${esc(b.workspace)}${b.project ? ` <span class="text-slate-400">/ ${esc(b.project)}</span>` : ""}</td>
         <td class="px-3 py-2 text-xs font-mono text-slate-500">${esc(b.veda_key_masked)}</td>
-        <td class="px-3 py-2 text-sm whitespace-nowrap">${esc(b.mode)} · ${b.limit}</td>
+        <td class="px-3 py-2 text-sm whitespace-nowrap">${esc(b.mode)} · ${b.limit}${promptBadge}</td>
         <td class="px-3 py-2 text-sm text-center">${b.msg_count}${b.error_count ? ` <span class="text-rose-500">/${b.error_count}</span>` : ""}</td>
         <td class="px-3 py-2 text-right whitespace-nowrap">
           <button data-act="edit" data-id="${attr(b.bot_id)}" class="text-xs text-blue-600 hover:underline">编辑</button>
           <button data-act="reconnect" data-id="${attr(b.bot_id)}" class="text-xs text-slate-500 hover:underline ml-2">重连</button>
           <button data-act="delete" data-id="${attr(b.bot_id)}" data-name="${attr(b.name)}" class="text-xs text-rose-600 hover:underline ml-2">删除</button>
         </td>
-      </tr>`,
-    )
+      </tr>`;
+    })
     .join("");
   const table = bots.length
     ? `<div class="bg-white border border-slate-200 rounded-lg overflow-x-auto">
@@ -1007,7 +1012,10 @@ function openBotForm(app: HTMLElement, bot?: TunnelBot) {
         <label class="block text-xs text-slate-500 mb-1">bot prompt（角色/风格，留空 = 服务端默认）</label>
         <textarea name="prompt" rows="5" maxlength="4000" placeholder="# 角色&#10;DAL 答疑机器人。回答简洁,操作类问题给编号步骤;涉及工单引导到 OnePaaS 平台。"
           class="w-full border border-slate-300 rounded px-2 py-1.5 text-sm font-mono">${editing && bot!.prompt ? esc(bot!.prompt) : ""}</textarea>
-        <p class="text-[11px] text-slate-400 mt-1">追加在内置知识库协议(检索策略/引用/拒答规则)之后,只定义角色与风格,不会覆盖协议。</p>
+        <div class="flex justify-between items-baseline mt-1 gap-3">
+          <p class="text-[11px] text-slate-400">追加在内置知识库协议(检索策略/引用/拒答规则)之后,只定义角色与风格,不会覆盖协议。</p>
+          <span id="tn-prompt-count" class="text-[11px] text-slate-400 font-mono shrink-0"></span>
+        </div>
       </div>
       <div class="flex items-center gap-3 pt-2">
         <button type="submit" class="bg-slate-900 text-white px-4 py-1.5 rounded text-sm font-medium hover:bg-slate-700">${editing ? "保存" : "创建"}</button>
@@ -1017,6 +1025,16 @@ function openBotForm(app: HTMLElement, bot?: TunnelBot) {
   showModal(title, body);
   const form = document.getElementById("tn-form") as HTMLFormElement;
   const msg = document.getElementById("tn-form-msg")!;
+  // Live prompt char counter; warns in amber as it nears the 4000 cap.
+  const promptEl = form.querySelector<HTMLTextAreaElement>('[name="prompt"]')!;
+  const promptCount = document.getElementById("tn-prompt-count")!;
+  const syncPromptCount = () => {
+    const n = promptEl.value.length;
+    promptCount.textContent = `${n} / 4000`;
+    promptCount.className = `text-[11px] font-mono shrink-0 ${n > 3800 ? "text-amber-600" : "text-slate-400"}`;
+  };
+  promptEl.addEventListener("input", syncPromptCount);
+  syncPromptCount();
   form.addEventListener("submit", async (e) => {
     e.preventDefault();
     const fd = new FormData(form);
