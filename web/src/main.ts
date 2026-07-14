@@ -4,6 +4,7 @@ import { renderAdmin } from "./admin";
 // ── Auth state ────────────────────────────────────────────────────────────
 type Auth = { vk: string };
 const STORAGE_KEY = "veda.auth";
+const FS_KEY_PREFIX = "veda.fs-key.";
 
 function getAuth(): Auth | null {
   try {
@@ -18,6 +19,28 @@ function setAuth(a: Auth) {
 }
 function clearAuth() {
   localStorage.removeItem(STORAGE_KEY);
+}
+
+function getFsKey(workspaceId: string): string | null {
+  try {
+    return sessionStorage.getItem(`${FS_KEY_PREFIX}${workspaceId}`);
+  } catch {
+    return null;
+  }
+}
+function setFsKey(workspaceId: string, key: string) {
+  try {
+    sessionStorage.setItem(`${FS_KEY_PREFIX}${workspaceId}`, key);
+  } catch {
+    // The file page will ask for the key again when session storage is unavailable.
+  }
+}
+function clearFsKey(workspaceId: string) {
+  try {
+    sessionStorage.removeItem(`${FS_KEY_PREFIX}${workspaceId}`);
+  } catch {
+    // Nothing to clear when session storage is unavailable.
+  }
 }
 
 // ── Language state ────────────────────────────────────────────────────────
@@ -104,6 +127,7 @@ const S = {
     kindVectorHint: "向量记录 + 检索，REST API 接入",
     badgeFile: "文件库",
     badgeVector: "向量库",
+    btnFiles: "文件",
     btnDatasets: "数据集",
     btnApiDocs: "API 文档",
     vectorHint: "向量库用账号 key (vk_) 直接调 REST API；wk_ / JWT / FUSE 不适用于向量库。",
@@ -115,6 +139,22 @@ const S = {
     keysEmpty: "还没有 key，点下面新建一个。",
     deleteKeyConfirm: "删除（吊销）这个 key？正在用它的客户端会立即失效。",
     wsDescPlaceholder: "描述（可选）",
+    filesBack: "← 返回 Console",
+    filesKeyTitle: "打开文件库",
+    filesKeyHint: "粘贴这个 workspace 的 wk_。它只保存在当前浏览器标签页，用于直接请求 Veda。",
+    filesKeyPlaceholder: "wk_...",
+    filesOpen: "打开文件库",
+    filesChangeKey: "更换 key",
+    filesUpload: "上传文件",
+    filesUploading: "上传中…",
+    filesUploadHint: "单个文件最多 50 MB。文本和二进制文件都会原样上传。",
+    filesNewDir: "新建目录",
+    filesNewDirPlaceholder: "目录名，如 docs 或 docs/图片",
+    filesEmpty: "空目录。",
+    filesDownload: "下载",
+    filesDirectory: "目录",
+    filesNotFound: "这个 workspace 不存在，或不是文件库。",
+    filesTooLarge: "文件超过 50 MB 限制。",
   },
   en: {
     tagline: "A programmable knowledge store.",
@@ -186,6 +226,7 @@ const S = {
     kindVectorHint: "Vector records + retrieval, via REST API",
     badgeFile: "File",
     badgeVector: "Vector",
+    btnFiles: "Files",
     btnDatasets: "Datasets",
     btnApiDocs: "API docs",
     vectorHint: "Vector Workspaces use the account key (vk_) with the REST API directly; wk_ / JWT / FUSE don't apply.",
@@ -197,6 +238,22 @@ const S = {
     keysEmpty: "No keys yet — create one below.",
     deleteKeyConfirm: "Delete (revoke) this key? Clients using it stop working immediately.",
     wsDescPlaceholder: "description (optional)",
+    filesBack: "← Back to Console",
+    filesKeyTitle: "Open file workspace",
+    filesKeyHint: "Paste this workspace's wk_. It stays only in this browser tab and is sent directly to Veda.",
+    filesKeyPlaceholder: "wk_...",
+    filesOpen: "Open files",
+    filesChangeKey: "Change key",
+    filesUpload: "Upload file",
+    filesUploading: "Uploading…",
+    filesUploadHint: "Up to 50 MB per file. Text and binary files are uploaded unchanged.",
+    filesNewDir: "New folder",
+    filesNewDirPlaceholder: "folder name, e.g. docs or docs/images",
+    filesEmpty: "This directory is empty.",
+    filesDownload: "Download",
+    filesDirectory: "Directory",
+    filesNotFound: "This workspace does not exist or is not a file workspace.",
+    filesTooLarge: "This file exceeds the 50 MB limit.",
   },
 } as const;
 
@@ -311,6 +368,52 @@ const datasetsApi = {
     ),
 };
 
+type FsDirEntry = {
+  name: string;
+  path: string;
+  is_dir: boolean;
+  size_bytes: number | null;
+  mime_type: string | null;
+  updated_at: string;
+};
+
+type FsWriteResponse = {
+  file_id: string;
+  revision: number;
+  content_unchanged: boolean;
+};
+
+const MAX_FILE_BYTES = 50 * 1024 * 1024;
+
+function fsEndpoint(path: string): string {
+  const encoded = path
+    .split("/")
+    .filter(Boolean)
+    .map((part) => encodeURIComponent(part))
+    .join("/");
+  return encoded ? `/v1/fs/${encoded}` : "/v1/fs";
+}
+
+async function fsError(res: Response): Promise<string> {
+  const body = (await res.json().catch(() => null)) as ApiResponse<unknown> | null;
+  return body?.error || `HTTP ${res.status}`;
+}
+
+async function fsFetch(path: string, key: string, opts: RequestInit = {}): Promise<Response> {
+  const headers = new Headers(opts.headers);
+  headers.set("Authorization", `Bearer ${key}`);
+  const res = await fetch(path, { ...opts, headers });
+  if (!res.ok) throw new Error(await fsError(res));
+  return res;
+}
+
+async function fsJson<T>(path: string, key: string, opts: RequestInit = {}): Promise<T> {
+  const res = await fsFetch(path, key, opts);
+  const body = (await res.json().catch(() => null)) as ApiResponse<T> | null;
+  if (!body?.success) throw new Error(body?.error || "invalid server response");
+  return body.data as T;
+}
+
 // ── Helpers ────────────────────────────────────────────────────────────────
 function esc(s: string): string {
   const d = document.createElement("div");
@@ -318,7 +421,30 @@ function esc(s: string): string {
   return d.innerHTML;
 }
 function attr(s: string): string {
-  return s.replace(/&/g, "&amp;").replace(/"/g, "&quot;");
+  return s
+    .replace(/&/g, "&amp;")
+    .replace(/"/g, "&quot;")
+    .replace(/</g, "&lt;");
+}
+
+function fmtBytes(n: number | null): string {
+  if (n == null) return "—";
+  if (n < 1024) return `${n} B`;
+  const units = ["KB", "MB", "GB", "TB"];
+  let value = n / 1024;
+  let index = 0;
+  while (value >= 1024 && index < units.length - 1) {
+    value /= 1024;
+    index++;
+  }
+  return `${value.toFixed(1)} ${units[index]}`;
+}
+
+function fmtTime(s: string): string {
+  const date = new Date(s);
+  return Number.isNaN(date.getTime())
+    ? s
+    : date.toLocaleString(getLang() === "zh" ? "zh-CN" : "en-US", { hour12: false });
 }
 
 function kv(label: string, val: string, hint = ""): string {
@@ -387,7 +513,9 @@ async function render() {
     document.body.appendChild(m);
   }
   const r = currentRoute();
-  if (r.startsWith("/console")) await renderConsole(app);
+  const fsRoute = r.match(/^\/console\/fs\/([^/]+)$/);
+  if (fsRoute) await renderFsWorkspace(app, decodeURIComponent(fsRoute[1]));
+  else if (r.startsWith("/console")) await renderConsole(app);
   else if (r.startsWith("/docs")) await renderDocs(app);
   else if (r.startsWith("/admin")) await renderAdmin(app);
   else await renderLanding(app);
@@ -442,6 +570,7 @@ function showOnboarded(r: {
 }) {
   const baseUrl = location.origin;
   const L = t();
+  setFsKey(r.workspace_id, r.workspace_key);
   const btn = document.getElementById("get-started");
   if (btn?.parentElement) btn.parentElement.classList.add("hidden");
   const sec = document.getElementById("onboard-result")!;
@@ -565,6 +694,7 @@ function renderWsList(list: Workspace[], vk: string) {
         <a href="#/docs/vectors" class="text-sm border border-slate-300 px-3 py-1.5 rounded hover:bg-slate-50">${esc(L.btnApiDocs)}</a>
         ${delBtn}`
         : `${keyBtns}
+        <button data-act="files" data-id="${attr(w.id)}" class="text-sm border border-slate-300 px-3 py-1.5 rounded hover:bg-slate-50">${esc(L.btnFiles)}</button>
         ${delBtn}`;
       return `
     <div class="bg-white border border-slate-200 rounded-lg p-4 flex justify-between items-center gap-4">
@@ -587,8 +717,238 @@ function renderWsList(list: Workspace[], vk: string) {
       if (act === "new-key") newKeyModal(vk, id);
       else if (act === "keys") keysModal(vk, id);
       else if (act === "datasets") datasetsModal(vk, id);
+      else if (act === "files") location.hash = `#/console/fs/${encodeURIComponent(id)}`;
       else if (act === "delete") deleteWs(vk, id);
     });
+  });
+}
+
+async function renderFsWorkspace(app: HTMLElement, workspaceId: string) {
+  const auth = getAuth();
+  const L = t();
+  if (!auth) {
+    app.innerHTML = `<p class="text-slate-600">${esc(L.noAccountHere)} <a href="#/" class="text-blue-600 underline">${esc(L.getStartedArrow)}</a></p>`;
+    return;
+  }
+
+  app.innerHTML = `<p class="text-slate-500">${esc(L.loading)}</p>`;
+  let workspace: Workspace | undefined;
+  try {
+    workspace = (await workspaces.list(auth.vk)).find((w) => w.id === workspaceId && w.kind === "fs");
+  } catch (e: any) {
+    app.innerHTML = `<p class="text-red-600">${esc(L.errorPrefix + e.message)}</p>`;
+    return;
+  }
+  if (!workspace) {
+    app.innerHTML = `<p class="text-red-600">${esc(L.filesNotFound)}</p>`;
+    return;
+  }
+
+  const key = getFsKey(workspaceId);
+  if (!key) {
+    app.innerHTML = `
+      <div class="max-w-lg mx-auto mt-10">
+        <a href="#/console" class="text-sm text-blue-600 hover:underline">${esc(L.filesBack)}</a>
+        <h1 class="text-xl font-bold mt-5 mb-1">${esc(L.filesKeyTitle)}</h1>
+        <p class="text-sm text-slate-500 mb-5">${esc(workspace.name)}</p>
+        <p class="text-sm text-slate-600 mb-4">${esc(L.filesKeyHint)}</p>
+        <form id="fs-key-form">
+          <input id="fs-key" type="password" autocomplete="off" placeholder="${attr(L.filesKeyPlaceholder)}"
+            class="w-full border border-slate-300 rounded px-3 py-2 mb-3 focus:outline-none focus:border-slate-500">
+          <button class="w-full bg-slate-900 text-white px-4 py-2 rounded font-medium hover:bg-slate-700">${esc(L.filesOpen)}</button>
+        </form>
+      </div>`;
+    document.getElementById("fs-key-form")!.addEventListener("submit", (event) => {
+      event.preventDefault();
+      const entered = (document.getElementById("fs-key") as HTMLInputElement).value.trim();
+      if (!entered) return;
+      setFsKey(workspaceId, entered);
+      render();
+    });
+    return;
+  }
+
+  app.innerHTML = `
+    <div class="flex flex-wrap justify-between items-start gap-3 mb-6">
+      <div>
+        <a href="#/console" class="text-sm text-blue-600 hover:underline">${esc(L.filesBack)}</a>
+        <h1 class="text-2xl font-bold mt-3">${esc(workspace.name)}</h1>
+        <p class="text-sm text-slate-500 mt-1">${esc(L.kindFile)}</p>
+      </div>
+      <button id="fs-change-key" class="text-sm border border-slate-300 px-3 py-1.5 rounded hover:bg-slate-50">${esc(L.filesChangeKey)}</button>
+    </div>
+    <section class="bg-white border border-slate-200 rounded-lg overflow-x-auto">
+      <div id="fs-browser" class="text-sm"></div>
+    </section>`;
+  document.getElementById("fs-change-key")!.addEventListener("click", () => {
+    clearFsKey(workspaceId);
+    render();
+  });
+  initFsBrowser(document.getElementById("fs-browser")!, key);
+}
+
+function initFsBrowser(root: HTMLElement, key: string) {
+  const L = t();
+
+  const download = async (path: string) => {
+    try {
+      const res = await fsFetch(fsEndpoint(path), key);
+      const blob = await res.blob();
+      const link = document.createElement("a");
+      const objectUrl = URL.createObjectURL(blob);
+      link.href = objectUrl;
+      link.download = path.split("/").filter(Boolean).pop() || "download";
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      setTimeout(() => URL.revokeObjectURL(objectUrl), 0);
+    } catch (e: any) {
+      const status = root.querySelector("#fs-status");
+      if (status) {
+        status.textContent = e.message;
+        status.className = "text-sm text-red-600";
+      }
+    }
+  };
+
+  const load = async (path: string) => {
+    root.innerHTML = `<div class="px-4 py-3 text-slate-500">${esc(L.loading)}</div>`;
+    let entries: FsDirEntry[];
+    try {
+      entries = await fsJson<FsDirEntry[]>(`${fsEndpoint(path)}?list`, key);
+    } catch (e: any) {
+      root.innerHTML = `<div class="px-4 py-3 text-red-600">${esc(e.message)}</div>`;
+      return;
+    }
+
+    entries.sort((a, b) =>
+      a.is_dir === b.is_dir ? a.name.localeCompare(b.name) : a.is_dir ? -1 : 1,
+    );
+    const parts = path.split("/").filter(Boolean);
+    let current = "";
+    const crumbs = [`<button data-fs-dir="/" class="text-blue-600 hover:underline">/</button>`];
+    for (const part of parts) {
+      current += `/${part}`;
+      crumbs.push(
+        `<span class="text-slate-300"> / </span><button data-fs-dir="${attr(current)}" class="text-blue-600 hover:underline">${esc(part)}</button>`,
+      );
+    }
+    const rows = entries
+      .map((entry) => {
+        const meta = entry.is_dir
+          ? L.filesDirectory
+          : `${fmtBytes(entry.size_bytes)}${entry.mime_type ? ` · ${esc(entry.mime_type)}` : ""}`;
+        const name = entry.is_dir
+          ? `<button data-fs-dir="${attr(entry.path)}" class="text-blue-600 hover:underline text-left">📁 ${esc(entry.name)}</button>`
+          : `📄 ${esc(entry.name)}`;
+        const action = entry.is_dir
+          ? ""
+          : `<button data-fs-download="${attr(entry.path)}" class="text-blue-600 hover:underline">${esc(L.filesDownload)}</button>`;
+        return `<tr class="border-t border-slate-100">
+          <td class="px-4 py-2">${name}</td>
+          <td class="px-4 py-2 text-xs text-slate-500">${meta}</td>
+          <td class="px-4 py-2 text-xs text-slate-500 whitespace-nowrap">${esc(fmtTime(entry.updated_at))}</td>
+          <td class="px-4 py-2 text-right text-sm">${action}</td>
+        </tr>`;
+      })
+      .join("");
+    root.innerHTML = `
+      <div class="px-4 py-3 border-b border-slate-100 flex flex-wrap items-center justify-between gap-3">
+        <div class="text-sm">${crumbs.join("")}</div>
+        <div class="flex flex-wrap items-center gap-2">
+          <input id="fs-upload-input" type="file" class="hidden">
+          <button id="fs-mkdir" class="text-sm border border-slate-300 px-3 py-1.5 rounded hover:bg-slate-50">${esc(L.filesNewDir)}</button>
+          <button id="fs-upload" class="bg-slate-900 text-white px-3 py-1.5 rounded text-sm font-medium hover:bg-slate-700">${esc(L.filesUpload)}</button>
+        </div>
+      </div>
+      <div class="px-4 py-2 text-xs text-slate-500 border-b border-slate-100 flex flex-wrap justify-between gap-2">
+        <span>${esc(L.filesUploadHint)}</span><span id="fs-status"></span>
+      </div>
+      ${
+        entries.length
+          ? `<table class="w-full text-left text-sm"><tbody>${rows}</tbody></table>`
+          : `<div class="px-4 py-4 text-slate-500">${esc(L.filesEmpty)}</div>`
+      }`;
+
+    root.querySelectorAll("[data-fs-dir]").forEach((element) => {
+      element.addEventListener("click", () => load((element as HTMLElement).dataset.fsDir!));
+    });
+    root.querySelectorAll("[data-fs-download]").forEach((element) => {
+      element.addEventListener("click", () => download((element as HTMLElement).dataset.fsDownload!));
+    });
+    document.getElementById("fs-mkdir")!.addEventListener("click", () => mkdirModal(path, key, load));
+    const input = document.getElementById("fs-upload-input") as HTMLInputElement;
+    const status = document.getElementById("fs-status")!;
+    const button = document.getElementById("fs-upload") as HTMLButtonElement;
+    const upload = async () => {
+      const file = input.files?.[0];
+      if (!file) {
+        return;
+      }
+      if (file.size > MAX_FILE_BYTES) {
+        status.textContent = L.filesTooLarge;
+        status.className = "text-sm text-red-600";
+        return;
+      }
+      const target = `${path === "/" ? "" : path}/${file.name}`;
+      button.disabled = true;
+      button.textContent = L.filesUploading;
+      try {
+        await fsJson<FsWriteResponse>(fsEndpoint(target), key, { method: "PUT", body: file });
+        await load(path);
+      } catch (e: any) {
+        status.textContent = e.message;
+        status.className = "text-sm text-red-600";
+        button.disabled = false;
+        button.textContent = L.filesUpload;
+      }
+    };
+    button.addEventListener("click", () => {
+      input.value = "";
+      input.click();
+    });
+    input.addEventListener("change", () => void upload());
+  };
+
+  load("/");
+}
+
+/// "New folder" under the current directory. Multi-level names (a/b) are fine
+/// — the server's mkdir creates parents. The browser reloads into the same
+/// directory so the new folder shows up immediately.
+function mkdirModal(path: string, key: string, reload: (p: string) => Promise<void>) {
+  const L = t();
+  modal(
+    L.filesNewDir,
+    `
+    <input id="fs-dir-name" placeholder="${attr(L.filesNewDirPlaceholder)}" class="w-full border border-slate-300 rounded px-3 py-2 mb-4 focus:outline-none focus:border-slate-500">
+    <div class="flex justify-end gap-2">
+      <button data-close class="text-sm border border-slate-300 px-3 py-1.5 rounded hover:bg-slate-50">${esc(L.cancel)}</button>
+      <button id="fs-dir-create" class="text-sm bg-slate-900 text-white px-3 py-1.5 rounded hover:bg-slate-700">${esc(L.create)}</button>
+    </div>
+  `,
+  );
+  document.querySelector("[data-close]")!.addEventListener("click", closeModal);
+  const input = document.getElementById("fs-dir-name") as HTMLInputElement;
+  input.focus();
+  const create = async () => {
+    const name = input.value.trim().replace(/^\/+|\/+$/g, "");
+    if (!name) return;
+    try {
+      await fsJson<unknown>("/v1/fs-mkdir", key, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ path: `${path === "/" ? "" : path}/${name}` }),
+      });
+      closeModal();
+      await reload(path);
+    } catch (e: any) {
+      alert(L.failed + e.message);
+    }
+  };
+  document.getElementById("fs-dir-create")!.addEventListener("click", () => void create());
+  input.addEventListener("keydown", (ev) => {
+    if (ev.key === "Enter") void create();
   });
 }
 

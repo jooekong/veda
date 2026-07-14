@@ -237,9 +237,9 @@ All fs endpoints authenticate with a `wk_` (bound to an fs workspace); writes re
 
 | Method / Path | Description |
 |---|---|
-| `PUT /v1/fs/{path}` | Write a file (raw UTF-8 body). Supports `If-Match: "<rev>"` (CAS; mismatch → `412`) and `If-None-Match: "<sha256>"` (skips the rewrite when content is identical, returning `content_unchanged:true`). Returns `{ file_id, revision, content_unchanged }` + `ETag`. Non-UTF-8 → `400`; path is a directory → `409`; >50MB → `413`. |
+| `PUT /v1/fs/{path}` | Write raw bytes. Valid UTF-8 is stored, chunked, and indexed as text; non-UTF-8 is stored verbatim as a blob (PDFs additionally have their text extracted for search; other binaries such as images are not indexed). Supports `If-Match: "<rev>"` (CAS; mismatch → `412`) and `If-None-Match: "<sha256>"` (skips the rewrite when content is identical, returning `content_unchanged:true`). Returns `{ file_id, revision, content_unchanged }` + `ETag`. A directory path → `409`; maximum file size 50MB. |
 | `POST /v1/fs/{path}` | Append content (no CAS). |
-| `GET /v1/fs/{path}` | Read. `?stat` for metadata, `?list` for directory listing, `?lines=start:end` for a line slice; `Range: bytes=a-b` returns `206`. No parameters returns the full content. |
+| `GET /v1/fs/{path}` | Read raw bytes with the stored `Content-Type`. `?stat` for metadata, `?list` for directory listing, `?lines=start:end` for a line slice; `Range: bytes=a-b` returns `206`. No parameters returns the full content. |
 | `HEAD /v1/fs/{path}` | Fetch `FileInfo` (path/file_id/is_dir/size/mime/revision/checksum/timestamps). |
 | `DELETE /v1/fs/{path}` | Delete (directories recurse). |
 | `POST /v1/fs-copy` | `{ from, to }` server-side copy (content-addressed dedup). |

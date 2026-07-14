@@ -237,9 +237,9 @@ app_id 账号是 passwordless 的：不能 login、不能 claim，`app_id` 与 `
 
 | 方法 / 路径 | 说明 |
 |---|---|
-| `PUT /v1/fs/{path}` | 写文件（裸 UTF-8 body）。支持 `If-Match: "<rev>"`（CAS，不匹配 `412`）、`If-None-Match: "<sha256>"`（内容相同则不重写，返回 `content_unchanged:true`）。返回 `{ file_id, revision, content_unchanged }` + `ETag`。非 UTF-8 → `400`；路径是目录 → `409`；>50MB → `413`。 |
+| `PUT /v1/fs/{path}` | 写原始字节。有效 UTF-8 按文本存储、分块和索引；非 UTF-8 原样存为 blob（PDF 额外抽取文本用于搜索，图片等二进制不索引）。支持 `If-Match: "<rev>"`（CAS，不匹配 `412`）、`If-None-Match: "<sha256>"`（内容相同则不重写，返回 `content_unchanged:true`）。返回 `{ file_id, revision, content_unchanged }` + `ETag`。路径是目录 → `409`；单文件上限 50MB。 |
 | `POST /v1/fs/{path}` | 追加内容（无 CAS）。 |
-| `GET /v1/fs/{path}` | 读。`?stat` 取元数据、`?list` 列目录、`?lines=start:end` 取行片段；`Range: bytes=a-b` 返回 `206`。无参数返回全文。 |
+| `GET /v1/fs/{path}` | 读原始字节并返回存储的 `Content-Type`。`?stat` 取元数据、`?list` 列目录、`?lines=start:end` 取行片段；`Range: bytes=a-b` 返回 `206`。无参数返回全文。 |
 | `HEAD /v1/fs/{path}` | 取 `FileInfo`（path/file_id/is_dir/size/mime/revision/checksum/时间）。 |
 | `DELETE /v1/fs/{path}` | 删（目录递归）。 |
 | `POST /v1/fs-copy` | `{ from, to }` 服务端复制（内容寻址去重）。 |
