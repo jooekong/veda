@@ -12,6 +12,8 @@ tokio.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 reqwest.workspace = true
+# StreamExt::next over reqwest::bytes_stream (LLM SSE streaming).
+futures-util = { version = "0.3", default-features = false }
 tracing.workspace = true
 metrics = "0.24"
 moka.workspace = true

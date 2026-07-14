@@ -197,6 +197,9 @@ pub struct AnswerApiRequest {
     pub query: String,
     pub path_prefix: Option<String>,
     pub limit: Option<usize>,
+    /// Bot persona appended to the built-in knowledge-base protocol (which
+    /// it cannot override). Empty/absent → the server default persona.
+    pub prompt: Option<String>,
 }
 
 /// Response for `POST /v1/answer`. `answer` is the generated text with inline
@@ -211,9 +214,9 @@ pub struct AnswerApiResponse {
     pub estimated_context_tokens: usize,
 }
 
-/// One `[n]` reference. In P0 each citation covers exactly one contiguous
-/// span (`spans.len() == 1`); the field is a `Vec` so a future revision can
-/// group several spans of one document under a single marker.
+/// One `[n]` reference. A search-hit citation carries exactly one chunk
+/// span; an empty `spans` means the whole file (evidence came from the
+/// model reading the file directly).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct AnswerCitation {
     pub index: usize,

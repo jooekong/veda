@@ -850,16 +850,101 @@ pub trait VectorWorkspaceStore: Send + Sync {
     async fn count_vectors(&self, workspace_id: &str, dataset: &str) -> Result<i64>;
 }
 
-// ── LLM Service (for L0/L1 summary generation) ────────
+// ── LLM Service ────────────────────────────────────────
+
+/// One message in an OpenAI-style chat transcript. Domain type owned by
+/// veda-core so `AnswerService` and mocks never touch provider wire formats;
+/// `veda-pipeline`'s `LlmProvider` maps these onto its private request DTOs.
+#[derive(Debug, Clone)]
+pub struct ChatMsg {
+    /// "system" | "user" | "assistant" | "tool".
+    pub role: String,
+    pub content: String,
+    /// Non-empty only on an assistant message echoing a tool-call round.
+    pub tool_calls: Vec<ToolCall>,
+    /// `Some` only when `role == "tool"` — links the result to its call.
+    pub tool_call_id: Option<String>,
+}
+
+impl ChatMsg {
+    pub fn system(content: impl Into<String>) -> Self {
+        Self::plain("system", content)
+    }
+    pub fn user(content: impl Into<String>) -> Self {
+        Self::plain("user", content)
+    }
+    /// The assistant turn that requested these tool calls (content empty).
+    pub fn assistant_tool_calls(tool_calls: Vec<ToolCall>) -> Self {
+        Self {
+            role: "assistant".to_string(),
+            content: String::new(),
+            tool_calls,
+            tool_call_id: None,
+        }
+    }
+    /// One tool result, answering the call with `id`.
+    pub fn tool(id: impl Into<String>, content: impl Into<String>) -> Self {
+        Self {
+            role: "tool".to_string(),
+            content: content.into(),
+            tool_calls: Vec::new(),
+            tool_call_id: Some(id.into()),
+        }
+    }
+    fn plain(role: &str, content: impl Into<String>) -> Self {
+        Self {
+            role: role.to_string(),
+            content: content.into(),
+            tool_calls: Vec::new(),
+            tool_call_id: None,
+        }
+    }
+}
+
+/// One tool invocation requested by the model. `arguments` is the raw JSON
+/// string exactly as produced (possibly malformed — executors must treat it
+/// as untrusted input and fail soft).
+#[derive(Debug, Clone)]
+pub struct ToolCall {
+    pub id: String,
+    pub name: String,
+    pub arguments: String,
+}
+
+/// Declaration of one callable tool (OpenAI "function" shape). `parameters`
+/// is a JSON Schema object.
+#[derive(Debug, Clone)]
+pub struct ToolSpec {
+    pub name: &'static str,
+    pub description: &'static str,
+    pub parameters: serde_json::Value,
+}
+
+/// One item on a `chat_stream` channel. `Content` deltas arrive as generated;
+/// `ToolCalls` is emitted at most once, fully assembled, at end of stream —
+/// it is always the final item when present.
+#[derive(Debug, Clone)]
+pub enum ChatStreamItem {
+    Content(String),
+    ToolCalls(Vec<ToolCall>),
+}
 
 #[async_trait]
 pub trait LlmService: Send + Sync {
+    /// Worker-driven L0/L1 summary generation (flat prompt, no tools).
     async fn summarize(&self, content: &str, max_tokens: usize) -> Result<String>;
-    /// One-shot completion for the RAG answer path (`AnswerService`). Unlike
-    /// `summarize` (worker-driven L0/L1), this runs on the request path with
-    /// a fully-assembled prompt. The caller owns the per-attempt timeout and
-    /// retry budget; implementations should just issue the underlying chat
-    /// call. Kept separate from `summarize` so the two call sites can evolve
-    /// (temperature, retry policy) independently.
-    async fn complete(&self, prompt: &str, max_tokens: usize) -> Result<String>;
+    /// Streaming chat with optional tool calling, for the agentic answer
+    /// path. `tools` empty → the `tools` field is omitted on the wire (used
+    /// by the forced final round). Channel contract mirrors the old
+    /// `complete_stream`: the outer `Result` is the connection attempt
+    /// (retryable by the caller — nothing has streamed yet); an `Err` item
+    /// means the stream broke mid-generation (not retryable once content
+    /// was forwarded). A channel that closes without a `ToolCalls` item is a
+    /// pure content round. Dropping the receiver cancels the request.
+    async fn chat_stream(
+        &self,
+        messages: &[ChatMsg],
+        tools: &[ToolSpec],
+        max_tokens: usize,
+    ) -> Result<tokio::sync::mpsc::Receiver<Result<ChatStreamItem>>>;
 }

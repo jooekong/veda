@@ -232,8 +232,13 @@ mod tests {
         async fn summarize(&self, content: &str, _max_tokens: usize) -> Result<String> {
             Ok(format!("SUMMARY: {}", &content[..content.len().min(50)]))
         }
-        async fn complete(&self, prompt: &str, _max_tokens: usize) -> Result<String> {
-            Ok(format!("ANSWER: {}", &prompt[..prompt.len().min(50)]))
+        async fn chat_stream(
+            &self,
+            _messages: &[veda_core::store::ChatMsg],
+            _tools: &[veda_core::store::ToolSpec],
+            _max_tokens: usize,
+        ) -> Result<tokio::sync::mpsc::Receiver<Result<veda_core::store::ChatStreamItem>>> {
+            unreachable!("summary tests never chat")
         }
     }
 

@@ -129,29 +129,22 @@ async fn main() -> anyhow::Result<()> {
         }
     };
 
-    // RAG answer service (retrieve → tiered assembly → LLM). Present only when
-    // [llm] is configured; a `None` here is the source of the 501 the
-    // `/v1/answer` route returns. Token budgets come from [llm], timeout/retry
-    // from AnswerParams defaults (20s attempt × 1 retry).
+    // Agentic RAG answer service (LLM drives search/read_file via tool
+    // calls). Present only when [llm] is configured; a `None` here is the
+    // source of the 501 the `/v1/answer` route returns. Round/token knobs
+    // come from [llm], timeout/retry from AnswerParams defaults.
     let answer_service: Option<Arc<AnswerService>> = match (&cfg.llm, &llm) {
         (Some(llm_cfg), Some(llm)) => {
             let params = AnswerParams {
-                max_context_tokens: llm_cfg.answer_max_context_tokens,
                 max_output_tokens: llm_cfg.answer_max_output_tokens,
+                max_tool_rounds: llm_cfg.answer_max_tool_rounds,
                 ..Default::default()
             };
-            // Same call as the worker's chunk_sync (`semantic_chunk(_, 2048)`)
-            // — the answer path rebuilds these chunks to resolve neighbour
-            // windows, so algorithm and size MUST stay in lockstep.
-            let chunker: veda_core::service::answer::Chunker =
-                Arc::new(|text: &str| veda_pipeline::chunking::semantic_chunk(text, 2048));
-            Some(Arc::new(AnswerService::new(
+            let tools = Arc::new(veda_core::service::answer::LiveTools::new(
                 search_service.clone(),
-                mysql.clone(),
-                llm.clone(),
-                chunker,
-                params,
-            )))
+                fs_service.clone(),
+            ));
+            Some(Arc::new(AnswerService::new(tools, llm.clone(), params)))
         }
         _ => None,
     };

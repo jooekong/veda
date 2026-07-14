@@ -44,6 +44,7 @@ veda-tunnel     外部 IM 接入（企微长连接）             (已上生产 
   - Writeback 模式（`--write-mode=writeback`）：`ShadowStore` 缓冲 FUSE 写入到内存（per-file 10MB / total 50MB cap，超 per-file 自动降级到 sync flush，超 total 返 ENOSPC）；`CommitQueue` 单线程 worker（std::thread + mpsc + min-heap deadline，token-based 合并同 path 的 Touch），默认 5s 静默期；create() defer 不打 server，蛋黄到第一次真正的 Touch 才上传；lookup/getattr/readdir/readdirplus 在 writeback 下走 shadow overlay（tombstone 隐藏，pending_children 追加，dedup by basename）；unlink 把 LocalOnly 直接干掉不打 server，Dirty/Clean 才下 DELETE；rename 先打 server 后改 shadow，old_path 自动 tombstone 防止 in-flight PUT 漏到 server；destroy() unmount 时 drain 所有 pending commit
   - 其他：statfs 返回合理值
 - `veda-server`：新增 `GET /v1/events` SSE 端点（轮询 veda_fs_events 表，cursor-based）；`GET /v1/fs/{path}` 支持 `Range` header 返回 206 Partial Content
+- `web`：Vite 文档站 + 内置 Console；fs workspace 的 `#/console/fs/{workspace_id}` 支持目录浏览、单文件原始上传和下载。数据面 `wk_` 仅存当前浏览器标签页，直接调用原生 `/v1/fs/*`，文本与二进制均可用。
 - v0.1.5 批：
   - 搜索：真 BM25 hybrid（dense + sparse RRF via Milvus 2.5 `hybrid_search`），fulltext 改为 BM25 sparse，jieba 分词中文，自动 schema 迁移（drop+rebuild + 全量 ChunkSync 入队）；`SearchHit.score_type` 标 `rrf` / `bm25` / `cosine`；`/v1/search` 路由响应剥离内部字段（vector / workspace_id）
   - Worker：paginated chunk read（chunk_sync + summary_sync 共享 `load_full_content`），`catch_unwind` 隔离 task panic；summary debounce 30s + burst window 5min（`veda_summary_enqueue_total{burst=...}` 计数）；L1 prompt 结构化 + 输出语言策略仅 zh-CN / en（中文或中文+英语→中文，其余→英语）
@@ -57,13 +58,13 @@ veda-tunnel     外部 IM 接入（企微长连接）             (已上生产 
   - **Linux CLI 改 musl 静态产物**：`x86_64-unknown-linux-musl`，任意 glibc 可跑；`veda-fuse` 仍 gnu（动态链 libfuse3）
   - **server 自带安装器**：`GET /install.sh` 返回构建时嵌入的安装脚本；`GET /capabilities` 无鉴权能力探针（FUSE 用它决定是否暴露 summary sidecar）
 
-## RAG 问答 `/v1/answer`（2026-07-10，P0）
+## RAG 问答 `/v1/answer`（2026-07-14 改造为 Agentic）
 
-fs 数据面新增知识库问答：检索 → 分层上下文组装 → LLM 生成**带可验证引用**的答案。设计+评审+实现记录见 `docs/plans/veda-answer-plan.md`。
+fs 数据面知识库问答：LLM 经 **OpenAI function calling** 自主多轮调用 `search` / `read_file` 召回,再生成**带可验证引用**的答案。设计见 `docs/plans/veda-answer-agentic.md`(取代 07-10 的 one-shot 组装管线,退役理由在内)。
 
-- **`veda-core/service/answer.rs`**：`AnswerService`（依赖 SearchService/MetadataStore/LlmService 全 trait）。组装：过滤 detached 命中 → 按 file_id 聚合 + per-doc cap 3 → 邻居 ±1 区间合并（不连续 span 插省略标记）→ **水印守卫**（`last_embedded_content_hash != checksum` 的文件禁邻居扩展、只用 Milvus 命中原文防 revision 混杂）→ L0 批取（仅 Ready 非空）→ 展开后按估算 token 预算裁整 span（L0 最后裁）。引用后处理：`[n]` 与资料块对齐生成 `citations[{index,path,spans}]`，无效编号剔除，零有效引用→citations 回退全部资料块+`ungrounded` 指标。`LlmService` trait 新增 `complete()`（与 `summarize` 并列）。
-- **`veda-server/routes/answer.rs`**：`POST /v1/answer`（`AuthWorkspace`，fs only）。挂在 30s TimeoutLayer **之外**、自带 45s 总 deadline（LLM 单次 20s×2 尝试）；per-workspace 并发信号量（`answer_concurrency` 默认 2，超出 429）；query ≤1024 字符；错误映射 501 `FEATURE_DISABLED`+no-store（无 `[llm]`）/ 502 `LLM_UNAVAILABLE` / 504 `ANSWER_TIMEOUT`；空召回 200 固定话术不调 LLM。配置：`[llm]` 下 `answer_max_context_tokens`(6000)/`answer_max_output_tokens`(1024)/`answer_concurrency`(2)。指标 `veda_answer_request_seconds{outcome}` 等。
-- **veda-tunnel 接入**：`[answer] enabled`（默认 true，改动需重启）走 `/v1/answer`（单请求 60s 超时），回复=答案正文+出处列表；false 回退纯检索直出。错误话术：501→「问答未启用」、429→「太频繁」、502/504→「暂时不可用」。
+- **`veda-core/service/answer.rs`**：`AnswerService`(依赖 `ToolExecutor` + `LlmService` 两个 trait;`LiveTools` 为生产实现,包 SearchService+FsService)。流程:用原始 query 预检索(route limit,默认 12)进首条 user 消息 → agentic loop:每轮 `chat_stream`(流式,tools 随带),LLM 回 tool_calls 则执行(search 固定 limit 6 / read_file 截 8000 字符可 offset 续读,path_prefix 硬约束)并以 role=tool 回填,回 content 即终答;≤`answer_max_tool_rounds`(默认 4)轮后强制收尾(不带 tools)。工具错误一律回填文本让 LLM 自愈。**Prompt 分层**:system = 内置知识库协议(工具用法/引用/防注入/拒答,不可覆盖)+ bot persona(请求 `prompt` 字段,空则 `DEFAULT_BOT_PROMPT`)。**Block 注册表**:search hit 按 (path,chunk) 去重编号,read_file 按 path 注册整文件块(citation `spans:[]` = 整文件);`[n]` 对齐生成 citations,零有效引用→回退全部块+`ungrounded`。时间预算:loop 总 80s,单次 LLM 尝试 20s,剩余 <25s 不再开工具轮;重试规则=该次调用未向下游转发过 delta。`LlmService` trait:`summarize` + `chat_stream(messages,tools)`(旧 complete* 已删);`veda-pipeline/llm.rs` 含流式 tool_calls 分片拼装器。
+- **`veda-server/routes/answer.rs`**：`POST /v1/answer(/stream)`(`AuthWorkspace`,fs only)。挂在 30s TimeoutLayer **之外**、自带 90s 兜底 deadline;per-workspace 并发信号量(`answer_concurrency` 默认 2,超出 429);query ≤1024 字符、`prompt` ≤4000 字符;SSE 事件 `delta`/`reset`(丢弃已积累 delta,罕见的说话后调工具轮)/`final`(权威)/`error`。「没找到」不再是检索空提前返回,而是 LLM 输出固定话术(outcome=empty 按话术判定)。配置:`[llm]` 下 `answer_max_tool_rounds`(4,调 0≈退化 one-shot 应急旋钮)/`answer_max_output_tokens`(1024)/`answer_concurrency`(2);`answer_max_context_tokens` 已删。指标:`veda_answer_request_seconds{outcome}`、`veda_answer_rounds`(loop 失控监控)等;hit_count=累计去重资料块数。
+- **veda-tunnel 接入**：`[answer] enabled`(默认 true,改动需重启)优先走 **`/v1/answer/stream`**(SSE:delta 逐段 → tunnel ≥1s 节流刷新企微气泡,final 帧权威含 citations;老 server 404/405 自动回落 `/v1/answer`),回复=答案正文+出处列表;false 回退纯检索直出。错误话术:501→「问答未启用」、429→「太频繁」、502/504→「暂时不可用」。per-bot `prompt`(veda_tunnel_bots 列)随请求透传。
 - **验收**（真实 veda_it MySQL+测试 Milvus+airouter）：端到端带引用答案 3.5s；不编造（无关问题固定拒答）；400/501/kind-mismatch 负向全过。P1（SSE 流式、L1 全局题路径）、v1.5（db kind）见 plan §12。
 
 ## 平台网关面（AI Workbench / OnePaaS）
@@ -83,6 +84,7 @@ fs 数据面新增知识库问答：检索 → 分层上下文组装 → LLM 生
 - **一 bot 一连接一 key**：每个企微机器人一条长连接 + 一个只读 `wk_`（绑一 workspace）。群 @提问 / 单聊 → 剥 `@` → `POST /v1/search`（Bearer `wk_`）→ 取 top-k `content`+`path` 拼 markdown → 长连接流式回（先 `finish:false` 占位吸收企微 5s 超时，检索完 `finish:true`）。
 - **连接生命周期**（`wecom/conn.rs`）：`aibot_subscribe` 订阅 → 30s `ping` 心跳 → 断线/被踢（`aibot_event_callback` 的 `disconnected_event`）指数退避重连；msgid moka TTL 去重防 5s 重推双查；WS sink 由单写循环独占，读循环 / 心跳 / handler 都经 mpsc 投帧。
 - **bot 管理（共享 MySQL 表，三入口）**：bot 配置存 MySQL（`veda_tunnel_bots` 表，生产与 veda-server 同库，`store.rs` bootstrap + information_schema 列迁移；`config.toml` 的 `[[wecom.bot]]` 仅首次 seed）。三个写入口收敛到同一张表：① console UI `#/admin/tunnel`（经 nginx `/tunnel/v1/*` → tunnel `:9110/admin/*`，即时生效）② tunnel admin CRUD API（同上）③ **veda-server 平台 API**（`/v1/workspace/{ws}/project/{id}/tunnel/bots`，AI 工作台专用：直写共享表 + 自动 mint/revoke 只读 `wk_`，`routes/tunnel_bots.rs` + `tunnel_bots.rs`，进程间零 RPC）。tunnel 侧 **30s store 轮询 reconcile**（`reconcile::plan` 纯函数 diff：新增 spawn / 变更 respawn / 删除 stop）收敛平台写入，并把 `conn_state` 心跳写回表（仅变化时 UPDATE，`updated_at=updated_at` 保配置时间戳），平台 GET 可见在线状态。
+- **问答质量遥测（qa_log）**：每次问答落 `veda_tunnel_qa_log`（query/答案原文/outcome 七分类/延迟/引用数，best-effort 不阻塞回复）；stream 首帧带 `feedback.id` 激活企微点赞点踩，`feedback_event` 回流 `veda_tunnel_qa_feedback`（同人改评价替换）。outcome=no_context 按 server 拒答话术前缀判定（语义检索恒有 top-k，hit 数不可用）——该清单即知识库内容缺口。admin `/admin/stats`+`/admin/qa-log`，console tunnel 页有统计卡+bad case 明细。计划：`docs/plans/veda-tunnel-qa-log.md`。
 - **管控面**（`admin.rs`，默认 `127.0.0.1:9100`，fail-closed `admin_token`：未配 404 / 错 401）：`GET /admin/bots`（配置+状态，secret 不返回、`veda_key` 脱敏）、`POST/PUT/DELETE /admin/bots[/{id}]`（CRUD，编辑时 secret/key 留空=保留）、`POST /bots/{id}/reconnect`、`POST /admin/reload`（从 MySQL 全量重载）、`GET /healthz`。
 - **单实例 + adapter 结构**：企微「新连接踢旧」约束决定全局单实例持 bot 连接（多实例选主划到未来）。`wecom/` 是第一个 adapter，`config`/`registry`/`veda`/`admin`/`store` 通用，未来 `feishu/` 平级新增。依赖复用 workspace，新增 `tokio-tungstenite`（rustls，同 reqwest TLS 栈）+ `sqlx`（MySQL bot store，同 veda-store 客户端）。
 
@@ -156,4 +158,3 @@ Vector dataset 是 db workspace 内的逻辑分组（内部物理 pk = `{dataset
   - SummarySync / DirSummarySync 入队前检查去重，避免重复 LLM 调用
   - 搜索 API：`detail_level` 参数控制返回粒度，Abstract/Overview/Full 三级
   - LLM 配置可选，未配置时 summary 功能自动禁用
-

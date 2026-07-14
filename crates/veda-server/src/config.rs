@@ -225,11 +225,12 @@ pub struct LlmConfig {
     pub model: String,
     #[serde(default = "default_max_summary_tokens")]
     pub max_summary_tokens: usize,
-    /// `/v1/answer` assembled-context token budget (estimated, see answer
-    /// plan §4). Higher = more context per answer, more LLM cost/latency.
-    #[serde(default = "default_answer_max_context_tokens")]
-    pub answer_max_context_tokens: usize,
-    /// `/v1/answer` output token ceiling for the LLM completion.
+    /// `/v1/answer` tool round-trip cap for the agentic loop. 0 degrades to
+    /// pre-search + one forced answer (closest to the old one-shot mode) —
+    /// the emergency knob if the loop misbehaves in production.
+    #[serde(default = "default_answer_max_tool_rounds")]
+    pub answer_max_tool_rounds: usize,
+    /// `/v1/answer` output token ceiling per LLM round.
     #[serde(default = "default_answer_max_output_tokens")]
     pub answer_max_output_tokens: usize,
     /// Per-workspace in-flight `/v1/answer` concurrency (semaphore permits).
@@ -244,8 +245,8 @@ fn default_max_summary_tokens() -> usize {
     2048
 }
 
-fn default_answer_max_context_tokens() -> usize {
-    6000
+fn default_answer_max_tool_rounds() -> usize {
+    4
 }
 
 fn default_answer_max_output_tokens() -> usize {
@@ -315,7 +316,7 @@ impl ServerConfig {
                     api_key: String::new(),
                     model: String::new(),
                     max_summary_tokens: default_max_summary_tokens(),
-                    answer_max_context_tokens: default_answer_max_context_tokens(),
+                    answer_max_tool_rounds: default_answer_max_tool_rounds(),
                     answer_max_output_tokens: default_answer_max_output_tokens(),
                     answer_concurrency: default_answer_concurrency(),
                 })

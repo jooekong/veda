@@ -9,9 +9,56 @@ that matters.
 
 ## [Unreleased]
 
+### Changed
+- **`/v1/answer` is now agentic.** The LLM drives retrieval itself through
+  tool calls (`search` for re-querying with different keywords, `read_file`
+  for pulling full context around a hit) across up to
+  `answer_max_tool_rounds` (default 4) rounds, instead of the old
+  retrieve-once → assemble → single-completion pipeline. Empty retrieval no
+  longer short-circuits: the model rewrites keywords and searches again; the
+  canned "not found" phrase is now always model-produced. Citations with an
+  empty `spans` array mean the whole file (evidence came from `read_file`).
+  The SSE stream gains a `reset` event telling consumers to discard deltas
+  accumulated so far (rare talk-then-tool-call rounds); the `final` frame
+  stays authoritative. Route deadline 45s → 90s. Config: `[llm]`
+  `answer_max_tool_rounds` added, `answer_max_context_tokens` removed.
+
+### Added
+- **Per-request answer persona: `prompt` field on `/v1/answer(/stream)`.**
+  Appended to the built-in knowledge-base protocol (tool policy, citation
+  rules, injection guard — not overridable), ≤4000 chars; absent falls back
+  to the server default persona. Groundwork for per-bot prompts in the WeCom
+  tunnel.
+- **Built-in Console file manager.** fs workspaces now expose a `Files` entry
+  in `#/console`; it lists directories, uploads a selected text or binary file
+  and downloads original bytes. The workspace `wk_` is kept only in the active
+  browser tab and sent directly to the native `/v1/fs/*` data plane.
+
 ## [0.1.17] — 2026-07-13
 
 ### Added
+- **`POST /v1/answer/stream` — streaming RAG answers (SSE).** Same request
+  as `/v1/answer`; the response streams `delta` events (incremental LLM
+  text) and ends with an authoritative `final` frame carrying the full
+  `AnswerApiResponse` (citations align only against complete text — always
+  replace accumulated deltas with it); failures after the 200 arrive as an
+  `error` event. Pre-checks (400/401/429/501) stay plain HTTP. Mounted
+  outside the 30s TimeoutLayer with a 45s per-event guard; the per-workspace
+  concurrency permit spans the whole stream. veda-tunnel consumes it with
+  ≥1s-throttled WeCom bubble refreshes (first token visible in ~1-2s instead
+  of a 7-11s blank wait) and falls back to the one-shot endpoint on older
+  servers. Plan: `docs/plans/veda-answer-stream.md`.
+- **veda-tunnel QA telemetry (qa_log).** Every WeCom Q&A lands a row in
+  `veda_tunnel_qa_log` (query, full answer text, outcome, latency, citation
+  count; best-effort — never blocks the reply), and each reply's first stream
+  frame carries `feedback.id`, activating WeCom's thumb-up/down UI; votes
+  flow back via `feedback_event` into `veda_tunnel_qa_feedback` (re-voting
+  replaces). `no_context` classification matches the server's canned-refusal
+  prefix (semantic retrieval always returns top-k, so hit-count can't signal
+  it) — that list doubles as the knowledge base's missing-docs backlog. New
+  admin endpoints `/admin/stats` + `/admin/qa-log`; the console tunnel page
+  gains stat cards and a filterable Q&A/bad-case table. Admin bot writes now
+  leave audit log lines. Plan: `docs/plans/veda-tunnel-qa-log.md`.
 - **Platform fs file upload/download.** The AI Workbench data plane gains
   `PUT /v1/workspace/{ws}/project/{id}/file?path=` (raw-byte body, same
   UTF-8-vs-blob content sniff as the `wk_` plane, parents auto-created,

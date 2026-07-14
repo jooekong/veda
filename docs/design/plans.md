@@ -13,8 +13,10 @@
 
 | 计划 | 状态 |
 | --- | --- |
-| [`veda-answer-plan.md`](../plans/veda-answer-plan.md) | **P0 已实现+真实环境验收通过（未部署）**：`/v1/answer` RAG 问答；余 DAL 真题评审（DoD-4）+ P1 流式/L1 |
-| [`veda-tunnel-plan.md`](../plans/veda-tunnel-plan.md) | 一期已实现并部署 .161 测试（企微长连接 + 检索直出 + MySQL bot 管理）；二期生成式问答依赖 answer-plan |
+| [`veda-answer-agentic.md`](../plans/veda-answer-agentic.md) | **Stage 1 已实现 e2e 全绿**：`/v1/answer` agentic 多次召回(tool loop)+ prompt 分层;Stage 2 bot prompt 三入口贯通进行中 |
+| [`veda-answer-plan.md`](../plans/veda-answer-plan.md) | ⚠️ 组装管线已被 agentic 重构取代(见上);API 契约/引用对齐仍是基础。余 DAL 真题评审(将由 qa-log 自动化) |
+| [`veda-tunnel-plan.md`](../plans/veda-tunnel-plan.md) | **生产运行中**（专用机 .95）：企微长连接 + RAG 问答 + 三入口 bot 管理 + 平台 API（§18）；方向池见 `design/tunnel-directions.md` |
+| [`veda-tunnel-qa-log.md`](../plans/veda-tunnel-qa-log.md) | **方案已定稿待实现**（T1 质量遥测）：问答日志 + 企微点赞点踩回流 + console 统计/bad case 清单 |
 | [`db-workspace-followups.md`](../plans/db-workspace-followups.md) | 接业务方前待办：H1 Milvus GC / M1 维度校验 / A1 内存天花板（硬门槛）+ backlog 并入尾巴 |
 | [`embedding-throughput-plan.md`](../plans/embedding-throughput-plan.md) | 已设计未实现，明确"先上线后优化" |
 | [`outbox-dedup-refactor.md`](../plans/outbox-dedup-refactor.md) | 未实现仍有效（A-3 fencing 提交后需重对行号） |

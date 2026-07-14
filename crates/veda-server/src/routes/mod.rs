@@ -64,11 +64,11 @@ pub fn build_router(state: Arc<AppState>) -> Router {
 
     timed
         .merge(events::routes())
-        // `/v1/answer` carries its own 45s deadline (LLM generation runs up to
-        // 20s/attempt × 2), so it must NOT sit under the 30s TimeoutLayer above
-        // — that would cut a legitimate answer off mid-generation. Same
-        // rationale as the SSE stream: merged in after the layer, untimed at the
-        // tower level, self-limited inside the handler.
+        // `/v1/answer` carries its own 90s deadline (the agentic tool loop
+        // budgets 80s internally), so it must NOT sit under the 30s
+        // TimeoutLayer above — that would cut a legitimate answer off
+        // mid-loop. Same rationale as the SSE stream: merged in after the
+        // layer, untimed at the tower level, self-limited inside the handler.
         .merge(answer::routes())
         .with_state(state)
 }
