@@ -15,8 +15,17 @@ use tracing::{info, warn};
 
 use super::protocol::{respond_stream_frame, MsgCallbackBody, MSGTYPE_TEXT};
 use crate::config::BotConfig;
+use crate::qa_log::{QaLogEntry, QaLogStore};
 use crate::registry::{self, Registry};
-use crate::veda::{AnswerData, Hit, SearchError, VedaClient};
+use crate::veda::{AnswerData, AnswerStreamItem, Hit, SearchError, VedaClient};
+
+/// Minimum gap between interim WeCom frame refreshes while streaming.
+/// Whether interim refreshes count against the 30 msg/min quota is not
+/// documented — 1s throttling keeps a full answer under ~10 frames either way.
+const STREAM_FLUSH_INTERVAL: std::time::Duration = std::time::Duration::from_secs(1);
+/// Stop interim refreshes when the accumulated text approaches WeCom's
+/// 20480-byte frame cap; the final frame (rendered with sources) still goes out.
+const STREAM_INTERIM_BYTE_CAP: usize = 19_000;
 
 /// Everything a handler task needs. All fields are cheap to clone (Arc /
 /// channel sender / Arc-backed registry).
@@ -29,6 +38,23 @@ pub struct HandlerCtx {
     /// Global answer switch (`[answer] enabled`): true → route through
     /// `/v1/answer`, false → raw search. Process-wide, not per-bot.
     pub answer_enabled: bool,
+    /// QA telemetry sink (docs/plans/veda-tunnel-qa-log.md). Writes are
+    /// best-effort; a failure warns and never blocks the reply.
+    pub qa_log: Arc<QaLogStore>,
+}
+
+/// The server's canned refusal when retrieval found nothing relevant — MUST
+/// stay in sync with veda-core `service::answer::NO_CONTEXT_ANSWER` (matched
+/// as a prefix; the wire text may carry trailing punctuation). Rows matching
+/// this are the "missing docs" backlog, the QA log's primary product.
+const NO_CONTEXT_ANSWER: &str = "知识库中没有找到相关内容";
+
+/// A reply plus what the QA log needs to know about how it came to be.
+struct Reply {
+    text: String,
+    outcome: &'static str,
+    hit_count: u32,
+    citation_count: u32,
 }
 
 pub async fn handle_message(ctx: HandlerCtx, req_id: String, body: MsgCallbackBody) {
@@ -37,9 +63,24 @@ pub async fn handle_message(ctx: HandlerCtx, req_id: String, body: MsgCallbackBo
     let stream_id = uuid::Uuid::new_v4().to_string();
 
     if body.msgtype.as_deref() != Some(MSGTYPE_TEXT) {
+        // Guidance bubbles: no feedback UI, no QA-log row — not a Q&A.
         send_final(&ctx, &req_id, &stream_id, "暂只支持文字提问").await;
         return;
     }
+
+    // Chat metadata for the QA log, captured before `text` is moved.
+    let chat_type = body.chattype.clone().unwrap_or_else(|| "single".to_string());
+    let user_id = body
+        .from
+        .as_ref()
+        .and_then(|f| f.userid.clone())
+        .unwrap_or_default();
+    // Group chats key by chatid; singles by the asking user. Doubles as the
+    // reachable-chat ledger for future proactive push (directions T6).
+    let chat_key = match body.chatid.as_deref() {
+        Some(cid) if chat_type == "group" => cid.to_string(),
+        _ => user_id.clone(),
+    };
 
     let raw_text = body.text.map(|t| t.content).unwrap_or_default();
     let query = strip_mention(&raw_text);
@@ -47,6 +88,11 @@ pub async fn handle_message(ctx: HandlerCtx, req_id: String, body: MsgCallbackBo
         send_final(&ctx, &req_id, &stream_id, "请在 @ 机器人后输入要查询的问题").await;
         return;
     }
+
+    // The feedback id rides the FIRST frame (protocol: stream.feedback.id on
+    // the first reply activates WeCom's thumb-up/down UI); votes come back as
+    // feedback_event callbacks carrying it.
+    let feedback_id = uuid::Uuid::new_v4().to_string();
 
     // Placeholder frame — must reach WeCom within 5s; search may take longer.
     let _ = ctx
@@ -56,6 +102,7 @@ pub async fn handle_message(ctx: HandlerCtx, req_id: String, body: MsgCallbackBo
             &stream_id,
             "正在查阅知识库…",
             false,
+            Some(&feedback_id),
         ))
         .await;
 
@@ -66,17 +113,43 @@ pub async fn handle_message(ctx: HandlerCtx, req_id: String, body: MsgCallbackBo
 
     let started = std::time::Instant::now();
     let reply = if ctx.answer_enabled {
-        answer_reply(&ctx, &query, started).await
+        answer_reply_stream(&ctx, &req_id, &stream_id, &query, started).await
     } else {
         search_reply(&ctx, &query, started).await
     };
 
-    send_final(&ctx, &req_id, &stream_id, &reply).await;
+    send_final(&ctx, &req_id, &stream_id, &reply.text).await;
+
+    let entry = QaLogEntry {
+        bot_id: ctx.bot.bot_id.clone(),
+        chat_type,
+        chat_key,
+        user_id,
+        query,
+        outcome: reply.outcome,
+        hit_count: reply.hit_count,
+        citation_count: reply.citation_count,
+        latency_ms: started.elapsed().as_millis().min(u32::MAX as u128) as u32,
+        answer_text: reply.text,
+        feedback_id,
+    };
+    if let Err(e) = ctx.qa_log.log(&entry).await {
+        warn!(bot = %ctx.bot.name, error = %e, "qa log write failed (reply already sent)");
+    }
+}
+
+fn err_reply(text: &str, outcome: &'static str) -> Reply {
+    Reply {
+        text: text.to_string(),
+        outcome,
+        hit_count: 0,
+        citation_count: 0,
+    }
 }
 
 /// Pre-answer path: raw `/v1/search` + snippet rendering. Behaviour is
 /// unchanged from before the answer switch existed.
-async fn search_reply(ctx: &HandlerCtx, query: &str, started: std::time::Instant) -> String {
+async fn search_reply(ctx: &HandlerCtx, query: &str, started: std::time::Instant) -> Reply {
     match ctx
         .veda
         .search(&ctx.bot.veda_key, query, &ctx.bot.mode, ctx.bot.limit)
@@ -90,7 +163,12 @@ async fn search_reply(ctx: &HandlerCtx, query: &str, started: std::time::Instant
                 ms = started.elapsed().as_millis() as u64,
                 "search ok"
             );
-            render_markdown(&hits)
+            Reply {
+                text: render_markdown(&hits),
+                outcome: if hits.is_empty() { "no_context" } else { "raw_search" },
+                hit_count: hits.len() as u32,
+                citation_count: 0,
+            }
         }
         Err(SearchError::Unauthorized) => {
             registry::update(&ctx.registry, &ctx.bot.bot_id, |s| {
@@ -100,7 +178,7 @@ async fn search_reply(ctx: &HandlerCtx, query: &str, started: std::time::Instant
             // Keep the WeCom connection alive — a bad key is not a reason to
             // drop the long connection (§9).
             warn!(bot = %ctx.bot.name, "search unauthorized (401)");
-            "知识库鉴权失败，请联系管理员".to_string()
+            err_reply("知识库鉴权失败，请联系管理员", "error")
         }
         Err(SearchError::Unavailable(e)) => {
             registry::update(&ctx.registry, &ctx.bot.bot_id, |s| {
@@ -108,49 +186,61 @@ async fn search_reply(ctx: &HandlerCtx, query: &str, started: std::time::Instant
                 s.last_error = Some(truncate(&e, 200));
             });
             warn!(bot = %ctx.bot.name, error = %e, "search unavailable");
-            "知识库暂时不可用，请稍后再试".to_string()
+            err_reply("知识库暂时不可用，请稍后再试", "error")
         }
         // search() only maps 401→Unauthorized and everything else→Unavailable,
         // so these answer-only variants never reach here; treat them as
         // unavailable to keep the match exhaustive.
-        Err(SearchError::Disabled) | Err(SearchError::Throttled) => {
-            "知识库暂时不可用，请稍后再试".to_string()
+        Err(SearchError::Disabled)
+        | Err(SearchError::Throttled)
+        | Err(SearchError::StreamUnsupported) => {
+            err_reply("知识库暂时不可用，请稍后再试", "error")
         }
     }
 }
 
-/// Answer path: veda's `/v1/answer` RAG endpoint — body + a verifiable
-/// citation list, with per-error fallbacks (§8). A failed call is recorded on
-/// the bot's error counters, matching the search path.
-async fn answer_reply(ctx: &HandlerCtx, query: &str, started: std::time::Instant) -> String {
-    match ctx.veda.answer(&ctx.bot.veda_key, query).await {
-        Ok(data) => {
-            info!(
-                bot = %ctx.bot.name,
-                query = %query,
-                citations = data.citations.len(),
-                ms = started.elapsed().as_millis() as u64,
-                "answer ok"
-            );
-            render_answer(&data)
-        }
-        Err(SearchError::Disabled) => {
+/// Success mapping shared by the one-shot and streaming answer paths.
+/// Semantic retrieval always returns top-k (hit_count is never 0 in
+/// practice — live-verified 2026-07-14), so "the KB doesn't cover this" is
+/// signalled by the server's canned refusal text, not by hits. Hits with a
+/// real answer but zero citations = ungrounded.
+fn answer_data_to_reply(data: &AnswerData) -> Reply {
+    let outcome = if data.answer.trim().starts_with(NO_CONTEXT_ANSWER) {
+        "no_context"
+    } else if data.citations.is_empty() {
+        "ungrounded"
+    } else {
+        "answered"
+    };
+    Reply {
+        text: render_answer(data),
+        outcome,
+        hit_count: data.hit_count as u32,
+        citation_count: data.citations.len() as u32,
+    }
+}
+
+/// Error mapping shared by the one-shot and streaming answer paths: bump the
+/// bot's error counters and pick the user-facing canned phrase.
+fn answer_error_to_reply(ctx: &HandlerCtx, e: SearchError) -> Reply {
+    match e {
+        SearchError::Disabled => {
             registry::update(&ctx.registry, &ctx.bot.bot_id, |s| {
                 s.error_count += 1;
                 s.last_error = Some("answer disabled (501)".to_string());
             });
             warn!(bot = %ctx.bot.name, "answer disabled (501)");
-            "知识库问答未启用".to_string()
+            err_reply("知识库问答未启用", "disabled")
         }
-        Err(SearchError::Throttled) => {
+        SearchError::Throttled => {
             registry::update(&ctx.registry, &ctx.bot.bot_id, |s| {
                 s.error_count += 1;
                 s.last_error = Some("answer throttled (429)".to_string());
             });
             warn!(bot = %ctx.bot.name, "answer throttled (429)");
-            "提问太频繁，请稍后再试".to_string()
+            err_reply("提问太频繁，请稍后再试", "throttled")
         }
-        Err(SearchError::Unauthorized) => {
+        SearchError::Unauthorized => {
             registry::update(&ctx.registry, &ctx.bot.bot_id, |s| {
                 s.error_count += 1;
                 s.last_error = Some("answer 401 (key invalid/revoked)".to_string());
@@ -158,23 +248,139 @@ async fn answer_reply(ctx: &HandlerCtx, query: &str, started: std::time::Instant
             // Keep the WeCom connection alive — a bad key is not a reason to
             // drop the long connection (§9).
             warn!(bot = %ctx.bot.name, "answer unauthorized (401)");
-            "知识库鉴权失败，请联系管理员".to_string()
+            err_reply("知识库鉴权失败，请联系管理员", "error")
         }
-        Err(SearchError::Unavailable(e)) => {
+        // StreamUnsupported is handled by the caller's fallback before this.
+        SearchError::StreamUnsupported | SearchError::Unavailable(_) => {
+            let detail = match e {
+                SearchError::Unavailable(m) => m,
+                _ => "stream unsupported".to_string(),
+            };
             registry::update(&ctx.registry, &ctx.bot.bot_id, |s| {
                 s.error_count += 1;
-                s.last_error = Some(truncate(&e, 200));
+                s.last_error = Some(truncate(&detail, 200));
             });
-            warn!(bot = %ctx.bot.name, error = %e, "answer unavailable");
-            "知识库暂时不可用，请稍后再试".to_string()
+            warn!(bot = %ctx.bot.name, error = %detail, "answer unavailable");
+            err_reply("知识库暂时不可用，请稍后再试", "error")
+        }
+    }
+}
+
+/// Answer path: veda's `/v1/answer` RAG endpoint — body + a verifiable
+/// citation list, with per-error fallbacks (§8). Used directly when the
+/// server has no streaming endpoint yet, and as the streaming fallback.
+async fn answer_reply(ctx: &HandlerCtx, query: &str, started: std::time::Instant) -> Reply {
+    match ctx
+        .veda
+        .answer(&ctx.bot.veda_key, query, ctx.bot.prompt.as_deref())
+        .await
+    {
+        Ok(data) => {
+            let query_log: String = query.chars().take(64).collect();
+            info!(
+                bot = %ctx.bot.name,
+                query = ?query_log,
+                citations = data.citations.len(),
+                hits = data.hit_count,
+                ms = started.elapsed().as_millis() as u64,
+                "answer ok"
+            );
+            answer_data_to_reply(&data)
+        }
+        Err(e) => answer_error_to_reply(ctx, e),
+    }
+}
+
+/// Streaming answer: forwards LLM deltas to WeCom as throttled interim
+/// refreshes of the same bubble (full-replacement semantics), then lets the
+/// caller send the authoritative final frame from the returned `Reply`.
+/// Falls back to the one-shot path when the server predates
+/// `/v1/answer/stream`.
+async fn answer_reply_stream(
+    ctx: &HandlerCtx,
+    req_id: &str,
+    stream_id: &str,
+    query: &str,
+    started: std::time::Instant,
+) -> Reply {
+    let mut rx = match ctx
+        .veda
+        .answer_stream(&ctx.bot.veda_key, query, ctx.bot.prompt.as_deref())
+        .await
+    {
+        Ok(rx) => rx,
+        Err(SearchError::StreamUnsupported) => {
+            info!(bot = %ctx.bot.name, "server has no /v1/answer/stream, falling back");
+            return answer_reply(ctx, query, started).await;
+        }
+        Err(e) => return answer_error_to_reply(ctx, e),
+    };
+
+    let mut acc = String::new();
+    let mut last_flush = std::time::Instant::now(); // placeholder frame just went out
+    let mut frames_sent = 0u32;
+    loop {
+        match rx.recv().await {
+            Some(AnswerStreamItem::Delta(d)) => {
+                acc.push_str(&d);
+                if last_flush.elapsed() >= STREAM_FLUSH_INTERVAL
+                    && !acc.trim().is_empty()
+                    && acc.len() <= STREAM_INTERIM_BYTE_CAP
+                {
+                    let _ = ctx
+                        .outbound
+                        .send(respond_stream_frame(req_id, stream_id, &acc, false, None))
+                        .await;
+                    frames_sent += 1;
+                    last_flush = std::time::Instant::now();
+                }
+            }
+            Some(AnswerStreamItem::Reset) => {
+                // Server rolled back a talk-then-tool-call round: drop what
+                // we accumulated. Any interim frame already shown gets
+                // overwritten by the next flush / the final frame (WeCom
+                // stream frames are full replacements).
+                acc.clear();
+            }
+            Some(AnswerStreamItem::Final(data)) => {
+                let query_log: String = query.chars().take(64).collect();
+                info!(
+                    bot = %ctx.bot.name,
+                    query = ?query_log,
+                    citations = data.citations.len(),
+                    hits = data.hit_count,
+                    interim_frames = frames_sent,
+                    ms = started.elapsed().as_millis() as u64,
+                    "answer ok (streamed)"
+                );
+                return answer_data_to_reply(&data);
+            }
+            Some(AnswerStreamItem::Error(code)) => {
+                let e = match code.as_str() {
+                    "THROTTLED" => SearchError::Throttled,
+                    "FEATURE_DISABLED" => SearchError::Disabled,
+                    other => SearchError::Unavailable(format!("stream error: {other}")),
+                };
+                return answer_error_to_reply(ctx, e);
+            }
+            None => {
+                return answer_error_to_reply(
+                    ctx,
+                    SearchError::Unavailable("stream ended without final".to_string()),
+                );
+            }
         }
     }
 }
 
 async fn send_final(ctx: &HandlerCtx, req_id: &str, stream_id: &str, content: &str) {
+    // feedback.id only matters on the first frame of a reply; final frames
+    // never (re)set it. Cap the body so the ungrounded fallback + a long 出处
+    // list can't blow past WeCom's ~20480-byte frame limit.
+    let content = cap_frame_bytes(content, STREAM_INTERIM_BYTE_CAP);
     let _ = ctx
         .outbound
-        .send(respond_stream_frame(req_id, stream_id, content, true))
+        .send(respond_stream_frame(req_id, stream_id, &content, true, None))
         .await;
 }
 
@@ -238,6 +444,27 @@ pub(crate) fn truncate(s: &str, max: usize) -> String {
     }
 }
 
+/// Cap a final frame to `cap` bytes. WeCom rejects frames over 20480 bytes; the
+/// ungrounded fallback plus a long 出处 list can exceed that. Under the cap the
+/// text is returned untouched; over it, cut on a char boundary and append a
+/// truncation marker (result stays ≤ cap bytes).
+fn cap_frame_bytes(s: &str, cap: usize) -> String {
+    if s.len() <= cap {
+        return s.to_string();
+    }
+    const MARK: &str = "\n…(内容过长已截断)";
+    let budget = cap.saturating_sub(MARK.len());
+    let mut end = 0;
+    for (i, c) in s.char_indices() {
+        let next = i + c.len_utf8();
+        if next > budget {
+            break;
+        }
+        end = next;
+    }
+    format!("{}{MARK}", &s[..end])
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -295,8 +522,25 @@ mod tests {
     }
 
     #[test]
+    fn cap_frame_leaves_text_within_cap() {
+        let s = "a".repeat(19_000); // exactly at cap → untouched
+        assert_eq!(cap_frame_bytes(&s, 19_000), s);
+    }
+
+    #[test]
+    fn cap_frame_truncates_oversize_on_char_boundary() {
+        let s = "中".repeat(10_000); // 30_000 bytes, well over cap
+        let out = cap_frame_bytes(&s, 19_000);
+        assert!(out.len() <= 19_000, "capped to <= cap bytes, got {}", out.len());
+        let body = out.strip_suffix("\n…(内容过长已截断)").expect("has truncation marker");
+        assert!(body.chars().all(|c| c == '中'), "body cut on a char boundary");
+        assert!(!body.is_empty());
+    }
+
+    #[test]
     fn render_answer_with_citations() {
         let data = AnswerData {
+            hit_count: 5,
             answer: "接入分三步[1]，多活需额外申请[2]".to_string(),
             citations: vec![
                 AnswerCitation {
@@ -320,6 +564,7 @@ mod tests {
     #[test]
     fn render_answer_no_citations_body_only() {
         let data = AnswerData {
+            hit_count: 5,
             answer: "知识库中没有找到相关内容".to_string(),
             citations: vec![],
         };
@@ -333,6 +578,7 @@ mod tests {
         // Citation with index 1 has no path → dropped from the 出处 list; its
         // 1-based index is preserved for the ones that remain.
         let data = AnswerData {
+            hit_count: 5,
             answer: "答案[1][2]".to_string(),
             citations: vec![
                 AnswerCitation {
@@ -353,6 +599,7 @@ mod tests {
     #[test]
     fn render_answer_all_none_paths_body_only() {
         let data = AnswerData {
+            hit_count: 5,
             answer: "答案".to_string(),
             citations: vec![AnswerCitation {
                 index: 1,

@@ -113,6 +113,10 @@ pub struct BotConfig {
     pub mode: String,
     #[serde(default = "default_limit")]
     pub limit: usize,
+    /// Custom answer persona, passed through to `/v1/answer` as `prompt`.
+    /// None/empty → the server's default persona.
+    #[serde(default)]
+    pub prompt: Option<String>,
 }
 
 fn default_mode() -> String {
@@ -187,6 +191,13 @@ impl BotConfig {
                 self.name,
                 self.mode
             );
+        }
+        // Mirror of the server-side /v1/answer prompt cap — reject early so a
+        // too-long persona fails at config time, not per message.
+        if let Some(p) = &self.prompt {
+            if p.chars().count() > 4000 {
+                bail!("bot '{}' prompt exceeds 4000 characters", self.name);
+            }
         }
         Ok(())
     }

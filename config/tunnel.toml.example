@@ -35,3 +35,7 @@ token = "REPLACE_ME"
 # project   = "hr"             # optional, display-only
 # mode      = "hybrid"         # optional: hybrid | semantic | fulltext
 # limit     = 8                # optional, default 8
+# prompt    = """              # optional bot persona (≤4000 chars), appended
+# # 角色                        # after the server's built-in KB protocol;
+# HR 答疑机器人,回答简洁。       # unset = server default persona
+# """

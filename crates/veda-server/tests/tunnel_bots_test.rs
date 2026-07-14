@@ -292,12 +292,13 @@ async fn tunnel_bot_crud_cycle() {
     assert!(bot.get("secret").is_none(), "secret must never round-trip");
     assert_eq!(active_keys(&state, &s.fs_ws_id).await, 1);
 
-    // Validation: bad mode / out-of-band limit.
+    // Validation: bad mode / out-of-band limit / oversized prompt.
     for bad in [
         json!({"bot_id": "b2", "name": "n2", "secret": "s", "mode": "fuzzy"}),
         json!({"bot_id": "b2", "name": "n2", "secret": "s", "limit": 0}),
         json!({"bot_id": "b2", "name": "n2", "secret": "s", "limit": 25}),
         json!({"bot_id": " ", "name": "n2", "secret": "s"}),
+        json!({"bot_id": "b2", "name": "n2", "secret": "s", "prompt": "长".repeat(4001)}),
     ] {
         let (st, _) = send(&router, "POST", &base, Some(bad)).await;
         assert_eq!(st, StatusCode::BAD_REQUEST);
@@ -336,6 +337,29 @@ async fn tunnel_bot_crud_cycle() {
     assert_eq!(st, StatusCode::OK, "patch: {patched}");
     assert_eq!(patched["mode"], "semantic");
     assert_eq!(patched["limit"], 12);
+    assert!(patched["prompt"].is_null(), "no persona configured yet");
+
+    // Prompt round-trip: set → visible in full; clear with "" → back to null.
+    let persona = "# 角色\nDAL 答疑助手,回答给出编号步骤。";
+    let (st, patched) = send(
+        &router,
+        "PATCH",
+        &format!("{base}/{bot_id}"),
+        Some(json!({"prompt": persona})),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "patch prompt: {patched}");
+    assert_eq!(patched["prompt"], persona);
+    assert_eq!(patched["mode"], "semantic", "other fields kept");
+    let (st, patched) = send(
+        &router,
+        "PATCH",
+        &format!("{base}/{bot_id}"),
+        Some(json!({"prompt": ""})),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK);
+    assert!(patched["prompt"].is_null(), "empty prompt clears the persona: {patched}");
 
     // The whole surface is fs-only now: even list/patch on a db project stop
     // at the kind gate (and a cross-project bot_id stays unreachable).

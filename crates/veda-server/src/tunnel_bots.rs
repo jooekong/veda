@@ -32,6 +32,8 @@ pub struct TunnelBotRow {
     pub project: Option<String>,
     pub mode: String,
     pub search_limit: i32,
+    /// Custom answer persona; NULL → server default persona.
+    pub prompt: Option<String>,
     pub key_id: Option<String>,
     pub creator: Option<String>,
     pub creator_name: Option<String>,
@@ -53,18 +55,21 @@ pub struct NewTunnelBot {
     pub project: String,
     pub mode: String,
     pub search_limit: i32,
+    pub prompt: Option<String>,
     pub key_id: String,
     pub creator: Option<String>,
     pub creator_name: Option<String>,
 }
 
-/// Patchable fields (PATCH semantics: `None` = keep).
+/// Patchable fields (PATCH semantics: `None` = keep). For `prompt`,
+/// `Some("")` clears the custom persona back to the server default.
 #[derive(Default)]
 pub struct TunnelBotPatch {
     pub name: Option<String>,
     pub secret: Option<String>,
     pub mode: Option<String>,
     pub search_limit: Option<i32>,
+    pub prompt: Option<String>,
 }
 
 impl TunnelBotStore {
@@ -96,6 +101,7 @@ impl TunnelBotStore {
                 project      VARCHAR(128) NULL,
                 mode         VARCHAR(32)  NOT NULL DEFAULT 'hybrid',
                 search_limit INT          NOT NULL DEFAULT 8,
+                prompt       TEXT         NULL,
                 key_id       VARCHAR(64)  NULL,
                 creator      VARCHAR(128) NULL,
                 creator_name VARCHAR(128) NULL,
@@ -135,6 +141,7 @@ impl TunnelBotStore {
                 "conn_updated_at",
                 "ADD COLUMN conn_updated_at TIMESTAMP NULL",
             ),
+            ("prompt", "ADD COLUMN prompt TEXT NULL"),
         ] {
             if !have.iter().any(|c| c == col) {
                 if let Err(e) = sqlx::query(&format!("ALTER TABLE veda_tunnel_bots {ddl}"))
@@ -159,7 +166,7 @@ impl TunnelBotStore {
     }
 
     const COLS: &'static str = "bot_id, name, veda_key, workspace, project, mode, search_limit, \
-         key_id, creator, creator_name, conn_state, conn_updated_at, created_at, updated_at";
+         prompt, key_id, creator, creator_name, conn_state, conn_updated_at, created_at, updated_at";
 
     pub async fn list_by_project(&self, project_id: &str) -> Result<Vec<TunnelBotRow>, VedaError> {
         let rows = sqlx::query(&format!(
@@ -197,8 +204,8 @@ impl TunnelBotStore {
         let res = sqlx::query(
             "INSERT INTO veda_tunnel_bots \
              (bot_id, name, secret, veda_key, workspace, project, mode, search_limit, \
-              key_id, creator, creator_name) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+              prompt, key_id, creator, creator_name) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(&b.bot_id)
         .bind(&b.name)
@@ -208,6 +215,7 @@ impl TunnelBotStore {
         .bind(&b.project)
         .bind(&b.mode)
         .bind(b.search_limit)
+        .bind(&b.prompt)
         .bind(&b.key_id)
         .bind(&b.creator)
         .bind(&b.creator_name)
@@ -231,18 +239,24 @@ impl TunnelBotStore {
         project_id: &str,
         p: &TunnelBotPatch,
     ) -> Result<bool, VedaError> {
+        // prompt: absent = keep, "" = clear back to the server default
+        // persona, non-empty = set. The CASE keeps "absent" distinct from
+        // "clear", which COALESCE alone cannot express.
         let res = sqlx::query(
             "UPDATE veda_tunnel_bots SET \
              name         = COALESCE(?, name), \
              secret       = COALESCE(NULLIF(?, ''), secret), \
              mode         = COALESCE(?, mode), \
-             search_limit = COALESCE(?, search_limit) \
+             search_limit = COALESCE(?, search_limit), \
+             prompt       = CASE WHEN ? IS NULL THEN prompt ELSE NULLIF(?, '') END \
              WHERE bot_id = ? AND project = ?",
         )
         .bind(&p.name)
         .bind(&p.secret)
         .bind(&p.mode)
         .bind(p.search_limit)
+        .bind(&p.prompt)
+        .bind(&p.prompt)
         .bind(bot_id)
         .bind(project_id)
         .execute(&self.pool)
@@ -316,6 +330,7 @@ fn row_to_view(row: &MySqlRow) -> Result<TunnelBotRow, VedaError> {
             project: row.try_get("project")?,
             mode: row.try_get("mode")?,
             search_limit: row.try_get("search_limit")?,
+            prompt: row.try_get("prompt")?,
             key_id: row.try_get("key_id")?,
             creator: row.try_get("creator")?,
             creator_name: row.try_get("creator_name")?,

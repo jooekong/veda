@@ -55,7 +55,17 @@ mod tests {
             project: None,
             mode: "hybrid".to_string(),
             limit,
+            prompt: None,
         }
+    }
+
+    #[test]
+    fn prompt_change_respawns() {
+        let mut d = vec![bot("a", "a", 8)];
+        let r = running(&d);
+        d[0].prompt = Some("# 角色\n新 persona".to_string());
+        let acts = plan(&d, &r);
+        assert!(matches!(acts.as_slice(), [Action::Respawn(b)] if b.bot_id == "a"));
     }
 
     fn running(bots: &[BotConfig]) -> HashMap<String, Arc<BotConfig>> {

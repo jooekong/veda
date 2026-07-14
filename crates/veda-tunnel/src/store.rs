@@ -30,6 +30,12 @@ impl BotStore {
         Ok(store)
     }
 
+    /// Cloneable handle to the shared pool (MySqlPool is Arc-backed) — the
+    /// QA-log store rides the same connections instead of opening its own.
+    pub fn pool(&self) -> MySqlPool {
+        self.pool.clone()
+    }
+
     /// Create/upgrade the table. tunnel OWNS this DDL; veda-server's
     /// `tunnel_bots.rs` (platform write path) duplicates it so either side can
     /// start first — keep the two in sync when columns change.
@@ -54,6 +60,7 @@ impl BotStore {
                 project      VARCHAR(128) NULL,
                 mode         VARCHAR(32)  NOT NULL DEFAULT 'hybrid',
                 search_limit INT          NOT NULL DEFAULT 8,
+                prompt       TEXT         NULL,
                 key_id       VARCHAR(64)  NULL,
                 creator      VARCHAR(128) NULL,
                 creator_name VARCHAR(128) NULL,
@@ -98,6 +105,7 @@ impl BotStore {
                 "conn_updated_at",
                 "ADD COLUMN conn_updated_at TIMESTAMP NULL",
             ),
+            ("prompt", "ADD COLUMN prompt TEXT NULL"),
         ] {
             if !have.iter().any(|c| c == col) {
                 if let Err(e) = sqlx::query(&format!("ALTER TABLE veda_tunnel_bots {ddl}"))
@@ -137,7 +145,7 @@ impl BotStore {
 
     pub async fn list(&self) -> Result<Vec<BotConfig>> {
         let rows = sqlx::query(
-            "SELECT bot_id, name, secret, veda_key, workspace, project, mode, search_limit \
+            "SELECT bot_id, name, secret, veda_key, workspace, project, mode, search_limit, prompt \
              FROM veda_tunnel_bots ORDER BY name",
         )
         .fetch_all(&self.pool)
@@ -148,7 +156,7 @@ impl BotStore {
 
     pub async fn get(&self, bot_id: &str) -> Result<Option<BotConfig>> {
         let row = sqlx::query(
-            "SELECT bot_id, name, secret, veda_key, workspace, project, mode, search_limit \
+            "SELECT bot_id, name, secret, veda_key, workspace, project, mode, search_limit, prompt \
              FROM veda_tunnel_bots WHERE bot_id = ?",
         )
         .bind(bot_id)
@@ -170,8 +178,8 @@ impl BotStore {
     pub async fn add(&self, b: &BotConfig) -> Result<()> {
         sqlx::query(
             "INSERT INTO veda_tunnel_bots \
-             (bot_id, name, secret, veda_key, workspace, project, mode, search_limit) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+             (bot_id, name, secret, veda_key, workspace, project, mode, search_limit, prompt) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(&b.bot_id)
         .bind(&b.name)
@@ -181,6 +189,7 @@ impl BotStore {
         .bind(&b.project)
         .bind(&b.mode)
         .bind(b.limit as i32)
+        .bind(&b.prompt)
         .execute(&self.pool)
         .await
         .context("insert bot")?;
@@ -189,15 +198,16 @@ impl BotStore {
 
     /// Update an existing bot. Empty `secret` / `veda_key` keep the stored
     /// value (via `COALESCE(NULLIF(?, ''), col)`) so the UI never has to
-    /// round-trip a plaintext secret or the full key. Returns false if
-    /// bot_id is unknown.
+    /// round-trip a plaintext secret or the full key. `prompt` is full
+    /// replacement (admin body carries the whole BotConfig; None clears back
+    /// to the server default persona). Returns false if bot_id is unknown.
     pub async fn update(&self, b: &BotConfig) -> Result<bool> {
         let res = sqlx::query(
             "UPDATE veda_tunnel_bots SET \
              name=?, \
              secret   = COALESCE(NULLIF(?, ''), secret), \
              veda_key = COALESCE(NULLIF(?, ''), veda_key), \
-             workspace=?, project=?, mode=?, search_limit=? \
+             workspace=?, project=?, mode=?, search_limit=?, prompt=? \
              WHERE bot_id=?",
         )
         .bind(&b.name)
@@ -207,6 +217,7 @@ impl BotStore {
         .bind(&b.project)
         .bind(&b.mode)
         .bind(b.limit as i32)
+        .bind(&b.prompt)
         .bind(&b.bot_id)
         .execute(&self.pool)
         .await
@@ -241,5 +252,6 @@ fn row_to_bot(row: &MySqlRow) -> Result<BotConfig> {
         project: row.try_get("project")?,
         mode: row.try_get("mode")?,
         limit: row.try_get::<i32, _>("search_limit")? as usize,
+        prompt: row.try_get("prompt")?,
     })
 }

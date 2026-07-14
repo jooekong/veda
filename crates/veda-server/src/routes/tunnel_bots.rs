@@ -56,6 +56,9 @@ struct AppTunnelBot {
     project: Option<String>,
     mode: String,
     limit: i32,
+    /// Custom answer persona; absent = server default. Round-trips in full
+    /// (not a secret) so the workbench edit form can prefill it.
+    prompt: Option<String>,
     /// Masked auto-minted read-only key, e.g. `wk_a1b2…c3d4`.
     veda_key: String,
     /// tunnel's connection heartbeat: unknown|connecting|subscribed|
@@ -77,6 +80,7 @@ impl From<TunnelBotRow> for AppTunnelBot {
             project: r.project,
             mode: r.mode,
             limit: r.search_limit,
+            prompt: r.prompt,
             veda_key: mask_token(&r.veda_key),
             conn_state: r.conn_state,
             conn_updated_at: r.conn_updated_at,
@@ -95,6 +99,8 @@ struct CreateBotReq {
     secret: String,
     mode: Option<String>,
     limit: Option<i32>,
+    /// Custom answer persona (≤4000 chars); absent/empty = server default.
+    prompt: Option<String>,
 }
 
 #[derive(serde::Deserialize)]
@@ -104,6 +110,22 @@ struct PatchBotReq {
     secret: Option<String>,
     mode: Option<String>,
     limit: Option<i32>,
+    /// Absent = keep; empty string = clear back to the server default;
+    /// non-empty (≤4000 chars) = set.
+    prompt: Option<String>,
+}
+
+/// Mirror of the `/v1/answer` prompt cap.
+const MAX_PROMPT_CHARS: usize = 4000;
+
+fn validate_prompt(prompt: Option<&str>) -> Result<(), AppError> {
+    if prompt.is_some_and(|p| p.chars().count() > MAX_PROMPT_CHARS) {
+        return Err(VedaError::InvalidInput(format!(
+            "prompt must be at most {MAX_PROMPT_CHARS} characters"
+        ))
+        .into());
+    }
+    Ok(())
 }
 
 fn validate_mode(mode: &str) -> Result<(), AppError> {
@@ -166,6 +188,9 @@ async fn create_bot(
     validate_mode(&mode)?;
     let limit = req.limit.unwrap_or(DEFAULT_LIMIT);
     validate_limit(limit)?;
+    validate_prompt(req.prompt.as_deref())?;
+    // Empty persona = no persona (server default).
+    let prompt = req.prompt.filter(|p| !p.trim().is_empty());
 
     // Mint the bot's dedicated read-only data-plane key.
     let raw_key = format!("wk_{}", Uuid::new_v4().to_string().replace('-', ""));
@@ -196,6 +221,7 @@ async fn create_bot(
         project: ws.id.clone(),
         mode,
         search_limit: limit,
+        prompt,
         key_id: wk.id.clone(),
         creator,
         creator_name,
@@ -255,11 +281,13 @@ async fn update_bot(
             return Err(VedaError::InvalidInput("name must not be blank".into()).into());
         }
     }
+    validate_prompt(req.prompt.as_deref())?;
     let patch = TunnelBotPatch {
         name: req.name.map(|s| s.trim().to_string()),
         secret: req.secret,
         mode: req.mode,
         search_limit: req.limit,
+        prompt: req.prompt,
     };
     if !state
         .tunnel_bots
