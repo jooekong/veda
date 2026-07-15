@@ -70,6 +70,9 @@ const HIT_SNIPPET_CHARS: usize = 600;
 const READ_FILE_MAX_CHARS: usize = 8000;
 /// Tool calls executed per round; extras are dropped.
 const TOOL_CALLS_PER_ROUND: usize = 5;
+/// Char cap for a ToolNote's detail (search query / file path) — status-line
+/// length, consumers show it verbatim.
+const TOOL_NOTE_DETAIL_CHARS: usize = 60;
 /// Minimum remaining budget to start another tool round; below this the
 /// loop forces a final answer so generation isn't squeezed to nothing.
 const FINAL_RESERVE: Duration = Duration::from_secs(25);
@@ -154,11 +157,14 @@ pub struct AnswerResult {
 
 /// Events on the answer channel. `Delta` text is raw LLM output; `Reset`
 /// tells consumers to discard all deltas accumulated so far (a rare
-/// talk-then-call round was rolled back); `Done` carries the aligned,
-/// authoritative result — consumers must replace accumulated deltas with it.
+/// talk-then-call round was rolled back); `ToolNote` announces a tool call
+/// about to run (progress only — safe to drop or render as a status line);
+/// `Done` carries the aligned, authoritative result — consumers must replace
+/// accumulated deltas with it.
 pub enum AnswerStreamEvent {
     Delta(String),
     Reset,
+    ToolNote { name: String, detail: String },
     Done(AnswerResult),
     Failed(AnswerError),
 }
@@ -242,7 +248,9 @@ impl AnswerService {
             match ev {
                 AnswerStreamEvent::Done(r) => terminal = Some(Ok(r)),
                 AnswerStreamEvent::Failed(e) => terminal = Some(Err(e)),
-                AnswerStreamEvent::Delta(_) | AnswerStreamEvent::Reset => {}
+                AnswerStreamEvent::Delta(_)
+                | AnswerStreamEvent::Reset
+                | AnswerStreamEvent::ToolNote { .. } => {}
             }
         }
         terminal.unwrap_or_else(|| {
@@ -397,6 +405,10 @@ impl Engine {
                     if self.tx.is_closed() {
                         return;
                     }
+                    // Progress note before the (potentially slow) execution;
+                    // send failure just means the consumer left — the
+                    // is_closed check above catches it next iteration.
+                    let _ = self.tx.send(tool_note(call)).await;
                     // Bound each tool call by the LLM attempt timeout, never past
                     // the loop deadline; a stuck tool self-heals into the
                     // transcript so the model can react and the loop continues.
@@ -641,6 +653,23 @@ impl Engine {
             out.push_str(&format!("\n(未完,续读用 offset={end})"));
         }
         out
+    }
+}
+
+/// Progress event for one tool call: tool name plus its key argument
+/// (search → query, read_file → path), char-capped for status-line display.
+/// Unparseable/missing arguments yield an empty detail — consumers render a
+/// generic "查阅中" note. Never exposes tool results.
+fn tool_note(call: &ToolCall) -> AnswerStreamEvent {
+    let args: serde_json::Value = serde_json::from_str(&call.arguments).unwrap_or_default();
+    let detail = match call.name.as_str() {
+        "search" => args.get("query").and_then(|v| v.as_str()).unwrap_or(""),
+        "read_file" => args.get("path").and_then(|v| v.as_str()).unwrap_or(""),
+        _ => "",
+    };
+    AnswerStreamEvent::ToolNote {
+        name: call.name.clone(),
+        detail: truncate_chars(detail, TOOL_NOTE_DETAIL_CHARS),
     }
 }
 
@@ -1123,6 +1152,7 @@ mod engine_tests {
         match ev {
             Some(AnswerStreamEvent::Delta(_)) => "delta".into(),
             Some(AnswerStreamEvent::Reset) => "reset".into(),
+            Some(AnswerStreamEvent::ToolNote { .. }) => "tool_note".into(),
             Some(AnswerStreamEvent::Done(_)) => "done".into(),
             Some(AnswerStreamEvent::Failed(e)) => format!("failed({e})"),
             None => "none".into(),
@@ -1166,6 +1196,51 @@ mod engine_tests {
         let tool_msg = &calls[1].last_msg;
         assert_eq!(tool_msg.role, "tool");
         assert!(tool_msg.content.contains("同前"), "{}", tool_msg.content);
+    }
+
+    #[tokio::test]
+    async fn tool_round_emits_tool_note_before_answer_deltas() {
+        let llm = Arc::new(ScriptedLlm::new(vec![
+            round(vec![ScriptItem::Call("search", r#"{"query":"换个词"}"#)]),
+            round(vec![ScriptItem::Content("根据[1],答案是X")]),
+        ]));
+        let tools = Arc::new(StubTools::hits(vec![("/docs/a.md", 3, "内容")]));
+        let events = collect(llm, tools, fast_params(4), "问题").await;
+        let note_at = events
+            .iter()
+            .position(|e| {
+                matches!(e, AnswerStreamEvent::ToolNote { name, detail }
+                    if name == "search" && detail == "换个词")
+            })
+            .expect("tool round emits a ToolNote with the search query");
+        let first_delta = events
+            .iter()
+            .position(|e| matches!(e, AnswerStreamEvent::Delta(_)))
+            .expect("final round streams deltas");
+        assert!(note_at < first_delta, "note precedes the answer text");
+    }
+
+    #[test]
+    fn tool_note_extracts_key_argument() {
+        let note = |name: &str, args: &str| {
+            match tool_note(&ToolCall {
+                id: "c1".into(),
+                name: name.into(),
+                arguments: args.into(),
+            }) {
+                AnswerStreamEvent::ToolNote { name, detail } => (name, detail),
+                _ => unreachable!(),
+            }
+        };
+        assert_eq!(note("search", r#"{"query":"DAL 多活"}"#).1, "DAL 多活");
+        assert_eq!(note("read_file", r#"{"path":"/a/b.md"}"#).1, "/a/b.md");
+        // Unparseable args / unknown tool degrade to an empty detail.
+        assert_eq!(note("search", "not json").1, "");
+        assert_eq!(note("mystery", r#"{"query":"x"}"#), ("mystery".into(), "".into()));
+        // Detail is char-capped, not byte-capped.
+        let long = "中".repeat(TOOL_NOTE_DETAIL_CHARS + 5);
+        let (_, d) = note("search", &format!(r#"{{"query":"{long}"}}"#));
+        assert_eq!(d.chars().count(), TOOL_NOTE_DETAIL_CHARS + 1, "cap + ellipsis");
     }
 
     #[tokio::test]

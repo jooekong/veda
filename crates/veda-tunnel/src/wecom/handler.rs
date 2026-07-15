@@ -342,6 +342,23 @@ async fn answer_reply_stream(
                 // stream frames are full replacements).
                 acc.clear();
             }
+            Some(AnswerStreamItem::ToolNote { name, detail }) => {
+                // Status line while tools run — the longest silent stretch of
+                // an answer. Sent as a full-replacement frame; `acc` is empty
+                // here (the server emits Reset before tool notes), and even if
+                // it weren't, the next delta flush overwrites the bubble.
+                // Shares the interim throttle so a note burst (up to 5 calls
+                // per round) can't blow the frame budget.
+                if last_flush.elapsed() >= STREAM_FLUSH_INTERVAL {
+                    let note = render_tool_note(&name, &detail);
+                    let _ = ctx
+                        .outbound
+                        .send(respond_stream_frame(req_id, stream_id, &note, false, None))
+                        .await;
+                    frames_sent += 1;
+                    last_flush = std::time::Instant::now();
+                }
+            }
             Some(AnswerStreamItem::Final(data)) => {
                 let query_log: String = query.chars().take(64).collect();
                 info!(
@@ -382,6 +399,18 @@ async fn send_final(ctx: &HandlerCtx, req_id: &str, stream_id: &str, content: &s
         .outbound
         .send(respond_stream_frame(req_id, stream_id, &content, true, None))
         .await;
+}
+
+/// Status line for a server-side tool call. Only the two known tools get a
+/// specific verb; unknown tools (server newer than tunnel) and empty details
+/// degrade to a generic note.
+fn render_tool_note(name: &str, detail: &str) -> String {
+    let detail = detail.trim();
+    match (name, detail.is_empty()) {
+        ("search", false) => format!("🔍 正在检索:{detail}"),
+        ("read_file", false) => format!("📄 正在查阅:{detail}"),
+        _ => "🔍 正在查阅知识库…".to_string(),
+    }
 }
 
 /// Group text arrives with the mention inline as plain text, e.g.
@@ -484,6 +513,15 @@ mod tests {
     #[test]
     fn mention_only_is_empty() {
         assert_eq!(strip_mention("@Robot"), "");
+    }
+
+    #[test]
+    fn tool_note_renders_by_tool() {
+        assert_eq!(render_tool_note("search", "DAL 多活"), "🔍 正在检索:DAL 多活");
+        assert_eq!(render_tool_note("read_file", "/a/b.md"), "📄 正在查阅:/a/b.md");
+        // Unknown tool / blank detail → generic note.
+        assert_eq!(render_tool_note("mystery", "x"), "🔍 正在查阅知识库…");
+        assert_eq!(render_tool_note("search", "  "), "🔍 正在查阅知识库…");
     }
 
     #[test]

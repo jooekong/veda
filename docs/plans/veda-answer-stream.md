@@ -1,6 +1,8 @@
 # /v1/answer 流式（T2 / answer-plan P1）
 
 > 📌 **补充(2026-07-14 agentic 重构)**:SSE 契约新增 `reset` 事件(丢弃已累积 delta,罕见的说话后调工具轮);`final==concat(deltas)` 在 reset 发生时需按「reset 清空」口径理解,final 仍权威。见 `veda-answer-agentic.md`。
+>
+> 📌 **补充(2026-07-15 tool 进度透出)**:SSE 契约再增 `tool` 事件 `{"name","detail"}`(工具执行前发出,detail=检索词/文件路径,≤60 字符,不含工具结果),纯进度提示可丢弃;tunnel 渲染为「🔍 正在检索:…」/「📄 正在查阅:…」状态行帧(与 interim 共享 1s 节流),覆盖 placeholder→首个 delta 之间的工具轮静默段。旧 tunnel 忽略未知事件,兼容。
 
 > **状态：已上线（2026-07-14）**。DoD 全过：SSE 解析 3 单测 + drive_stream 4 单测 + 非流式 28 测零变化 + tunnel 34 测 + 真实 e2e（多 delta/final==拼接/citations/no_context 单帧/400）；.89 冒烟 curl -N 实锤逐段吐字后 .85/.95/.89-tunnel 全部署。待真机体感确认（Joe）。
 

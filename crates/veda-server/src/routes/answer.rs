@@ -189,10 +189,13 @@ async fn answer(
 /// POST /v1/answer/stream — SSE variant of `/v1/answer` (same request body).
 /// Pre-checks (400/401/429/501) and pre-search errors surface as plain HTTP
 /// *before* the stream opens; after that the response is
-/// `text/event-stream` with four event types:
+/// `text/event-stream` with five event types:
 ///   `delta` `{"text":"…"}`  — incremental LLM output (unaligned `[n]`)
 ///   `reset` `{}`            — discard all deltas accumulated so far (a
 ///                             talk-then-tool-call round was rolled back)
+///   `tool`  `{"name","detail"}` — a tool call is about to run (progress
+///                             only; consumers may render a status line or
+///                             ignore it)
 ///   `final` `{ApiResponse<AnswerApiResponse>}` — authoritative full result
 ///   `error` `{"error_code","error"}` — failure after the 200 was sent
 /// Consumers must replace accumulated deltas with the `final` payload
@@ -293,6 +296,9 @@ async fn answer_stream(
                 Ok(Some(AnswerStreamEvent::Reset)) => {
                     yield Ok(reset_event());
                 }
+                Ok(Some(AnswerStreamEvent::ToolNote { name, detail })) => {
+                    yield Ok(tool_event(&name, &detail));
+                }
                 Ok(Some(AnswerStreamEvent::Done(r))) => {
                     timer.set_outcome(answer_outcome_label(r.grounded, &r.answer));
                     record_answer_stats(&ws, r.hit_count, r.estimated_context_tokens, r.rounds);
@@ -359,6 +365,15 @@ fn delta_event(text: &str) -> Event {
 /// show discarded preamble, but the final frame is authoritative anyway.
 fn reset_event() -> Event {
     Event::default().event("reset").data("{}")
+}
+
+/// Progress note for a tool call about to run (name + key argument, no
+/// results). Older consumers ignore unknown events, so this is additive.
+fn tool_event(name: &str, detail: &str) -> Event {
+    Event::default()
+        .event("tool")
+        .json_data(serde_json::json!({ "name": name, "detail": detail }))
+        .unwrap_or_else(|_| sse_fallback())
 }
 
 fn final_event(payload: &AnswerApiResponse) -> Event {

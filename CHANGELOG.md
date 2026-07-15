@@ -33,6 +33,13 @@ that matters.
   in `#/console`; it lists directories, uploads a selected text or binary file
   and downloads original bytes. The workspace `wk_` is kept only in the active
   browser tab and sent directly to the native `/v1/fs/*` data plane.
+- **Tool-call progress in streaming answers.** `POST /v1/answer/stream` gains a
+  fifth SSE event `tool` `{"name","detail"}`, emitted right before each tool
+  call runs (search → the query, read_file → the path, char-capped, never tool
+  results). The WeCom tunnel renders it as a status line in the reply bubble
+  (「🔍 正在检索:…」/「📄 正在查阅:…」), covering the silent stretch between
+  the placeholder and the first answer delta. Older consumers ignore unknown
+  events — purely additive.
 
 ## [0.1.17] — 2026-07-13
 

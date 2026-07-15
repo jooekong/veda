@@ -129,11 +129,13 @@ pub enum SearchError {
 /// One event from `POST /v1/answer/stream`. `Final` is authoritative — the
 /// consumer replaces accumulated deltas with it (citations only align on the
 /// full text, server-side). `Reset` = discard all deltas accumulated so far
-/// (the server rolled back a talk-then-tool-call round).
+/// (the server rolled back a talk-then-tool-call round). `ToolNote` = a tool
+/// call is about to run server-side (progress only, safe to drop).
 #[derive(Debug)]
 pub enum AnswerStreamItem {
     Delta(String),
     Reset,
+    ToolNote { name: String, detail: String },
     Final(AnswerData),
     /// Server-declared failure after the stream opened (error_code), or a
     /// transport break.
@@ -356,6 +358,24 @@ impl VedaClient {
                         "reset" => {
                             if tx.send(AnswerStreamItem::Reset).await.is_err() {
                                 return;
+                            }
+                        }
+                        "tool" => {
+                            #[derive(Deserialize)]
+                            struct T {
+                                #[serde(default)]
+                                name: String,
+                                #[serde(default)]
+                                detail: String,
+                            }
+                            if let Ok(t) = serde_json::from_str::<T>(data) {
+                                let item = AnswerStreamItem::ToolNote {
+                                    name: t.name,
+                                    detail: t.detail,
+                                };
+                                if tx.send(item).await.is_err() {
+                                    return;
+                                }
                             }
                         }
                         "final" => {

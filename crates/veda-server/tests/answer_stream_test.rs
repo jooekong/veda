@@ -347,13 +347,24 @@ async fn answer_stream_end_to_end() {
     // `final`. Mirroring it here keeps the equality assertion valid even in
     // the rare talk-then-tool-call round that emits a reset.
     let mut acc = String::new();
+    let mut tool_notes = 0usize;
     for (ev, v) in &events {
         match ev.as_str() {
             "delta" => acc.push_str(v["text"].as_str().unwrap_or_default()),
             "reset" => acc.clear(),
+            // Progress notes are optional (zero tool rounds is a valid
+            // answer) — but when present they carry the documented shape.
+            "tool" => {
+                tool_notes += 1;
+                assert!(
+                    v["name"].is_string() && v["detail"].is_string(),
+                    "tool event shape: {v}"
+                );
+            }
             _ => {}
         }
     }
+    eprintln!("tool notes seen: {tool_notes}");
     let finals: Vec<&Value> = events.iter().filter(|(e, _)| e == "final").map(|(_, v)| v).collect();
     assert!(!acc.is_empty(), "at least one surviving delta; events: {events:?}");
     assert_eq!(finals.len(), 1, "exactly one final; events: {events:?}");
@@ -385,6 +396,10 @@ async fn answer_stream_end_to_end() {
     let finals: Vec<&Value> = events.iter().filter(|(e, _)| e == "final").map(|(_, v)| v).collect();
     assert_eq!(finals.len(), 1, "events: {events:?}");
     assert!(!events.iter().any(|(e, _)| e == "error"), "no error events");
+    eprintln!(
+        "unanswerable case tool notes: {}",
+        events.iter().filter(|(e, _)| e == "tool").count()
+    );
 
     // ── custom bot prompt travels through and still grounds ──
     let (status, _, body) = post_stream(
