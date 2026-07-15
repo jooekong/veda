@@ -103,6 +103,30 @@ Overview:
 
 One-sentence summary:"#;
 
+/// Skip a leading YAML frontmatter block (`---` line ... `---` line) so
+/// language detection samples the document body, not metadata. Company doc
+/// generators emit ASCII-heavy frontmatter (service/controller/path keys)
+/// that dominates the first 500 chars and fooled the Han-ratio check into
+/// labeling Chinese docs as English. An unterminated opener is treated as
+/// body (e.g. a Markdown horizontal rule at the top of a file).
+fn skip_frontmatter(content: &str) -> &str {
+    let mut lines = content.split_inclusive('\n');
+    let Some(first) = lines.next() else {
+        return content;
+    };
+    if first.trim_end() != "---" {
+        return content;
+    }
+    let mut offset = first.len();
+    for line in lines {
+        offset += line.len();
+        if line.trim_end() == "---" {
+            return &content[offset..];
+        }
+    }
+    content
+}
+
 /// Detect a coarse output language from a sample of the content. Returns
 /// a label for the {language} prompt slot. Policy: only `en` or `zh-CN`,
 /// never ja/ko.
@@ -158,7 +182,7 @@ pub async fn generate_l0(
     max_tokens: usize,
 ) -> Result<String> {
     let truncated = truncate_content(content, 12_000);
-    let lang = detect_output_language(&truncated);
+    let lang = detect_output_language(skip_frontmatter(&truncated));
     let prompt = L0_PROMPT
         .replace("{language}", lang)
         .replace("{content}", &truncated);
@@ -167,7 +191,7 @@ pub async fn generate_l0(
 
 pub async fn generate_l1(llm: &dyn LlmService, content: &str, max_tokens: usize) -> Result<String> {
     let truncated = truncate_content(content, 12_000);
-    let lang = detect_output_language(&truncated);
+    let lang = detect_output_language(skip_frontmatter(&truncated));
     let prompt = L1_PROMPT
         .replace("{language}", lang)
         .replace("{content}", &truncated);
@@ -315,6 +339,44 @@ mod tests {
         let (l0, l1) = result.unwrap();
         assert!(!l0.is_empty());
         assert!(!l1.is_empty());
+    }
+
+    // ── skip_frontmatter ──────────────────────────────
+
+    #[test]
+    fn frontmatter_stripped_before_detection() {
+        // The incident shape: ASCII-heavy YAML frontmatter followed by a
+        // Chinese body. Sampling must land on the body → zh-CN.
+        let doc = "---\nserviceName: outlets-vip-customer-service\ncontrollerClass: com.ddmc.outlets.vip.customer.controller.PointsRedemptionController\nhttpMethod: POST\nfullPath: /applet/points/redemption/check\nfeatureName: 积分兑换校验\n---\n\n# 积分兑换校验\n\n本接口用于会员提交积分兑换前的资格校验，包括会员状态、积分余额、会员等级与每周兑换上限。";
+        assert_eq!(detect_output_language(doc), "en", "sanity: raw doc fools the detector");
+        assert_eq!(detect_output_language(skip_frontmatter(doc)), "zh-CN");
+    }
+
+    #[test]
+    fn frontmatter_absent_is_untouched() {
+        let doc = "# 标题\n正文内容";
+        assert_eq!(skip_frontmatter(doc), doc);
+        let doc = "plain english text";
+        assert_eq!(skip_frontmatter(doc), doc);
+        assert_eq!(skip_frontmatter(""), "");
+    }
+
+    #[test]
+    fn frontmatter_unterminated_treated_as_body() {
+        // A lone `---` opener (e.g. horizontal rule at top) never closes —
+        // keep the whole content rather than discarding everything.
+        let doc = "---\nno closing fence\n中文正文在这里继续下去";
+        assert_eq!(skip_frontmatter(doc), doc);
+    }
+
+    #[test]
+    fn frontmatter_requires_own_line() {
+        // `---suffix` is not a fence.
+        let doc = "---abc\nbody";
+        assert_eq!(skip_frontmatter(doc), doc);
+        // CRLF fences are tolerated via trim_end.
+        let doc = "---\r\nkey: value\r\n---\r\n中文正文，中文正文，中文正文";
+        assert_eq!(skip_frontmatter(doc), "中文正文，中文正文，中文正文");
     }
 
     #[test]

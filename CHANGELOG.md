@@ -10,6 +10,22 @@ that matters.
 ## [Unreleased]
 
 ### Fixed
+- **Empty LLM completions now fail loudly instead of persisting.** An empty
+  (post-trim) chat completion is treated as a retryable error in the LLM
+  client — a summary can never legally be empty, so HTTP 200 + `content:""`
+  (observed during the 2026-07 incident) now retries and, if persistent,
+  dead-letters visibly instead of silently storing an empty abstract.
+- **Stale SummarySync tasks on binary files no longer dead-letter.** A file
+  written as text then overwritten as binary before the worker ran left an
+  orphaned SummarySync that errored through all retries (315 dead tasks in
+  prod). The worker now skips blob files with a warning; the blob stays
+  downloadable, no summary is attempted.
+- **Language detection no longer fooled by YAML frontmatter.** Summary
+  output-language detection samples the document body after skipping a
+  leading `--- … ---` block, so Chinese docs emitted by API-doc generators
+  (ASCII-heavy frontmatter) get Chinese summaries instead of English ones.
+  Existing summaries only change on the next content update or an explicit
+  re-enqueue.
 - **Empty L0 abstracts from reasoning-model truncation.** Summary generation
   sent `max_tokens=150` for L0; on gateway backends where a reasoning model's
   thinking tokens count against that budget, generation could exhaust it

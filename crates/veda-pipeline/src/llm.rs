@@ -187,20 +187,7 @@ impl LlmProvider {
             });
         }
 
-        let parsed: ChatResponse = serde_json::from_slice(&bytes).map_err(|e| LlmError {
-            inner: VedaError::Internal(format!("LLM invalid JSON: {e}")),
-            retryable: false,
-        })?;
-
-        parsed
-            .choices
-            .into_iter()
-            .next()
-            .map(|c| c.message.content.trim().to_string())
-            .ok_or_else(|| LlmError {
-                inner: VedaError::Internal("LLM returned empty choices".to_string()),
-                retryable: false,
-            })
+        parse_chat_response(&bytes)
     }
 
     async fn chat(&self, prompt: &str, max_tokens: usize) -> Result<String> {
@@ -223,9 +210,43 @@ impl LlmProvider {
     }
 }
 
+#[derive(Debug)]
 struct LlmError {
     inner: VedaError,
     retryable: bool,
+}
+
+/// Parse a non-streaming chat completion body into the message content.
+///
+/// Empty content (after trim) is an error, and a retryable one: summarize()
+/// prompts always demand text, so an empty completion means upstream
+/// misbehavior — e.g. a reasoning model whose thinking exhausted max_tokens
+/// (the 2026-07 empty-abstract incident, where HTTP 200 + content="" was
+/// silently persisted). Retrying may land on a healthy backend; if all
+/// retries return empty the task fails loudly instead of storing "".
+fn parse_chat_response(bytes: &[u8]) -> std::result::Result<String, LlmError> {
+    let parsed: ChatResponse = serde_json::from_slice(bytes).map_err(|e| LlmError {
+        inner: VedaError::Internal(format!("LLM invalid JSON: {e}")),
+        retryable: false,
+    })?;
+
+    let content = parsed
+        .choices
+        .into_iter()
+        .next()
+        .map(|c| c.message.content.trim().to_string())
+        .ok_or_else(|| LlmError {
+            inner: VedaError::Internal("LLM returned empty choices".to_string()),
+            retryable: false,
+        })?;
+
+    if content.is_empty() {
+        return Err(LlmError {
+            inner: VedaError::Internal("LLM returned empty content".to_string()),
+            retryable: true,
+        });
+    }
+    Ok(content)
 }
 
 // ── OpenAI-compatible SSE stream parsing ────────────────
@@ -503,6 +524,40 @@ mod tests {
             content: Some(s.to_string()),
             tool_calls: Vec::new(),
         })
+    }
+
+    // ── parse_chat_response ──────────────────────────────
+
+    #[test]
+    fn parse_response_returns_trimmed_content() {
+        let body = br#"{"choices":[{"message":{"content":"  a summary  "}}]}"#;
+        assert_eq!(parse_chat_response(body).unwrap(), "a summary");
+    }
+
+    #[test]
+    fn parse_response_empty_content_is_retryable_error() {
+        // The 2026-07 incident shape: HTTP 200, choices present, content "".
+        let body = br#"{"choices":[{"message":{"content":""}}]}"#;
+        let err = parse_chat_response(body).unwrap_err();
+        assert!(err.retryable, "empty content must be retryable");
+        assert!(err.inner.to_string().contains("empty content"));
+
+        // Whitespace-only content is the same failure after trim.
+        let body = br#"{"choices":[{"message":{"content":"  \n "}}]}"#;
+        assert!(parse_chat_response(body).unwrap_err().retryable);
+    }
+
+    #[test]
+    fn parse_response_empty_choices_is_terminal_error() {
+        let body = br#"{"choices":[]}"#;
+        let err = parse_chat_response(body).unwrap_err();
+        assert!(!err.retryable);
+    }
+
+    #[test]
+    fn parse_response_invalid_json_is_terminal_error() {
+        let err = parse_chat_response(b"{broken").unwrap_err();
+        assert!(!err.retryable);
     }
 
     #[test]

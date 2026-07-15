@@ -503,6 +503,16 @@ impl Worker {
             return Ok(());
         };
 
+        // Blob files (images/binaries) have no text layer to summarize. A
+        // stale SummarySync can still point at one: a file first written as
+        // text (enqueuing the task) then overwritten as binary before the
+        // worker ran. Erroring here sent 315 such orphans to dead-letter in
+        // prod (2026-07-13) — skip instead; the blob stays downloadable.
+        if file.storage_type == StorageType::Blob {
+            warn!(workspace_id, file_id, "summary_sync skipped: blob file has no text layer");
+            return Ok(());
+        }
+
         let content = self.load_full_content(&file).await?;
 
         if content.trim().is_empty() {
