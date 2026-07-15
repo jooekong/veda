@@ -147,13 +147,22 @@ pub fn detect_output_language(sample: &str) -> &'static str {
     "en"
 }
 
-pub async fn generate_l0(llm: &dyn LlmService, content: &str) -> Result<String> {
+// max_tokens is a safety fuse, not an output-length control: the prompts
+// already bound the answer (~100 tokens for L0). Reasoning models spend
+// thinking tokens from the same budget on some gateways, so a tight cap
+// (the old 150) can exhaust the budget mid-thought and yield an empty
+// content string. All summary calls therefore share one generous budget.
+pub async fn generate_l0(
+    llm: &dyn LlmService,
+    content: &str,
+    max_tokens: usize,
+) -> Result<String> {
     let truncated = truncate_content(content, 12_000);
     let lang = detect_output_language(&truncated);
     let prompt = L0_PROMPT
         .replace("{language}", lang)
         .replace("{content}", &truncated);
-    llm.summarize(&prompt, 150).await
+    llm.summarize(&prompt, max_tokens).await
 }
 
 pub async fn generate_l1(llm: &dyn LlmService, content: &str, max_tokens: usize) -> Result<String> {
@@ -194,7 +203,7 @@ pub async fn aggregate_dir_summary(
     let l0_prompt = DIR_L0_PROMPT
         .replace("{language}", lang)
         .replace("{overview}", &l1);
-    let l0 = llm.summarize(&l0_prompt, 150).await?;
+    let l0 = llm.summarize(&l0_prompt, max_overview_tokens).await?;
 
     Ok((l0, l1))
 }
@@ -275,7 +284,8 @@ mod tests {
     #[tokio::test]
     async fn generate_l0_returns_summary() {
         let llm = MockLlm;
-        let result = generate_l0(&llm, "This is a test document about Rust programming.").await;
+        let result =
+            generate_l0(&llm, "This is a test document about Rust programming.", 8192).await;
         assert!(result.is_ok());
         let text = result.unwrap();
         assert!(text.starts_with("SUMMARY:"));

@@ -44,7 +44,7 @@ dimension = 1024
 api_url = "https://api.openai.com/v1/chat/completions"
 api_key = "sk-xxx"
 model = "gpt-4o-mini"
-max_summary_tokens = 2048
+max_summary_tokens = 8192
 ```
 
 ### 1.3 数据库初始化

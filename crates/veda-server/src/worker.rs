@@ -511,7 +511,7 @@ impl Worker {
 
         let max_tokens = self.max_overview_tokens;
         let (l0, l1) = tokio::try_join!(
-            summary::generate_l0(llm.as_ref(), &content),
+            summary::generate_l0(llm.as_ref(), &content, max_tokens),
             summary::generate_l1(llm.as_ref(), &content, max_tokens),
         )?;
 

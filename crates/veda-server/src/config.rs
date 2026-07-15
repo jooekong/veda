@@ -242,7 +242,14 @@ pub struct LlmConfig {
 }
 
 fn default_max_summary_tokens() -> usize {
-    2048
+    // Generous on purpose: reasoning models (prod: deepseek-v4-flash) may
+    // count thinking tokens against max_tokens depending on the gateway
+    // backend. 2048 left L1 close to the line and the old hardcoded 150
+    // for L0 produced empty abstracts whenever thinking overran the budget
+    // (2026-07-08..13 prod incident). 8192 is safe on effectively all
+    // OpenAI-compatible backends; actual output length is bounded by the
+    // prompts, not this fuse.
+    8192
 }
 
 fn default_answer_max_tool_rounds() -> usize {
