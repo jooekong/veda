@@ -242,7 +242,9 @@ impl QaLogStore {
 
     pub async fn list(&self, f: &QaLogFilter) -> Result<Vec<QaLogRow>> {
         let size = f.size.clamp(1, 100);
-        let offset = f.page.max(1).saturating_sub(1) * size;
+        // u64 arithmetic: a huge `page` must not overflow u32 (release builds
+        // would wrap into a bogus offset).
+        let offset = (u64::from(f.page.max(1)) - 1) * u64::from(size);
         let rows = sqlx::query(
             "SELECT q.id, q.ts, q.bot_id, q.chat_type, q.user_id, q.query, q.outcome, \
                     q.hit_count, q.citation_count, q.latency_ms, q.answer_text, \

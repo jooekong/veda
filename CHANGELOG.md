@@ -40,6 +40,15 @@ that matters.
   (「🔍 正在检索:…」/「📄 正在查阅:…」), covering the silent stretch between
   the placeholder and the first answer delta. Older consumers ignore unknown
   events — purely additive.
+- **Platform QA telemetry reads for WeCom tunnel bots.** The apps surface adds
+  `GET /v1/workspace/{workspace}/project/{id}/tunnel/qa/stats` (outcome
+  distribution + thumb up/down over a `days` window, clamped 1–90) and
+  `.../tunnel/qa/logs` (paginated Q&A detail, filterable by `outcome` /
+  `down_voted` / `bot_id`). Both read the tunnel's shared `veda_tunnel_qa_log` /
+  `veda_tunnel_qa_feedback` tables scoped to the project's own bots — a `bot_id`
+  outside the project collapses to `NOT_FOUND`, and a project with no bots
+  returns empty. fs-project only; reads go through external authz (the detail
+  carries user questions and bot answers).
 
 ## [0.1.17] — 2026-07-13
 

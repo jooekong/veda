@@ -1,5 +1,5 @@
-//! WeCom tunnel bot management on the apps surface
-//! (`/v1/workspace/{workspace}/project/{id}/tunnel/bots`).
+//! WeCom tunnel bot management + QA telemetry on the apps surface
+//! (`/v1/workspace/{workspace}/project/{id}/tunnel/...`).
 //!
 //! Lets the AI Workbench attach a WeCom bot to an **fs** project: the caller
 //! supplies the bot's WeCom credentials, veda auto-mints a read-only `wk_`
@@ -8,14 +8,20 @@
 //! picks changes up within one store-poll interval (~30s); `conn_state` in
 //! responses is tunnel's heartbeat written back through the same table.
 //!
+//! `tunnel/qa/{stats,logs}` expose the tunnel's per-project QA telemetry
+//! (question/answer outcomes + thumb up/down). The telemetry tables key only
+//! on `bot_id`, so tenant isolation is enforced here: every read resolves the
+//! project's own bots first and constrains the query to that `bot_id` set — a
+//! caller-supplied `bot_id` outside it collapses to NOT_FOUND.
+//!
 //! Same posture as the rest of the apps surface: gateway-externalized authz,
 //! company response envelope, cross-tenant probes collapse to NOT_FOUND.
 
 use std::sync::Arc;
 
-use axum::extract::{Path, State};
+use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
-use axum::routing::{patch, post};
+use axum::routing::{get, patch, post};
 use axum::{Json, Router};
 use chrono::{DateTime, Utc};
 use uuid::Uuid;
@@ -24,9 +30,9 @@ use veda_types::{ApiResponse, KeyPermission, KeyStatus, VedaError, WorkspaceKey}
 
 use crate::error::AppError;
 use crate::platform::GatewayUser;
-use crate::routes::apps::{company_envelope, load_app_project, mask_token};
+use crate::routes::apps::{company_envelope, load_app_project, mask_token, CompanyPage};
 use crate::state::AppState;
-use crate::tunnel_bots::{NewTunnelBot, TunnelBotPatch, TunnelBotRow};
+use crate::tunnel_bots::{NewTunnelBot, QaLogRow, QaStats, TunnelBotPatch, TunnelBotRow};
 
 /// WeCom answers cap out fast; keep limit in the same band as /v1/answer.
 const MAX_LIMIT: i32 = 24;
@@ -41,6 +47,14 @@ pub fn routes() -> Router<Arc<AppState>> {
         .route(
             "/v1/workspace/{workspace}/project/{id}/tunnel/bots/{bot_id}",
             patch(update_bot).delete(remove_bot),
+        )
+        .route(
+            "/v1/workspace/{workspace}/project/{id}/tunnel/qa/stats",
+            get(qa_stats),
+        )
+        .route(
+            "/v1/workspace/{workspace}/project/{id}/tunnel/qa/logs",
+            get(qa_logs),
         )
         .layer(axum::middleware::from_fn(company_envelope))
 }
@@ -329,5 +343,187 @@ async fn remove_bot(
             }
             Ok(Json(ApiResponse::ok(())))
         }
+    }
+}
+
+// ── QA telemetry (read-only) ────────────────────────────────────────────────
+
+// QA read parameter bounds (the store re-clamps `size` defensively).
+const QA_DEFAULT_DAYS: u32 = 7;
+const QA_MAX_DAYS: u32 = 90;
+const QA_DEFAULT_SIZE: u32 = 20;
+const QA_MAX_SIZE: u32 = 100;
+
+/// Outcomes the tunnel currently records — keep in sync with
+/// `veda-tunnel/src/wecom/handler.rs` (answer + search + error paths). A filter
+/// outside this set is a typo, so reject it early instead of silently
+/// returning nothing.
+const KNOWN_OUTCOMES: [&str; 7] = [
+    "answered",
+    "no_context",
+    "ungrounded",
+    "raw_search",
+    "error",
+    "disabled",
+    "throttled",
+];
+
+fn clamp_days(days: Option<u32>) -> u32 {
+    days.unwrap_or(QA_DEFAULT_DAYS).clamp(1, QA_MAX_DAYS)
+}
+
+fn clamp_page(page: Option<u32>) -> u32 {
+    page.unwrap_or(1).max(1)
+}
+
+fn clamp_size(size: Option<u32>) -> u32 {
+    size.unwrap_or(QA_DEFAULT_SIZE).clamp(1, QA_MAX_SIZE)
+}
+
+fn validate_outcome(outcome: &str) -> Result<(), AppError> {
+    if KNOWN_OUTCOMES.contains(&outcome) {
+        Ok(())
+    } else {
+        Err(VedaError::InvalidInput(format!(
+            "unknown outcome '{outcome}' (want {})",
+            KNOWN_OUTCOMES.join("|")
+        ))
+        .into())
+    }
+}
+
+/// Resolve the `bot_id` scope a QA read may touch — the crux of tenant
+/// isolation, since the QA tables carry no workspace/project column.
+///
+/// The scope is the project's own bots. A caller-supplied `bot_id` must be one
+/// of them — otherwise NOT_FOUND, so a probe can't learn another tenant's bot
+/// exists (same cross-tenant posture as the rest of this surface). A project
+/// with no bots yields an empty scope → empty stats / logs, never an error.
+async fn resolve_bot_scope(
+    state: &AppState,
+    project_id: &str,
+    bot_id: Option<&str>,
+) -> Result<Vec<String>, AppError> {
+    let owned = state.tunnel_bots.bot_ids_by_project(project_id).await?;
+    match bot_id.map(str::trim).filter(|s| !s.is_empty()) {
+        Some(want) => {
+            if owned.iter().any(|b| b == want) {
+                Ok(vec![want.to_string()])
+            } else {
+                Err(VedaError::NotFound(format!("bot {want}")).into())
+            }
+        }
+        None => Ok(owned),
+    }
+}
+
+#[derive(serde::Deserialize)]
+struct QaStatsQuery {
+    days: Option<u32>,
+    bot_id: Option<String>,
+}
+
+/// GET /v1/workspace/{workspace}/project/{id}/tunnel/qa/stats?days=7&bot_id= —
+/// outcome distribution + thumb up/down over the window, scoped to this
+/// project's bots. `days` defaults to 7, clamped to 1..=90; an optional
+/// `bot_id` must belong to the project.
+async fn qa_stats(
+    State(state): State<Arc<AppState>>,
+    Path((workspace, ws_id)): Path<(String, String)>,
+    gw: GatewayUser,
+    Query(q): Query<QaStatsQuery>,
+) -> Result<Json<ApiResponse<QaStats>>, AppError> {
+    // QA rows carry user questions + bot answers (actual content), so gate the
+    // read with the same external authz as the data plane (project_data.rs),
+    // not the lighter bot-list posture.
+    crate::platform::authorize(gw.cookie(), "workspace-create", &workspace, gw.user_name()).await?;
+    let ws = load_fs_project(&state, &workspace, &ws_id).await?;
+    let days = clamp_days(q.days);
+    let scope = resolve_bot_scope(&state, &ws.id, q.bot_id.as_deref()).await?;
+    let stats = state.tunnel_bots.qa_stats(&scope, days).await?;
+    Ok(Json(ApiResponse::ok(stats)))
+}
+
+#[derive(serde::Deserialize)]
+struct QaLogsQuery {
+    bot_id: Option<String>,
+    outcome: Option<String>,
+    /// Only rows with at least one down-vote.
+    down_voted: Option<bool>,
+    page: Option<u32>,
+    size: Option<u32>,
+}
+
+/// GET /v1/workspace/{workspace}/project/{id}/tunnel/qa/logs?bot_id=&outcome=&
+/// down_voted=&page=&size= — newest-first Q&A rows with per-row vote counts,
+/// paginated in the company envelope. `size` defaults to 20, clamped to
+/// 1..=100; `page` is 1-based. Scoped to this project's bots.
+async fn qa_logs(
+    State(state): State<Arc<AppState>>,
+    Path((workspace, ws_id)): Path<(String, String)>,
+    gw: GatewayUser,
+    Query(q): Query<QaLogsQuery>,
+) -> Result<Json<CompanyPage<QaLogRow>>, AppError> {
+    crate::platform::authorize(gw.cookie(), "workspace-create", &workspace, gw.user_name()).await?;
+    let ws = load_fs_project(&state, &workspace, &ws_id).await?;
+    let page = clamp_page(q.page);
+    let size = clamp_size(q.size);
+    let outcome = q.outcome.as_deref().map(str::trim).filter(|s| !s.is_empty());
+    if let Some(o) = outcome {
+        validate_outcome(o)?;
+    }
+    let down_voted = q.down_voted.unwrap_or(false);
+    let scope = resolve_bot_scope(&state, &ws.id, q.bot_id.as_deref()).await?;
+    let (rows, total) = state
+        .tunnel_bots
+        .qa_logs(&scope, outcome, down_voted, page, size)
+        .await?;
+    Ok(Json(CompanyPage::new(
+        rows,
+        page,
+        size,
+        "ts".into(),
+        "desc".into(),
+        total,
+    )))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn days_defaults_and_clamps() {
+        assert_eq!(clamp_days(None), 7);
+        assert_eq!(clamp_days(Some(0)), 1);
+        assert_eq!(clamp_days(Some(1)), 1);
+        assert_eq!(clamp_days(Some(30)), 30);
+        assert_eq!(clamp_days(Some(90)), 90);
+        assert_eq!(clamp_days(Some(9999)), 90);
+    }
+
+    #[test]
+    fn page_defaults_to_one_and_never_zero() {
+        assert_eq!(clamp_page(None), 1);
+        assert_eq!(clamp_page(Some(0)), 1);
+        assert_eq!(clamp_page(Some(5)), 5);
+    }
+
+    #[test]
+    fn size_defaults_and_clamps() {
+        assert_eq!(clamp_size(None), 20);
+        assert_eq!(clamp_size(Some(0)), 1);
+        assert_eq!(clamp_size(Some(50)), 50);
+        assert_eq!(clamp_size(Some(100)), 100);
+        assert_eq!(clamp_size(Some(101)), 100);
+    }
+
+    #[test]
+    fn outcome_known_accepted_unknown_rejected() {
+        for o in KNOWN_OUTCOMES {
+            assert!(validate_outcome(o).is_ok(), "{o} should be valid");
+        }
+        let err = validate_outcome("bogus").unwrap_err();
+        assert!(matches!(err.0, VedaError::InvalidInput(_)));
     }
 }

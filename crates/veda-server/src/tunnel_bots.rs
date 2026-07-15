@@ -3,6 +3,13 @@
 //! DDL; the CREATE here is a byte-for-byte copy so whichever process starts
 //! first bootstraps it — keep them in sync).
 //!
+//! Also serves the platform's read-only view of the tunnel's QA telemetry
+//! (`veda_tunnel_qa_log` / `veda_tunnel_qa_feedback`, owner:
+//! `veda-tunnel/src/qa_log.rs`) so the AI Workbench can show per-project stats
+//! and Q&A detail. Those tables carry only `bot_id`, so tenant isolation is
+//! enforced by the caller resolving a project's bots first and constraining
+//! every read to that `bot_id` set — see `qa_stats` / `qa_logs`.
+//!
 //! The AI Workbench talks only to veda-server, and veda-tunnel talks only to
 //! MySQL: platform CRUD lands here as plain row writes, and tunnel's 30s
 //! store poll converges live WeCom connections onto the table. No RPC
@@ -13,9 +20,14 @@
 
 use anyhow::Context;
 use chrono::{DateTime, Utc};
+use serde::Serialize;
 use sqlx::mysql::{MySqlPool, MySqlPoolOptions, MySqlRow};
 use sqlx::Row;
 use veda_types::VedaError;
+
+/// QA feedback kinds as stored by veda-tunnel (`qa_log.rs`).
+const QA_FEEDBACK_UP: i8 = 1;
+const QA_FEEDBACK_DOWN: i8 = 2;
 
 pub struct TunnelBotStore {
     pool: MySqlPool,
@@ -72,6 +84,36 @@ pub struct TunnelBotPatch {
     pub prompt: Option<String>,
 }
 
+/// QA telemetry summary over a window (mirrors veda-tunnel's `QaStats`).
+#[derive(Debug, Serialize)]
+pub struct QaStats {
+    pub days: u32,
+    pub total: i64,
+    /// outcome → count, e.g. `{"answered": 120, "no_context": 8}`.
+    pub outcomes: serde_json::Map<String, serde_json::Value>,
+    pub feedback_up: i64,
+    pub feedback_down: i64,
+}
+
+/// One Q&A row with its per-row vote counts (mirrors veda-tunnel's `QaLogRow`).
+/// `answer_text` is returned verbatim (MEDIUMTEXT; page size caps the blast).
+#[derive(Debug, Serialize)]
+pub struct QaLogRow {
+    pub id: i64,
+    pub ts: DateTime<Utc>,
+    pub bot_id: String,
+    pub chat_type: String,
+    pub user_id: String,
+    pub query: String,
+    pub outcome: String,
+    pub hit_count: i32,
+    pub citation_count: i32,
+    pub latency_ms: i32,
+    pub answer_text: Option<String>,
+    pub up_count: i64,
+    pub down_count: i64,
+}
+
 impl TunnelBotStore {
     pub async fn connect(database_url: &str) -> anyhow::Result<Self> {
         let pool = MySqlPoolOptions::new()
@@ -82,6 +124,7 @@ impl TunnelBotStore {
             .context("connect tunnel-bots MySQL")?;
         let store = Self { pool };
         store.ensure_schema().await?;
+        store.ensure_qa_schema().await?;
         Ok(store)
     }
 
@@ -162,6 +205,57 @@ impl TunnelBotStore {
                 }
             }
         }
+        Ok(())
+    }
+
+    /// Idempotent bootstrap of the QA telemetry tables — a byte-for-byte copy
+    /// of veda-tunnel's `qa_log.rs` DDL (owner: veda-tunnel). Both new in that
+    /// release, so plain `CREATE TABLE IF NOT EXISTS` with no column migration:
+    /// a veda-server carrying this read API can land on a fresh DB before the
+    /// tunnel that writes these rows.
+    async fn ensure_qa_schema(&self) -> anyhow::Result<()> {
+        sqlx::query(
+            r#"
+            CREATE TABLE IF NOT EXISTS veda_tunnel_qa_log (
+                id             BIGINT AUTO_INCREMENT PRIMARY KEY,
+                ts             TIMESTAMP    NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                bot_id         VARCHAR(128) NOT NULL,
+                chat_type      VARCHAR(16)  NOT NULL,
+                chat_key       VARCHAR(191) NOT NULL,
+                user_id        VARCHAR(128) NOT NULL,
+                query          TEXT         NOT NULL,
+                outcome        VARCHAR(16)  NOT NULL,
+                hit_count      INT          NOT NULL DEFAULT 0,
+                citation_count INT          NOT NULL DEFAULT 0,
+                latency_ms     INT          NOT NULL DEFAULT 0,
+                answer_text    MEDIUMTEXT   NULL,
+                feedback_id    VARCHAR(64)  NULL,
+                KEY idx_bot_ts (bot_id, ts),
+                KEY idx_outcome (outcome, ts),
+                KEY idx_feedback (feedback_id)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+            "#,
+        )
+        .execute(&self.pool)
+        .await
+        .context("ensure veda_tunnel_qa_log")?;
+        sqlx::query(
+            r#"
+            CREATE TABLE IF NOT EXISTS veda_tunnel_qa_feedback (
+                id          BIGINT AUTO_INCREMENT PRIMARY KEY,
+                ts          TIMESTAMP    NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                feedback_id VARCHAR(64)  NOT NULL,
+                user_id     VARCHAR(128) NOT NULL,
+                kind        TINYINT      NOT NULL,
+                reason      TINYINT      NULL,
+                KEY idx_feedback (feedback_id),
+                UNIQUE KEY uk_fb_user (feedback_id, user_id)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+            "#,
+        )
+        .execute(&self.pool)
+        .await
+        .context("ensure veda_tunnel_qa_feedback")?;
         Ok(())
     }
 
@@ -307,6 +401,188 @@ impl TunnelBotStore {
             .map_err(internal)?;
         Ok(res.rows_affected())
     }
+
+    // ── QA telemetry reads (tenant scope = a project's bots) ────────────────
+
+    /// The `bot_id`s under a project — the QA read scope. A project with no
+    /// bots yields an empty vec, which the QA queries short-circuit to empty
+    /// results (never an error).
+    pub async fn bot_ids_by_project(&self, project_id: &str) -> Result<Vec<String>, VedaError> {
+        let rows = sqlx::query("SELECT bot_id FROM veda_tunnel_bots WHERE project = ?")
+            .bind(project_id)
+            .fetch_all(&self.pool)
+            .await
+            .map_err(internal)?;
+        rows.iter()
+            .map(|r| r.try_get::<String, _>("bot_id").map_err(internal))
+            .collect()
+    }
+
+    /// Outcome distribution + thumb up/down over the last `days`, constrained to
+    /// `bot_ids` (the project's bots). Empty scope → zeroed stats, no query.
+    pub async fn qa_stats(&self, bot_ids: &[String], days: u32) -> Result<QaStats, VedaError> {
+        let mut outcomes = serde_json::Map::new();
+        if bot_ids.is_empty() {
+            return Ok(QaStats {
+                days,
+                total: 0,
+                outcomes,
+                feedback_up: 0,
+                feedback_down: 0,
+            });
+        }
+        let ph = in_placeholders(bot_ids.len());
+        let outcome_sql = format!(
+            "SELECT outcome, COUNT(*) AS n FROM veda_tunnel_qa_log \
+             WHERE ts >= NOW() - INTERVAL ? DAY AND bot_id IN ({ph}) \
+             GROUP BY outcome"
+        );
+        let mut q = sqlx::query(&outcome_sql).bind(days);
+        for b in bot_ids {
+            q = q.bind(b);
+        }
+        let rows = q.fetch_all(&self.pool).await.map_err(internal)?;
+        let mut total = 0i64;
+        for r in &rows {
+            let outcome: String = r.try_get("outcome").map_err(internal)?;
+            let n: i64 = r.try_get("n").map_err(internal)?;
+            total += n;
+            outcomes.insert(outcome, n.into());
+        }
+        let fb_sql = format!(
+            "SELECT f.kind, COUNT(*) AS n FROM veda_tunnel_qa_feedback f \
+             JOIN veda_tunnel_qa_log q ON q.feedback_id = f.feedback_id \
+             WHERE q.ts >= NOW() - INTERVAL ? DAY AND q.bot_id IN ({ph}) \
+             GROUP BY f.kind"
+        );
+        let mut q = sqlx::query(&fb_sql).bind(days);
+        for b in bot_ids {
+            q = q.bind(b);
+        }
+        let fb = q.fetch_all(&self.pool).await.map_err(internal)?;
+        let (mut up, mut down) = (0i64, 0i64);
+        for r in &fb {
+            let kind: i8 = r.try_get("kind").map_err(internal)?;
+            let n: i64 = r.try_get("n").map_err(internal)?;
+            if kind == QA_FEEDBACK_UP {
+                up = n;
+            } else if kind == QA_FEEDBACK_DOWN {
+                down = n;
+            }
+        }
+        Ok(QaStats {
+            days,
+            total,
+            outcomes,
+            feedback_up: up,
+            feedback_down: down,
+        })
+    }
+
+    /// Newest-first Q&A rows (with per-row vote counts) plus the total matching
+    /// the filter, constrained to `bot_ids`. Empty scope → empty page, no query.
+    /// `page` is 1-based; `size` is clamped defensively to 1..=100.
+    pub async fn qa_logs(
+        &self,
+        bot_ids: &[String],
+        outcome: Option<&str>,
+        down_voted: bool,
+        page: u32,
+        size: u32,
+    ) -> Result<(Vec<QaLogRow>, i64), VedaError> {
+        if bot_ids.is_empty() {
+            return Ok((Vec::new(), 0));
+        }
+        let size = size.clamp(1, 100);
+        // u64 arithmetic: a caller-supplied huge `page` must not overflow u32
+        // (release builds would wrap into a bogus offset).
+        let offset = (u64::from(page.max(1)) - 1) * u64::from(size);
+        let ph = in_placeholders(bot_ids.len());
+        let dv = down_voted as i32;
+
+        // Total for the company page envelope (exact, over the same filter).
+        let count_sql = format!(
+            "SELECT COUNT(*) AS n FROM veda_tunnel_qa_log q \
+             WHERE q.bot_id IN ({ph}) \
+               AND (? IS NULL OR q.outcome = ?) \
+               AND (? = 0 OR EXISTS (SELECT 1 FROM veda_tunnel_qa_feedback f \
+                    WHERE f.feedback_id = q.feedback_id AND f.kind = 2))"
+        );
+        let mut q = sqlx::query(&count_sql);
+        for b in bot_ids {
+            q = q.bind(b);
+        }
+        let total: i64 = q
+            .bind(outcome)
+            .bind(outcome)
+            .bind(dv)
+            .fetch_one(&self.pool)
+            .await
+            .map_err(internal)?
+            .try_get("n")
+            .map_err(internal)?;
+
+        let list_sql = format!(
+            "SELECT q.id, q.ts, q.bot_id, q.chat_type, q.user_id, q.query, q.outcome, \
+                    q.hit_count, q.citation_count, q.latency_ms, q.answer_text, \
+                    (SELECT COUNT(*) FROM veda_tunnel_qa_feedback f \
+                     WHERE f.feedback_id = q.feedback_id AND f.kind = 1) AS up_count, \
+                    (SELECT COUNT(*) FROM veda_tunnel_qa_feedback f \
+                     WHERE f.feedback_id = q.feedback_id AND f.kind = 2) AS down_count \
+             FROM veda_tunnel_qa_log q \
+             WHERE q.bot_id IN ({ph}) \
+               AND (? IS NULL OR q.outcome = ?) \
+               AND (? = 0 OR EXISTS (SELECT 1 FROM veda_tunnel_qa_feedback f \
+                    WHERE f.feedback_id = q.feedback_id AND f.kind = 2)) \
+             ORDER BY q.id DESC LIMIT ? OFFSET ?"
+        );
+        let mut q = sqlx::query(&list_sql);
+        for b in bot_ids {
+            q = q.bind(b);
+        }
+        let rows = q
+            .bind(outcome)
+            .bind(outcome)
+            .bind(dv)
+            .bind(size)
+            .bind(offset)
+            .fetch_all(&self.pool)
+            .await
+            .map_err(internal)?;
+        let items = rows
+            .iter()
+            .map(qa_row_to_log)
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok((items, total))
+    }
+}
+
+/// `?, ?, …` for an `IN (...)` clause of `n` bound values. Only the `?`
+/// placeholders are interpolated — the values themselves are always bound, so
+/// this is injection-safe. Callers guarantee `n >= 1`.
+fn in_placeholders(n: usize) -> String {
+    vec!["?"; n].join(", ")
+}
+
+fn qa_row_to_log(r: &MySqlRow) -> Result<QaLogRow, VedaError> {
+    let take = || -> Result<QaLogRow, sqlx::Error> {
+        Ok(QaLogRow {
+            id: r.try_get("id")?,
+            ts: r.try_get("ts")?,
+            bot_id: r.try_get("bot_id")?,
+            chat_type: r.try_get("chat_type")?,
+            user_id: r.try_get("user_id")?,
+            query: r.try_get("query")?,
+            outcome: r.try_get("outcome")?,
+            hit_count: r.try_get("hit_count")?,
+            citation_count: r.try_get("citation_count")?,
+            latency_ms: r.try_get("latency_ms")?,
+            answer_text: r.try_get("answer_text")?,
+            up_count: r.try_get("up_count")?,
+            down_count: r.try_get("down_count")?,
+        })
+    };
+    take().map_err(internal)
 }
 
 fn is_duplicate(e: &sqlx::Error) -> bool {

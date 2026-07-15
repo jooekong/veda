@@ -73,7 +73,7 @@ impl AppPageQuery {
 /// Company page envelope returned directly by apps list handlers. The response
 /// middleware passes it through untouched (it has no `success` field).
 #[derive(serde::Serialize)]
-struct CompanyPage<T> {
+pub(crate) struct CompanyPage<T> {
     data: Vec<T>,
     page: u32,
     size: u32,
@@ -86,7 +86,7 @@ struct CompanyPage<T> {
 }
 
 impl<T> CompanyPage<T> {
-    fn new(data: Vec<T>, page: u32, size: u32, order_by: String, order: String, total: i64) -> Self {
+    pub(crate) fn new(data: Vec<T>, page: u32, size: u32, order_by: String, order: String, total: i64) -> Self {
         let total_page = if size > 0 {
             (total + size as i64 - 1) / size as i64
         } else {
