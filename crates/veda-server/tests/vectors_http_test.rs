@@ -1616,6 +1616,26 @@ async fn sub_fs_api_rejects_db(
         "expected error_code=WORKSPACE_KIND_MISMATCH, got: {v:?}"
     );
 
+    // The same db-kind wk_ IS accepted by the kind-agnostic identity
+    // probe: /v1/whoami reports the workspace instead of gating on kind.
+    // (This is what CLI status/import-key use to backfill workspace.id.)
+    let req = Request::builder()
+        .method("GET")
+        .uri("/v1/whoami")
+        .header("authorization", format!("Bearer {wk_token}"))
+        .body(Body::empty())
+        .unwrap();
+    let resp = router.clone().oneshot(req).await.unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::OK,
+        "whoami must accept a wk_ of any kind"
+    );
+    let v = body_json(resp.into_body()).await;
+    assert_eq!(v["data"]["workspace_id"].as_str(), Some(db_ws_id.as_str()));
+    assert_eq!(v["data"]["kind"].as_str(), Some("db"));
+    assert_eq!(v["data"]["permission"].as_str(), Some("readwrite"));
+
     // Cleanup.
     let _ = state
         .vector_workspace_store

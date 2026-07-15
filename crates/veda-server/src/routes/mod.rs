@@ -43,6 +43,7 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/install.sh", get(install_script))
         .route("/capabilities", get(capabilities))
         .route("/v1/ready", get(ready))
+        .route("/v1/whoami", get(whoami))
         .route("/v1/metrics", get(metrics_endpoint))
         .merge(account::routes())
         .merge(apps::routes())
@@ -187,6 +188,26 @@ fn capabilities_payload(summary_enabled: bool) -> ApiResponse<serde_json::Value>
     }))
 }
 
+/// Identity probe for the data plane: resolve the presented `wk_` to
+/// the workspace it belongs to. Accepts keys of either kind (fs/db) —
+/// a pasted `wk_` carries no workspace id, so clients (CLI `status` /
+/// `init --import-key`) call this to backfill their local config.
+async fn whoami(auth: crate::auth::AuthAnyWorkspace) -> Response {
+    Json(whoami_payload(&auth)).into_response()
+}
+
+/// Wire-shape payload for [`whoami`]. Split out so a unit test can pin
+/// the field names — the CLI deserialises this exact shape to backfill
+/// `workspace.id` in its config, so a silent rename would break the
+/// backfill with no compile-time signal.
+fn whoami_payload(auth: &crate::auth::AuthAnyWorkspace) -> ApiResponse<serde_json::Value> {
+    ApiResponse::ok(serde_json::json!({
+        "workspace_id": auth.workspace_id,
+        "kind": auth.kind,
+        "permission": auth.permission,
+    }))
+}
+
 async fn install_script() -> impl IntoResponse {
     (
         StatusCode::OK,
@@ -285,6 +306,23 @@ mod tests {
         let json = serde_json::to_value(&resp).unwrap();
         assert_eq!(json["success"], true);
         assert_eq!(json["data"]["summary_enabled"], false);
+    }
+
+    #[test]
+    fn whoami_payload_pins_wire_shape() {
+        // The CLI (`veda-cli::init::backfill_active_workspace_id`) reads
+        // data.workspace_id from this exact shape — pin the field names
+        // and enum spellings so a rename fails here, not in the field.
+        let auth = crate::auth::AuthAnyWorkspace {
+            workspace_id: "ws-123".into(),
+            kind: veda_types::WorkspaceKind::Fs,
+            permission: veda_types::KeyPermission::ReadWrite,
+        };
+        let json = serde_json::to_value(whoami_payload(&auth)).unwrap();
+        assert_eq!(json["success"], true);
+        assert_eq!(json["data"]["workspace_id"], "ws-123");
+        assert_eq!(json["data"]["kind"], "fs");
+        assert_eq!(json["data"]["permission"], "readwrite");
     }
 
     #[test]

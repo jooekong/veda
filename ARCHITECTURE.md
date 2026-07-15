@@ -105,6 +105,7 @@ fs 数据面知识库问答：LLM 经 **OpenAI function calling** 自主多轮�
 - **控制面用账号 key `vk_`**（`AuthAccount`）：账号 / workspace / dataset / key 生命周期、`/admin/v1/tokens`。`vk_` 不进数据面、不外发；业务方只拿可吊销、分读写的 `wk_`。token 的 `allowed_workspaces` scope 在唯一的 ownership 闸 `load_owned_workspace` 统一强制，所有带 `ws_id` 的控制面路由自动继承——scoped `vk_` 不能越权操作同账号其他 workspace。
 - JWT 已移除（无 `POST /v1/workspaces/{id}/token`、无 `jwt_secret`），鉴权全部为纯 key 校验。
 - key 生命周期：`POST/GET/DELETE /v1/workspaces/{id}/keys`（list 仅回元数据，明文只在创建时显示一次）。
+- **身份自省 `GET /v1/whoami`**（`AuthAnyWorkspace`，收 fs/db 任一 kind 的 `wk_`，不设 kind 闸）：返回 `{workspace_id, kind, permission}`。CLI `veda status` / `veda init --import-key wk_…` 用它把粘贴 key 场景缺失的 workspace id 回填进本地 config（best-effort，旧 server 404 时静默保持 unknown）。
 
 **三类数据集合在 fs workspace 下并存**：dentry/files、structured collections、L0/L1 summaries。**db workspace 只承载** Pinecone-style 裸向量记录，不允许建 file 或 structured collection。
 

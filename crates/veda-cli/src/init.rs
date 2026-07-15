@@ -125,10 +125,11 @@ pub fn apply_login(cfg: &mut CliConfig, api_key: String) {
 
 /// Apply a paste-an-existing workspace key (wk_*). Drops every other
 /// profile and any account-scope key — a workspace key alone cannot
-/// drive account-scope endpoints, and there is no server endpoint to
-/// look up which workspace the wk_ belongs to, so the new entry has
-/// `id = None`. Lands under the default alias because there's no
-/// other useful name to pick.
+/// drive account-scope endpoints. The entry starts with `id = None`;
+/// callers backfill it via [`backfill_active_workspace_id`]
+/// (best-effort — pure so this stays testable without HTTP). Lands
+/// under the default alias because there's no other useful name to
+/// pick.
 ///
 /// Caller persists the config after.
 pub fn apply_workspace_key(cfg: &mut CliConfig, wk: String) {
@@ -138,6 +139,42 @@ pub fn apply_workspace_key(cfg: &mut CliConfig, wk: String) {
         DEFAULT_WORKSPACE_ALIAS,
         WorkspaceEntry { id: None, key: wk },
     );
+}
+
+/// Fill in the active profile's missing workspace id by asking the
+/// server which workspace the stored `wk_` belongs to (GET /v1/whoami).
+/// Returns true when the id was resolved and written into `cfg` —
+/// caller persists. No-op (false) when there's nothing to do: no
+/// active profile, id already known, or empty key placeholder.
+///
+/// Best-effort by design: any failure — a server predating the
+/// endpoint (404), an invalid key (401), network trouble — leaves the
+/// config untouched and the id unknown; the next `veda status` simply
+/// retries.
+pub async fn backfill_active_workspace_id(client: &Client, cfg: &mut CliConfig) -> bool {
+    let Some(alias) = cfg.active_alias().map(String::from) else {
+        return false;
+    };
+    let Some(entry) = cfg.workspaces.get(&alias) else {
+        return false;
+    };
+    if entry.id.is_some() || entry.key.is_empty() {
+        return false;
+    }
+    let Ok(resp) = client.whoami(&entry.key).await else {
+        return false;
+    };
+    let Some(id) = resp["data"]["workspace_id"].as_str().filter(|s| !s.is_empty()) else {
+        return false;
+    };
+    let id = id.to_string();
+    match cfg.workspaces.get_mut(&alias) {
+        Some(entry) => {
+            entry.id = Some(id);
+            true
+        }
+        None => false,
+    }
 }
 
 /// Resolved params for `veda init`. Construction (prompting / flag merge)
@@ -1134,5 +1171,89 @@ mod tests {
         assert_eq!(cfg.active_ws_id(), Some("ws-ok"));
         let def = cfg.workspace_for(DEFAULT_WORKSPACE_ALIAS).unwrap();
         assert!(def.key.is_empty(), "key should be empty placeholder, got {:?}", def.key);
+    }
+
+    // ── backfill_active_workspace_id ───────────────────────────────
+
+    fn cfg_with_pasted_wk(server_url: &str) -> CliConfig {
+        let mut cfg = CliConfig {
+            server_url: server_url.into(),
+            ..CliConfig::default()
+        };
+        apply_workspace_key(&mut cfg, "wk-pasted".into());
+        cfg
+    }
+
+    #[tokio::test]
+    async fn backfill_resolves_id_via_whoami() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/v1/whoami"))
+            .respond_with(ok(json!({
+                "workspace_id": "ws-resolved",
+                "kind": "fs",
+                "permission": "readwrite",
+            })))
+            .mount(&server)
+            .await;
+
+        let client = Client::new(&server.uri());
+        let mut cfg = cfg_with_pasted_wk(&server.uri());
+        assert!(backfill_active_workspace_id(&client, &mut cfg).await);
+        assert_eq!(cfg.active_ws_id(), Some("ws-resolved"));
+    }
+
+    #[tokio::test]
+    async fn backfill_tolerates_older_server_without_endpoint() {
+        // Deployed servers may predate /v1/whoami — a 404 must leave
+        // the config untouched, not error the whole command.
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/v1/whoami"))
+            .respond_with(ResponseTemplate::new(404).set_body_string("not found"))
+            .mount(&server)
+            .await;
+
+        let client = Client::new(&server.uri());
+        let mut cfg = cfg_with_pasted_wk(&server.uri());
+        assert!(!backfill_active_workspace_id(&client, &mut cfg).await);
+        assert_eq!(cfg.active_ws_id(), None);
+    }
+
+    #[tokio::test]
+    async fn backfill_skips_when_id_already_known() {
+        // No mock mounted: a request would 404 the MockServer, but the
+        // point is that no request is made at all.
+        let server = MockServer::start().await;
+        let client = Client::new(&server.uri());
+        let mut cfg = cfg_with_pasted_wk(&server.uri());
+        cfg.set_active_profile(
+            DEFAULT_WORKSPACE_ALIAS,
+            WorkspaceEntry {
+                id: Some("ws-known".into()),
+                key: "wk-pasted".into(),
+            },
+        );
+        assert!(!backfill_active_workspace_id(&client, &mut cfg).await);
+        assert_eq!(cfg.active_ws_id(), Some("ws-known"));
+        assert!(server.received_requests().await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn backfill_skips_empty_key_placeholder() {
+        // Mint-failure placeholder (id set, key empty) and no-profile
+        // configs must not fire a whoami with an empty bearer.
+        let server = MockServer::start().await;
+        let client = Client::new(&server.uri());
+
+        let mut cfg = CliConfig::default();
+        assert!(!backfill_active_workspace_id(&client, &mut cfg).await);
+
+        cfg.set_active_profile(
+            DEFAULT_WORKSPACE_ALIAS,
+            WorkspaceEntry { id: None, key: String::new() },
+        );
+        assert!(!backfill_active_workspace_id(&client, &mut cfg).await);
+        assert!(server.received_requests().await.unwrap().is_empty());
     }
 }

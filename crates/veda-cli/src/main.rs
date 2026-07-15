@@ -1068,6 +1068,13 @@ async fn run_init_command(
                 init::find_workspace_id_by_name(&new_client, &api_key, &alias).await?;
             workspace::run_workspace_add(&new_client, &mut cfg, alias, existing_id).await?;
         }
+        // For workspace keys (wk_), resolve which workspace the key
+        // belongs to so status shows a real id. Best-effort — a server
+        // without /v1/whoami leaves id unset and status backfills later.
+        if matches!(kind, init::ImportedKeyKind::Workspace) {
+            let new_client = client::Client::new(&cfg.server_url);
+            init::backfill_active_workspace_id(&new_client, &mut cfg).await;
+        }
         cfg.save()?;
         println!();
         if let Some(p) = bak {
@@ -1240,6 +1247,13 @@ async fn main() -> anyhow::Result<()> {
             } else {
                 None
             };
+            // A pasted-wk_ profile starts with no workspace id; resolve
+            // it once via /v1/whoami and persist so status shows a real
+            // id instead of "(id unknown)". Save failure is tolerable —
+            // the id still renders this run and backfills again next time.
+            if reachable == Some(true) && init::backfill_active_workspace_id(&c, &mut cfg).await {
+                let _ = cfg.save();
+            }
             print!("{}", status::render_status(&cfg, reachable));
         }
         Commands::Init {

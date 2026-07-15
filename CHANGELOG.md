@@ -36,6 +36,11 @@ that matters.
   (directory aggregation was measured thinking up to ~5k tokens).
 
 ### Changed
+- **`veda status` no longer flags a missing account key.** The account key
+  (`vk_`) is optional for data-plane use — a config holding only a pasted
+  `wk_` workspace key is fully functional, yet status rendered
+  `API key: ✗ missing` as if setup were broken. The line is now labeled
+  `Account key`, shown only when a key is configured, and omitted otherwise.
 - **`/v1/answer` is now agentic.** The LLM drives retrieval itself through
   tool calls (`search` for re-querying with different keywords, `read_file`
   for pulling full context around a hit) across up to
@@ -50,6 +55,12 @@ that matters.
   `answer_max_tool_rounds` added, `answer_max_context_tokens` removed.
 
 ### Added
+- **`GET /v1/whoami` — data-plane identity probe.** Resolves the presented
+  `wk_` (either kind, no kind gate) to `{workspace_id, kind, permission}`.
+  `veda status` and `veda init --import-key wk_…` use it to backfill the
+  workspace id a pasted key can't carry, so status shows a real id instead
+  of `(id unknown)`. Best-effort against servers predating the endpoint:
+  404 leaves the config untouched and status retries next run.
 - **Per-request answer persona: `prompt` field on `/v1/answer(/stream)`.**
   Appended to the built-in knowledge-base protocol (tool policy, citation
   rules, injection guard — not overridable), ≤4000 chars; absent falls back

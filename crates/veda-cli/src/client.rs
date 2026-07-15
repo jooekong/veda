@@ -146,6 +146,18 @@ impl Client {
         Self::check(resp).await
     }
 
+    /// GET /v1/whoami — resolve a `wk_` to its workspace
+    /// (`data.workspace_id` / `kind` / `permission`).
+    pub async fn whoami(&self, ws_key: &str) -> Result<serde_json::Value> {
+        let resp = self
+            .http
+            .get(format!("{}/v1/whoami", self.base))
+            .bearer_auth(ws_key)
+            .send()
+            .await?;
+        Self::check(resp).await
+    }
+
     pub async fn create_workspace_key(
         &self,
         api_key: &str,

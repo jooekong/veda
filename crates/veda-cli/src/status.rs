@@ -41,19 +41,20 @@ pub fn render_status(cfg: &CliConfig, reachable: Option<bool>) -> String {
         return "No configuration. Run `veda init` to set up.\n".to_string();
     }
     let server_line = match reachable {
-        Some(true) => format!("Server:    {}  (reachable)", cfg.server_url),
-        Some(false) => format!("Server:    {}  (unreachable)", cfg.server_url),
-        None => format!("Server:    {}", cfg.server_url),
+        Some(true) => format!("Server:      {}  (reachable)", cfg.server_url),
+        Some(false) => format!("Server:      {}  (unreachable)", cfg.server_url),
+        None => format!("Server:      {}", cfg.server_url),
     };
-    let api_key_state = if cfg.api_key.as_deref().is_some_and(|s| !s.is_empty()) {
-        "✓ configured"
+    // Account key (vk_) only matters for control-plane commands; a
+    // data-plane-only config (pasted wk_) is fully usable without it,
+    // so the line appears only when a key is present — never as missing.
+    let account_key_line = if cfg.api_key.as_deref().is_some_and(|s| !s.is_empty()) {
+        "Account key: ✓ configured\n"
     } else {
-        "✗ missing"
+        ""
     };
     let ws_state = render_workspace_line(cfg);
-    format!(
-        "{server_line}\nAPI key:   {api_key_state}\nWorkspace: {ws_state}\n"
-    )
+    format!("{server_line}\n{account_key_line}Workspace:   {ws_state}\n")
 }
 
 /// "Workspace:" line content. ★ marks the active profile so users
@@ -148,7 +149,7 @@ mod tests {
         let out = render_status(&full_cfg(), Some(true));
         assert!(out.contains("http://example.com:3000"));
         assert!(out.contains("(reachable)"));
-        assert!(out.contains("✓ configured"));
+        assert!(out.contains("Account key: ✓ configured"));
         // Active profile is marked with ★ and shows the short id
         // (first hyphen-separated segment) so the line stays short.
         assert!(out.contains("★ default"), "out: {out}");
@@ -199,6 +200,7 @@ mod tests {
         };
         let out = render_status(&cfg, Some(true));
         assert!(out.contains("none selected"));
+        assert!(out.contains("Account key: ✓ configured"), "out: {out}");
     }
 
     #[test]
@@ -206,7 +208,8 @@ mod tests {
         // Paste-a-wk_ flow lands in a [workspaces.default] entry with
         // id=None — status must surface that ("id unknown") without
         // calling it "none selected", which would imply the CLI is
-        // unusable.
+        // unusable. The account key (vk_) is optional for data-plane
+        // use, so its line is omitted entirely — no "missing" scare.
         let mut cfg = CliConfig {
             api_key: None,
             ..CliConfig::default()
@@ -219,6 +222,8 @@ mod tests {
         assert!(out.contains("★ default"), "out: {out}");
         assert!(out.contains("(id unknown)"), "out: {out}");
         assert!(!out.contains("none selected"), "out: {out}");
+        assert!(!out.contains("Account key"), "out: {out}");
+        assert!(!out.contains("missing"), "out: {out}");
     }
 
     #[test]

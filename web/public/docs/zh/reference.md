@@ -41,6 +41,7 @@
 - **用错面 = 401**：`vk_` 打数据面、或 `wk_` 打控制面，都按无效凭证 `401 UNAUTHORIZED` 拒绝。
 - **吊销立即生效**：archive workspace 会在同一事务里把它名下所有 `wk_` 置为 `revoked`；suspend 账号会让其名下所有 key（`vk_`+`wk_`）在下次请求即失效。
 - **JWT 已彻底移除**：没有 `POST /v1/workspaces/{id}/token`，没有 `jwt_secret`，鉴权全是纯 key 校验（key 以 SHA-256 哈希存储）。
+- **身份自省**：`GET /v1/whoami`（Bearer `wk_`，fs/db 通用、不校验 kind）返回该 key 所属的 `{workspace_id, kind, permission}`。手上只有一把裸 `wk_` 想知道它指向哪个 workspace 时用这个——CLI `veda status` / `veda init --import-key wk_…` 靠它回填本地配置里的 workspace id。
 
 > `vk_` 是账号根权限，没有能力分级。要限制一把令牌只能动某几个 workspace，用 `POST /admin/v1/tokens` 的 `allowed_workspaces` scope（见 §4.5）。
 

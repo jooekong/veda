@@ -114,6 +114,16 @@ impl AuthDbWorkspace {
     }
 }
 
+/// Workspace-scoped auth that accepts a `wk_` of either kind. For
+/// identity-style endpoints (`GET /v1/whoami`) that report on the key
+/// rather than act on workspace data — fs and db keys both apply, so
+/// no kind gate.
+pub struct AuthAnyWorkspace {
+    pub workspace_id: String,
+    pub kind: veda_types::WorkspaceKind,
+    pub permission: veda_types::KeyPermission,
+}
+
 impl AuthAccount {
     pub async fn load_owned_workspace(
         &self,
@@ -237,6 +247,30 @@ impl FromRequestParts<Arc<AppState>> for AuthDbWorkspace {
             Ok(AuthDbWorkspace {
                 workspace_id: wk.workspace_id,
                 read_only,
+            })
+        }
+    }
+}
+
+impl FromRequestParts<Arc<AppState>> for AuthAnyWorkspace {
+    type Rejection = Response;
+
+    fn from_request_parts(
+        parts: &mut Parts,
+        state: &Arc<AppState>,
+    ) -> impl std::future::Future<Output = Result<Self, Self::Rejection>> + Send {
+        let state = state.clone();
+        let auth_header = parts
+            .headers
+            .get("authorization")
+            .and_then(|v| v.to_str().ok())
+            .map(|s| s.to_string());
+        async move {
+            let (wk, _read_only) = resolve_ws_key(auth_header, state).await?;
+            Ok(AuthAnyWorkspace {
+                workspace_id: wk.workspace_id,
+                kind: wk.kind,
+                permission: wk.permission,
             })
         }
     }
