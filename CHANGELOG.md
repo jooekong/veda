@@ -9,6 +9,16 @@ that matters.
 
 ## [Unreleased]
 
+### Fixed
+- **Empty L0 abstracts from reasoning-model truncation.** Summary generation
+  sent `max_tokens=150` for L0; on gateway backends where a reasoning model's
+  thinking tokens count against that budget, generation could exhaust it
+  mid-thought and return an empty `content` with HTTP 200, which was then
+  stored as a ready-but-empty abstract (hit ~10% of files in prod
+  2026-07-08..13). All summary calls (file L0/L1, directory aggregate) now
+  share the `max_summary_tokens` budget, default raised 2048 → 8192
+  (directory aggregation was measured thinking up to ~5k tokens).
+
 ### Changed
 - **`/v1/answer` is now agentic.** The LLM drives retrieval itself through
   tool calls (`search` for re-querying with different keywords, `read_file`

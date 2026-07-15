@@ -151,7 +151,7 @@ Vector dataset 是 db workspace 内的逻辑分组（内部物理 pk = `{dataset
 - VedaError::Storage 使用 String（而非 anyhow::Error）避免 lib crate 兼容问题
 - **三层信息模型 (Tiered Context Loading)**：
   - L0 Abstract (~100 tokens)：文件/目录的一句话摘要，存入 Milvus 做向量搜索
-  - L1 Overview (~2k tokens，可通过 `max_summary_tokens` 配置)：结构化概览，按需从 MySQL 批量加载
+  - L1 Overview (~2k tokens)：结构化概览，按需从 MySQL 批量加载。所有 summary LLM 调用（L0/L1/目录聚合）共用 `max_summary_tokens` 预算（默认 8192）——预算是防截断保险丝而非输出长度控制；推理模型的思考 token 在部分网关后端计入 max_tokens，预算过紧会在思考阶段耗尽产出空 content（2026-07 生产事故）
   - L2 Full (原文 chunk)：现有 chunk 搜索
   - 写入流程：ChunkSync → SummarySync (LLM 并行生成 L0+L1) → DirSummarySync (自底向上聚合，含去重防抖)
   - 文件和目录的 L0 均写入 Milvus `veda_summaries` 集合（Abstract 搜索可命中目录）
