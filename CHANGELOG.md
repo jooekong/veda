@@ -53,6 +53,11 @@ that matters.
   (directory aggregation was measured thinking up to ~5k tokens).
 
 ### Changed
+- **`answer_max_output_tokens` default raised 1024 → 4096.** Production
+  answers measure p50 ≈1.4k chars (max ≈2.6k) — the 1024 ceiling was
+  silently not enforced by the LLM gateway. The new default matches real
+  output so a gateway that starts enforcing `max_tokens` won't truncate
+  the majority of answers.
 - **WeCom answer sources render compactly.** After a `———` separator, the
   tunnel lists one `[n]` + file basename entry per line — at most 3 entries,
   the rest folded into a final "等 N 篇" line — instead of full paths for

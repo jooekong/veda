@@ -257,7 +257,10 @@ fn default_answer_max_tool_rounds() -> usize {
 }
 
 fn default_answer_max_output_tokens() -> usize {
-    1024
+    // Prod answers measure p50 ≈1.4k chars / max ≈2.6k (2026-07-16): the old
+    // 1024 was silently unenforced by the gateway; 4096 matches reality so a
+    // gateway that does enforce max_tokens won't truncate normal answers.
+    4096
 }
 
 fn default_answer_concurrency() -> usize {

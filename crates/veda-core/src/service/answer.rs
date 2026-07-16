@@ -96,7 +96,7 @@ pub struct AnswerParams {
 impl Default for AnswerParams {
     fn default() -> Self {
         Self {
-            max_output_tokens: 1024,
+            max_output_tokens: 4096,
             max_tool_rounds: 4,
             total_budget: Duration::from_secs(80),
             llm_attempt_timeout: Duration::from_secs(20),
