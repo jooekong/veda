@@ -447,12 +447,13 @@ fn render_markdown(hits: &[Hit]) -> String {
     out.trim_end().to_string()
 }
 
-/// Render a `/v1/answer` result for WeCom: the answer body, then one compact
-/// "出处：" line of `[n]` + file basename entries. `[n]` reuses the
-/// server-assigned citation index so it lines up with the `[n]` markers in
-/// the body. At most [`MAX_LISTED_CITATIONS`] entries are shown; the rest
-/// collapse into "等 N 篇". Citations without a resolvable path are skipped;
-/// if none remain, only the body is sent.
+/// Render a `/v1/answer` result for WeCom: the answer body, a `———`
+/// separator, then a "出处：" list with one `[n]` + file basename entry per
+/// line. `[n]` reuses the server-assigned citation index so it lines up
+/// with the `[n]` markers in the body. At most [`MAX_LISTED_CITATIONS`]
+/// entries are shown; the rest collapse into a final "等 N 篇" line.
+/// Citations without a resolvable path are skipped; if none remain, only
+/// the body is sent.
 fn render_answer(data: &AnswerData) -> String {
     let body = data.answer.trim();
     let cited: Vec<(usize, &str)> = data
@@ -463,21 +464,18 @@ fn render_answer(data: &AnswerData) -> String {
     if cited.is_empty() {
         return body.to_string();
     }
-    // Basenames keep the line short, but knowledge bases hold same-named
+    // Basenames keep entries short, but knowledge bases hold same-named
     // files in different dirs — entries whose basename collides within the
     // displayed set fall back to their full path.
     let shown = &cited[..cited.len().min(MAX_LISTED_CITATIONS)];
-    let listed: Vec<String> = shown
-        .iter()
-        .map(|(idx, path)| {
-            let name = basename(path);
-            let dup = shown.iter().filter(|(_, p)| basename(p) == name).count() > 1;
-            format!("[{idx}] `{}`", if dup { *path } else { name })
-        })
-        .collect();
-    let mut out = format!("{body}\n\n出处：{}", listed.join(" · "));
+    let mut out = format!("{body}\n\n———\n出处：");
+    for (idx, path) in shown {
+        let name = basename(path);
+        let dup = shown.iter().filter(|(_, p)| basename(p) == name).count() > 1;
+        out.push_str(&format!("\n[{idx}] `{}`", if dup { *path } else { name }));
+    }
     if cited.len() > MAX_LISTED_CITATIONS {
-        out.push_str(&format!(" 等 {} 篇", cited.len()));
+        out.push_str(&format!("\n等 {} 篇", cited.len()));
     }
     out
 }
@@ -618,10 +616,9 @@ mod tests {
         };
         let out = render_answer(&data);
         assert!(out.contains("接入分三步[1]"));
-        // Compact single source line: basenames joined on one line.
-        assert!(out.contains("出处：[1] `接入.md` · [2] `多活.md`"), "{out}");
+        // Separator, then a "出处：" header with one basename entry per line.
+        assert!(out.contains("———\n出处：\n[1] `接入.md`\n[2] `多活.md`"), "{out}");
         assert!(!out.contains("/a/接入.md"), "full paths are not shown");
-        assert_eq!(out.lines().filter(|l| l.contains("出处：")).count(), 1);
     }
 
     #[test]
@@ -640,7 +637,7 @@ mod tests {
         let out = render_answer(&data);
         assert!(out.contains("[3] `f3.md`"), "{out}");
         assert!(!out.contains("f4.md"), "entries beyond the cap are folded");
-        assert!(out.contains("等 5 篇"), "{out}");
+        assert!(out.ends_with("\n等 5 篇"), "fold note on its own line: {out}");
     }
 
     #[test]

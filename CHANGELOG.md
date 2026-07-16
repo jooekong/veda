@@ -45,13 +45,13 @@ that matters.
   (directory aggregation was measured thinking up to ~5k tokens).
 
 ### Changed
-- **WeCom answer sources render as one compact line.** The tunnel now shows
-  `出处：[1] a.md · [2] b.md` — file basenames on a single line, at most 3
-  entries, the rest folded into "等 N 篇" — instead of one full-path line per
-  citation. Entries whose basename collides within the displayed set fall
-  back to their full path, so same-named files in different directories stay
-  distinguishable. (Moving the line into a `<think>` block was probed and
-  abandoned: WeCom stalls on a final frame carrying think tags.)
+- **WeCom answer sources render compactly.** After a `———` separator, the
+  tunnel lists one `[n]` + file basename entry per line — at most 3 entries,
+  the rest folded into a final "等 N 篇" line — instead of full paths for
+  every citation. Entries whose basename collides within the displayed set
+  fall back to their full path, so same-named files in different directories
+  stay distinguishable. (Moving sources into a `<think>` block was probed
+  and abandoned: WeCom stalls on a final frame carrying think tags.)
 - **`veda status` no longer flags a missing account key.** The account key
   (`vk_`) is optional for data-plane use — a config holding only a pasted
   `wk_` workspace key is fully functional, yet status rendered
