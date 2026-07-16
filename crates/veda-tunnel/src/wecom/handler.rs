@@ -463,10 +463,17 @@ fn render_answer(data: &AnswerData) -> String {
     if cited.is_empty() {
         return body.to_string();
     }
-    let listed: Vec<String> = cited
+    // Basenames keep the line short, but knowledge bases hold same-named
+    // files in different dirs — entries whose basename collides within the
+    // displayed set fall back to their full path.
+    let shown = &cited[..cited.len().min(MAX_LISTED_CITATIONS)];
+    let listed: Vec<String> = shown
         .iter()
-        .take(MAX_LISTED_CITATIONS)
-        .map(|(idx, path)| format!("[{idx}] `{}`", basename(path)))
+        .map(|(idx, path)| {
+            let name = basename(path);
+            let dup = shown.iter().filter(|(_, p)| basename(p) == name).count() > 1;
+            format!("[{idx}] `{}`", if dup { *path } else { name })
+        })
         .collect();
     let mut out = format!("{body}\n\n出处：{}", listed.join(" · "));
     if cited.len() > MAX_LISTED_CITATIONS {
@@ -634,6 +641,33 @@ mod tests {
         assert!(out.contains("[3] `f3.md`"), "{out}");
         assert!(!out.contains("f4.md"), "entries beyond the cap are folded");
         assert!(out.contains("等 5 篇"), "{out}");
+    }
+
+    #[test]
+    fn render_answer_disambiguates_duplicate_basenames() {
+        let data = AnswerData {
+            hit_count: 5,
+            answer: "答案[1][2][3]".to_string(),
+            citations: vec![
+                AnswerCitation {
+                    index: 1,
+                    path: Some("/dal/接入.md".to_string()),
+                },
+                AnswerCitation {
+                    index: 2,
+                    path: Some("/fdc/接入.md".to_string()),
+                },
+                AnswerCitation {
+                    index: 3,
+                    path: Some("/dal/faq.md".to_string()),
+                },
+            ],
+        };
+        let out = render_answer(&data);
+        // Colliding basenames show their full path; unique ones stay short.
+        assert!(out.contains("[1] `/dal/接入.md`"), "{out}");
+        assert!(out.contains("[2] `/fdc/接入.md`"), "{out}");
+        assert!(out.contains("[3] `faq.md`"), "{out}");
     }
 
     #[test]
