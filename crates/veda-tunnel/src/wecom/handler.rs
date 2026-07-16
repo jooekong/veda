@@ -51,13 +51,9 @@ const NO_CONTEXT_ANSWER: &str = "知识库中没有找到相关内容";
 
 /// Citation entries shown on the compact "出处：" line; the rest collapse
 /// into "等 N 篇". Grounded answers rarely cite more than this.
+/// (Folding sources into a `<think>` block was probed 2026-07-16 and
+/// abandoned: a final frame carrying think blocks stalled the bubble.)
 const MAX_LISTED_CITATIONS: usize = 3;
-
-/// Fixed reply for the `#think-test` debug command: exercises WeCom's
-/// `<think>` rendering (head block, tail block, markdown inside) so a real
-/// client shows whether a tail think block can serve as a folded sources
-/// section. Not a Q&A — no QA-log row. Remove once the experiment settles.
-const THINK_TEST_REPLY: &str = "<think>实验A(头部块):平台预期用法。\n- 列表项是否渲染?\n- `行内代码` 是否渲染?</think>这是正文:假设这里是答案主体,含 [1][2] 标记。\n\n第二段正文,确认 think 块不吞掉后续内容。\n\n<think>出处:[1] `接入.md` · [2] `多活.md` 等 5 篇\n实验B(尾部块):若此块默认折叠、位置正确,出处可搬进来。</think>";
 
 /// A reply plus what the QA log needs to know about how it came to be.
 struct Reply {
@@ -115,13 +111,6 @@ pub async fn handle_message(ctx: HandlerCtx, req_id: String, body: MsgCallbackBo
             Some(&feedback_id),
         ))
         .await;
-
-    // Debug probe for WeCom `<think>` rendering — exact command, replies
-    // with the fixed experiment message and skips search/answer + QA log.
-    if query == "#think-test" {
-        send_final(&ctx, &req_id, &stream_id, THINK_TEST_REPLY).await;
-        return;
-    }
 
     registry::update(&ctx.registry, &ctx.bot.bot_id, |s| {
         s.last_msg_at = Some(Utc::now());

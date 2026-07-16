@@ -48,9 +48,8 @@ that matters.
 - **WeCom answer sources render as one compact line.** The tunnel now shows
   `出处：[1] a.md · [2] b.md` — file basenames on a single line, at most 3
   entries, the rest folded into "等 N 篇" — instead of one full-path line per
-  citation. A `#think-test` debug command (exact match) replies with a fixed
-  message probing WeCom's `<think>` block rendering, to evaluate moving the
-  source line into a natively collapsed section.
+  citation. (Moving the line into a `<think>` block was probed and abandoned:
+  WeCom stalls on a final frame carrying think tags.)
 - **`veda status` no longer flags a missing account key.** The account key
   (`vk_`) is optional for data-plane use — a config holding only a pasted
   `wk_` workspace key is fully functional, yet status rendered
