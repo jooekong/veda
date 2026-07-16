@@ -767,6 +767,8 @@ type QaRow = {
   citation_count: number;
   latency_ms: number;
   answer_text: string | null;
+  /** JSON array `[{tool, detail}]` of the retrieval steps behind the answer. */
+  tool_trace: string | null;
   up_count: number;
   down_count: number;
 };
@@ -784,6 +786,25 @@ const OUTCOME_BADGE: Record<string, [string, string]> = {
 function outcomeBadge(o: string): string {
   const [label, cls] = OUTCOME_BADGE[o] ?? [o, "bg-slate-100 text-slate-500"];
   return `<span class="text-xs px-1.5 py-0.5 rounded font-medium ${cls}">${esc(label)}</span>`;
+}
+
+/** Collapsible retrieval story: one line per tool step (search / read_file). */
+function traceDetails(raw: string | null): string {
+  if (!raw) return "";
+  let steps: { tool?: string; detail?: string }[];
+  try {
+    steps = JSON.parse(raw);
+  } catch {
+    return "";
+  }
+  if (!Array.isArray(steps) || !steps.length) return "";
+  const lines = steps
+    .map((s) => {
+      const label = s.tool === "read_file" ? "📄 查阅" : "🔍 检索";
+      return `<div>${label} ${esc(s.detail ?? "")}</div>`;
+    })
+    .join("");
+  return `<details class="mt-1"><summary class="text-xs text-slate-400 cursor-pointer">过程（${steps.length} 步）</summary><div class="text-xs text-slate-600 mt-1 space-y-0.5">${lines}</div></details>`;
 }
 
 function statCard(label: string, value: string, sub = ""): string {
@@ -856,10 +877,14 @@ async function loadQaRows(box: HTMLElement, outcome: string, downVoted: boolean)
     .map(
       (r) => `
     <tr class="border-t border-slate-100 align-top">
-      <td class="px-3 py-2 text-xs text-slate-400 whitespace-nowrap">${esc(new Date(r.ts).toLocaleString("zh-CN", { hour12: false }))}</td>
+      <td class="px-3 py-2 text-xs text-slate-400 whitespace-nowrap">
+        ${esc(new Date(r.ts).toLocaleString("zh-CN", { hour12: false }))}
+        ${r.user_id ? `<div class="mt-0.5 text-slate-500">${esc(r.user_id)}</div>` : ""}
+      </td>
       <td class="px-3 py-2 text-sm max-w-md">
         <div class="font-medium">${esc(r.query)}</div>
         ${r.answer_text ? `<details class="mt-1"><summary class="text-xs text-slate-400 cursor-pointer">答案</summary><div class="text-xs text-slate-600 whitespace-pre-wrap mt-1">${esc(r.answer_text)}</div></details>` : ""}
+        ${traceDetails(r.tool_trace)}
       </td>
       <td class="px-3 py-2">${outcomeBadge(r.outcome)}</td>
       <td class="px-3 py-2 text-xs text-slate-500 whitespace-nowrap">${r.citation_count} 引用 · ${(r.latency_ms / 1000).toFixed(1)}s</td>
@@ -870,7 +895,7 @@ async function loadQaRows(box: HTMLElement, outcome: string, downVoted: boolean)
   box.innerHTML = `<div class="bg-white border border-slate-200 rounded-lg overflow-x-auto">
     <table class="w-full text-left">
       <thead class="text-xs uppercase tracking-wide text-slate-500">
-        <tr><th class="px-3 py-2 font-semibold">时间</th><th class="px-3 py-2 font-semibold">问题 / 答案</th><th class="px-3 py-2 font-semibold">结果</th><th class="px-3 py-2 font-semibold">质量</th><th class="px-3 py-2 font-semibold">反馈</th></tr>
+        <tr><th class="px-3 py-2 font-semibold">时间 / 提问人</th><th class="px-3 py-2 font-semibold">问题 / 答案 / 过程</th><th class="px-3 py-2 font-semibold">结果</th><th class="px-3 py-2 font-semibold">质量</th><th class="px-3 py-2 font-semibold">反馈</th></tr>
       </thead>
       <tbody>${tr}</tbody>
     </table>

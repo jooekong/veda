@@ -110,6 +110,10 @@ pub struct QaLogRow {
     pub citation_count: i32,
     pub latency_ms: i32,
     pub answer_text: Option<String>,
+    /// JSON array of the tool calls behind the answer (search queries /
+    /// file reads, in order); null for pre-trace rows and non-streamed
+    /// replies.
+    pub tool_trace: Option<String>,
     pub up_count: i64,
     pub down_count: i64,
 }
@@ -209,10 +213,10 @@ impl TunnelBotStore {
     }
 
     /// Idempotent bootstrap of the QA telemetry tables — a byte-for-byte copy
-    /// of veda-tunnel's `qa_log.rs` DDL (owner: veda-tunnel). Both new in that
-    /// release, so plain `CREATE TABLE IF NOT EXISTS` with no column migration:
-    /// a veda-server carrying this read API can land on a fresh DB before the
-    /// tunnel that writes these rows.
+    /// of veda-tunnel's `qa_log.rs` DDL + column migration (owner:
+    /// veda-tunnel; column changes must land in both). A veda-server carrying
+    /// this read API can land on a fresh DB before the tunnel that writes
+    /// these rows.
     async fn ensure_qa_schema(&self) -> anyhow::Result<()> {
         sqlx::query(
             r#"
@@ -230,6 +234,7 @@ impl TunnelBotStore {
                 latency_ms     INT          NOT NULL DEFAULT 0,
                 answer_text    MEDIUMTEXT   NULL,
                 feedback_id    VARCHAR(64)  NULL,
+                tool_trace     TEXT         NULL,
                 KEY idx_bot_ts (bot_id, ts),
                 KEY idx_outcome (outcome, ts),
                 KEY idx_feedback (feedback_id)
@@ -239,6 +244,36 @@ impl TunnelBotStore {
         .execute(&self.pool)
         .await
         .context("ensure veda_tunnel_qa_log")?;
+        // Columns added after the table first shipped; veda-tunnel runs the
+        // same migration — losing the ALTER race with 1060 duplicate column
+        // is convergence, not failure.
+        let have: Vec<String> = sqlx::query(
+            "SELECT COLUMN_NAME FROM information_schema.COLUMNS \
+             WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'veda_tunnel_qa_log'",
+        )
+        .fetch_all(&self.pool)
+        .await
+        .context("read veda_tunnel_qa_log columns")?
+        .iter()
+        .map(|r| r.try_get::<String, _>("COLUMN_NAME").unwrap_or_default())
+        .collect();
+        for (col, ddl) in [("tool_trace", "ADD COLUMN tool_trace TEXT NULL")] {
+            if !have.iter().any(|c| c == col) {
+                if let Err(e) = sqlx::query(&format!("ALTER TABLE veda_tunnel_qa_log {ddl}"))
+                    .execute(&self.pool)
+                    .await
+                {
+                    let dup = e
+                        .as_database_error()
+                        .map(|d| d.message().contains("Duplicate column"))
+                        .unwrap_or(false);
+                    if !dup {
+                        return Err(e)
+                            .with_context(|| format!("migrate veda_tunnel_qa_log: add {col}"));
+                    }
+                }
+            }
+        }
         sqlx::query(
             r#"
             CREATE TABLE IF NOT EXISTS veda_tunnel_qa_feedback (
@@ -524,7 +559,7 @@ impl TunnelBotStore {
 
         let list_sql = format!(
             "SELECT q.id, q.ts, q.bot_id, q.chat_type, q.user_id, q.query, q.outcome, \
-                    q.hit_count, q.citation_count, q.latency_ms, q.answer_text, \
+                    q.hit_count, q.citation_count, q.latency_ms, q.answer_text, q.tool_trace, \
                     (SELECT COUNT(*) FROM veda_tunnel_qa_feedback f \
                      WHERE f.feedback_id = q.feedback_id AND f.kind = 1) AS up_count, \
                     (SELECT COUNT(*) FROM veda_tunnel_qa_feedback f \
@@ -578,6 +613,7 @@ fn qa_row_to_log(r: &MySqlRow) -> Result<QaLogRow, VedaError> {
             citation_count: r.try_get("citation_count")?,
             latency_ms: r.try_get("latency_ms")?,
             answer_text: r.try_get("answer_text")?,
+            tool_trace: r.try_get("tool_trace")?,
             up_count: r.try_get("up_count")?,
             down_count: r.try_get("down_count")?,
         })

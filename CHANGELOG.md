@@ -9,6 +9,14 @@ that matters.
 
 ## [Unreleased]
 
+### Added
+- **QA log captures the retrieval story behind each answer.** The tunnel
+  records every server-announced tool call of a streamed answer — search
+  queries and file reads, in execution order — into a new `tool_trace`
+  column (JSON array; both DDL copies migrate idempotently). The admin
+  console's Q&A details now show the asker's WeCom user id under the
+  timestamp and a collapsible "过程" section listing each retrieval step.
+
 ### Fixed
 - **Unrelated source lists on uncited answers.** When the answer model wrote
   no valid `[n]` marker, `/v1/answer` backfilled citations with every

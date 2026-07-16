@@ -38,6 +38,11 @@ pub struct QaLogEntry {
     /// phrases, so the log always shows "what the user saw".
     pub answer_text: String,
     pub feedback_id: String,
+    /// JSON array of the tool calls the server announced while answering
+    /// (`[{"tool":"search","detail":"…"}]`, in execution order) — how the
+    /// answer was assembled. `None` when no tool ran or the reply didn't
+    /// stream (one-shot fallback / errors).
+    pub tool_trace: Option<String>,
 }
 
 /// Feedback kinds as stored. Wire values from the WeCom `feedback_event`
@@ -69,6 +74,8 @@ pub struct QaLogRow {
     pub citation_count: i32,
     pub latency_ms: i32,
     pub answer_text: Option<String>,
+    /// See [`QaLogEntry::tool_trace`] — raw JSON array or null.
+    pub tool_trace: Option<String>,
     pub up_count: i64,
     pub down_count: i64,
 }
@@ -92,9 +99,10 @@ impl QaLogStore {
         Ok(store)
     }
 
-    /// Both tables are new in this release — plain idempotent CREATEs, no
-    /// column migration needed yet (add the information_schema dance only
-    /// when a column lands after first deploy, like store.rs does).
+    /// Idempotent CREATEs plus the column migration for pre-existing tables
+    /// (same information_schema dance as store.rs — MySQL 8 has no
+    /// `ADD COLUMN IF NOT EXISTS`). veda-server's `tunnel_bots.rs` carries a
+    /// copy of this DDL + migration; column changes must land in both.
     async fn bootstrap(&self) -> Result<()> {
         sqlx::query(
             r#"
@@ -112,6 +120,7 @@ impl QaLogStore {
                 latency_ms     INT          NOT NULL DEFAULT 0,
                 answer_text    MEDIUMTEXT   NULL,
                 feedback_id    VARCHAR(64)  NULL,
+                tool_trace     TEXT         NULL,
                 KEY idx_bot_ts (bot_id, ts),
                 KEY idx_outcome (outcome, ts),
                 KEY idx_feedback (feedback_id)
@@ -121,6 +130,7 @@ impl QaLogStore {
         .execute(&self.pool)
         .await
         .context("bootstrap veda_tunnel_qa_log")?;
+        self.migrate_qa_log_columns().await?;
         sqlx::query(
             r#"
             CREATE TABLE IF NOT EXISTS veda_tunnel_qa_feedback (
@@ -141,12 +151,46 @@ impl QaLogStore {
         Ok(())
     }
 
+    /// Columns added after the tables first shipped. Both this process and
+    /// veda-server run the same migration — losing the ALTER race with 1060
+    /// duplicate column is convergence, not failure.
+    async fn migrate_qa_log_columns(&self) -> Result<()> {
+        let have: Vec<String> = sqlx::query(
+            "SELECT COLUMN_NAME FROM information_schema.COLUMNS \
+             WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'veda_tunnel_qa_log'",
+        )
+        .fetch_all(&self.pool)
+        .await
+        .context("read veda_tunnel_qa_log columns")?
+        .iter()
+        .map(|r| r.try_get::<String, _>("COLUMN_NAME").unwrap_or_default())
+        .collect();
+        for (col, ddl) in [("tool_trace", "ADD COLUMN tool_trace TEXT NULL")] {
+            if !have.iter().any(|c| c == col) {
+                if let Err(e) = sqlx::query(&format!("ALTER TABLE veda_tunnel_qa_log {ddl}"))
+                    .execute(&self.pool)
+                    .await
+                {
+                    let dup = e
+                        .as_database_error()
+                        .map(|d| d.message().contains("Duplicate column"))
+                        .unwrap_or(false);
+                    if !dup {
+                        return Err(e)
+                            .with_context(|| format!("migrate veda_tunnel_qa_log: add {col}"));
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
     pub async fn log(&self, e: &QaLogEntry) -> Result<()> {
         sqlx::query(
             "INSERT INTO veda_tunnel_qa_log \
              (bot_id, chat_type, chat_key, user_id, query, outcome, hit_count, \
-              citation_count, latency_ms, answer_text, feedback_id) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+              citation_count, latency_ms, answer_text, feedback_id, tool_trace) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(&e.bot_id)
         .bind(&e.chat_type)
@@ -159,6 +203,7 @@ impl QaLogStore {
         .bind(e.latency_ms)
         .bind(&e.answer_text)
         .bind(&e.feedback_id)
+        .bind(&e.tool_trace)
         .execute(&self.pool)
         .await
         .context("insert qa log")?;
@@ -247,7 +292,7 @@ impl QaLogStore {
         let offset = (u64::from(f.page.max(1)) - 1) * u64::from(size);
         let rows = sqlx::query(
             "SELECT q.id, q.ts, q.bot_id, q.chat_type, q.user_id, q.query, q.outcome, \
-                    q.hit_count, q.citation_count, q.latency_ms, q.answer_text, \
+                    q.hit_count, q.citation_count, q.latency_ms, q.answer_text, q.tool_trace, \
                     (SELECT COUNT(*) FROM veda_tunnel_qa_feedback f \
                      WHERE f.feedback_id = q.feedback_id AND f.kind = 1) AS up_count, \
                     (SELECT COUNT(*) FROM veda_tunnel_qa_feedback f \
@@ -286,6 +331,7 @@ fn row_to_log(r: &MySqlRow) -> Result<QaLogRow> {
         citation_count: r.try_get("citation_count")?,
         latency_ms: r.try_get("latency_ms")?,
         answer_text: r.try_get("answer_text")?,
+        tool_trace: r.try_get("tool_trace")?,
         up_count: r.try_get("up_count")?,
         down_count: r.try_get("down_count")?,
     })

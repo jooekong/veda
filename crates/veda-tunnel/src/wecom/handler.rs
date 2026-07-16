@@ -57,6 +57,9 @@ const MAX_LISTED_CITATIONS: usize = 3;
 
 /// A reply plus what the QA log needs to know about how it came to be.
 struct Reply {
+    /// JSON array of server-announced tool calls (search queries / file
+    /// reads, in order) — only the streaming answer path fills this.
+    tool_trace: Option<String>,
     text: String,
     outcome: &'static str,
     hit_count: u32,
@@ -138,6 +141,7 @@ pub async fn handle_message(ctx: HandlerCtx, req_id: String, body: MsgCallbackBo
         latency_ms: started.elapsed().as_millis().min(u32::MAX as u128) as u32,
         answer_text: reply.text,
         feedback_id,
+        tool_trace: reply.tool_trace,
     };
     if let Err(e) = ctx.qa_log.log(&entry).await {
         warn!(bot = %ctx.bot.name, error = %e, "qa log write failed (reply already sent)");
@@ -150,6 +154,7 @@ fn err_reply(text: &str, outcome: &'static str) -> Reply {
         outcome,
         hit_count: 0,
         citation_count: 0,
+        tool_trace: None,
     }
 }
 
@@ -174,6 +179,7 @@ async fn search_reply(ctx: &HandlerCtx, query: &str, started: std::time::Instant
                 outcome: if hits.is_empty() { "no_context" } else { "raw_search" },
                 hit_count: hits.len() as u32,
                 citation_count: 0,
+                tool_trace: None,
             }
         }
         Err(SearchError::Unauthorized) => {
@@ -223,6 +229,7 @@ fn answer_data_to_reply(data: &AnswerData) -> Reply {
         outcome,
         hit_count: data.hit_count as u32,
         citation_count: data.citations.len() as u32,
+        tool_trace: None,
     }
 }
 
@@ -325,6 +332,9 @@ async fn answer_reply_stream(
     let mut acc = String::new();
     let mut last_flush = std::time::Instant::now(); // placeholder frame just went out
     let mut frames_sent = 0u32;
+    // Every announced tool call, kept outside the frame throttle — the QA
+    // log records the full retrieval story even when notes are not shown.
+    let mut trace: Vec<serde_json::Value> = Vec::new();
     loop {
         match rx.recv().await {
             Some(AnswerStreamItem::Delta(d)) => {
@@ -349,6 +359,7 @@ async fn answer_reply_stream(
                 acc.clear();
             }
             Some(AnswerStreamItem::ToolNote { name, detail }) => {
+                trace.push(serde_json::json!({ "tool": name, "detail": detail }));
                 // Status line while tools run — the longest silent stretch of
                 // an answer. Sent as a full-replacement frame; `acc` is empty
                 // here (the server emits Reset before tool notes), and even if
@@ -372,11 +383,16 @@ async fn answer_reply_stream(
                     query = ?query_log,
                     citations = data.citations.len(),
                     hits = data.hit_count,
+                    tool_calls = trace.len(),
                     interim_frames = frames_sent,
                     ms = started.elapsed().as_millis() as u64,
                     "answer ok (streamed)"
                 );
-                return answer_data_to_reply(&data);
+                let mut reply = answer_data_to_reply(&data);
+                if !trace.is_empty() {
+                    reply.tool_trace = serde_json::to_string(&trace).ok();
+                }
+                return reply;
             }
             Some(AnswerStreamItem::Error(code)) => {
                 let e = match code.as_str() {
