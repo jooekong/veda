@@ -49,6 +49,16 @@ pub struct HandlerCtx {
 /// this are the "missing docs" backlog, the QA log's primary product.
 const NO_CONTEXT_ANSWER: &str = "知识库中没有找到相关内容";
 
+/// Citation entries shown on the compact "出处：" line; the rest collapse
+/// into "等 N 篇". Grounded answers rarely cite more than this.
+const MAX_LISTED_CITATIONS: usize = 3;
+
+/// Fixed reply for the `#think-test` debug command: exercises WeCom's
+/// `<think>` rendering (head block, tail block, markdown inside) so a real
+/// client shows whether a tail think block can serve as a folded sources
+/// section. Not a Q&A — no QA-log row. Remove once the experiment settles.
+const THINK_TEST_REPLY: &str = "<think>实验A(头部块):平台预期用法。\n- 列表项是否渲染?\n- `行内代码` 是否渲染?</think>这是正文:假设这里是答案主体,含 [1][2] 标记。\n\n第二段正文,确认 think 块不吞掉后续内容。\n\n<think>出处:[1] `接入.md` · [2] `多活.md` 等 5 篇\n实验B(尾部块):若此块默认折叠、位置正确,出处可搬进来。</think>";
+
 /// A reply plus what the QA log needs to know about how it came to be.
 struct Reply {
     text: String,
@@ -105,6 +115,13 @@ pub async fn handle_message(ctx: HandlerCtx, req_id: String, body: MsgCallbackBo
             Some(&feedback_id),
         ))
         .await;
+
+    // Debug probe for WeCom `<think>` rendering — exact command, replies
+    // with the fixed experiment message and skips search/answer + QA log.
+    if query == "#think-test" {
+        send_final(&ctx, &req_id, &stream_id, THINK_TEST_REPLY).await;
+        return;
+    }
 
     registry::update(&ctx.registry, &ctx.bot.bot_id, |s| {
         s.last_msg_at = Some(Utc::now());
@@ -392,8 +409,8 @@ async fn answer_reply_stream(
 
 async fn send_final(ctx: &HandlerCtx, req_id: &str, stream_id: &str, content: &str) {
     // feedback.id only matters on the first frame of a reply; final frames
-    // never (re)set it. Cap the body so the ungrounded fallback + a long 出处
-    // list can't blow past WeCom's ~20480-byte frame limit.
+    // never (re)set it. Cap the body so an unusually long answer can't blow
+    // past WeCom's ~20480-byte frame limit.
     let content = cap_frame_bytes(content, STREAM_INTERIM_BYTE_CAP);
     let _ = ctx
         .outbound
@@ -441,11 +458,12 @@ fn render_markdown(hits: &[Hit]) -> String {
     out.trim_end().to_string()
 }
 
-/// Render a `/v1/answer` result for WeCom: the answer body, then a separator
-/// and a "出处：" list of `[n] path` lines. `[n]` reuses the server-assigned
-/// citation index so it lines up with the `[n]` markers in the body.
-/// Citations without a resolvable path are skipped; if none remain, only the
-/// body is sent.
+/// Render a `/v1/answer` result for WeCom: the answer body, then one compact
+/// "出处：" line of `[n]` + file basename entries. `[n]` reuses the
+/// server-assigned citation index so it lines up with the `[n]` markers in
+/// the body. At most [`MAX_LISTED_CITATIONS`] entries are shown; the rest
+/// collapse into "等 N 篇". Citations without a resolvable path are skipped;
+/// if none remain, only the body is sent.
 fn render_answer(data: &AnswerData) -> String {
     let body = data.answer.trim();
     let cited: Vec<(usize, &str)> = data
@@ -456,11 +474,22 @@ fn render_answer(data: &AnswerData) -> String {
     if cited.is_empty() {
         return body.to_string();
     }
-    let mut out = format!("{body}\n\n———\n出处：\n");
-    for (idx, path) in cited {
-        out.push_str(&format!("[{idx}] `{path}`\n"));
+    let listed: Vec<String> = cited
+        .iter()
+        .take(MAX_LISTED_CITATIONS)
+        .map(|(idx, path)| format!("[{idx}] `{}`", basename(path)))
+        .collect();
+    let mut out = format!("{body}\n\n出处：{}", listed.join(" · "));
+    if cited.len() > MAX_LISTED_CITATIONS {
+        out.push_str(&format!(" 等 {} 篇", cited.len()));
     }
-    out.trim_end().to_string()
+    out
+}
+
+/// Last path segment for the compact source line ("/hr/报销.md" → "报销.md").
+/// Falls back to the whole path when there is no non-empty segment.
+fn basename(path: &str) -> &str {
+    path.rsplit('/').find(|s| !s.is_empty()).unwrap_or(path)
 }
 
 /// Char-based truncation (never splits a multi-byte UTF-8 boundary).
@@ -473,9 +502,9 @@ pub(crate) fn truncate(s: &str, max: usize) -> String {
     }
 }
 
-/// Cap a final frame to `cap` bytes. WeCom rejects frames over 20480 bytes; the
-/// ungrounded fallback plus a long 出处 list can exceed that. Under the cap the
-/// text is returned untouched; over it, cut on a char boundary and append a
+/// Cap a final frame to `cap` bytes. WeCom rejects frames over 20480 bytes;
+/// an unusually long answer body can exceed that. Under the cap the text is
+/// returned untouched; over it, cut on a char boundary and append a
 /// truncation marker (result stays ≤ cap bytes).
 fn cap_frame_bytes(s: &str, cap: usize) -> String {
     if s.len() <= cap {
@@ -593,10 +622,37 @@ mod tests {
         };
         let out = render_answer(&data);
         assert!(out.contains("接入分三步[1]"));
-        assert!(out.contains("———"));
-        assert!(out.contains("出处："));
-        assert!(out.contains("[1] `/a/接入.md`"));
-        assert!(out.contains("[2] `/b/多活.md`"));
+        // Compact single source line: basenames joined on one line.
+        assert!(out.contains("出处：[1] `接入.md` · [2] `多活.md`"), "{out}");
+        assert!(!out.contains("/a/接入.md"), "full paths are not shown");
+        assert_eq!(out.lines().filter(|l| l.contains("出处：")).count(), 1);
+    }
+
+    #[test]
+    fn render_answer_folds_beyond_max_listed() {
+        let citations = (1..=5)
+            .map(|i| AnswerCitation {
+                index: i,
+                path: Some(format!("/docs/f{i}.md")),
+            })
+            .collect();
+        let data = AnswerData {
+            hit_count: 5,
+            answer: "答案[1][2][3][4][5]".to_string(),
+            citations,
+        };
+        let out = render_answer(&data);
+        assert!(out.contains("[3] `f3.md`"), "{out}");
+        assert!(!out.contains("f4.md"), "entries beyond the cap are folded");
+        assert!(out.contains("等 5 篇"), "{out}");
+    }
+
+    #[test]
+    fn basename_extracts_last_segment() {
+        assert_eq!(basename("/hr/报销.md"), "报销.md");
+        assert_eq!(basename("plain.md"), "plain.md");
+        assert_eq!(basename("/dir/"), "dir");
+        assert_eq!(basename("/"), "/");
     }
 
     #[test]
@@ -631,7 +687,7 @@ mod tests {
         };
         let out = render_answer(&data);
         assert!(!out.contains("[1] `"));
-        assert!(out.contains("[2] `/b.md`"));
+        assert!(out.contains("[2] `b.md`"));
     }
 
     #[test]
@@ -645,5 +701,31 @@ mod tests {
             }],
         };
         assert_eq!(render_answer(&data), "答案");
+    }
+
+    #[test]
+    fn answer_outcome_classification() {
+        let data = |answer: &str, citations: Vec<AnswerCitation>| AnswerData {
+            hit_count: 5,
+            answer: answer.to_string(),
+            citations,
+        };
+        // Canned refusal → no_context, regardless of citations.
+        let r = answer_data_to_reply(&data("知识库中没有找到相关内容。", vec![]));
+        assert_eq!(r.outcome, "no_context");
+        // Real answer with zero citations → ungrounded (the server no longer
+        // backfills all evidence blocks, so this branch is reachable).
+        let r = answer_data_to_reply(&data("未标注的回答", vec![]));
+        assert_eq!(r.outcome, "ungrounded");
+        // Cited answer → answered.
+        let r = answer_data_to_reply(&data(
+            "答案[1]",
+            vec![AnswerCitation {
+                index: 1,
+                path: Some("/a.md".to_string()),
+            }],
+        ));
+        assert_eq!(r.outcome, "answered");
+        assert_eq!(r.citation_count, 1);
     }
 }

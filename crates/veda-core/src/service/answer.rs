@@ -149,7 +149,7 @@ pub struct AnswerResult {
     /// Token estimate of all evidence text fed to the model.
     pub estimated_context_tokens: usize,
     /// False when the model produced a non-refusal answer with zero valid
-    /// `[n]` markers (citations were backfilled from all blocks).
+    /// `[n]` markers (citations stay empty in that case).
     pub grounded: bool,
     /// Tool round-trips actually taken.
     pub rounds: usize,
@@ -824,9 +824,11 @@ fn parse_citation_indices(text: &str) -> Vec<usize> {
 
 /// Post-process the model output into citations. Valid `[n]` (1..=blocks)
 /// become citations (dedup, order-preserving). Invalid numbers are ignored
-/// (body kept as-is). Zero valid citations + non-refusal answer →
-/// ungrounded: citations fall back to every registered block. A refusal
-/// (contains the fixed phrase) keeps empty citations and stays grounded.
+/// (body kept as-is). Zero valid citations → empty citations, whether the
+/// answer is the fixed refusal (grounded) or a non-refusal that cited
+/// nothing (ungrounded). Blocks the model saw but did not cite are not
+/// sources — backfilling all of them flooded consumers with unrelated paths
+/// on every uncited answer.
 fn align_citations(answer: String, blocks: &[Block]) -> (String, Vec<AnswerCitation>, bool) {
     let max = blocks.len();
     let mut seen: HashSet<usize> = HashSet::new();
@@ -840,11 +842,8 @@ fn align_citations(answer: String, blocks: &[Block]) -> (String, Vec<AnswerCitat
         let citations = valid.iter().map(|&n| block_to_citation(&blocks[n - 1])).collect();
         return (answer, citations, true);
     }
-    if answer.contains(NO_CONTEXT_ANSWER) {
-        return (answer, Vec::new(), true);
-    }
-    let citations = blocks.iter().map(block_to_citation).collect();
-    (answer, citations, false)
+    let grounded = answer.contains(NO_CONTEXT_ANSWER);
+    (answer, Vec::new(), grounded)
 }
 
 #[cfg(test)]
@@ -932,10 +931,10 @@ mod tests {
     }
 
     #[test]
-    fn align_zero_valid_non_refusal_falls_back_ungrounded() {
+    fn align_zero_valid_non_refusal_ungrounded_empty_citations() {
         let (_, cites, grounded) = align_citations("答案但忘了标注".into(), &blocks_fixture());
         assert!(!grounded);
-        assert_eq!(cites.len(), 2);
+        assert!(cites.is_empty(), "uncited blocks must not be reported as sources");
     }
 
     #[test]

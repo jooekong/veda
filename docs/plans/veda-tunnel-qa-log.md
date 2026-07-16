@@ -64,7 +64,7 @@ CREATE TABLE IF NOT EXISTS veda_tunnel_qa_feedback (
 |---|---|
 | `answered` | answer 正常返回（含引用） |
 | `no_context` | 检索空 → 固定话术「知识库中没有找到相关内容」——**这个清单 = 内容缺口** |
-| `ungrounded` | answer 返回但零有效引用（现有 fallback 分支） |
+| `ungrounded` | answer 返回但零有效引用（server 端 2026-07-16 起零引用返回空 citations，此分支才真正可达） |
 | `raw_search` | `[answer] enabled=false` 时的纯检索直出 |
 | `error` | 5xx/超时（附现有错误话术分支：502/504） |
 | `throttled` / `disabled` | 429 / 501 |

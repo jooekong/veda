@@ -10,6 +10,15 @@ that matters.
 ## [Unreleased]
 
 ### Fixed
+- **Unrelated source lists on uncited answers.** When the answer model wrote
+  no valid `[n]` marker, `/v1/answer` backfilled citations with every
+  evidence block the loop had seen (initial top-12 pre-search + all
+  tool-round hits). Hybrid retrieval always returns top-k, so answers with
+  nothing to cite went out with a long list of unrelated sources. Ungrounded
+  answers now return empty citations (`grounded` still drives the metrics
+  label), and the tunnel QA-log `ungrounded` outcome — which keyed on empty
+  citations and could never fire against the backfill — now classifies
+  correctly.
 - **Empty LLM completions now fail loudly instead of persisting.** An empty
   (post-trim) chat completion is treated as a retryable error in the LLM
   client — a summary can never legally be empty, so HTTP 200 + `content:""`
@@ -36,6 +45,12 @@ that matters.
   (directory aggregation was measured thinking up to ~5k tokens).
 
 ### Changed
+- **WeCom answer sources render as one compact line.** The tunnel now shows
+  `出处：[1] a.md · [2] b.md` — file basenames on a single line, at most 3
+  entries, the rest folded into "等 N 篇" — instead of one full-path line per
+  citation. A `#think-test` debug command (exact match) replies with a fixed
+  message probing WeCom's `<think>` block rendering, to evaluate moving the
+  source line into a natively collapsed section.
 - **`veda status` no longer flags a missing account key.** The account key
   (`vk_`) is optional for data-plane use — a config holding only a pasted
   `wk_` workspace key is fully functional, yet status rendered
