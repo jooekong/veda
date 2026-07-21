@@ -9,6 +9,8 @@ that matters.
 
 ## [Unreleased]
 
+## [0.1.19] — 2026-07-21
+
 ### Added
 - **QA log captures the retrieval story behind each answer.** The tunnel
   records every server-announced tool call of a streamed answer — search
