@@ -2,6 +2,7 @@ mod client;
 mod config;
 mod init;
 mod status;
+mod urlenc;
 mod workspace;
 
 use clap::{Parser, Subcommand, ValueEnum};
@@ -1373,8 +1374,19 @@ async fn main() -> anyhow::Result<()> {
             } else {
                 let src_path = std::path::Path::new(&src);
                 if src_path.is_dir() {
-                    let n = cp_dir_recursive(&c, cfg.active_wk()?, src_path, &dst).await?;
-                    println!("Uploaded {n} file(s) under {dst}");
+                    let stats = cp_dir_recursive(&c, cfg.active_wk()?, src_path, &dst).await?;
+                    if stats.failed > 0 {
+                        // Rerunning is cheap: already-uploaded files dedup
+                        // server-side via If-None-Match, so only the failed
+                        // ones actually re-upload.
+                        anyhow::bail!(
+                            "uploaded {} file(s), {} FAILED (listed above) — \
+                             fix and rerun the same command to retry just the failures",
+                            stats.uploaded,
+                            stats.failed
+                        );
+                    }
+                    println!("Uploaded {} file(s) under {dst}", stats.uploaded);
                 } else {
                     let content = read_file_bytes(&src)?;
                     let resp = c.write_file(cfg.active_wk()?, &dst, content).await?;
@@ -1730,19 +1742,40 @@ fn read_file_bytes(src: impl AsRef<std::path::Path>) -> anyhow::Result<Vec<u8>> 
     std::fs::read(src).map_err(|e| anyhow::anyhow!("read {} failed: {e}", src.display()))
 }
 
+#[derive(Debug)]
+struct CpStats {
+    uploaded: usize,
+    failed: usize,
+}
+
+/// A batch upload where every single request fails is a systemic
+/// problem (server down, revoked key), not a per-file one — abort
+/// instead of grinding through thousands of doomed requests.
+const MAX_CONSECUTIVE_FAILURES: usize = 10;
+
 /// Recursively upload every file under `src_root` to `dst_root` on the server.
-/// Remote path = dst_root + path-relative-to-src_root. Skips empty directories.
-/// Returns the number of files uploaded.
+/// Remote path = dst_root + path-relative-to-src_root. Skips empty directories
+/// and ignored names (see `collect_files`). A file that fails to upload is
+/// reported and skipped so one bad filename can't strand the rest of the
+/// batch; only a run of consecutive failures aborts.
 async fn cp_dir_recursive(
     client: &client::Client,
     ws_key: &str,
     src_root: &std::path::Path,
     dst_root: &str,
-) -> anyhow::Result<usize> {
+) -> anyhow::Result<CpStats> {
     let dst_root = dst_root.trim_end_matches('/');
     let mut files = Vec::new();
-    collect_files(src_root, &mut files)?;
-    let mut count = 0usize;
+    let mut ignored = 0usize;
+    collect_files(src_root, &mut files, &mut ignored)?;
+    if ignored > 0 {
+        eprintln!("  (skipped {ignored} ignored entr{}: {}, {})",
+            if ignored == 1 { "y" } else { "ies" },
+            IGNORED_DIRS.join("/"),
+            IGNORED_FILES.join("/"));
+    }
+    let mut stats = CpStats { uploaded: 0, failed: 0 };
+    let mut consecutive = 0usize;
     for f in &files {
         let rel = f.strip_prefix(src_root)?;
         // POSIX path on the server side regardless of host OS
@@ -1752,15 +1785,45 @@ async fn cp_dir_recursive(
             .collect::<Vec<_>>()
             .join("/");
         let remote = format!("{dst_root}/{rel_str}");
-        let content = read_file_bytes(f)?;
-        client.write_file(ws_key, &remote, content).await?;
-        println!("  {} -> {remote}", f.display());
-        count += 1;
+        let outcome = match read_file_bytes(f) {
+            Ok(content) => client.write_file(ws_key, &remote, content).await.map(|_| ()),
+            Err(e) => Err(e),
+        };
+        match outcome {
+            Ok(()) => {
+                stats.uploaded += 1;
+                consecutive = 0;
+                println!("  {} -> {remote}", f.display());
+            }
+            Err(e) => {
+                stats.failed += 1;
+                consecutive += 1;
+                eprintln!("  FAILED {remote}: {e:#}");
+                if consecutive >= MAX_CONSECUTIVE_FAILURES {
+                    anyhow::bail!(
+                        "aborting after {consecutive} consecutive failures \
+                         ({} uploaded, {} failed) — server or key problem?",
+                        stats.uploaded,
+                        stats.failed
+                    );
+                }
+            }
+        }
     }
-    Ok(count)
+    Ok(stats)
 }
 
-fn collect_files(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) -> std::io::Result<()> {
+/// Directory names never worth uploading to a knowledge workspace:
+/// VCS internals and tool/editor caches add thousands of junk files.
+const IGNORED_DIRS: &[&str] = &[".git", "__pycache__", ".idea", "node_modules"];
+/// File names never worth uploading: macOS Finder droppings.
+const IGNORED_FILES: &[&str] = &[".DS_Store"];
+
+fn collect_files(
+    dir: &std::path::Path,
+    out: &mut Vec<std::path::PathBuf>,
+    ignored: &mut usize,
+) -> std::io::Result<()> {
     for entry in std::fs::read_dir(dir)? {
         let entry = entry?;
         // Use file_type() (does NOT follow symlinks) to avoid infinite recursion
@@ -1771,10 +1834,20 @@ fn collect_files(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) -> st
             eprintln!("skip symlink: {}", entry.path().display());
             continue;
         }
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
         let p = entry.path();
         if ft.is_dir() {
-            collect_files(&p, out)?;
+            if IGNORED_DIRS.contains(&name.as_ref()) {
+                *ignored += 1;
+                continue;
+            }
+            collect_files(&p, out, ignored)?;
         } else if ft.is_file() {
+            if IGNORED_FILES.contains(&name.as_ref()) {
+                *ignored += 1;
+                continue;
+            }
             out.push(p);
         }
     }
@@ -1820,5 +1893,94 @@ mod cp_bytes_tests {
         let err = read_file_bytes("/nonexistent/path/abc.txt").unwrap_err();
         let msg = err.to_string();
         assert!(msg.contains("read") && msg.contains("/nonexistent"), "msg: {msg}");
+    }
+}
+
+#[cfg(test)]
+mod cp_dir_tests {
+    use super::{collect_files, cp_dir_recursive};
+    use std::fs;
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    fn ok_json() -> ResponseTemplate {
+        ResponseTemplate::new(200)
+            .set_body_json(serde_json::json!({"success": true, "data": {"revision": 1}}))
+    }
+
+    #[test]
+    fn collect_files_skips_vcs_and_finder_junk() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        fs::create_dir(root.join(".git")).unwrap();
+        fs::write(root.join(".git/config"), "x").unwrap();
+        fs::create_dir(root.join("__pycache__")).unwrap();
+        fs::write(root.join("__pycache__/a.pyc"), "x").unwrap();
+        fs::create_dir(root.join("sub")).unwrap();
+        fs::write(root.join("sub/b.txt"), "x").unwrap();
+        fs::write(root.join("sub/.DS_Store"), "x").unwrap();
+        fs::write(root.join(".DS_Store"), "x").unwrap();
+        fs::write(root.join("a.txt"), "x").unwrap();
+
+        let mut files = Vec::new();
+        let mut ignored = 0usize;
+        collect_files(root, &mut files, &mut ignored).unwrap();
+        let mut names: Vec<String> = files
+            .iter()
+            .map(|p| p.strip_prefix(root).unwrap().to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        assert_eq!(names, vec!["a.txt", "sub/b.txt"]);
+        // .git dir + __pycache__ dir count once each; both .DS_Store files count
+        assert_eq!(ignored, 4);
+    }
+
+    #[tokio::test]
+    async fn cp_dir_continues_past_a_failed_file() {
+        // The guidewiki incident: one 400 killed the remaining 13k files.
+        // A per-file failure must not strand the rest of the batch.
+        let server = MockServer::start().await;
+        // Specific mock first — wiremock matches in mount order.
+        Mock::given(method("PUT"))
+            .and(path("/v1/fs/dst/bad.txt"))
+            .respond_with(ResponseTemplate::new(400).set_body_string("bad path"))
+            .mount(&server)
+            .await;
+        Mock::given(method("PUT"))
+            .respond_with(ok_json())
+            .mount(&server)
+            .await;
+
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("bad.txt"), "x").unwrap();
+        fs::write(dir.path().join("good1.txt"), "x").unwrap();
+        fs::write(dir.path().join("good2.txt"), "x").unwrap();
+
+        let client = super::client::Client::new(&server.uri());
+        let stats = cp_dir_recursive(&client, "wk-test", dir.path(), "/dst")
+            .await
+            .unwrap();
+        assert_eq!(stats.uploaded, 2);
+        assert_eq!(stats.failed, 1);
+    }
+
+    #[tokio::test]
+    async fn cp_dir_aborts_after_consecutive_failures() {
+        // Every request failing = systemic (server down / bad key);
+        // don't grind through thousands of doomed uploads.
+        let server = MockServer::start().await;
+        Mock::given(method("PUT"))
+            .respond_with(ResponseTemplate::new(500).set_body_string("down"))
+            .mount(&server)
+            .await;
+        let dir = tempfile::tempdir().unwrap();
+        for i in 0..12 {
+            fs::write(dir.path().join(format!("f{i:02}.txt")), "x").unwrap();
+        }
+        let client = super::client::Client::new(&server.uri());
+        let err = cp_dir_recursive(&client, "wk-test", dir.path(), "/dst")
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("consecutive"), "got: {err}");
     }
 }

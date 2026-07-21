@@ -2,6 +2,10 @@ use std::time::Duration;
 
 use chrono::{DateTime, Utc};
 use serde::Deserialize;
+// FUSE paths come straight from the kernel, so any byte a filesystem
+// allows (`%`, `?`, `#`, spaces…) can appear — encode before building
+// URLs, same as the CLI client.
+use veda_cli::urlenc::encode_path;
 
 #[derive(Debug, Deserialize)]
 pub struct ApiResponse<T> {
@@ -171,7 +175,7 @@ impl VedaClient {
     }
 
     pub fn stat(&self, path: &str) -> Result<FileInfo> {
-        let path = path.trim_start_matches('/');
+        let path = encode_path(path.trim_start_matches('/'));
         let url = if path.is_empty() {
             format!("{}/v1/fs?stat", self.base)
         } else {
@@ -188,7 +192,7 @@ impl VedaClient {
     }
 
     pub fn read_file(&self, path: &str) -> Result<Vec<u8>> {
-        let path = path.trim_start_matches('/');
+        let path = encode_path(path.trim_start_matches('/'));
         let resp = self.http.get(format!("{}/v1/fs/{path}", self.base))
             .bearer_auth(&self.key)
             .send()
@@ -210,7 +214,7 @@ impl VedaClient {
         expected_rev: Option<i32>,
     ) -> Result<Option<i32>> {
         use sha2::{Digest, Sha256};
-        let path = path.trim_start_matches('/');
+        let path = encode_path(path.trim_start_matches('/'));
         let digest = {
             let mut h = Sha256::new();
             h.update(content);
@@ -234,7 +238,7 @@ impl VedaClient {
     }
 
     pub fn list_dir(&self, path: &str) -> Result<Vec<DirEntry>> {
-        let path = path.trim_start_matches('/');
+        let path = encode_path(path.trim_start_matches('/'));
         let url = if path.is_empty() {
             format!("{}/v1/fs?list", self.base)
         } else {
@@ -248,7 +252,7 @@ impl VedaClient {
     }
 
     pub fn delete(&self, path: &str) -> Result<()> {
-        let path = path.trim_start_matches('/');
+        let path = encode_path(path.trim_start_matches('/'));
         let url = if path.is_empty() {
             format!("{}/v1/fs", self.base)
         } else {
@@ -312,7 +316,7 @@ impl VedaClient {
     /// and without depending on the server's 404 behaviour. Lift
     /// when workspace-level summaries become a first-class feature.
     pub fn get_summary(&self, path: &str, kind: SummaryKind) -> Result<SidecarOutcome> {
-        let path = path.trim_start_matches('/');
+        let path = encode_path(path.trim_start_matches('/'));
         if path.is_empty() {
             return Ok(SidecarOutcome::NotFound);
         }
@@ -342,7 +346,7 @@ impl VedaClient {
         if length == 0 {
             return Ok(Vec::new());
         }
-        let path = path.trim_start_matches('/');
+        let path = encode_path(path.trim_start_matches('/'));
         let end = offset + length - 1;
         let resp = self.http.get(format!("{}/v1/fs/{path}", self.base))
             .bearer_auth(&self.key)

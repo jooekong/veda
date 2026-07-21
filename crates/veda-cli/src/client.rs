@@ -3,6 +3,8 @@ use std::time::Duration;
 use anyhow::{bail, Context, Result};
 use sha2::{Digest, Sha256};
 
+use crate::urlenc::encode_path;
+
 /// HTTP error preserving the server's status code so callers can match
 /// on specific codes via [`status_code`]. Wrap with `.context()` as
 /// usual — the chain walk recovers `ApiError` through any layers of
@@ -179,7 +181,7 @@ impl Client {
         path: &str,
         content: Vec<u8>,
     ) -> Result<serde_json::Value> {
-        let path = path.trim_start_matches('/');
+        let path = encode_path(path.trim_start_matches('/'));
         // Pre-hash and send If-None-Match so the server can short-circuit the
         // write when the content already matches what's stored (no dedup of
         // chunks, no revision bump). The server sniffs UTF-8 to pick text vs
@@ -202,7 +204,7 @@ impl Client {
         path: &str,
         content: &str,
     ) -> Result<serde_json::Value> {
-        let path = path.trim_start_matches('/');
+        let path = encode_path(path.trim_start_matches('/'));
         let resp = self
             .http
             .post(format!("{}/v1/fs/{path}", self.base))
@@ -216,7 +218,7 @@ impl Client {
     /// Read raw bytes so binary files (pdf/image/jar) round-trip losslessly.
     /// Callers that need text (line slicing) decode with `String::from_utf8`.
     pub async fn read_file(&self, ws_key: &str, path: &str, lines: Option<&str>) -> Result<Vec<u8>> {
-        let path = path.trim_start_matches('/');
+        let path = encode_path(path.trim_start_matches('/'));
         let mut url = format!("{}/v1/fs/{path}", self.base);
         if let Some(l) = lines {
             url.push_str(&format!("?lines={l}"));
@@ -230,7 +232,7 @@ impl Client {
     }
 
     pub async fn list_dir(&self, ws_key: &str, path: &str) -> Result<serde_json::Value> {
-        let path = path.trim_start_matches('/');
+        let path = encode_path(path.trim_start_matches('/'));
         let url = if path.is_empty() {
             format!("{}/v1/fs?list", self.base)
         } else {
@@ -257,7 +259,7 @@ impl Client {
     }
 
     pub async fn delete_file(&self, ws_key: &str, path: &str) -> Result<serde_json::Value> {
-        let path = path.trim_start_matches('/');
+        let path = encode_path(path.trim_start_matches('/'));
         let url = if path.is_empty() {
             format!("{}/v1/fs", self.base)
         } else {
@@ -342,7 +344,7 @@ impl Client {
         path: &str,
         endpoint: &str,
     ) -> Result<(u16, serde_json::Value)> {
-        let path = path.trim_start_matches('/');
+        let path = encode_path(path.trim_start_matches('/'));
         let resp = self
             .http
             .get(format!("{}/v1/{endpoint}/{path}", self.base))

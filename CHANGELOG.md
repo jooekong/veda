@@ -17,7 +17,27 @@ that matters.
   console's Q&A details now show the asker's WeCom user id under the
   timestamp and a collapsible "过程" section listing each retrieval step.
 
+### Changed
+- **`veda cp` directory upload survives per-file failures.** One bad file
+  used to abort the whole batch at the first error (a 13k-file upload once
+  died at file #70). Failures are now reported and skipped, the command
+  exits non-zero with an uploaded/failed summary, and rerunning retries
+  only the failures (already-uploaded files dedup via `If-None-Match`).
+  Ten consecutive failures still abort — that pattern means the server or
+  key is broken, not the filenames.
+- **`veda cp` skips junk entries.** `.git`, `__pycache__`, `.idea`,
+  `node_modules` directories and `.DS_Store` files are no longer uploaded;
+  a one-line summary reports how many entries were skipped.
+
 ### Fixed
+- **Filenames with `%`, `?`, `#`, spaces now upload correctly.** The CLI and
+  FUSE clients built `/v1/fs/{path}` URLs from raw filenames. A bare `%`
+  (e.g. `较昨日降N%实验复盘.md`) formed an invalid escape sequence that
+  nginx rejected with a bare HTML 400 before the request reached veda, and
+  `?`/`#` silently truncated the path into query/fragment — writing the
+  wrong remote file. All fs-path endpoints now percent-encode the path
+  (new shared `veda_cli::urlenc`); the server decodes exactly once, so
+  names round-trip byte-for-byte (verified live against prod).
 - **Unrelated source lists on uncited answers.** When the answer model wrote
   no valid `[n]` marker, `/v1/answer` backfilled citations with every
   evidence block the loop had seen (initial top-12 pre-search + all
