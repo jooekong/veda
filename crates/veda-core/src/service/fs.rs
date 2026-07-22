@@ -841,9 +841,20 @@ impl FsService {
         let take = (effective_end - start + 1) as usize;
 
         match file.storage_type {
-            StorageType::Blob => Err(VedaError::InvalidInput(
-                "cannot read lines from a binary file".into(),
-            )),
+            // Extractable blobs (pdf/word) serve line windows over their
+            // stored extracted text, so `cat --range` and agent tools can
+            // page through big documents. Blobs have no line_count, so
+            // skip/take on the line iterator does all EOF clamping.
+            StorageType::Blob => {
+                let text = self.read_extracted_text(&file_id, &file).await?.ok_or_else(|| {
+                    VedaError::InvalidInput(if file.source_type.is_extractable() {
+                        "文本提取尚未完成或该文件无法提取，可先用 search 检索其内容".into()
+                    } else {
+                        "cannot read lines from a binary file".into()
+                    })
+                })?;
+                Ok(join_lines(text.lines().skip(skip).take(take)))
+            }
             StorageType::Inline => {
                 let content = self
                     .meta

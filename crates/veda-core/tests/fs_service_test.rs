@@ -186,6 +186,34 @@ async fn blob_word_preview_serves_extract_as_text() {
 }
 
 #[tokio::test]
+async fn blob_word_line_reads_page_extracted_text() {
+    let (svc, state) = make_service();
+    let resp = svc.write_blob("ws1", "/w.docx", DOCX_BYTES.to_vec(), None).await.unwrap();
+
+    // No extract yet → clear "pending" error, not the generic binary one.
+    let err = svc.read_file_lines("ws1", "/w.docx", 1, 2).await.unwrap_err();
+    assert!(matches!(err, VedaError::InvalidInput(ref m) if m.contains("提取")), "err: {err}");
+
+    let sha = {
+        let st = state.lock().unwrap();
+        st.files.iter().find(|f| f.id == resp.file_id).unwrap().checksum_sha256.clone()
+    };
+    seed_extract(&state, &resp.file_id, "line one\nline two\nline three\nline four", &sha);
+
+    // 1-indexed inclusive window over the extracted text.
+    assert_eq!(svc.read_file_lines("ws1", "/w.docx", 2, 3).await.unwrap(), "line two\nline three");
+    // End past EOF clamps; start past EOF yields empty.
+    assert_eq!(svc.read_file_lines("ws1", "/w.docx", 4, 99).await.unwrap(), "line four");
+    assert_eq!(svc.read_file_lines("ws1", "/w.docx", 50, 60).await.unwrap(), "");
+
+    // Non-extractable blobs keep the original refusal.
+    let png = b"\x89PNG\r\n\x1a\n\0\0\0\rIHDRpng".to_vec();
+    svc.write_blob("ws1", "/p.png", png, None).await.unwrap();
+    let err = svc.read_file_lines("ws1", "/p.png", 1, 2).await.unwrap_err();
+    assert!(matches!(err, VedaError::InvalidInput(ref m) if m.contains("binary")), "err: {err}");
+}
+
+#[tokio::test]
 async fn delete_word_blob_purges_extract() {
     let (svc, state) = make_service();
     let resp = svc.write_blob("ws1", "/w.docx", DOCX_BYTES.to_vec(), None).await.unwrap();
