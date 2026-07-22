@@ -38,12 +38,17 @@ pub async fn ping_server(server_url: &str) -> bool {
 /// checking).
 pub fn render_status(cfg: &CliConfig, reachable: Option<bool>) -> String {
     if !is_configured(cfg) {
-        return "No configuration. Run `veda init` to set up.\n".to_string();
+        return "No configuration. Run `veda init` to set up, or export $VEDA_SERVER + $VEDA_KEY.\n"
+            .to_string();
     }
+    // Surface where credentials actually come from — an env override
+    // silently beating config.toml is the #1 "why is it hitting the wrong
+    // workspace" confusion, so say it out loud.
+    let env_server_tag = if cfg.server_from_env { "  [$VEDA_SERVER]" } else { "" };
     let server_line = match reachable {
-        Some(true) => format!("Server:      {}  (reachable)", cfg.server_url),
-        Some(false) => format!("Server:      {}  (unreachable)", cfg.server_url),
-        None => format!("Server:      {}", cfg.server_url),
+        Some(true) => format!("Server:      {}  (reachable){env_server_tag}", cfg.server_url),
+        Some(false) => format!("Server:      {}  (unreachable){env_server_tag}", cfg.server_url),
+        None => format!("Server:      {}{env_server_tag}", cfg.server_url),
     };
     // Account key (vk_) only matters for control-plane commands; a
     // data-plane-only config (pasted wk_) is fully usable without it,
@@ -53,7 +58,11 @@ pub fn render_status(cfg: &CliConfig, reachable: Option<bool>) -> String {
     } else {
         ""
     };
-    let ws_state = render_workspace_line(cfg);
+    let ws_state = if cfg.env_key.is_some() {
+        "wk_ from $VEDA_KEY (env override; config profiles ignored)".to_string()
+    } else {
+        render_workspace_line(cfg)
+    };
     format!("{server_line}\n{account_key_line}Workspace:   {ws_state}\n")
 }
 
@@ -108,7 +117,10 @@ fn is_configured(cfg: &CliConfig) -> bool {
     !cfg.server_url.is_empty()
         && (cfg.api_key.is_some()
             || !cfg.workspaces.is_empty()
-            || cfg.active_workspace.is_some())
+            || cfg.active_workspace.is_some()
+            // Pure-env mode: no config.toml at all, everything from
+            // $VEDA_SERVER/$VEDA_KEY — fully usable, so report it.
+            || cfg.env_key.is_some())
 }
 
 #[cfg(test)]

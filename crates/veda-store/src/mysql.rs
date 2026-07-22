@@ -893,6 +893,34 @@ impl MetadataStore for MysqlStore {
         Ok(())
     }
 
+    async fn count_index_backlog(&self, workspace_id: &str) -> Result<(i64, i64, i64)> {
+        // Rides idx_dedup (workspace_id, event_type, status) — never a
+        // table scan even on a fat outbox.
+        let rows: Vec<(String, i64)> = sqlx::query_as(
+            r#"SELECT status, COUNT(*) FROM veda_outbox
+               WHERE workspace_id = ?
+                 AND event_type IN ('chunk_sync', 'extract_sync')
+                 AND status IN ('pending', 'processing', 'dead')
+               GROUP BY status"#,
+        )
+        .bind(workspace_id)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(storage_err)?;
+        let mut pending = 0;
+        let mut processing = 0;
+        let mut dead = 0;
+        for (status, n) in rows {
+            match status.as_str() {
+                "pending" => pending = n,
+                "processing" => processing = n,
+                "dead" => dead = n,
+                _ => {}
+            }
+        }
+        Ok((pending, processing, dead))
+    }
+
     async fn get_dentry(&self, workspace_id: &str, path: &str) -> Result<Option<Dentry>> {
         let mut conn = self.pool.acquire().await.map_err(storage_err)?;
         get_dentry_conn(&mut *conn, workspace_id, path).await

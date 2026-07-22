@@ -24,6 +24,13 @@ pub struct CliConfig {
     pub api_key: Option<String>,
     pub active_workspace: Option<String>,
     pub workspaces: BTreeMap<String, WorkspaceEntry>,
+    /// Workspace key injected via `$VEDA_KEY` — same variable FUSE reads.
+    /// Never persisted (CliConfig serialises through RawConfig, which has
+    /// no such field): env credentials must not leak into config.toml.
+    /// When set, it wins over the active profile in [`Self::active_wk`].
+    pub env_key: Option<String>,
+    /// True when `$VEDA_SERVER` overrode `server_url` — status display only.
+    pub server_from_env: bool,
 }
 
 impl Default for CliConfig {
@@ -33,6 +40,8 @@ impl Default for CliConfig {
             api_key: None,
             active_workspace: None,
             workspaces: BTreeMap::new(),
+            env_key: None,
+            server_from_env: false,
         }
     }
 }
@@ -93,7 +102,10 @@ impl CliConfig {
     }
 
     /// Read config from a specific path. Returns default if the file is
-    /// absent. Migrates legacy top-level workspace fields on the fly.
+    /// absent. Migrates legacy top-level workspace fields on the fly, then
+    /// applies `$VEDA_SERVER` / `$VEDA_KEY` (same variables FUSE reads).
+    /// Precedence ends up: `--server`/`--key` flags (applied by main) >
+    /// env > config.toml.
     pub fn load_from(path: &Path) -> Result<Self> {
         let raw: RawConfig = if path.exists() {
             let s = std::fs::read_to_string(path)?;
@@ -104,7 +116,25 @@ impl CliConfig {
                 ..RawConfig::default()
             }
         };
-        Ok(Self::from_raw(raw))
+        let mut cfg = Self::from_raw(raw);
+        cfg.apply_env(
+            std::env::var("VEDA_SERVER").ok(),
+            std::env::var("VEDA_KEY").ok(),
+        );
+        Ok(cfg)
+    }
+
+    /// Apply environment overrides. Split out (values injected) so tests
+    /// don't have to mutate process env. Empty strings count as unset so
+    /// `VEDA_KEY= veda …` can't silently send a blank Bearer.
+    pub fn apply_env(&mut self, server: Option<String>, key: Option<String>) {
+        if let Some(s) = server.filter(|s| !s.trim().is_empty()) {
+            self.server_url = s.trim().to_string();
+            self.server_from_env = true;
+        }
+        self.env_key = key
+            .map(|k| k.trim().to_string())
+            .filter(|k| !k.is_empty());
     }
 
     fn from_raw(raw: RawConfig) -> Self {
@@ -146,6 +176,8 @@ impl CliConfig {
             api_key,
             active_workspace: active,
             workspaces,
+            env_key: None,
+            server_from_env: false,
         }
     }
 
@@ -209,9 +241,15 @@ impl CliConfig {
     /// step but its key-mint failed — better to surface that locally
     /// than send a blank Bearer to the server and get 401).
     pub fn active_wk(&self) -> Result<&str> {
+        // `$VEDA_KEY` wins over any configured profile — the env path is
+        // per-process and never touches config.toml (CI / scripts / running
+        // against multiple workspaces from one machine).
+        if let Some(k) = self.env_key.as_deref() {
+            return Ok(k);
+        }
         let alias = self
             .active_alias()
-            .ok_or_else(|| anyhow!("no workspace selected. Run `veda init` first."))?;
+            .ok_or_else(|| anyhow!("no workspace selected. Run `veda init` first, or set $VEDA_KEY."))?;
         let entry = self.workspace_for(alias)?;
         if entry.key.is_empty() {
             // `veda workspace add <alias>` knows about empty-key
@@ -472,6 +510,51 @@ key = "wk-work"
         let cfg = CliConfig::default();
         let err = cfg.api_key().unwrap_err().to_string();
         assert!(err.contains("veda init"), "msg: {err}");
+    }
+
+    #[test]
+    fn env_key_wins_over_configured_profile() {
+        let mut cfg = CliConfig::default();
+        cfg.workspaces.insert(
+            "default".into(),
+            WorkspaceEntry { id: Some("ws-1".into()), key: "wk_from_config".into() },
+        );
+        cfg.active_workspace = Some("default".into());
+        cfg.apply_env(None, Some("wk_from_env".into()));
+        assert_eq!(cfg.active_wk().unwrap(), "wk_from_env");
+        // Server untouched when $VEDA_SERVER absent.
+        assert!(!cfg.server_from_env);
+    }
+
+    #[test]
+    fn env_key_enables_zero_config_mode() {
+        let mut cfg = CliConfig::default(); // no profiles at all
+        cfg.apply_env(Some("https://veda.example".into()), Some("wk_env".into()));
+        assert_eq!(cfg.active_wk().unwrap(), "wk_env");
+        assert_eq!(cfg.server_url, "https://veda.example");
+        assert!(cfg.server_from_env);
+    }
+
+    #[test]
+    fn blank_env_values_are_ignored() {
+        let mut cfg = CliConfig::default();
+        cfg.apply_env(Some("  ".into()), Some("".into()));
+        assert!(cfg.env_key.is_none(), "empty $VEDA_KEY must not become a blank Bearer");
+        assert_eq!(cfg.server_url, default_server_url());
+        assert!(!cfg.server_from_env);
+        // Still unconfigured → active_wk errors with the init/env hint.
+        assert!(cfg.active_wk().is_err());
+    }
+
+    #[test]
+    fn env_key_never_persists_to_disk() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        let mut cfg = CliConfig::default();
+        cfg.apply_env(Some("https://env.example".into()), Some("wk_secret".into()));
+        cfg.save_to(&path).unwrap();
+        let on_disk = std::fs::read_to_string(&path).unwrap();
+        assert!(!on_disk.contains("wk_secret"), "env key leaked into config.toml: {on_disk}");
     }
 
     #[test]

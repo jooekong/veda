@@ -250,6 +250,8 @@ app_id 账号是 passwordless 的：不能 login、不能 claim，`app_id` 与 `
 
 > 删根 `DELETE /v1/fs` 恒返 `400`（禁止）。
 
+**索引进度**：`GET /v1/index-status` 返回本 workspace 待索引任务计数 `{pending, processing, dead}`（只统计决定可搜索性的 chunk/extract 任务）。批量上传后轮询它判断「什么时候全部可搜」；`dead > 0` 表示有文件永久索引失败，需联系管理员。CLI：`veda status --index [--wait]`（`--wait` 轮询到清零，dead>0 退出码非零，可做 CI gate）。
+
 ### 搜索（`POST /v1/search`）
 
 `{ query, mode?, limit?, path_prefix?, detail_level? }`。`mode` 默认 `hybrid`（同向量库三模式）；`limit` 默认 10、上限 100；`detail_level` 默认 `full`。返回 `SearchHit[]`，每个 hit 带 `score_type`（`rrf`/`bm25`/`cosine`，跨 type 不可比）。嵌入是**异步**的，刚写入的文件要等几秒才可搜。
@@ -265,6 +267,16 @@ app_id 账号是 passwordless 的：不能 login、不能 claim，`app_id` 与 `
 | **L2 Full** | `GET /v1/fs/{path}` 或 search `detail_level=full`（默认） | 全文 | 原文 chunk |
 
 `/v1/abstract`、`/v1/overview` 是**三态响应**：`200`（已就绪）/ `202 + Retry-After:5`（生成中）/ `501 + Cache-Control:no-store`（server 未配 `[llm]`，摘要功能禁用）。摘要依赖可选的 LLM 配置，未配置时自动禁用。根 `/` 没有摘要（无根 dentry）。
+
+### RAG 问答（`POST /v1/answer`）
+
+一次调用拿**带可验证引用**的答案：服务端 LLM 自主多轮检索（search + read_file 工具循环）后作答，答案正文带内联 `[n]` 标注。需要 server 配置了 `[llm]`，仅 fs workspace。
+
+- **请求**：`{ query（≤1024 字符）, path_prefix?, limit?（预检索条数，默认 12 上限 24）, prompt?（自定义 bot 人设，≤4000）}`。
+- **响应**：`{ answer, citations: [{index, path, spans}], hit_count, estimated_context_tokens }`。`spans` 是 chunk 区间；**空数组 = 引用整篇文件**。同一文件的多个段落会产生多条同 path 的 citation（chunk 粒度，属预期）——展示层建议按 path 聚合。找不到依据时返回固定拒答话术且 citations 为空（不编造）。
+- **流式**：`POST /v1/answer/stream`（SSE）五事件：`delta`（增量文本）/ `reset`（丢弃已积累 delta）/ `tool`（工具进度提示）/ `final`（权威完整结果，消费者必须用它替换累积文本）/ `error`。
+- **错误**：`429 THROTTLED`（每 workspace 并发上限，默认 2）；`501 FEATURE_DISABLED`（未配 LLM）；`504 ANSWER_TIMEOUT`（超 90s 截止）。耗时通常 10–90s。
+- **CLI**：`veda ask "问题" [--path 前缀] [--json]`；MCP 的 `ask` 工具同能力。
 
 ### SQL（`POST /v1/sql`）
 

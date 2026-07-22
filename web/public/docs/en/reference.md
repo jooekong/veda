@@ -249,6 +249,8 @@ All fs endpoints authenticate with a `wk_` (bound to an fs workspace); writes re
 
 > Deleting the root — `DELETE /v1/fs` — always returns `400` (forbidden).
 
+**Indexing progress**: `GET /v1/index-status` returns this workspace's backlog of index-gating tasks as `{pending, processing, dead}` (chunk/extract tasks only — the ones that gate searchability). Poll it after batch uploads to answer "is everything searchable yet"; `dead > 0` means some files permanently failed to index and need an operator. CLI: `veda status --index [--wait]` (`--wait` polls until drained; exits non-zero on dead > 0 — usable as a CI gate).
+
 ### Search (`POST /v1/search`)
 
 `{ query, mode?, limit?, path_prefix?, detail_level? }`. `mode` defaults to `hybrid` (same three modes as the vector workspace); `limit` defaults to 10, max 100; `detail_level` defaults to `full`. Returns `SearchHit[]`; every hit carries a `score_type` (`rrf`/`bm25`/`cosine` — not comparable across types). Embedding is **asynchronous**: a freshly written file takes a few seconds to become searchable.
@@ -264,6 +266,16 @@ Every file / directory gets auto-generated layered summaries — fetch on demand
 | **L2 Full** | `GET /v1/fs/{path}` or search `detail_level=full` (default) | full text | raw content chunks |
 
 `/v1/abstract` and `/v1/overview` are **tri-state**: `200` (ready) / `202 + Retry-After:5` (generating) / `501 + Cache-Control:no-store` (server has no `[llm]` configured; summaries disabled). Summaries depend on the optional LLM config and are automatically disabled without it. The root `/` has no summary (no root dentry).
+
+### RAG answering (`POST /v1/answer`)
+
+One call, one answer **with verifiable citations**: a server-side LLM loop retrieves on its own (search + read_file tool rounds) and answers with inline `[n]` markers. Requires `[llm]` configured server-side; fs workspaces only.
+
+- **Request**: `{ query (≤1024 chars), path_prefix?, limit? (pre-search count, default 12, cap 24), prompt? (custom bot persona, ≤4000) }`.
+- **Response**: `{ answer, citations: [{index, path, spans}], hit_count, estimated_context_tokens }`. `spans` are chunk ranges; **an empty array means the whole file**. Two passages of one file yield two citations with the same path (chunk granularity, by design) — display layers should group by path. When nothing supports an answer, a fixed refusal phrase comes back with empty citations (no fabrication).
+- **Streaming**: `POST /v1/answer/stream` (SSE), five events: `delta` / `reset` (drop accumulated deltas) / `tool` (progress note) / `final` (authoritative full result — consumers must replace accumulated text with it) / `error`.
+- **Errors**: `429 THROTTLED` (per-workspace concurrency cap, default 2); `501 FEATURE_DISABLED` (no LLM configured); `504 ANSWER_TIMEOUT` (90s deadline). Typical latency 10–90s.
+- **CLI**: `veda ask "question" [--path PREFIX] [--json]`; the MCP `ask` tool exposes the same capability.
 
 ### SQL (`POST /v1/sql`)
 

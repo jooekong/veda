@@ -349,6 +349,43 @@ impl Client {
         Self::check(resp).await
     }
 
+    /// POST /v1/answer — one-shot RAG answer with citations. The server's
+    /// agentic loop runs up to 90s (route deadline), well past this
+    /// client's default 60s request timeout, so the call carries its own
+    /// 100s per-request override.
+    pub async fn ask(
+        &self,
+        ws_key: &str,
+        question: &str,
+        path_prefix: Option<&str>,
+    ) -> Result<serde_json::Value> {
+        let mut body = serde_json::json!({ "query": question });
+        if let Some(p) = path_prefix {
+            body["path_prefix"] = serde_json::Value::String(p.to_string());
+        }
+        let resp = self
+            .http
+            .post(format!("{}/v1/answer", self.base))
+            .timeout(std::time::Duration::from_secs(100))
+            .bearer_auth(ws_key)
+            .json(&body)
+            .send()
+            .await?;
+        Self::check(resp).await
+    }
+
+    /// GET /v1/index-status — {pending, processing, dead} counts of
+    /// index-gating tasks for this workspace.
+    pub async fn index_status(&self, ws_key: &str) -> Result<serde_json::Value> {
+        let resp = self
+            .http
+            .get(format!("{}/v1/index-status", self.base))
+            .bearer_auth(ws_key)
+            .send()
+            .await?;
+        Self::check(resp).await
+    }
+
     /// Returns (status_code, body). Both summary endpoints have the same
     /// three-state contract (200 ready / 202 pending / 501 disabled) that
     /// the CLI renders differently. `check()` returns only the body on

@@ -6,6 +6,20 @@ use veda_types::*;
 #[async_trait]
 pub trait MetadataStore: Send + Sync {
     async fn ping(&self) -> Result<()>;
+
+    /// Per-workspace backlog of index-affecting outbox tasks — only
+    /// `chunk_sync` + `extract_sync` (the events that gate searchability;
+    /// summary events debounce for 30s and would read as a permanently
+    /// non-zero backlog). Returns `(pending, processing, dead)` counts.
+    /// Serves `GET /v1/index-status`. Default impl errs so test mocks
+    /// that never touch indexing don't have to stub it.
+    async fn count_index_backlog(&self, workspace_id: &str) -> Result<(i64, i64, i64)> {
+        let _ = workspace_id;
+        Err(VedaError::Internal(
+            "count_index_backlog not implemented by this store".into(),
+        ))
+    }
+
     async fn get_dentry(&self, workspace_id: &str, path: &str) -> Result<Option<Dentry>>;
     async fn list_dentries(&self, workspace_id: &str, parent_path: &str) -> Result<Vec<Dentry>>;
     /// Return up to `limit` dentries under `path_prefix` ordered by `path`

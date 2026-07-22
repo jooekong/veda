@@ -10,6 +10,28 @@ that matters.
 ## [Unreleased]
 
 ### Added
+- **`veda ask` — RAG answering from the CLI.** One-shot question → answer
+  with inline `[n]` citations and a deduplicated source list; `--json`
+  prints the raw response for scripts; friendly one-liners for
+  "LLM not configured" (501) and "concurrency full" (429).
+- **`$VEDA_SERVER` / `$VEDA_KEY` environment auth for the CLI.** The same
+  variables FUSE already reads now drive every data-plane command:
+  `export` both and run `veda search` with zero config.toml — nothing is
+  ever written to disk in env mode. Precedence: `--server` flag > env >
+  config.toml; `veda status` labels env-sourced values.
+- **Indexing visibility.** New `GET /v1/index-status` returns the
+  workspace's `{pending, processing, dead}` counts of index-gating tasks;
+  `veda cp -r` prints a "N file(s) queued for indexing" hint after batch
+  uploads, and `veda status --index [--wait]` polls until everything is
+  searchable (non-zero exit when any file permanently failed — CI-friendly).
+
+### Fixed
+- **WeCom bot source list no longer shows one file twice.** Citations are
+  chunk-granular (two passages of one file = two citations), and the
+  tunnel rendered one line per citation — users saw duplicate-looking
+  entries. Same-file citations now collapse into a single line carrying
+  all their `[n]` indices.
+
 - **MCP endpoint (`POST /mcp`)**: veda-server now speaks the Model Context
   Protocol (Streamable HTTP transport, stateless, protocol revision
   2025-06-18), so Coding Agents (Claude Code, Cursor, …) can attach a veda

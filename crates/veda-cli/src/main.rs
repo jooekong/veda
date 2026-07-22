@@ -53,7 +53,16 @@ struct Cli {
 enum Commands {
     /// Show current config (server URL, key state, workspace) and a
     /// best-effort server reachability ping.
-    Status,
+    Status {
+        /// Show this workspace's indexing backlog (pending / processing /
+        /// dead counts of files not yet searchable).
+        #[arg(long)]
+        index: bool,
+        /// With --index: poll every 5s until the backlog drains to zero.
+        /// Exits non-zero if any task is dead (permanently failed).
+        #[arg(long, requires = "index")]
+        wait: bool,
+    },
     /// One-stop auth entry. Five mutually-exclusive modes selected by
     /// flags:
     ///
@@ -181,6 +190,17 @@ enum Commands {
         #[arg(long, value_enum, default_value_t = SearchDetail::Full)]
         detail_level: SearchDetail,
         /// Restrict the search to a subtree (e.g. `/docs`). Omit to search the whole workspace.
+        #[arg(long)]
+        path: Option<String>,
+    },
+    /// Ask the knowledge base a question — one-shot RAG answer with `[n]`
+    /// citations (server-side retrieval; needs the server to have an LLM
+    /// configured). May take 10-90 seconds. With --json, prints the raw
+    /// response (answer/citations/hit_count) for scripts.
+    Ask {
+        /// The question (max 1024 chars)
+        question: String,
+        /// Restrict retrieval to a subtree (e.g. `/wiki`)
         #[arg(long)]
         path: Option<String>,
     },
@@ -687,7 +707,7 @@ mod cli_parse_tests {
     #[test]
     fn workspace_override_returns_none_when_flag_absent() {
         let cfg = config::CliConfig::default();
-        let cmd = Commands::Status;
+        let cmd = Commands::Status { index: false, wait: false };
         let out = resolve_workspace_override(&cfg, None, &cmd).unwrap();
         assert!(out.is_none());
     }
@@ -1229,6 +1249,33 @@ async fn run_init_command(
     Ok(())
 }
 
+/// `veda status --index [--wait]` — indexing backlog for the active
+/// workspace. With --wait, polls every 5s until pending+processing hit
+/// zero; exits non-zero when dead > 0 so CI can gate on "uploaded AND
+/// searchable AND nothing failed".
+async fn run_index_status(
+    c: &client::Client,
+    cfg: &config::CliConfig,
+    wait: bool,
+) -> anyhow::Result<()> {
+    loop {
+        let st = c.index_status(cfg.active_wk()?).await?;
+        let pending = st["data"]["pending"].as_i64().unwrap_or(0);
+        let processing = st["data"]["processing"].as_i64().unwrap_or(0);
+        let dead = st["data"]["dead"].as_i64().unwrap_or(0);
+        println!("indexing: {pending} pending, {processing} processing, {dead} dead");
+        if dead > 0 {
+            anyhow::bail!(
+                "{dead} file(s) permanently failed to index — ask an operator to inspect the outbox dead letters"
+            );
+        }
+        if !wait || pending + processing == 0 {
+            return Ok(());
+        }
+        tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+    }
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
@@ -1248,19 +1295,28 @@ async fn main() -> anyhow::Result<()> {
     let json_output = cli.json;
 
     match cli.command {
-        Commands::Status => {
+        Commands::Status { index, wait } => {
+            if index {
+                run_index_status(&c, &cfg, wait).await?;
+                return Ok(());
+            }
             // Skip the ping when nothing is configured — there's no
             // server to talk to that the user opted into.
-            let reachable = if cfg.api_key.is_some() || !cfg.workspaces.is_empty() {
-                Some(status::ping_server(&cfg.server_url).await)
-            } else {
-                None
-            };
+            let reachable =
+                if cfg.api_key.is_some() || !cfg.workspaces.is_empty() || cfg.env_key.is_some() {
+                    Some(status::ping_server(&cfg.server_url).await)
+                } else {
+                    None
+                };
             // A pasted-wk_ profile starts with no workspace id; resolve
             // it once via /v1/whoami and persist so status shows a real
             // id instead of "(id unknown)". Save failure is tolerable —
             // the id still renders this run and backfills again next time.
-            if reachable == Some(true) && init::backfill_active_workspace_id(&c, &mut cfg).await {
+            // Skipped in env-key mode: nothing configured to backfill.
+            if reachable == Some(true)
+                && cfg.env_key.is_none()
+                && init::backfill_active_workspace_id(&c, &mut cfg).await
+            {
                 let _ = cfg.save();
             }
             print!("{}", status::render_status(&cfg, reachable));
@@ -1395,6 +1451,18 @@ async fn main() -> anyhow::Result<()> {
                         );
                     }
                     println!("Uploaded {} file(s) under {dst}", stats.uploaded);
+                    // Batch uploads index asynchronously — tell the user how
+                    // to know when everything is searchable. Best-effort:
+                    // pre-index-status servers 404 here, stay silent then.
+                    if let Ok(st) = c.index_status(cfg.active_wk()?).await {
+                        let queued = st["data"]["pending"].as_i64().unwrap_or(0)
+                            + st["data"]["processing"].as_i64().unwrap_or(0);
+                        if queued > 0 {
+                            println!(
+                                "{queued} file(s) queued for indexing — check: veda status --index [--wait]"
+                            );
+                        }
+                    }
                 } else {
                     let content = read_file_bytes(&src)?;
                     let resp = c.write_file(cfg.active_wk()?, &dst, content).await?;
@@ -1557,6 +1625,44 @@ async fn main() -> anyhow::Result<()> {
                         print!("\n  L1: {preview}...");
                     }
                     println!();
+                }
+            }
+        }
+        Commands::Ask { question, path } => {
+            let resp = match c.ask(cfg.active_wk()?, &question, path.as_deref()).await {
+                Ok(r) => r,
+                Err(e) => {
+                    // 501/429 are expected states, not crashes — translate
+                    // them into actionable one-liners before the generic
+                    // error path takes over.
+                    let msg = e.to_string();
+                    if msg.contains("FEATURE_DISABLED") {
+                        anyhow::bail!("问答未启用:server 未配置 LLM([llm] 缺失)。可改用 `veda search`。");
+                    }
+                    if msg.contains("THROTTLED") {
+                        anyhow::bail!("问答并发已满(每 workspace 上限),稍后重试。");
+                    }
+                    return Err(e);
+                }
+            };
+            if json_output {
+                println!("{}", resp["data"]);
+            } else {
+                let data = &resp["data"];
+                println!("{}", data["answer"].as_str().unwrap_or(""));
+                if let Some(cites) = data["citations"].as_array().filter(|c| !c.is_empty()) {
+                    println!("\n———\n出处:");
+                    // Same-file citations collapse into one line (a file
+                    // cited for two passages is still one source to read).
+                    let mut seen: Vec<&str> = Vec::new();
+                    for c in cites {
+                        if let Some(p) = c["path"].as_str() {
+                            if !seen.contains(&p) {
+                                seen.push(p);
+                                println!("  {p}");
+                            }
+                        }
+                    }
                 }
             }
         }

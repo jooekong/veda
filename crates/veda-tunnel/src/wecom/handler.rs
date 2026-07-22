@@ -464,12 +464,15 @@ fn render_markdown(hits: &[Hit]) -> String {
 }
 
 /// Render a `/v1/answer` result for WeCom: the answer body, a `———`
-/// separator, then a "出处：" list with one `[n]` + file basename entry per
-/// line. `[n]` reuses the server-assigned citation index so it lines up
-/// with the `[n]` markers in the body. At most [`MAX_LISTED_CITATIONS`]
-/// entries are shown; the rest collapse into a final "等 N 篇" line.
-/// Citations without a resolvable path are skipped; if none remain, only
-/// the body is sent.
+/// separator, then a "出处：" list with **one line per source file**.
+/// Citations are chunk-granular server-side (two passages of one file =
+/// two citations, same path, different spans) — correct data, but two
+/// identical-looking lines to a reader (2026-07-22 production report).
+/// So same-path citations collapse into one line carrying all their
+/// indices ("[1][2] `x.md`"), keeping every `[n]` in the body resolvable.
+/// At most [`MAX_LISTED_CITATIONS`] files are shown; the rest collapse
+/// into a final "等 N 篇" line. Citations without a resolvable path are
+/// skipped; if none remain, only the body is sent.
 fn render_answer(data: &AnswerData) -> String {
     let body = data.answer.trim();
     let cited: Vec<(usize, &str)> = data
@@ -480,18 +483,27 @@ fn render_answer(data: &AnswerData) -> String {
     if cited.is_empty() {
         return body.to_string();
     }
+    // Group by path, preserving first-appearance order.
+    let mut files: Vec<(&str, Vec<usize>)> = Vec::new();
+    for (idx, path) in &cited {
+        match files.iter_mut().find(|(p, _)| p == path) {
+            Some((_, idxs)) => idxs.push(*idx),
+            None => files.push((path, vec![*idx])),
+        }
+    }
     // Basenames keep entries short, but knowledge bases hold same-named
     // files in different dirs — entries whose basename collides within the
     // displayed set fall back to their full path.
-    let shown = &cited[..cited.len().min(MAX_LISTED_CITATIONS)];
+    let shown = &files[..files.len().min(MAX_LISTED_CITATIONS)];
     let mut out = format!("{body}\n\n———\n出处：");
-    for (idx, path) in shown {
+    for (path, idxs) in shown {
         let name = basename(path);
-        let dup = shown.iter().filter(|(_, p)| basename(p) == name).count() > 1;
-        out.push_str(&format!("\n[{idx}] `{}`", if dup { *path } else { name }));
+        let dup = shown.iter().filter(|(p, _)| basename(p) == name).count() > 1;
+        let marks: String = idxs.iter().map(|i| format!("[{i}]")).collect();
+        out.push_str(&format!("\n{marks} `{}`", if dup { *path } else { name }));
     }
-    if cited.len() > MAX_LISTED_CITATIONS {
-        out.push_str(&format!("\n等 {} 篇", cited.len()));
+    if files.len() > MAX_LISTED_CITATIONS {
+        out.push_str(&format!("\n等 {} 篇", files.len()));
     }
     out
 }
@@ -635,6 +647,36 @@ mod tests {
         // Separator, then a "出处：" header with one basename entry per line.
         assert!(out.contains("———\n出处：\n[1] `接入.md`\n[2] `多活.md`"), "{out}");
         assert!(!out.contains("/a/接入.md"), "full paths are not shown");
+    }
+
+    #[test]
+    fn render_answer_merges_same_file_citations_into_one_line() {
+        // Chunk-granular citations: two passages of the SAME file get two
+        // citation entries (same path, different spans). The source list
+        // must show that file once, carrying both indices — two identical
+        // lines confused users in production (2026-07-22, bot aibS3oC…).
+        let data = AnswerData {
+            hit_count: 28,
+            answer: "CRM3.0 支持多分类挂券[1],人群圈选由数分沉淀[2]".to_string(),
+            citations: vec![
+                AnswerCitation {
+                    index: 1,
+                    path: Some("/product/分类页百科.md".to_string()),
+                },
+                AnswerCitation {
+                    index: 2,
+                    path: Some("/product/分类页百科.md".to_string()),
+                },
+            ],
+        };
+        let out = render_answer(&data);
+        assert!(out.contains("\n[1][2] `分类页百科.md`"), "{out}");
+        assert_eq!(
+            out.matches("分类页百科.md").count(),
+            1,
+            "the file must be listed exactly once: {out}"
+        );
+        assert!(!out.contains("等 "), "one file → no fold line: {out}");
     }
 
     #[test]

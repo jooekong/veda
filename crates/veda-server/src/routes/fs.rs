@@ -36,7 +36,26 @@ pub fn routes() -> Router<Arc<AppState>> {
         .route("/v1/fs-rename", post(rename_file))
         .route("/v1/fs-mkdir", post(mkdir))
         .route("/v1/grep", post(grep))
+        .route("/v1/index-status", get(index_status))
         .merge(upload_routes)
+}
+
+/// GET /v1/index-status — how much of this workspace's uploaded content is
+/// still waiting to become searchable. Counts index-gating outbox tasks
+/// (chunk_sync + extract_sync) by status; `dead > 0` means some files
+/// permanently failed to index and need operator attention. Batch uploaders
+/// (CLI `cp -r`, CI) poll this to answer "is everything searchable yet".
+async fn index_status(
+    State(state): State<Arc<AppState>>,
+    auth: AuthWorkspace,
+) -> Result<Json<ApiResponse<serde_json::Value>>, AppError> {
+    let (pending, processing, dead) =
+        state.meta_store.count_index_backlog(&auth.workspace_id).await?;
+    Ok(Json(ApiResponse::ok(serde_json::json!({
+        "pending": pending,
+        "processing": processing,
+        "dead": dead,
+    }))))
 }
 
 async fn grep(
