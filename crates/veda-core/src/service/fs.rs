@@ -73,20 +73,35 @@ async fn compute_write_meta(content: String) -> Result<WriteMeta> {
     .map_err(|e| VedaError::Internal(format!("hash task join failed: {e}")))?
 }
 
+/// The CFB directory-entry name of a Word document's main stream, UTF-16LE —
+/// present in every .doc, never in xls/ppt/msi. Searched raw so we don't need
+/// to parse the (possibly spec-violating) container at write time.
+const WORD_STREAM_UTF16: &[u8] =
+    b"W\0o\0r\0d\0D\0o\0c\0u\0m\0e\0n\0t\0";
+
 /// Detect MIME type and source category from a binary blob's magic bytes.
 /// PDF → Pdf, Word (.doc/.docx) → Word (both text-extractable);
 /// images → Image; everything else → Binary.
+///
+/// `infer` reports `application/x-ole-storage` when it cannot sub-type an OLE
+/// container (its strict CFB parser rejects spec-violating writers like macOS
+/// textutil). Those are sniffed for the `WordDocument` stream name: present →
+/// a genuine .doc (mime normalized to `application/msword` so clients see the
+/// real type); absent → not Word (xls/ppt/msi), stored unindexed.
 fn detect_mime_and_source(data: &[u8]) -> (String, SourceType) {
     match infer::get(data) {
         Some(t) if t.mime_type() == "application/pdf" => {
             ("application/pdf".to_string(), SourceType::Pdf)
         }
-        Some(t)
-            if t.mime_type() == MIME_DOCX
-                || t.mime_type() == MIME_DOC
-                || t.mime_type() == MIME_OLE_STORAGE =>
-        {
+        Some(t) if t.mime_type() == MIME_DOCX || t.mime_type() == MIME_DOC => {
             (t.mime_type().to_string(), SourceType::Word)
+        }
+        Some(t) if t.mime_type() == MIME_OLE_STORAGE => {
+            if data.windows(WORD_STREAM_UTF16.len()).any(|w| w == WORD_STREAM_UTF16) {
+                (MIME_DOC.to_string(), SourceType::Word)
+            } else {
+                (MIME_OLE_STORAGE.to_string(), SourceType::Binary)
+            }
         }
         Some(t) if t.matcher_type() == infer::MatcherType::Image => {
             (t.mime_type().to_string(), SourceType::Image)

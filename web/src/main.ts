@@ -440,6 +440,25 @@ function fmtBytes(n: number | null): string {
   return `${value.toFixed(1)} ${units[index]}`;
 }
 
+// Raw mime strings are unreadable in a file listing (the OOXML one is 70+
+// chars); map the known families to short labels, fall back to the raw mime.
+// x-ole-storage stays raw: post-normalization it means "OLE but not Word"
+// (xls/ppt/msi), which we can't name more precisely.
+function fmtMime(mime: string): string {
+  if (mime === "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+    || mime === "application/msword") return "Word";
+  if (mime === "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    || mime === "application/vnd.ms-excel") return "Excel";
+  if (mime === "application/vnd.openxmlformats-officedocument.presentationml.presentation"
+    || mime === "application/vnd.ms-powerpoint") return "PPT";
+  if (mime === "application/pdf") return "PDF";
+  if (mime.startsWith("text/")) return "文本";
+  if (mime.startsWith("image/")) return "图片";
+  if (mime.startsWith("audio/")) return "音频";
+  if (mime.startsWith("video/")) return "视频";
+  return mime;
+}
+
 function fmtTime(s: string): string {
   const date = new Date(s);
   return Number.isNaN(date.getTime())
@@ -837,7 +856,7 @@ function initFsBrowser(root: HTMLElement, key: string) {
       .map((entry) => {
         const meta = entry.is_dir
           ? L.filesDirectory
-          : `${fmtBytes(entry.size_bytes)}${entry.mime_type ? ` · ${esc(entry.mime_type)}` : ""}`;
+          : `${fmtBytes(entry.size_bytes)}${entry.mime_type ? ` · ${esc(fmtMime(entry.mime_type))}` : ""}`;
         const name = entry.is_dir
           ? `<button data-fs-dir="${attr(entry.path)}" class="text-blue-600 hover:underline text-left">📁 ${esc(entry.name)}</button>`
           : `📄 ${esc(entry.name)}`;

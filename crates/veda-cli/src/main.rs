@@ -125,23 +125,27 @@ enum Commands {
         /// Remote path on server
         dst: String,
     },
-    /// Read file from server. Three mutually-exclusive slice flags
-    /// pick a subset; default streams the whole file.
+    /// Read a file's text. PDF/Word documents print their extracted
+    /// text; use --raw for the original bytes (or `veda cp` to download).
     Cat {
         /// Remote path
         path: String,
         /// 1-indexed inclusive line range, e.g. `1:20` for lines 1
         /// through 20, or `42:` for line 42 to end-of-file.
-        #[arg(long, conflicts_with_all = ["head", "tail"])]
+        #[arg(long, conflicts_with_all = ["head", "tail", "raw"])]
         range: Option<String>,
         /// Show the first N lines (server-side range, equivalent
         /// to `--range 1:N`).
-        #[arg(long, conflicts_with_all = ["range", "tail"])]
+        #[arg(long, conflicts_with_all = ["range", "tail", "raw"])]
         head: Option<usize>,
         /// Show the last N lines (fetches whole file then slices
         /// locally — there's no server endpoint for tail offsets).
-        #[arg(long, conflicts_with_all = ["range", "head"])]
+        #[arg(long, conflicts_with_all = ["range", "head", "raw"])]
         tail: Option<usize>,
+        /// Output the original bytes verbatim (no text extraction) —
+        /// what `cat` did for binaries before extracted-text reads.
+        #[arg(long)]
+        raw: bool,
     },
     /// List directory
     Ls {
@@ -151,8 +155,12 @@ enum Commands {
     },
     /// Move/rename file
     Mv { src: String, dst: String },
-    /// Delete file or directory
-    Rm { path: String },
+    /// Delete files or directories
+    Rm {
+        /// Remote paths (one or more)
+        #[arg(required = true, num_args = 1..)]
+        paths: Vec<String>,
+    },
     /// Append content to a file
     Append {
         /// Remote path
@@ -1394,7 +1402,7 @@ async fn main() -> anyhow::Result<()> {
                 }
             }
         }
-        Commands::Cat { path, range, head, tail } => {
+        Commands::Cat { path, range, head, tail, raw } => {
             // clap's conflicts_with_all already rejects > 1 of these;
             // here we just translate to the server-side `lines`
             // parameter shape (1-indexed inclusive A:B, with B empty
@@ -1402,41 +1410,39 @@ async fn main() -> anyhow::Result<()> {
             // server-side, so it goes through the slice-after-fetch
             // path.
             if let Some(n) = tail {
-                let bytes = c.read_file(cfg.active_wk()?, &path, None).await?;
-                let content = String::from_utf8(bytes).map_err(|_| {
-                    anyhow::anyhow!(
-                        "'{path}' is binary; --tail needs text. Redirect the whole file instead: veda cat {path} > out"
-                    )
-                })?;
+                let content = c.read_file_text(cfg.active_wk()?, &path).await?;
                 let lines: Vec<&str> = content.lines().collect();
                 let start = lines.len().saturating_sub(n);
                 // Print in original order, preserving a trailing
                 // newline only when the source had one.
                 let trailing = if content.ends_with('\n') { "\n" } else { "" };
                 print!("{}{trailing}", lines[start..].join("\n"));
-            } else {
-                let line_spec = match (range.as_deref(), head) {
-                    (Some(r), _) => Some(r.to_string()),
-                    (None, Some(n)) => Some(format!("1:{n}")),
-                    (None, None) => None,
-                };
+            } else if raw {
+                // Original bytes verbatim: binary (pdf/image/jar)
+                // round-trips losslessly when redirected to a file.
+                let bytes = c.read_file(cfg.active_wk()?, &path, None).await?;
+                use std::io::Write;
+                std::io::stdout().write_all(&bytes)?;
+            } else if let Some(line_spec) = match (range.as_deref(), head) {
+                (Some(r), _) => Some(r.to_string()),
+                (None, Some(n)) => Some(format!("1:{n}")),
+                (None, None) => None,
+            } {
                 let bytes = c
-                    .read_file(cfg.active_wk()?, &path, line_spec.as_deref())
+                    .read_file(cfg.active_wk()?, &path, Some(&line_spec))
                     .await?;
-                if line_spec.is_some() {
-                    // Line slicing implies text; the server already rejects
-                    // line reads on a binary blob, but guard the local decode.
-                    let content = String::from_utf8(bytes).map_err(|_| {
-                        anyhow::anyhow!("'{path}' is binary; --range/--head need text")
-                    })?;
-                    print!("{content}");
-                } else {
-                    // Whole-file read: write raw bytes so binary (pdf/image/jar)
-                    // round-trips losslessly when redirected to a file; text
-                    // prints as before.
-                    use std::io::Write;
-                    std::io::stdout().write_all(&bytes)?;
-                }
+                // Line slicing implies text; the server already rejects
+                // line reads on a binary blob, but guard the local decode.
+                let content = String::from_utf8(bytes).map_err(|_| {
+                    anyhow::anyhow!("'{path}' is binary; --range/--head need text")
+                })?;
+                print!("{content}");
+            } else {
+                // Whole-file read defaults to the text view: plain text
+                // comes back as-is, and extractable binaries (pdf/word)
+                // return their server-side extracted text.
+                let content = c.read_file_text(cfg.active_wk()?, &path).await?;
+                print!("{content}");
             }
         }
         Commands::Ls { path } => {
@@ -1470,14 +1476,27 @@ async fn main() -> anyhow::Result<()> {
             c.rename_file(cfg.active_wk()?, &src, &dst).await?;
             println!("Moved {src} -> {dst}");
         }
-        Commands::Rm { path } => {
+        Commands::Rm { paths } => {
             // rm is the only data-plane command that's irreversible
             // against the wrong workspace, so this is the one we ask
             // for explicit y/N confirmation on a TTY.
             let active = cfg.active_alias().unwrap_or("?").to_string();
-            confirm_or_announce(&active, "delete", &path, true)?;
-            c.delete_file(cfg.active_wk()?, &path).await?;
-            println!("Deleted {path}");
+            confirm_or_announce(&active, "delete", &paths.join(" "), true)?;
+            // Keep deleting past individual failures (mirrors cp's
+            // per-file tolerance); report and exit non-zero at the end.
+            let mut failed = 0usize;
+            for path in &paths {
+                match c.delete_file(cfg.active_wk()?, path).await {
+                    Ok(_) => println!("Deleted {path}"),
+                    Err(e) => {
+                        eprintln!("Failed {path}: {e}");
+                        failed += 1;
+                    }
+                }
+            }
+            if failed > 0 {
+                anyhow::bail!("{failed}/{} deletions failed", paths.len());
+            }
         }
         Commands::Append { path, content } => {
             let data = if content == "-" {

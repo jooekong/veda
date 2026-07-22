@@ -85,9 +85,9 @@ async fn blob_word_detected_enqueues_extract() {
             MIME_DOC,
         ),
         // Spec-violating writer (macOS textutil): infer can't open the
-        // container to sub-type it, so it reports the generic OLE mime —
-        // still routed to Word so the permissive extractor gets its shot.
-        ("/c.doc", DOC_BYTES, MIME_OLE_STORAGE),
+        // container so it reports generic OLE — the WordDocument-stream
+        // sniff still proves it Word and normalizes the mime.
+        ("/c.doc", DOC_BYTES, MIME_DOC),
     ] {
         let (svc, state) = make_service();
         let resp = svc.write_blob("ws1", path, data.to_vec(), None).await.unwrap();
@@ -98,6 +98,22 @@ async fn blob_word_detected_enqueues_extract() {
         assert!(st.outbox.iter().any(|e| e.event_type == OutboxEventType::ExtractSync));
         assert!(!st.outbox.iter().any(|e| e.event_type == OutboxEventType::ChunkSync));
     }
+}
+
+#[tokio::test]
+async fn blob_non_word_ole_stays_binary() {
+    // CFB magic + no "WordDocument" stream name anywhere: an OLE container
+    // that is not a Word file (xls/ppt/msi). Must NOT be routed to the
+    // extractor — stored unindexed under the generic OLE mime.
+    let mut data = vec![0xD0, 0xCF, 0x11, 0xE0, 0xA1, 0xB1, 0x1A, 0xE1];
+    data.extend_from_slice(&[0u8; 1024]);
+    let (svc, state) = make_service();
+    let resp = svc.write_blob("ws1", "/book.xls", data, None).await.unwrap();
+    let st = state.lock().unwrap();
+    let f = st.files.iter().find(|f| f.id == resp.file_id).unwrap();
+    assert_eq!(f.mime_type, MIME_OLE_STORAGE);
+    assert_eq!(f.source_type, SourceType::Binary);
+    assert!(!st.outbox.iter().any(|e| e.event_type == OutboxEventType::ExtractSync));
 }
 
 /// Insert a stored extract for `file_id`, keyed to the given source hash.

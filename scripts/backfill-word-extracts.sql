@@ -7,7 +7,8 @@
 --
 -- 1) Existing Word blobs were classified source_type='binary' before this
 --    release (never indexed). Reclassify them so the reconciler and worker
---    route them to ExtractSync.
+--    route them to ExtractSync. x-ole-storage rows are included only when a
+--    later step can prove them Word (the worker's FIB check skips the rest).
 UPDATE veda_files
 SET source_type = 'word'
 WHERE source_type = 'binary'
@@ -16,6 +17,19 @@ WHERE source_type = 'binary'
     'application/msword',
     'application/x-ole-storage'
   );
+
+-- 1b) Rows stored before write-time normalization carry the generic OLE mime.
+--     Once their extract row is fresh (the extractor's FIB check proved them
+--     Word), normalize the mime so clients/UI see the real type.
+--     NOTE: on the first run the extracts enqueued in step 2 have not been
+--     produced yet, so this matches nothing — re-run this script (idempotent)
+--     after the worker drains the queue to pick them up.
+UPDATE veda_files f
+JOIN veda_file_extracts fe
+  ON fe.file_id = f.id AND fe.source_sha256 = f.checksum_sha256
+SET f.mime_type = 'application/msword'
+WHERE f.mime_type = 'application/x-ole-storage'
+  AND f.source_type = 'word';
 
 -- 2) Enqueue ExtractSync for every extractable blob (word + pdf) whose
 --    stored extract is missing or stale. Covers both the just-reclassified

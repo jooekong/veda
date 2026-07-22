@@ -231,6 +231,21 @@ impl Client {
         Ok(resp.bytes().await?.to_vec())
     }
 
+    /// Read a file's text view: plain text as-is; extractable binaries
+    /// (pdf/word) return their server-side extracted text. The server
+    /// rejects non-extractable binaries — surface its message plus a
+    /// hint at the raw-bytes escape hatches.
+    pub async fn read_file_text(&self, ws_key: &str, path: &str) -> Result<String> {
+        let enc = encode_path(path.trim_start_matches('/'));
+        let url = format!("{}/v1/fs/{enc}?view=text", self.base);
+        let resp = self.http.get(&url).bearer_auth(ws_key).send().await?;
+        if !resp.status().is_success() {
+            let text = resp.text().await?;
+            bail!("read failed: {text}\n(for original bytes: veda cat --raw {path}, or veda cp)");
+        }
+        Ok(resp.text().await?)
+    }
+
     pub async fn list_dir(&self, ws_key: &str, path: &str) -> Result<serde_json::Value> {
         let path = encode_path(path.trim_start_matches('/'));
         let url = if path.is_empty() {

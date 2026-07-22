@@ -63,6 +63,10 @@ struct FsQuery {
     list: Option<String>,
     lines: Option<String>,
     stat: Option<String>,
+    /// `view=text`: return the file's text content — for extractable blobs
+    /// (pdf/word) that is the stored extracted text. Other values are
+    /// rejected so future views don't silently fall through to raw bytes.
+    view: Option<String>,
 }
 
 async fn read_root(
@@ -229,6 +233,18 @@ async fn read_file(
             .read_file_lines(&auth.workspace_id, &path, start, end)
             .await?;
         return Ok(content.into_response());
+    }
+
+    if let Some(ref view) = q.view {
+        if view != "text" {
+            return Err(VedaError::InvalidInput(format!("unknown view: {view}")).into());
+        }
+        let text = state.fs_service.read_file(&auth.workspace_id, &path).await?;
+        return Ok((
+            [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
+            text,
+        )
+            .into_response());
     }
 
     // Handle Range header for partial reads

@@ -86,10 +86,11 @@ pub const MIME_DOCX: &str =
     "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
 /// The legacy Word 97-2003 .doc mime.
 pub const MIME_DOC: &str = "application/msword";
-/// Generic OLE compound file: what `infer` reports for a .doc whose container
-/// violates the CFB spec (its strict sub-type probe can't open it — common
-/// with non-Microsoft writers like macOS textutil). Routed to the Word
-/// extractor, whose FIB-magic check cleanly rejects non-Word OLE (xls/ppt).
+/// Generic OLE compound file: what `infer` reports when it cannot sub-type an
+/// OLE container (its strict CFB probe rejects spec-violating writers like
+/// macOS textutil). Write-time detection sniffs these for the `WordDocument`
+/// stream and normalizes genuine .doc files to [`MIME_DOC`]; the extractor
+/// still accepts this mime for rows stored before that normalization.
 pub const MIME_OLE_STORAGE: &str = "application/x-ole-storage";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
