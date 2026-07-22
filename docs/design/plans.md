@@ -13,7 +13,7 @@
 
 | 计划 | 状态 |
 | --- | --- |
-| [`coding-agent-kb-plan.md`](../plans/coding-agent-kb-plan.md) | **已过两轮 review 修订**（07-22）：wiki 知识库 × Coding Agent——P0 server `/mcp` 端点(Streamable HTTP,用户零安装纯 json 配置)；P1 env 鉴权/索引可见性/`veda ask`；Word ✅0.1.20；HTML/sync 降 P2(先实验/有替代) |
+| [`coding-agent-kb-plan.md`](../plans/coding-agent-kb-plan.md) | **P0 已全量上线**（07-22）：`/mcp` 端点三节点部署+两生产入口验证+对外文档(中英)发布,SOP 实测 22 项全过(`docs/mcp-manual-test-sop.md`)；余 P1 env 鉴权/索引可见性/`veda ask`；HTML/sync 降 P2(先实验/有替代) |
 | [`veda-answer-agentic.md`](../plans/veda-answer-agentic.md) | **Stage 1 已实现 e2e 全绿**：`/v1/answer` agentic 多次召回(tool loop)+ prompt 分层;Stage 2 bot prompt 三入口贯通进行中 |
 | [`veda-answer-plan.md`](../plans/veda-answer-plan.md) | ⚠️ 组装管线已被 agentic 重构取代(见上);API 契约/引用对齐仍是基础。余 DAL 真题评审(将由 qa-log 自动化) |
 | [`veda-tunnel-plan.md`](../plans/veda-tunnel-plan.md) | **生产运行中**（专用机 .95）：企微长连接 + RAG 问答 + 三入口 bot 管理 + 平台 API（§18）；方向池见 `design/tunnel-directions.md` |
