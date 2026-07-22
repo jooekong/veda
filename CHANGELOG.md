@@ -9,6 +9,26 @@ that matters.
 
 ## [Unreleased]
 
+### Added
+- **Word documents (.docx and legacy .doc) are now indexed and readable.**
+  Uploading a Word file stores the original bytes as before, and the worker
+  now extracts its text (pure-Rust parsers: docx via zip+XML, .doc via a
+  permissive OLE reader + Word 97 piece table — encrypted and Word 95 files
+  are skipped), embeds it for semantic/fulltext search, and stores the full
+  text server-side. `.doc` files whose container defeats mime sub-typing
+  (`application/x-ole-storage`, e.g. written by macOS textutil) are routed
+  to the Word extractor too.
+- **Reading a PDF/Word file returns its extracted text.** `cat`, file
+  preview, and the answer bot's `read_file` tool now serve the stored
+  extracted full text for extractable binaries instead of failing with
+  "binary file" — the RAG bot can finally pull full-document context after
+  a search hit. Preview shows real text (`is_binary=false`); downloads
+  still return the original bytes untouched. Extraction staleness is
+  guarded by a content-hash check, and the stored text is deleted in the
+  same transaction as any file overwrite/delete (no orphaned text).
+  Existing deployments: run `scripts/backfill-word-extracts.sql` once to
+  reclassify stored Word files and top up extracts for existing PDFs.
+
 ## [0.1.19] — 2026-07-21
 
 ### Added

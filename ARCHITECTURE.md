@@ -53,7 +53,7 @@ veda-tunnel     外部 IM 接入（企微长连接）             (已上生产 
   - CLI：`veda --version`，`veda cp -r` 递归目录上传（跳 symlink），`veda grep`，`veda abstract` (L0) + `veda overview` (L1) 两个独立子命令
   - CLI 初始化：单子命令 `veda init` 五模式互斥分发（anonymous / named `--email` / `--login` / `--upgrade` / `--import-key`），`veda status`（配置健康度 + server reachability ping）。`--import-key` 接 `vk_*` 或 `wk_*`，覆写前自动把旧 `config.toml` 备份成 `config.toml.bak.<unix-ts>`
 - v0.1.14–0.1.16 批：
-  - **二进制 blob + PDF 提取**：`PUT /v1/fs/{path}` 按 body sniff——合法 UTF-8 走原文本路径不变；非 UTF-8 原样存进新表 `veda_file_blobs`（LONGBLOB，`storage_type=blob`），MIME 从 magic bytes 判定（`infer`）。PDF 额外入队 `ExtractSync`：worker 用 `pdf-extract`（纯 Rust）抽文本层 embed 进 Milvus——原件 byte-for-byte 可下载，内容可搜索；图片/jar 等其他二进制只存不索引。`GET` 回真实 `Content-Type`，blob 支持 byte-range、拒绝行读。预览路径（平台数据面/admin）对二进制返回 `is_binary=true` + 本地化「暂不支持预览」提示而非乱码；`list_dir` 返回真实 `mime_type`/`size_bytes`。覆盖写 index→noindex（text/pdf→image 等）会先清旧向量防 orphan
+  - **二进制 blob + PDF/Word 提取**：`PUT /v1/fs/{path}` 按 body sniff——合法 UTF-8 走原文本路径不变；非 UTF-8 原样存进新表 `veda_file_blobs`（LONGBLOB，`storage_type=blob`），MIME 从 magic bytes 判定（`infer`）。PDF（`source_type=pdf`）与 Word（`source_type=word`，.docx/.doc，含 infer 区分不出子类型的 `application/x-ole-storage`——提取器 FIB magic 兜底拒非 Word OLE）入队 `ExtractSync`：worker 抽文本层（PDF 用 `pdf-extract`；docx 手写 zip+quick-xml 收 `<w:t>`；.doc 手写宽松 CFB reader + Word97 piece table，`veda-pipeline/src/word.rs`，加密/Word95 明确拒），**全文 upsert 进 `veda_file_extracts`（file_id PK + source_sha256 防 stale）再 embed 进 Milvus**——原件 byte-for-byte 可下载，内容可搜索。图片/jar 等其他二进制只存不索引，扫描版 PDF（无文本层）提取为空则只存不索引。`read_file`/预览对可提取 blob 返回**提取全文**（source_sha256 与 blob 当前 checksum 一致才 serve，否则报「提取中」）——`/v1/answer` 的 `read_file` 工具因此可读 PDF/Word 全文。一致性：extracts 行与 blob 同事务删除（覆盖写/删除/orphan 清理三路径），worker 提取失败清行+watermark，读侧 sha 校验兜底；watermark 命中但 extracts 缺失/stale 时 worker 只补提取不重 embed（backfill 自愈，`scripts/backfill-word-extracts.sql`）。`GET` 回真实 `Content-Type`，blob 支持 byte-range、拒绝行读。预览路径（平台数据面/admin）对不可提取二进制返回 `is_binary=true` + 本地化「暂不支持预览」提示而非乱码；`list_dir` 返回真实 `mime_type`/`size_bytes`。覆盖写 index→noindex（text/pdf/word→image 等）会先清旧向量防 orphan
   - **CLI 二进制支持**：`veda cp` 文本二进制都传原始字节（客户端"looks binary"拒绝已删），`veda cat` 整读回原始字节（重定向即无损 round-trip），`--head/--tail/--range` 对二进制明确报错。二进制 cp/cat 需要 server ≥0.1.15（旧 server 对二进制 cp 返 400）
   - **Linux CLI 改 musl 静态产物**：`x86_64-unknown-linux-musl`，任意 glibc 可跑；`veda-fuse` 仍 gnu（动态链 libfuse3）
   - **server 自带安装器**：`GET /install.sh` 返回构建时嵌入的安装脚本；`GET /capabilities` 无鉴权能力探针（FUSE 用它决定是否暴露 summary sidecar）
@@ -135,7 +135,7 @@ Vector dataset 是 db workspace 内的逻辑分组（内部物理 pk = `{dataset
 
 ## 待实现
 
-- Image OCR（PDF 文本层提取已实现，见 v0.1.14–0.1.16 批）
+- Image OCR（PDF/Word 文本提取已实现；扫描版 PDF 与文档内嵌图片仍不索引，原始字节保留在 blob，上 OCR 后 force ExtractSync 全量重刷即可）
 - CLI/FUSE 端到端测试、K8s Helm chart
 - OTLP trace 二期（协议事实见 `docs/archive/plans/observability-otlp-plan.md` §0）
 
@@ -145,7 +145,7 @@ Vector dataset 是 db workspace 内的逻辑分组（内部物理 pk = `{dataset
 
 - MySQL = control plane (元数据、认证、outbox)
 - Milvus = data plane (向量搜索、structured collection 数据)
-- 文件分层存储：UTF-8 文本 ≤256KB inline，>256KB chunked；非 UTF-8 存 `veda_file_blobs`（LONGBLOB，magic-byte 判 MIME）
+- 文件分层存储：UTF-8 文本 ≤256KB inline，>256KB chunked；非 UTF-8 存 `veda_file_blobs`（LONGBLOB，magic-byte 判 MIME）；可提取 blob（pdf/word）的派生全文存 `veda_file_extracts`（file_id PK + source_sha256，纯缓存可整表重建，与 blob 同事务删除 + 读侧 sha 校验双保险防 stale）
 - Content-addressed dedup (SHA256)
 - Outbox pattern 实现最终一致性。文件写入与其 ChunkSync/SummarySync 入队在**同一 MySQL 事务**提交，写路径不会漂移。残余漂移来源只有死信任务（`veda_outbox_dead_total` + `veda_outbox_depth{status}` 暴露，告警在 Monitor 平台配）和 Milvus 侧数据丢失（磁盘/运维/破坏式迁移）。**不再有 6h 后台 reconcile loop**；改为按需 `POST /admin/v1/reconcile/{workspace_id}?dry_run=`（ops `metrics_token` 鉴权，默认 dry_run=true 只报告，失败响亮返回 500）
 - Account → Workspace 多租户；控制面 `vk_`、数据面 `wk_`，纯 key 校验（JWT 已移除）

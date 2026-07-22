@@ -74,11 +74,19 @@ async fn compute_write_meta(content: String) -> Result<WriteMeta> {
 }
 
 /// Detect MIME type and source category from a binary blob's magic bytes.
-/// PDF → Pdf (text-extractable); images → Image; everything else → Binary.
+/// PDF → Pdf, Word (.doc/.docx) → Word (both text-extractable);
+/// images → Image; everything else → Binary.
 fn detect_mime_and_source(data: &[u8]) -> (String, SourceType) {
     match infer::get(data) {
         Some(t) if t.mime_type() == "application/pdf" => {
             ("application/pdf".to_string(), SourceType::Pdf)
+        }
+        Some(t)
+            if t.mime_type() == MIME_DOCX
+                || t.mime_type() == MIME_DOC
+                || t.mime_type() == MIME_OLE_STORAGE =>
+        {
+            (t.mime_type().to_string(), SourceType::Word)
         }
         Some(t) if t.matcher_type() == infer::MatcherType::Image => {
             (t.mime_type().to_string(), SourceType::Image)
@@ -501,10 +509,37 @@ impl FsService {
                 let chunks = self.meta.get_file_chunks(&file_id, None, None).await?;
                 Ok(chunks.into_iter().map(|c| c.content).collect::<String>())
             }
-            StorageType::Blob => Err(VedaError::InvalidInput(
-                "binary file; use raw byte read".into(),
-            )),
+            StorageType::Blob => {
+                self.read_extracted_text(&file_id, &file).await?.ok_or_else(|| {
+                    VedaError::InvalidInput(if file.source_type.is_extractable() {
+                        "文本提取尚未完成或该文件无法提取，可先用 search 检索其内容".into()
+                    } else {
+                        "binary file; use raw byte read".into()
+                    })
+                })
+            }
         }
+    }
+
+    /// Stored extracted text for an extractable blob (pdf/word), or `None`
+    /// when there is nothing trustworthy to serve: not an extractable type,
+    /// extraction still pending/failed, or the stored text belongs to an
+    /// older blob revision (sha mismatch after a rewrite — never serve
+    /// stale text as if it were current).
+    async fn read_extracted_text(
+        &self,
+        file_id: &str,
+        file: &FileRecord,
+    ) -> Result<Option<String>> {
+        if !file.source_type.is_extractable() {
+            return Ok(None);
+        }
+        Ok(self
+            .meta
+            .get_file_extract(file_id)
+            .await?
+            .filter(|ex| ex.source_sha256 == file.checksum_sha256)
+            .map(|ex| ex.content))
     }
 
     /// Read a file as raw bytes plus its mime type, regardless of storage.
@@ -553,8 +588,25 @@ impl FsService {
         raw_path: &str,
         max_bytes: u64,
     ) -> Result<api::FilePreview> {
-        let (_file_id, file) = self.resolve_file(workspace_id, raw_path).await?;
+        let (file_id, file) = self.resolve_file(workspace_id, raw_path).await?;
         if matches!(file.storage_type, StorageType::Blob) {
+            // Extractable blobs (pdf/word) with a fresh extraction preview as
+            // text — same shape a plain text file would have.
+            if let Some(text) = self.read_extracted_text(&file_id, &file).await? {
+                let total = text.len() as u64;
+                let mut end = (max_bytes.min(total)) as usize;
+                while end > 0 && !text.is_char_boundary(end) {
+                    end -= 1;
+                }
+                return Ok(api::FilePreview {
+                    path: raw_path.to_string(),
+                    size: total,
+                    truncated: total > max_bytes,
+                    is_binary: false,
+                    content: text[..end].to_string(),
+                    mime_type: file.mime_type,
+                });
+            }
             // Map the raw mime to a user-friendly Chinese kind for the
             // unsupported-preview message; fall back to a generic label.
             let kind = match file.mime_type.as_str() {
@@ -1205,6 +1257,7 @@ impl FsService {
                     tx.delete_file_content(old_fid).await?;
                     tx.delete_file_chunks(old_fid).await?;
                     tx.delete_file_blob(old_fid).await?;
+                    tx.delete_file_extract(old_fid).await?;
                     let outbox = make_outbox(workspace_id, OutboxEventType::ChunkDelete, old_fid);
                     tx.insert_outbox(&outbox).await?;
                     tx.delete_file(old_fid).await?;
@@ -1566,6 +1619,7 @@ async fn cleanup_file_if_orphan(
         tx.delete_file_content(file_id).await?;
         tx.delete_file_chunks(file_id).await?;
         tx.delete_file_blob(file_id).await?;
+        tx.delete_file_extract(file_id).await?;
         let outbox = make_outbox(workspace_id, OutboxEventType::ChunkDelete, file_id);
         tx.insert_outbox(&outbox).await?;
         tx.delete_file(file_id).await?;
@@ -1604,8 +1658,9 @@ async fn persist_write_meta(
 ///   embedding API's per-input token cap, status 400) — without an
 ///   independent trigger the file's L0/L1 and the parent dir's aggregate
 ///   would silently never compute.
-/// - `Pdf` → `ExtractSync`: worker extracts the text layer then embeds it
-///   into Milvus for search. The original PDF bytes stay in the blob store.
+/// - `Pdf` / `Word` → `ExtractSync`: worker extracts the text layer then
+///   embeds it into Milvus for search. The original bytes stay in the blob
+///   store.
 /// - `Image` / `Binary` → none: stored verbatim, not indexed.
 async fn enqueue_index_outbox(
     tx: &mut dyn MetadataTx,
@@ -1620,7 +1675,7 @@ async fn enqueue_index_outbox(
             let summary = make_outbox(workspace_id, OutboxEventType::SummarySync, file_id);
             tx.try_insert_outbox_for_file(&summary, file_id).await?;
         }
-        SourceType::Pdf => {
+        SourceType::Pdf | SourceType::Word => {
             let outbox = make_outbox(workspace_id, OutboxEventType::ExtractSync, file_id);
             tx.try_insert_outbox_for_file(&outbox, file_id).await?;
         }
@@ -1706,12 +1761,17 @@ async fn finalize_full_rewrite(
     tx.delete_file_content(old_file_id).await?;
     tx.delete_file_chunks(old_file_id).await?;
     tx.delete_file_blob(old_file_id).await?;
+    // The stored extract belongs to the old blob: drop it in the same tx so a
+    // rewrite can never leave text from a previous revision behind. If the new
+    // content is extractable again, ExtractSync rewrites the row; readers are
+    // additionally guarded by the source_sha256 check.
+    tx.delete_file_extract(old_file_id).await?;
     // Purge stale Milvus vectors only when the file leaves an indexed type
-    // (text/pdf) for an unindexed one (image/binary): nothing re-indexes it,
-    // so the vectors would orphan. Index→index rewrites (text↔pdf) skip this —
-    // the new ChunkSync/ExtractSync upserts over the old vectors and sweeps the
-    // tail, and an independent ChunkDelete would race that index event under
-    // the worker's concurrent dispatch.
+    // (text/pdf/word) for an unindexed one (image/binary): nothing re-indexes
+    // it, so the vectors would orphan. Index→index rewrites (text↔pdf↔word)
+    // skip this — the new ChunkSync/ExtractSync upserts over the old vectors
+    // and sweeps the tail, and an independent ChunkDelete would race that
+    // index event under the worker's concurrent dispatch.
     //
     // SINGLE-WORKER ASSUMPTION: this ChunkDelete correctly clears the old text
     // vectors only because the worker drains a claimed batch before the next
@@ -1721,8 +1781,10 @@ async fn finalize_full_rewrite(
     // re-embed. Under multi-worker concurrency that ordering isn't guaranteed:
     // a stale ChunkSync could re-upsert old text vectors after this delete.
     // Revisit before scaling the worker horizontally.
-    if matches!(old_file.source_type, SourceType::Text | SourceType::Pdf)
-        && matches!(meta.source_type, SourceType::Image | SourceType::Binary)
+    if matches!(
+        old_file.source_type,
+        SourceType::Text | SourceType::Pdf | SourceType::Word
+    ) && matches!(meta.source_type, SourceType::Image | SourceType::Binary)
     {
         let del = make_outbox(workspace_id, OutboxEventType::ChunkDelete, old_file_id);
         tx.insert_outbox(&del).await?;

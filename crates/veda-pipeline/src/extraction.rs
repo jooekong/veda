@@ -1,7 +1,10 @@
-use veda_types::{Result, VedaError};
+use veda_types::{Result, VedaError, MIME_DOC, MIME_DOCX, MIME_OLE_STORAGE};
+
+use crate::word;
 
 /// Best-effort text extraction from a file's raw bytes, for search indexing.
-/// Text files return their UTF-8 content; PDFs return their text layer.
+/// Text files return their UTF-8 content; PDFs their text layer; Word
+/// documents (.doc/.docx) their body text.
 pub fn extract_text(data: &[u8], mime_type: &str) -> Result<String> {
     match mime_type {
         "text/plain" | "text/plain; charset=utf-8" | "text/plain;charset=utf-8" => {
@@ -9,6 +12,10 @@ pub fn extract_text(data: &[u8], mime_type: &str) -> Result<String> {
                 .map_err(|e| VedaError::InvalidInput(format!("text/plain is not valid UTF-8: {e}")))
         }
         "application/pdf" => extract_pdf_text(data),
+        MIME_DOCX => word::extract_docx_text(data),
+        // x-ole-storage: OLE container of undetermined sub-type — attempt the
+        // Word path; extract_doc_text rejects non-Word OLE (xls/ppt) cleanly.
+        MIME_DOC | MIME_OLE_STORAGE => word::extract_doc_text(data),
         other => Err(VedaError::InvalidInput(format!(
             "unsupported mime type for extraction: {other}"
         ))),

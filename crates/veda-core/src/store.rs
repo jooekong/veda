@@ -77,6 +77,13 @@ pub trait MetadataStore: Send + Sync {
     async fn get_file_content(&self, file_id: &str) -> Result<Option<String>>;
     /// Read raw blob bytes for a binary file (storage_type = Blob).
     async fn get_file_blob(&self, file_id: &str) -> Result<Option<Vec<u8>>>;
+    /// Read the stored extracted text of an extractable blob (pdf/word).
+    async fn get_file_extract(&self, file_id: &str) -> Result<Option<FileExtract>>;
+    /// Insert-or-replace the extracted text for a blob. Written by the
+    /// ExtractSync worker after a successful extraction.
+    async fn upsert_file_extract(&self, extract: &FileExtract) -> Result<()>;
+    /// Drop the extracted text row (extraction failed / blob unextractable).
+    async fn delete_file_extract(&self, file_id: &str) -> Result<()>;
     async fn get_file_chunks(
         &self,
         file_id: &str,
@@ -336,6 +343,10 @@ pub trait MetadataTx: Send {
     async fn delete_file_content(&mut self, file_id: &str) -> Result<()>;
     async fn insert_file_blob(&mut self, file_id: &str, data: &[u8]) -> Result<()>;
     async fn delete_file_blob(&mut self, file_id: &str) -> Result<()>;
+    /// Drop the extracted-text row alongside the blob it came from. Called in
+    /// the same transaction as content/chunks/blob deletion on every rewrite
+    /// and delete path so a stale extract can never outlive its blob.
+    async fn delete_file_extract(&mut self, file_id: &str) -> Result<()>;
     async fn insert_file_chunks(&mut self, chunks: &[FileChunk]) -> Result<()>;
     async fn delete_file_chunks(&mut self, file_id: &str) -> Result<()>;
     /// Delete chunks with `chunk_index >= from_chunk_index`. Used by incremental

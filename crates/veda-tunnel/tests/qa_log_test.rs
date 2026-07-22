@@ -28,6 +28,7 @@ fn entry(bot: &str, outcome: &'static str, fid: &str) -> QaLogEntry {
         latency_ms: 4200,
         answer_text: "按 [1] 配置 maxConnectionAge=290…".to_string(),
         feedback_id: fid.to_string(),
+        tool_trace: None,
     }
 }
 

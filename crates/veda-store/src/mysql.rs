@@ -6,9 +6,9 @@ use sqlx::types::Json;
 use sqlx::{MySqlPool, Row, Transaction};
 use veda_core::store::{AuthStore, CollectionMetaStore, MetadataStore, MetadataTx, TaskQueue};
 use veda_types::{
-    Account, ApiKeyRecord, CollectionSchema, Dataset, Dentry, FileChunk, FileRecord, FileSummary,
-    FsEvent, OutboxEvent, OutboxEventType, OutboxStatus, Result, SourceType, StorageStats,
-    StorageType,
+    Account, ApiKeyRecord, CollectionSchema, Dataset, Dentry, FileChunk, FileExtract, FileRecord,
+    FileSummary, FsEvent, OutboxEvent, OutboxEventType, OutboxStatus, Result, SourceType,
+    StorageStats, StorageType,
     SummaryStatus, VedaError, Workspace, WorkspaceKey,
 };
 
@@ -411,6 +411,12 @@ impl MysqlStore {
             r#"CREATE TABLE IF NOT EXISTS veda_file_blobs (
     file_id VARCHAR(36) PRIMARY KEY,
     data LONGBLOB NOT NULL
+)"#,
+            r#"CREATE TABLE IF NOT EXISTS veda_file_extracts (
+    file_id VARCHAR(36) PRIMARY KEY,
+    content LONGTEXT NOT NULL,
+    source_sha256 VARCHAR(64) NOT NULL,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
 )"#,
             r#"CREATE TABLE IF NOT EXISTS veda_file_chunks (
     file_id VARCHAR(36) NOT NULL,
@@ -997,6 +1003,49 @@ impl MetadataStore for MysqlStore {
             .map(|r| r.try_get::<Vec<u8>, _>("data"))
             .transpose()
             .map_err(storage_err)?)
+    }
+
+    async fn get_file_extract(&self, file_id: &str) -> Result<Option<FileExtract>> {
+        let row = sqlx::query(
+            r#"SELECT content, source_sha256 FROM veda_file_extracts WHERE file_id = ?"#,
+        )
+        .bind(file_id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(storage_err)?;
+        row.map(|r| {
+            Ok(FileExtract {
+                file_id: file_id.to_string(),
+                content: r.try_get("content").map_err(storage_err)?,
+                source_sha256: r.try_get("source_sha256").map_err(storage_err)?,
+            })
+        })
+        .transpose()
+    }
+
+    async fn upsert_file_extract(&self, extract: &FileExtract) -> Result<()> {
+        sqlx::query(
+            r#"INSERT INTO veda_file_extracts (file_id, content, source_sha256)
+               VALUES (?, ?, ?)
+               ON DUPLICATE KEY UPDATE content = VALUES(content),
+                                       source_sha256 = VALUES(source_sha256)"#,
+        )
+        .bind(&extract.file_id)
+        .bind(&extract.content)
+        .bind(&extract.source_sha256)
+        .execute(&self.pool)
+        .await
+        .map_err(storage_err)?;
+        Ok(())
+    }
+
+    async fn delete_file_extract(&self, file_id: &str) -> Result<()> {
+        sqlx::query(r#"DELETE FROM veda_file_extracts WHERE file_id = ?"#)
+            .bind(file_id)
+            .execute(&self.pool)
+            .await
+            .map_err(storage_err)?;
+        Ok(())
     }
 
     async fn get_file_chunks(
@@ -1813,6 +1862,16 @@ impl MetadataTx for MysqlMetadataTx {
     async fn delete_file_blob(&mut self, file_id: &str) -> Result<()> {
         let t = self.tx_mut()?;
         sqlx::query(r#"DELETE FROM veda_file_blobs WHERE file_id = ?"#)
+            .bind(file_id)
+            .execute(t.as_mut())
+            .await
+            .map_err(storage_err)?;
+        Ok(())
+    }
+
+    async fn delete_file_extract(&mut self, file_id: &str) -> Result<()> {
+        let t = self.tx_mut()?;
+        sqlx::query(r#"DELETE FROM veda_file_extracts WHERE file_id = ?"#)
             .bind(file_id)
             .execute(t.as_mut())
             .await

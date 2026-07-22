@@ -64,10 +64,33 @@ pub enum StorageType {
 pub enum SourceType {
     Text,
     Pdf,
+    /// Word document (.doc legacy binary or .docx OOXML): stored as blob,
+    /// text-extracted for indexing like Pdf.
+    Word,
     Image,
     /// Opaque binary (jar/exe/zip/...): stored as blob, not indexed.
     Binary,
 }
+
+impl SourceType {
+    /// Blob types whose text layer is extracted and indexed via ExtractSync.
+    pub fn is_extractable(self) -> bool {
+        matches!(self, SourceType::Pdf | SourceType::Word)
+    }
+}
+
+/// The OOXML .docx mime, as detected by `infer` from magic bytes. Shared by
+/// mime→SourceType routing (veda-core) and the extractor dispatch
+/// (veda-pipeline) so the two can never drift apart.
+pub const MIME_DOCX: &str =
+    "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
+/// The legacy Word 97-2003 .doc mime.
+pub const MIME_DOC: &str = "application/msword";
+/// Generic OLE compound file: what `infer` reports for a .doc whose container
+/// violates the CFB spec (its strict sub-type probe can't open it — common
+/// with non-Microsoft writers like macOS textutil). Routed to the Word
+/// extractor, whose FIB-magic check cleanly rejects non-Word OLE (xls/ppt).
+pub const MIME_OLE_STORAGE: &str = "application/x-ole-storage";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -395,6 +418,18 @@ pub struct FileChunk {
     /// chunks whose content did not change.
     pub chunk_sha256: String,
     pub content: String,
+}
+
+/// Extracted full text of an extractable blob (pdf/word), written by the
+/// ExtractSync worker so read paths serve text without re-parsing the blob.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FileExtract {
+    pub file_id: String,
+    pub content: String,
+    /// `checksum_sha256` of the blob this text came from. Readers must compare
+    /// it against the file's current checksum — a mismatch means the blob was
+    /// rewritten and re-extraction is still in flight (treat as absent).
+    pub source_sha256: String,
 }
 
 // ── Outbox ─────────────────────────────────────────────

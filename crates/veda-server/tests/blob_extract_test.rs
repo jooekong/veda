@@ -23,6 +23,12 @@ use veda_types::{SourceType, StorageType, Workspace, WorkspaceKind, WorkspaceSta
 /// Milvus search path, and lossless blob round-trip.
 const PDF_BYTES: &[u8] = include_bytes!("fixtures/veda_e2e.pdf");
 
+/// Real .docx / .doc (textutil-generated) with sentinel "VEDA_WORD_SENTINEL_88"
+/// and Chinese text — shared with veda-pipeline's extractor unit tests.
+const DOCX_BYTES: &[u8] =
+    include_bytes!("../../veda-pipeline/tests/fixtures/veda_word_e2e.docx");
+const DOC_BYTES: &[u8] = include_bytes!("../../veda-pipeline/tests/fixtures/veda_word_e2e.doc");
+
 #[derive(Debug, Deserialize)]
 struct MysqlSection {
     database_url: String,
@@ -90,6 +96,14 @@ async fn cleanup(mysql: &MysqlStore, milvus: &MilvusStore, ws: &str, file_ids: &
     let _ = sqlx::query(
         r#"DELETE fb FROM veda_file_blobs fb
            INNER JOIN veda_files f ON fb.file_id = f.id
+           WHERE f.workspace_id = ?"#,
+    )
+    .bind(ws)
+    .execute(pool)
+    .await;
+    let _ = sqlx::query(
+        r#"DELETE fe FROM veda_file_extracts fe
+           INNER JOIN veda_files f ON fe.file_id = f.id
            WHERE f.workspace_id = ?"#,
     )
     .bind(ws)
@@ -246,4 +260,124 @@ async fn pdf_extracts_and_becomes_searchable_e2e() {
     assert_eq!(mime, "application/pdf");
 
     cleanup(&mysql, &milvus, &ws, &[pdf.file_id]).await;
+}
+
+/// Word documents (.docx + legacy .doc) run the full pipeline: upload →
+/// ExtractSync extracts + stores full text + embeds into Milvus → the file is
+/// searchable, its text readable via read_file/preview — and deleting it
+/// leaves no extract row behind.
+#[tokio::test]
+#[ignore]
+async fn word_extracts_readable_and_cleans_up_e2e() {
+    let cfg = load_config();
+    let mysql = Arc::new(MysqlStore::new(&cfg.mysql.database_url).await.unwrap());
+    mysql.migrate().await.unwrap();
+    let milvus = Arc::new(MilvusStore::new(
+        &cfg.milvus.url,
+        cfg.milvus.token.clone(),
+        cfg.milvus.db.clone(),
+    ));
+    milvus
+        .init_collections(cfg.embedding.dimension)
+        .await
+        .unwrap();
+    let embedding = Arc::new(
+        EmbeddingProvider::new(
+            &cfg.embedding.api_url,
+            &cfg.embedding.api_key,
+            &cfg.embedding.model,
+            Some(cfg.embedding.dimension),
+            cfg.embedding.batch_size,
+        )
+        .unwrap(),
+    );
+    let fs = FsService::new(mysql.clone());
+    let ws = make_workspace(&mysql).await;
+
+    let docx = fs
+        .write_blob(&ws, "/w.docx", DOCX_BYTES.to_vec(), None)
+        .await
+        .unwrap();
+    let doc = fs
+        .write_blob(&ws, "/w.doc", DOC_BYTES.to_vec(), None)
+        .await
+        .unwrap();
+    for (fid, want_src) in [(&docx.file_id, SourceType::Word), (&doc.file_id, SourceType::Word)] {
+        let f = mysql.get_file(fid).await.unwrap().unwrap();
+        assert_eq!(f.source_type, want_src);
+        assert_eq!(f.storage_type, StorageType::Blob);
+    }
+
+    // Before the worker runs, the text read is a clear "pending" error.
+    let err = fs.read_file(&ws, "/w.docx").await.unwrap_err();
+    assert!(err.to_string().contains("提取"), "err: {err}");
+
+    let worker = Worker::new(
+        mysql.clone(),
+        mysql.clone(),
+        milvus.clone(),
+        embedding.clone(),
+        None,
+        4,
+        1,
+        2048,
+    );
+    let (tx, rx) = watch::channel(false);
+    let h = tokio::spawn(async move { worker.run(rx).await });
+    let deadline = std::time::Instant::now() + Duration::from_secs(120);
+    loop {
+        tokio::time::sleep(Duration::from_secs(3)).await;
+        let a = mysql.get_file(&docx.file_id).await.unwrap().unwrap();
+        let b = mysql.get_file(&doc.file_id).await.unwrap().unwrap();
+        if (a.last_embedded_content_hash.is_some() && b.last_embedded_content_hash.is_some())
+            || std::time::Instant::now() > deadline
+        {
+            break;
+        }
+    }
+    let _ = tx.send(true);
+    let _ = h.await;
+
+    // Both files' extracted text is indexed in Milvus…
+    let file_ids = milvus.list_chunk_file_ids(&ws).await.unwrap();
+    assert!(file_ids.contains(&docx.file_id), "docx chunks missing in Milvus");
+    assert!(file_ids.contains(&doc.file_id), "doc chunks missing in Milvus");
+
+    // …the stored extract serves read_file with sentinel + Chinese intact…
+    for path in ["/w.docx", "/w.doc"] {
+        let text = fs.read_file(&ws, path).await.unwrap();
+        assert!(text.contains("VEDA_WORD_SENTINEL_88"), "{path}: {text:?}");
+        assert!(text.contains("中文段落"), "{path}: {text:?}");
+        let p = fs.read_file_preview(&ws, path, 64 * 1024).await.unwrap();
+        assert!(!p.is_binary, "{path} preview must be text");
+        assert!(p.content.contains("VEDA_WORD_SENTINEL_88"), "{path}");
+    }
+
+    // …and the original bytes still round-trip.
+    let (bytes, _) = fs.read_file_raw(&ws, "/w.doc").await.unwrap();
+    assert_eq!(bytes, DOC_BYTES);
+
+    // Deleting the file removes its extract row in the same transaction —
+    // no orphaned extracted text may survive.
+    let count_extracts = |fid: String| {
+        let pool = mysql.pool().clone();
+        async move {
+            let row: (i64,) =
+                sqlx::query_as("SELECT COUNT(*) FROM veda_file_extracts WHERE file_id = ?")
+                    .bind(&fid)
+                    .fetch_one(&pool)
+                    .await
+                    .unwrap();
+            row.0
+        }
+    };
+    assert_eq!(count_extracts(docx.file_id.clone()).await, 1);
+    fs.delete(&ws, "/w.docx").await.unwrap();
+    assert_eq!(
+        count_extracts(docx.file_id.clone()).await,
+        0,
+        "extract row must be deleted with the file"
+    );
+
+    cleanup(&mysql, &milvus, &ws, &[docx.file_id, doc.file_id]).await;
 }

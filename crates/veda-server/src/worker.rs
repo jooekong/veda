@@ -443,9 +443,19 @@ impl Worker {
             return Ok(());
         };
 
-        if !force_reembed
-            && file.last_embedded_content_hash.as_deref() == Some(file.checksum_sha256.as_str())
-        {
+        // "Fresh" = the stored extract matches the current blob. Embeddings
+        // and the extract row are maintained together, but the row can lag
+        // (pre-extract-table files, a crash between upsert and watermark), so
+        // it is checked independently: a watermark hit with a stale/missing
+        // extract still re-extracts below — it only skips the embed.
+        let extract_fresh = self
+            .meta
+            .get_file_extract(file_id)
+            .await?
+            .is_some_and(|ex| ex.source_sha256 == file.checksum_sha256);
+        let embed_current = !force_reembed
+            && file.last_embedded_content_hash.as_deref() == Some(file.checksum_sha256.as_str());
+        if embed_current && extract_fresh {
             debug!(file_id, "extract_sync skipped: content unchanged since last embed");
             return Ok(());
         }
@@ -455,19 +465,22 @@ impl Worker {
             return Ok(());
         };
 
-        // PDF parsing is CPU-heavy and can panic on malformed input. Run it on
-        // the blocking pool; a panic surfaces as a JoinError and is handled as
-        // a skip rather than crashing the worker or dead-lettering the file.
+        // PDF/Word parsing is CPU-heavy and can panic on malformed input. Run
+        // it on the blocking pool; a panic surfaces as a JoinError and is
+        // handled as a skip rather than crashing the worker or dead-lettering
+        // the file.
         let mime = file.mime_type.clone();
         let extracted = tokio::task::spawn_blocking(move || extract_text(&data, &mime)).await;
         let text = match extracted {
             Ok(Ok(t)) => t,
             Ok(Err(e)) => {
                 warn!(workspace_id, file_id, error = %e, "extract_sync skipped: extraction failed");
-                // Drop any vectors from a prior successful extract so a PDF
-                // rewritten into an unextractable one stops serving stale hits,
-                // then watermark so we don't retry the doomed extract forever.
+                // Drop any vectors and stored text from a prior successful
+                // extract so a blob rewritten into an unextractable one stops
+                // serving stale content, then watermark so we don't retry the
+                // doomed extract forever.
                 self.vector.delete_chunks(workspace_id, file_id).await?;
+                self.meta.delete_file_extract(file_id).await?;
                 self.meta
                     .update_file_content_hash(file_id, &file.checksum_sha256)
                     .await?;
@@ -476,6 +489,7 @@ impl Worker {
             Err(join_err) => {
                 warn!(workspace_id, file_id, error = %join_err, "extract_sync skipped: extractor panicked");
                 self.vector.delete_chunks(workspace_id, file_id).await?;
+                self.meta.delete_file_extract(file_id).await?;
                 self.meta
                     .update_file_content_hash(file_id, &file.checksum_sha256)
                     .await?;
@@ -483,8 +497,23 @@ impl Worker {
             }
         };
 
-        let sem_chunks = semantic_chunk(&text, 2048);
-        drop(text);
+        // Persist the full text before embedding: read paths can serve it
+        // immediately, and a crash mid-embed re-runs this upsert (idempotent,
+        // keyed on file_id) on the next outbox claim.
+        let extract = veda_types::FileExtract {
+            file_id: file_id.to_string(),
+            content: text,
+            source_sha256: file.checksum_sha256.clone(),
+        };
+        self.meta.upsert_file_extract(&extract).await?;
+
+        if embed_current {
+            debug!(file_id, "extract_sync: refreshed stored extract; embeddings already current");
+            return Ok(());
+        }
+
+        let sem_chunks = semantic_chunk(&extract.content, 2048);
+        drop(extract);
         self.embed_and_watermark(workspace_id, file_id, &file.checksum_sha256, sem_chunks)
             .await
     }

@@ -58,6 +58,7 @@ fn source_type_str(s: veda_types::SourceType) -> &'static str {
     match s {
         veda_types::SourceType::Text => "text",
         veda_types::SourceType::Pdf => "pdf",
+        veda_types::SourceType::Word => "word",
         veda_types::SourceType::Image => "image",
         veda_types::SourceType::Binary => "binary",
     }

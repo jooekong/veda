@@ -291,11 +291,11 @@ impl Reconciler {
             // Route the repair by source type. Image/binary blobs are never
             // indexed, so their absence from Milvus is expected — skip them
             // (otherwise the worker would dead-letter a ChunkSync it can't run).
-            // PDFs are indexed via ExtractSync, text via ChunkSync.
+            // PDFs/Word docs are indexed via ExtractSync, text via ChunkSync.
             let event_type = match self.meta.get_file(fid).await? {
                 Some(f) => match f.source_type {
                     SourceType::Text => OutboxEventType::ChunkSync,
-                    SourceType::Pdf => OutboxEventType::ExtractSync,
+                    SourceType::Pdf | SourceType::Word => OutboxEventType::ExtractSync,
                     SourceType::Image | SourceType::Binary => continue,
                 },
                 None => continue, // file vanished since the snapshot

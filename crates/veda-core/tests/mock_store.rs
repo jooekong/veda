@@ -13,6 +13,7 @@ pub struct MockState {
     pub files: Vec<FileRecord>,
     pub file_contents: HashMap<String, String>,
     pub file_blobs: HashMap<String, Vec<u8>>,
+    pub file_extracts: HashMap<String, FileExtract>,
     pub file_chunks: Vec<FileChunk>,
     pub outbox: Vec<OutboxEvent>,
     pub fs_events: Vec<FsEvent>,
@@ -122,6 +123,23 @@ impl MetadataStore for MockMetadataStore {
     async fn get_file_blob(&self, file_id: &str) -> Result<Option<Vec<u8>>> {
         let st = self.state.lock().unwrap();
         Ok(st.file_blobs.get(file_id).cloned())
+    }
+
+    async fn get_file_extract(&self, file_id: &str) -> Result<Option<FileExtract>> {
+        let st = self.state.lock().unwrap();
+        Ok(st.file_extracts.get(file_id).cloned())
+    }
+
+    async fn upsert_file_extract(&self, extract: &FileExtract) -> Result<()> {
+        let mut st = self.state.lock().unwrap();
+        st.file_extracts.insert(extract.file_id.clone(), extract.clone());
+        Ok(())
+    }
+
+    async fn delete_file_extract(&self, file_id: &str) -> Result<()> {
+        let mut st = self.state.lock().unwrap();
+        st.file_extracts.remove(file_id);
+        Ok(())
     }
 
     async fn get_file_chunks(
@@ -562,6 +580,12 @@ impl MetadataTx for MockTx {
     async fn delete_file_blob(&mut self, file_id: &str) -> Result<()> {
         let mut st = self.state.lock().unwrap();
         st.file_blobs.remove(file_id);
+        Ok(())
+    }
+
+    async fn delete_file_extract(&mut self, file_id: &str) -> Result<()> {
+        let mut st = self.state.lock().unwrap();
+        st.file_extracts.remove(file_id);
         Ok(())
     }
 

@@ -68,6 +68,132 @@ async fn blob_pdf_detected_enqueues_extract() {
         .any(|e| e.event_type == OutboxEventType::ChunkSync));
 }
 
+/// Real .docx / .doc fixtures shared with veda-pipeline's extractor tests,
+/// so the infer-based mime detection runs against genuine files.
+const DOCX_BYTES: &[u8] =
+    include_bytes!("../../veda-pipeline/tests/fixtures/veda_word_e2e.docx");
+const DOC_BYTES: &[u8] = include_bytes!("../../veda-pipeline/tests/fixtures/veda_word_e2e.doc");
+
+#[tokio::test]
+async fn blob_word_detected_enqueues_extract() {
+    for (path, data, mime) in [
+        ("/a.docx", DOCX_BYTES, MIME_DOCX),
+        // Genuine MS Word writer → infer's sub-type probe succeeds.
+        (
+            "/b.doc",
+            include_bytes!("../../veda-pipeline/tests/fixtures/msword_sample.doc") as &[u8],
+            MIME_DOC,
+        ),
+        // Spec-violating writer (macOS textutil): infer can't open the
+        // container to sub-type it, so it reports the generic OLE mime —
+        // still routed to Word so the permissive extractor gets its shot.
+        ("/c.doc", DOC_BYTES, MIME_OLE_STORAGE),
+    ] {
+        let (svc, state) = make_service();
+        let resp = svc.write_blob("ws1", path, data.to_vec(), None).await.unwrap();
+        let st = state.lock().unwrap();
+        let f = st.files.iter().find(|f| f.id == resp.file_id).unwrap();
+        assert_eq!(f.mime_type, mime, "{path}");
+        assert_eq!(f.source_type, SourceType::Word, "{path}");
+        assert!(st.outbox.iter().any(|e| e.event_type == OutboxEventType::ExtractSync));
+        assert!(!st.outbox.iter().any(|e| e.event_type == OutboxEventType::ChunkSync));
+    }
+}
+
+/// Insert a stored extract for `file_id`, keyed to the given source hash.
+fn seed_extract(
+    state: &Arc<std::sync::Mutex<mock_store::MockState>>,
+    file_id: &str,
+    content: &str,
+    source_sha256: &str,
+) {
+    state.lock().unwrap().file_extracts.insert(
+        file_id.to_string(),
+        FileExtract {
+            file_id: file_id.to_string(),
+            content: content.to_string(),
+            source_sha256: source_sha256.to_string(),
+        },
+    );
+}
+
+#[tokio::test]
+async fn blob_word_read_serves_fresh_extract_only() {
+    let (svc, state) = make_service();
+    let resp = svc.write_blob("ws1", "/w.docx", DOCX_BYTES.to_vec(), None).await.unwrap();
+
+    // No extract row yet → "extraction pending", not the generic binary error.
+    let err = svc.read_file("ws1", "/w.docx").await.unwrap_err();
+    assert!(matches!(err, VedaError::InvalidInput(ref m) if m.contains("提取")), "err: {err}");
+
+    // Fresh extract (sha matches the blob) → served as text.
+    let sha = {
+        let st = state.lock().unwrap();
+        st.files.iter().find(|f| f.id == resp.file_id).unwrap().checksum_sha256.clone()
+    };
+    seed_extract(&state, &resp.file_id, "extracted word text", &sha);
+    assert_eq!(svc.read_file("ws1", "/w.docx").await.unwrap(), "extracted word text");
+
+    // Stale extract (sha from an older blob revision) → treated as absent,
+    // never served.
+    seed_extract(&state, &resp.file_id, "stale text", "deadbeef");
+    let err = svc.read_file("ws1", "/w.docx").await.unwrap_err();
+    assert!(matches!(err, VedaError::InvalidInput(_)), "err: {err}");
+}
+
+#[tokio::test]
+async fn blob_word_preview_serves_extract_as_text() {
+    let (svc, state) = make_service();
+    let resp = svc.write_blob("ws1", "/w.docx", DOCX_BYTES.to_vec(), None).await.unwrap();
+    let sha = {
+        let st = state.lock().unwrap();
+        st.files.iter().find(|f| f.id == resp.file_id).unwrap().checksum_sha256.clone()
+    };
+    seed_extract(&state, &resp.file_id, "提取的中文文本内容", &sha);
+
+    let p = svc.read_file_preview("ws1", "/w.docx", 1024).await.unwrap();
+    assert!(!p.is_binary);
+    assert_eq!(p.content, "提取的中文文本内容");
+    assert!(!p.truncated);
+
+    // Tiny max_bytes: truncates on a char boundary instead of panicking
+    // mid-UTF-8.
+    let p = svc.read_file_preview("ws1", "/w.docx", 4).await.unwrap();
+    assert!(p.truncated);
+    assert_eq!(p.content, "提");
+
+    // Without a fresh extract the preview falls back to the binary notice.
+    seed_extract(&state, &resp.file_id, "stale", "deadbeef");
+    let p = svc.read_file_preview("ws1", "/w.docx", 1024).await.unwrap();
+    assert!(p.is_binary);
+    assert!(p.content.contains("Word"), "content: {}", p.content);
+}
+
+#[tokio::test]
+async fn delete_word_blob_purges_extract() {
+    let (svc, state) = make_service();
+    let resp = svc.write_blob("ws1", "/w.docx", DOCX_BYTES.to_vec(), None).await.unwrap();
+    seed_extract(&state, &resp.file_id, "text", "sha");
+    svc.delete("ws1", "/w.docx").await.unwrap();
+    assert!(state.lock().unwrap().file_extracts.is_empty(), "extract row must die with the file");
+}
+
+#[tokio::test]
+async fn overwrite_word_blob_purges_stale_extract() {
+    let (svc, state) = make_service();
+    let resp = svc.write_blob("ws1", "/w.docx", DOCX_BYTES.to_vec(), None).await.unwrap();
+    seed_extract(&state, &resp.file_id, "old text", "sha-old");
+
+    // Rewrite the same path with different binary content (a PNG): the old
+    // extract must be dropped in the same transaction, not survive as junk.
+    let png = b"\x89PNG\r\n\x1a\n\0\0\0\rIHDRpng".to_vec();
+    svc.write_blob("ws1", "/w.docx", png, None).await.unwrap();
+    assert!(
+        state.lock().unwrap().file_extracts.is_empty(),
+        "rewrite must purge the previous revision's extract"
+    );
+}
+
 #[tokio::test]
 async fn blob_image_stored_not_indexed() {
     let (svc, state) = make_service();

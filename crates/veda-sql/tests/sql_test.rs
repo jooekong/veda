@@ -89,6 +89,15 @@ impl MetadataStore for MockMetaFull {
     async fn get_file_blob(&self, _id: &str) -> Result<Option<Vec<u8>>> {
         Ok(None)
     }
+    async fn get_file_extract(&self, _id: &str) -> Result<Option<FileExtract>> {
+        Ok(None)
+    }
+    async fn upsert_file_extract(&self, _extract: &FileExtract) -> Result<()> {
+        Ok(())
+    }
+    async fn delete_file_extract(&self, _id: &str) -> Result<()> {
+        Ok(())
+    }
     async fn get_file_chunks(
         &self,
         _id: &str,
@@ -405,6 +414,9 @@ impl MetadataTx for MockMetaFullTx {
     async fn delete_file_blob(&mut self, _id: &str) -> Result<()> {
         Ok(())
     }
+    async fn delete_file_extract(&mut self, _id: &str) -> Result<()> {
+        Ok(())
+    }
     async fn insert_file_chunks(&mut self, _chunks: &[FileChunk]) -> Result<()> {
         Ok(())
     }
@@ -539,6 +551,15 @@ impl MetadataStore for MockMeta {
     }
     async fn get_file_blob(&self, _id: &str) -> Result<Option<Vec<u8>>> {
         Ok(None)
+    }
+    async fn get_file_extract(&self, _id: &str) -> Result<Option<FileExtract>> {
+        Ok(None)
+    }
+    async fn upsert_file_extract(&self, _extract: &FileExtract) -> Result<()> {
+        Ok(())
+    }
+    async fn delete_file_extract(&self, _id: &str) -> Result<()> {
+        Ok(())
     }
     async fn get_file_chunks(
         &self,

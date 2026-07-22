@@ -19,6 +19,12 @@ metrics = "0.24"
 moka.workspace = true
 unicode-normalization.workspace = true
 pdf-extract = "0.10.0"
+# Word extraction: docx = zip container + XML; doc = hand-rolled permissive
+# OLE/CFB reader (real-world writers violate the spec harder than the strict
+# `cfb` crate tolerates) + Word 97 piece table; cp1252/utf-16 decode.
+zip = { version = "2", default-features = false, features = ["deflate"] }
+quick-xml = "0.37"
+encoding_rs = "0.8"
 
 [dev-dependencies]
 toml.workspace = true
