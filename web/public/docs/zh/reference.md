@@ -274,6 +274,21 @@ app_id 账号是 passwordless 的：不能 login、不能 claim，`app_id` 与 `
 
 定义 schema + 自动嵌入字段，按字段过滤搜索。`POST /v1/collections`（建）、`GET /v1/collections`（列）、`GET/DELETE /v1/collections/{name}`、`POST /v1/collections/{name}/rows`（插入，body 是 JSON 数组）、`POST /v1/collections/{name}/search`（`{ query, limit? }`）。过滤 / 聚合走 `veda sql`。
 
+### MCP 端点（`POST /mcp`）
+
+给 Coding Agent(Claude Code / Cursor / Codex)的原生工具面——[MCP](https://modelcontextprotocol.io)(Model Context Protocol)Streamable HTTP transport 的 **stateless** 模式,协议版本 `2025-06-18`。用户侧零安装,配置示例见 [AI 助手集成](#/docs/skill)。
+
+- **鉴权**:与 REST 数据面同一道闸——`Authorization: Bearer wk_…`(fs workspace;db kind 返 400)。只读 `wk_` 全功能可用(6 个工具均只读),这是推荐发给消费者的 key。
+- **协议行为**:每个 POST 一条 JSON-RPC 消息、回一个 JSON 响应;无 `id` 字段的 notification 返 `202`;不支持 batch;`GET /mcp` 返 `405`(无服务端 SSE 下行流);请求头 `MCP-Protocol-Version` 若存在且非支持版本返 `400`。
+- **工具(6 个,均只读)**:`search`(hybrid 检索,`detail_level` 三层)/ `grep`(字面量,带行号,匹配行截断 500B)/ `read_file`(PDF/Word 返提取文本;整读上限 64KB,`start_line`/`end_line` 分页)/ `list_dir`(`recursive` 上限 10000 条)/ `overview`(L1 摘要,未就绪/未启用返回可读提示)/ `ask`(等价 `POST /v1/answer` 非流式,带 citations;与 REST 共享每 workspace 并发上限,超出返回「too many concurrent」提示,10–90s)。
+- **错误语义**:协议错误(坏 JSON、未知方法/工具、参数校验)→ JSON-RPC `error`;领域错误(文件不存在、功能未启用、限流、超时)→ `result.isError=true` + 可读文本,调用方 LLM 可据此自愈。
+- 冒烟示例:
+
+```bash
+curl -s -H "Authorization: Bearer wk_..." -H 'Content-Type: application/json' \
+  -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}' https://<入口>/mcp
+```
+
 ### 变更流（`GET /v1/events`，SSE）
 
 游标式订阅 workspace 变更：`?since_id`（默认 0）、`?path_prefix`。`text/event-stream`，每条事件 `{ id, event_type, path, file_id }`。FUSE / 多实例靠它做近实时失效（~120s 内）。这是**裸 SSE 协议**（错误体不走 `ApiResponse` 信封），`410` 表示游标已过保留窗口、需重新订阅。

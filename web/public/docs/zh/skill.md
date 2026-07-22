@@ -1,10 +1,46 @@
-# AI 助手集成（Skill）
+# AI 助手集成（MCP / Skill）
 
-Veda 把 CLI 用法整理成了一份 [`skill.md`](http://git.ddxq.mobi/middleware/dbpaas/veda/-/raw/main/skill.md)：用法、决策表、错误码、不能做的事。下面是怎么把它装到不同的 AI 工具里。
+给 AI 工具接 veda 有两条路,按需选:
+
+| 路径 | 适用 | 安装 |
+|---|---|---|
+| **MCP(推荐)** | 在 Coding Agent 里**查**知识库(检索/读文件/问答),Claude Code / Cursor / Codex 全通用 | **零安装**,配一段 JSON |
+| CLI + skill.md | 需要**写**(上传/删除/目录维护)、脚本化、或用 FUSE/SQL 全量能力 | 装 `veda` CLI |
 
 ---
 
-## Claude Code（最简单，自动）
+## MCP 接入（推荐,零安装）
+
+veda-server 原生提供 MCP 端点(`POST /mcp`,Streamable HTTP,协议 2025-06-18)。你只需要一个 fs workspace 的 `wk_`(建议找管理员要**只读** key),在 agent 的 MCP 配置里加一段:
+
+```json
+// Claude Code: 项目根 .mcp.json / Cursor: .cursor/mcp.json
+{
+  "mcpServers": {
+    "veda-wiki": {
+      "type": "http",
+      "url": "https://<你的-veda-入口>/mcp",
+      "headers": { "Authorization": "Bearer wk_你的key" }
+    }
+  }
+}
+```
+
+配好后 agent 自动获得 6 个只读工具,不需要任何提示词教学:
+
+`search`(混合语义+关键词检索,支持 L0/L1/L2 分层省 token)· `grep`(字面量定位,带行号)· `read_file`(PDF/Word 返回提取文本)· `list_dir` · `overview`(L1 结构化概览)· `ask`(一站式 RAG 问答,带 `[n]` 引用出处)
+
+要点:
+
+- **一个条目绑一个 workspace**(key 决定)。接多个知识库就配多个条目,起不同名字(`veda-wiki` / `veda-api-docs`)。
+- `.mcp.json` 可以提交进项目 git 仓库,团队 clone 即用(key 建议走各自环境注入,不要把 key 提交进库)。
+- 工具全只读——上传维护知识库内容走下方的 CLI 路径。
+- 个别只支持 stdio 的老工具,用社区 [`mcp-remote`](https://www.npmjs.com/package/mcp-remote) 桥接到同一个 url 即可。
+- 端点协议细节见 [API 参考的 MCP 章节](#/docs/reference)。
+
+---
+
+## Claude Code（CLI + skill,需要写操作时）
 
 `install.sh` 检测到 `~/.claude` 存在时，会自动把 skill 装到 Claude Code 的 skills 目录：
 

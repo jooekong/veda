@@ -1,10 +1,46 @@
-# AI agent integration (Skill)
+# AI agent integration (MCP / Skill)
 
-Veda ships an agent-facing [`skill.md`](http://git.ddxq.mobi/middleware/dbpaas/veda/-/raw/main/skill.md): commands, decision tables, error codes, and what not to do. Below is how to install it into different AI tools.
+Two ways to wire an AI tool to veda — pick by need:
+
+| Path | Use when | Install |
+|---|---|---|
+| **MCP (recommended)** | A coding agent needs to **query** the knowledge base (search / read / Q&A); works natively in Claude Code / Cursor / Codex | **Zero install** — one JSON block |
+| CLI + skill.md | You need **writes** (upload / delete / maintenance), scripting, or the full FUSE/SQL surface | Install the `veda` CLI |
 
 ---
 
-## Claude Code (auto)
+## MCP (recommended, zero install)
+
+veda-server natively serves an MCP endpoint (`POST /mcp`, Streamable HTTP transport, protocol `2025-06-18`). All you need is a fs-workspace `wk_` (ask your admin for a **read-only** one) and one config block:
+
+```json
+// Claude Code: .mcp.json at project root / Cursor: .cursor/mcp.json
+{
+  "mcpServers": {
+    "veda-wiki": {
+      "type": "http",
+      "url": "https://<your-veda-host>/mcp",
+      "headers": { "Authorization": "Bearer wk_yourkey" }
+    }
+  }
+}
+```
+
+The agent then discovers six read-only tools — no prompt engineering needed:
+
+`search` (hybrid semantic+keyword, tiered L0/L1/L2 detail) · `grep` (literal, line numbers) · `read_file` (PDF/Word return extracted text) · `list_dir` · `overview` (L1 structured summary) · `ask` (one-shot RAG answer with `[n]` citations)
+
+Notes:
+
+- **One entry binds one workspace** (the key decides). Multiple knowledge bases = multiple entries with distinct names.
+- `.mcp.json` can live in your project's git repo so teammates get it on clone (inject the key via env, don't commit it).
+- Tools are read-only — content maintenance goes through the CLI path below.
+- For stdio-only clients, bridge with the community [`mcp-remote`](https://www.npmjs.com/package/mcp-remote) package.
+- Protocol details: see the MCP section in the [API reference](#/docs/reference).
+
+---
+
+## Claude Code (CLI + skill, when you need writes)
 
 `install.sh` detects `~/.claude` and drops the skill into Claude Code's skill directory automatically:
 

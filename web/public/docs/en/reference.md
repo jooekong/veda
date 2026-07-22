@@ -273,6 +273,21 @@ Every file / directory gets auto-generated layered summaries — fetch on demand
 
 Define a schema + an auto-embedded field, then filter and search by field. `POST /v1/collections` (create), `GET /v1/collections` (list), `GET/DELETE /v1/collections/{name}`, `POST /v1/collections/{name}/rows` (insert; body is a JSON array), `POST /v1/collections/{name}/search` (`{ query, limit? }`). Filters / aggregates go through `veda sql`.
 
+### MCP endpoint (`POST /mcp`)
+
+Native tool surface for coding agents (Claude Code / Cursor / Codex) — [MCP](https://modelcontextprotocol.io) Streamable HTTP transport in **stateless** mode, protocol revision `2025-06-18`. Zero client install; config examples in [AI agent integration](#/docs/skill).
+
+- **Auth**: the same gate as the REST data plane — `Authorization: Bearer wk_…` (fs workspace; db kind → 400). A read-only `wk_` runs every tool (all six are read-only) and is the recommended key to hand to consumers.
+- **Protocol behavior**: one JSON-RPC message per POST, one JSON response; notifications (no `id` member) → `202`; batches unsupported; `GET /mcp` → `405` (no server-initiated SSE stream); an `MCP-Protocol-Version` header with an unsupported value → `400`.
+- **Tools (6, all read-only)**: `search` (hybrid, tiered `detail_level`) / `grep` (literal, line numbers, matched lines clipped at 500B) / `read_file` (PDF/Word return extracted text; whole-file reads capped at 64KB, page with `start_line`/`end_line`) / `list_dir` (`recursive` capped at 10000 entries) / `overview` (L1 summary; pending/disabled return readable notices) / `ask` (equivalent to non-streaming `POST /v1/answer`, with citations; shares the per-workspace concurrency cap with REST — excess returns a "too many concurrent" notice; 10–90s).
+- **Error split**: protocol errors (bad JSON, unknown method/tool, invalid params) → JSON-RPC `error`; domain errors (missing file, feature disabled, throttled, timeout) → `result.isError=true` with readable text the calling LLM can react to.
+- Smoke test:
+
+```bash
+curl -s -H "Authorization: Bearer wk_..." -H 'Content-Type: application/json' \
+  -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}' https://<host>/mcp
+```
+
 ### Change stream (`GET /v1/events`, SSE)
 
 Cursor-based subscription to workspace changes: `?since_id` (default 0), `?path_prefix`. `text/event-stream`; each event is `{ id, event_type, path, file_id }`. FUSE / multi-instance setups rely on it for near-real-time invalidation (within ~120s). This is **raw SSE** (error bodies don't use the `ApiResponse` envelope); `410` means the cursor has fallen out of the retention window — resubscribe.

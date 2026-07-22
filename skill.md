@@ -12,6 +12,12 @@ description: |
 Veda is a multi-tenant knowledge store: files + vector search + SQL, all through
 one CLI. Interact via the `veda` binary; never construct HTTP requests directly.
 
+> **If a veda MCP server is configured in this session** (tools like
+> `search`/`grep`/`read_file`/`ask` from an MCP server named `veda-*`), prefer
+> those MCP tools for all read-only retrieval — they are faster to call and
+> need no CLI setup. Use this CLI for what MCP does not cover: uploads and
+> file maintenance (`cp`/`rm`/`mv`/`mkdir`), SQL, collections, and FUSE.
+
 ## Quick start
 
 ```sh
