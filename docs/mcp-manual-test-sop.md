@@ -45,11 +45,25 @@ curl -s --noproxy '*' -o /dev/null -w '%{http_code}\n' -H "Authorization: Bearer
 
 ## 2. 准备测试语料
 
+现成语料在 **`docs/sop-fixtures/mcp/`**(五种格式,每个文件一个主题 + 一个 grep 用哨兵词):
+
+| 文件 | 主题 | 哨兵(grep 用) | ask 可问 |
+|---|---|---|---|
+| `deploy-guide.md` | 部署指南 | `SOP_MD_SENTINEL_71` | 「发布的灰度顺序是什么?」→ 金丝雀→全量测试→生产 |
+| `oncall-handbook.txt` | 值班手册 | `SOP_TXT_SENTINEL_72` | 「P0 故障要求多久响应?」→ 五分钟 |
+| `api-style.html` | API 规范 | `SOP_HTML_SENTINEL_73` | 「列表接口分页参数是什么?」→ page/size,单页上限一百 |
+| `vector-intro.pdf` | 向量检索入门 | `SOP_PDF_SENTINEL_74` | 「为什么推荐混合检索?」→ 字面+语义互补 |
+| `db-migration.docx` | 数据库迁移须知 | `SOP_DOCX_SENTINEL_75` | 「大表回填每批多少行?」→ 一万行以内 |
+| `legacy-notes.doc` | 遗留系统备忘 | `SOP_DOC_SENTINEL_76` | 「老网关为什么不能下线?」→ 两个外部回调,明年一季度截止 |
+
 ```bash
-# 传几个真实 wiki 页(md/docx/pdf 混合),等索引完成
-veda cp -r ./wiki-sample /mcp-test        # 或 curl PUT /v1/fs/...
-# 约 30-60s 后(异步 embedding)用 REST search 确认可搜,再进 §3
+# 上传(在 repo 根目录):
+veda cp -r docs/sop-fixtures/mcp /mcp-test        # 或逐个 curl PUT /v1/fs/mcp-test/...
+# 约 30-60s 后(异步 embedding;pdf/word 多一道提取)用 §1 的 curl 或 REST search
+# 搜任一哨兵词确认已可检索,再进 §3
 ```
+
+> 注意:`api-style.html` 会连标签一起入库(HTML 暂无提取器)——read_file 读它看到标签属**已知现状**,顺带就是方案 §6 的质量实验样本,不算 bug。
 
 ## 3. Claude Code 接入(核心场景)
 
@@ -78,18 +92,74 @@ veda cp -r ./wiki-sample /mcp-test        # 或 curl PUT /v1/fs/...
 
 `.cursor/mcp.json` 内容同上(Cursor ≥0.46 支持 streamable http + headers)。Settings → MCP 里确认 veda-wiki 绿灯、工具可见,Chat 里同 §3 验证。
 
-## 5. 逐工具验证清单
+## 5. 逐工具手动测试用例
 
-| # | 工具 | 动作 | 预期 |
-|---|---|---|---|
-| 1 | search | 问语料里的语义问题(换个说法,别用原词) | 命中正确文件;`detail_level:"abstract"` 时每 hit 带 l0_abstract |
-| 2 | grep | 搜语料里的精确标识符 | 返回 path + 1-indexed line_no;超长行被截到 ~500B 加 `…` |
-| 3 | read_file | 读一个 docx/pdf 的 path | 返回**提取文本**非乱码;>64KB 文件被截断且提示用 start_line 分页 |
-| 4 | read_file | `start_line:1, end_line:5` | 只返回前 5 行 |
-| 5 | list_dir | `path:"/", recursive:true` | 完整子树 `{entries,truncated:false}` |
-| 6 | overview | 传一个已索引文件 path | 返回 l1_overview;刚传的文件可能返回「not ready yet」(isError,合理) |
-| 7 | ask | 开放问题 | 10-90s 返回带 `[n]` 引用答案;并发 >2 时第 3 个返回「too many concurrent」 |
-| 8 | 全部 | 换 **read-only wk_** 重跑 1-7 | 行为完全一致(全工具只读) |
+以下用例默认语料已按 §2 传到 `/mcp-test` 且已可检索。先定义一个 curl 封装(§1 的 `$VEDA`/`$WK` 已 export),之后每条用例一行命令;在 Claude Code 里测时,把「问法」直接说给 agent 即可:
+
+```bash
+mcp_call() { curl -s --noproxy '*' -H "Authorization: Bearer $WK" -H 'Content-Type: application/json' \
+  -d "{\"jsonrpc\":\"2.0\",\"id\":9,\"method\":\"tools/call\",\"params\":{\"name\":\"$1\",\"arguments\":$2}}" \
+  "$VEDA/mcp"; echo; }
+# 结果里 result.isError=false 且 content[0].text 符合预期即通过
+```
+
+### 5.1 search
+
+| # | arguments | 预期 |
+|---|---|---|
+| S1 语义改写命中 | `{"query":"上线放量要按什么顺序"}` | top hit path=`/mcp-test/deploy-guide.md`(查询一个原词没用,靠语义命中「灰度顺序」章节) |
+| S2 字面词命中(BM25 路) | `{"query":"SOP_PDF_SENTINEL_74"}` | `/mcp-test/vector-intro.pdf` 进 **top-3**(验证 PDF 文本层已入索引 + 字面一路工作)。不要求 top-1:六个哨兵句式高度相似,dense 一路对它们无区分度,RRF 融合会稀释字面强命中——2026-07-22 实测 fulltext 单路 pdf 以 40.7 分断层第一、hybrid 里第 3,属 RRF 正常行为;**要精确定位用 grep** |
+| S3 abstract 分层 | `{"query":"值班 故障 响应","detail_level":"abstract","limit":3}` | 每个 hit 带 `l0_abstract` 一句话摘要(**摘要异步生成,上传后 1-3 分钟内可能为空,稍后重试**) |
+| S4 子树过滤 | `{"query":"灰度顺序","path_prefix":"/mcp-test"}` | 正常命中;换 `"path_prefix":"/nowhere"` → 空数组 `[]` |
+
+### 5.2 grep
+
+| # | arguments | 预期 |
+|---|---|---|
+| G1 精确定位 | `{"pattern":"SOP_MD_SENTINEL_71"}` | 恰 1 hit:path=`/mcp-test/deploy-guide.md`,`line_no:3` |
+| G2 大小写 | `{"pattern":"sop_txt_sentinel_72","ignore_case":true}` | 命中 `/mcp-test/oncall-handbook.txt`,`line_no:2`;不带 ignore_case → `[]` |
+| G3 长行截断(可选) | 先 `python3 -c "print('LONGLINE_MARK '+'x'*3000)" \| veda cp - /mcp-test/long.txt`,再 `{"pattern":"LONGLINE_MARK"}` | 命中行被截到 ~500B 且以 `…` 结尾 |
+
+### 5.3 read_file
+
+| # | arguments | 预期 |
+|---|---|---|
+| R1 Word 提取 | `{"path":"/mcp-test/db-migration.docx"}` | **中文提取文本**非乱码,含「迁移三原则」「每批一万行」 |
+| R2 老 .doc 提取 | `{"path":"/mcp-test/legacy-notes.doc"}` | 提取文本含「老网关」「SOP_DOC_SENTINEL_76」 |
+| R3 PDF 提取 | `{"path":"/mcp-test/vector-intro.pdf"}` | 提取文本含「混合检索」 |
+| R4 行范围 | `{"path":"/mcp-test/deploy-guide.md","start_line":1,"end_line":3}` | 只有标题+哨兵行,**不含**「灰度顺序」正文 |
+| R5 HTML 现状 | `{"path":"/mcp-test/api-style.html"}` | 返回**带标签**的原文(已知现状,见 §2 注记,不算 bug) |
+| R6 缺文件 | `{"path":"/mcp-test/nope.md"}` | `isError:true` + not found 文案 |
+| R7 参数校验 | `{"path":"/mcp-test/deploy-guide.md","end_line":5}`(无 start_line) | JSON-RPC error `-32602` |
+
+### 5.4 list_dir
+
+| # | arguments | 预期 |
+|---|---|---|
+| L1 平铺 | `{"path":"/mcp-test"}` | `entries` 恰 6 个文件(+可选 long.txt),`truncated:false` |
+| L2 递归 | `{"recursive":true}` | 完整子树含 6 个 `/mcp-test/...` 路径,`truncated:false` |
+
+### 5.5 overview
+
+| # | arguments | 预期 |
+|---|---|---|
+| O1 pending 时序 | 上传后立刻 `{"path":"/mcp-test/deploy-guide.md"}` | `isError:true` +「not ready yet…retry」(摘要 30s 防抖 + LLM 异步,**属正常**) |
+| O2 就绪 | 1-3 分钟后重试同一调用 | `l1_overview` 结构化概览(含章节要点) |
+| O3 目录聚合 | `{"path":"/mcp-test"}`(再等几分钟) | 目录级 L1(自底向上聚合,比文件级更慢) |
+
+### 5.6 ask
+
+| # | arguments | 预期 |
+|---|---|---|
+| A1 单文档事实 | `{"question":"P0 故障要求多久响应?"}` | 答案含「五分钟」+ 内联 `[n]`;citations 含 `/mcp-test/oncall-handbook.txt` |
+| A2 跨文档综合 | `{"question":"新人要接手部署和值班,有哪些不能踩的红线?"}` | 综合 deploy-guide + oncall(可能含 db-migration),citations ≥2 条不同文件 |
+| A3 Word 内容进答案 | `{"question":"大表数据回填每批控制在多少行?","path_prefix":"/mcp-test"}` | 答案含「一万行」,citations 含 docx——验证 Word 提取文本进了 RAG 链路 |
+| A4 拒答不编造 | `{"question":"明天上海天气怎么样?"}` | 固定拒答话术,citations 空(**不得**编造答案) |
+| A5 并发闸 | `for i in 1 2 3; do mcp_call ask '{"question":"P0 响应时限?"}' & done; wait` | 至少 1 个返回 `isError:true`「too many concurrent」(每 workspace 并发上限 2);其余正常 |
+
+### 5.7 read-only key 复跑
+
+换 §0 的 **read-only wk_** 把 S1/G1/R1/L1/O2/A1 各跑一遍 → 行为与读写 key 完全一致(全工具只读,这是推荐发给消费者的 key 姿势)。
 
 ## 6. 观察面
 

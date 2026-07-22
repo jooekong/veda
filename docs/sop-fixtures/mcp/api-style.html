@@ -1,0 +1,32 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>API 设计规范(测试语料)</title>
+<style>body{font-family:sans-serif;max-width:720px;margin:2em auto}code{background:#eee}</style>
+</head>
+<body>
+<h1>API 设计规范(测试语料)</h1>
+<p>哨兵:SOP_HTML_SENTINEL_73 —— 本文件是 MCP 手测语料,内容为虚构示例。</p>
+
+<h2>路径与方法</h2>
+<p>资源路径使用小写复数名词,层级不超过三层。获取用 GET,创建用 POST,整体替换用 PUT,删除用 DELETE。禁止在 GET 请求里做任何写操作。</p>
+
+<h2>分页约定</h2>
+<p>列表接口统一使用 <code>page</code> 和 <code>size</code> 两个参数,页码从一开始,单页上限一百条。响应体必须携带总条数字段,方便前端渲染页码。</p>
+
+<h2>错误响应</h2>
+<p>错误统一返回三件套:机器可读的错误码、给开发者看的原因、给最终用户看的提示文案。错误码采用大写下划线风格,例如 <code>QUOTA_EXCEEDED</code>。</p>
+
+<table border="1" cellpadding="6">
+<tr><th>HTTP 状态</th><th>使用场景</th></tr>
+<tr><td>400</td><td>参数校验失败、业务规则拒绝</td></tr>
+<tr><td>401</td><td>凭证缺失或无效</td></tr>
+<tr><td>404</td><td>资源不存在,注意不要泄露资源是否曾经存在</td></tr>
+<tr><td>429</td><td>限流或配额用尽,响应头带重试建议</td></tr>
+</table>
+
+<h2>版本策略</h2>
+<p>大版本进路径前缀,例如 <code>/v1/</code>。字段级演进保持向后兼容:只加字段不改语义,废弃字段先标记两个迭代再移除。</p>
+</body>
+</html>
