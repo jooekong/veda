@@ -28,6 +28,19 @@ that matters.
   same transaction as any file overwrite/delete (no orphaned text).
   Existing deployments: run `scripts/backfill-word-extracts.sql` once to
   reclassify stored Word files and top up extracts for existing PDFs.
+- **`veda cat` reads documents; `veda rm` takes multiple paths.** `cat`
+  now defaults to the text view — PDF/Word print their extracted text
+  (server: `GET /v1/fs/{path}?view=text`); `--raw` restores verbatim
+  bytes. `rm` accepts several paths, keeps deleting past per-file
+  failures, and exits non-zero if any failed.
+
+### Fixed
+- **.doc files no longer surface as `application/x-ole-storage`.** Write
+  detection sniffs the OLE container for the `WordDocument` stream:
+  genuine .doc normalizes to `application/msword`; other OLE (xls/ppt)
+  goes back to plain binary storage instead of a doomed extraction. The
+  web file list also shows friendly type names (Word/Excel/PDF/图片…)
+  instead of raw mime strings.
 
 ## [0.1.19] — 2026-07-21
 

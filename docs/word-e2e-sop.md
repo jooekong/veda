@@ -117,4 +117,4 @@ WHERE f.id IS NULL;   -- 孤儿 extracts，恒应为 0
 | search 一直不命中 | `.89`: `journalctl -u veda-server --since "5 min ago" \| grep -iE "extract\|error"`；outbox 状态：`SELECT status,COUNT(*) FROM veda_outbox WHERE event_type='extract_sync' GROUP BY status;`（`dead` 增长 = 提取被打死，看 warn 日志里的 skip 原因） |
 | 预览仍显示「暂不支持预览」 | 该文件 extracts 尚未生成（等 worker）或提取失败（加密 doc / Word95 / 非 Word 的 OLE 文件按设计跳过，只存不索引） |
 | bot 拿不到全文 | admin Q&A 日志看 `read_file` 工具返回；「提取尚未完成」= worker 没跑完，稍后重试 |
-| CLI `cat` 输出乱码 | 符合预期：`cat`/下载是原始字节语义，提取文本走搜索/预览/bot |
+| CLI `cat` 输出乱码 | 旧版 CLI 才会：新 CLI `cat` 默认输出提取文本，`--raw` 才是原始字节；下载用 `veda cp` |
