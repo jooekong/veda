@@ -9,6 +9,8 @@ that matters.
 
 ## [Unreleased]
 
+## [0.1.20] — 2026-07-22
+
 ### Added
 - **Word documents (.docx and legacy .doc) are now indexed and readable.**
   Uploading a Word file stores the original bytes as before, and the worker
@@ -33,6 +35,10 @@ that matters.
   (server: `GET /v1/fs/{path}?view=text`); `--raw` restores verbatim
   bytes. `rm` accepts several paths, keeps deleting past per-file
   failures, and exits non-zero if any failed.
+- **Line-windowed reads work on documents.** `veda cat --range/--head/
+  --tail` (and the `?lines=A:B` API) page through a PDF/Word file's
+  extracted text with the same 1-indexed inclusive semantics as text
+  files — no more "cannot read lines from a binary file".
 
 ### Fixed
 - **.doc files no longer surface as `application/x-ole-storage`.** Write
