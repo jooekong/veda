@@ -50,7 +50,11 @@ static GATES: LazyLock<Mutex<HashMap<String, Arc<Semaphore>>>> =
 
 /// Fetch (or lazily create) the concurrency semaphore for a workspace. The lock
 /// is held only for the map lookup — never across an await.
-fn gate_for(workspace_id: &str, permits: usize) -> Arc<Semaphore> {
+///
+/// pub(crate): the MCP `ask` tool (routes/mcp.rs) funnels through the SAME
+/// per-workspace gate — REST and MCP answers share one concurrency budget,
+/// otherwise a workspace could double its LLM spend by mixing surfaces.
+pub(crate) fn gate_for(workspace_id: &str, permits: usize) -> Arc<Semaphore> {
     let mut gates = GATES.lock().unwrap();
     gates
         .entry(workspace_id.to_string())
@@ -399,7 +403,8 @@ fn sse_fallback() -> Event {
 // ── pure helpers (unit-tested) ─────────────────────────
 
 /// A trimmed query is valid when non-empty and within the char cap.
-fn valid_query(trimmed: &str) -> bool {
+/// pub(crate): the MCP `ask` tool applies the same constraint.
+pub(crate) fn valid_query(trimmed: &str) -> bool {
     !trimmed.is_empty() && trimmed.chars().count() <= MAX_QUERY_CHARS
 }
 
@@ -416,7 +421,8 @@ fn clamp_limit(raw: Option<usize>) -> usize {
 /// Metrics outcome for a produced answer. `empty` used to mean "retrieval
 /// found nothing, LLM never called"; in the agentic loop it means the model
 /// itself concluded there is nothing to answer from (fixed refusal phrase).
-fn answer_outcome_label(grounded: bool, answer: &str) -> &'static str {
+/// pub(crate): shared with the MCP `ask` tool.
+pub(crate) fn answer_outcome_label(grounded: bool, answer: &str) -> &'static str {
     if answer.contains(NO_CONTEXT_ANSWER) {
         "empty"
     } else if grounded {
@@ -451,7 +457,9 @@ fn feature_disabled_response() -> Response {
 /// Per-answer distribution metrics, recorded only on a produced answer.
 /// `veda_answer_rounds` watches for a runaway loop (every answer maxing its
 /// round cap = prompt or model regression).
-fn record_answer_stats(workspace_id: &str, hits: usize, est_tokens: usize, rounds: usize) {
+/// pub(crate): shared with the MCP `ask` tool so both surfaces feed the
+/// same histograms.
+pub(crate) fn record_answer_stats(workspace_id: &str, hits: usize, est_tokens: usize, rounds: usize) {
     ::metrics::histogram!("veda_answer_hits", "workspace_id" => workspace_id.to_string())
         .record(hits as f64);
     ::metrics::histogram!(
@@ -466,14 +474,15 @@ fn record_answer_stats(workspace_id: &str, hits: usize, est_tokens: usize, round
 /// RAII timer for `veda_answer_request_seconds{workspace_id,outcome}`. Defaults
 /// to `outcome=err` so an unforeseen early return records as an error; the
 /// handler sets ok|empty|ungrounded|llm_error|timeout|throttled explicitly.
-struct AnswerReqTimer {
+/// pub(crate): the MCP `ask` tool records into the same histogram.
+pub(crate) struct AnswerReqTimer {
     workspace_id: String,
     started: Instant,
     outcome: &'static str,
 }
 
 impl AnswerReqTimer {
-    fn start(workspace_id: &str) -> Self {
+    pub(crate) fn start(workspace_id: &str) -> Self {
         Self {
             workspace_id: workspace_id.to_string(),
             started: Instant::now(),
@@ -481,7 +490,7 @@ impl AnswerReqTimer {
         }
     }
 
-    fn set_outcome(&mut self, outcome: &'static str) {
+    pub(crate) fn set_outcome(&mut self, outcome: &'static str) {
         self.outcome = outcome;
     }
 }

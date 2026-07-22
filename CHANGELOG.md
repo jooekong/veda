@@ -9,6 +9,19 @@ that matters.
 
 ## [Unreleased]
 
+### Added
+- **MCP endpoint (`POST /mcp`)**: veda-server now speaks the Model Context
+  Protocol (Streamable HTTP transport, stateless, protocol revision
+  2025-06-18), so Coding Agents (Claude Code, Cursor, …) can attach a veda
+  fs workspace as a native tool server with zero client-side install — one
+  `.mcp.json` entry with the endpoint URL and a `wk_` bearer header. Six
+  read-only tools: `search` (hybrid, with L0/L1/L2 detail levels), `grep`
+  (literal, line numbers), `read_file` (extracted text for PDF/Word, 64KB
+  cap with line paging), `list_dir` (flat/recursive), `overview` (L1
+  summary), `ask` (one-shot RAG answer with citations; shares the
+  per-workspace concurrency gate and metrics with `/v1/answer`). New
+  `veda_mcp_request_seconds{method,outcome}` histogram.
+
 ## [0.1.20] — 2026-07-22
 
 ### Added

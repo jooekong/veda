@@ -7,6 +7,7 @@ pub mod collection;
 pub mod datasets;
 pub mod events;
 pub mod fs;
+pub mod mcp;
 pub mod project_data;
 pub mod reconcile;
 pub mod search;
@@ -71,6 +72,10 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         // mid-loop. Same rationale as the SSE stream: merged in after the
         // layer, untimed at the tower level, self-limited inside the handler.
         .merge(answer::routes())
+        // `/mcp` hosts the `ask` tool (same 90s budget as /v1/answer), so it
+        // also lives outside the 30s layer; every tool call carries its own
+        // in-handler timeout (routes/mcp.rs::TOOL_TIMEOUT / ASK_TOOL_TIMEOUT).
+        .merge(mcp::routes())
         .with_state(state)
 }
 
