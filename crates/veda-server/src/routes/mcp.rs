@@ -27,7 +27,7 @@
 //! attach that header, so there is nothing for it to reach. Revisit only if
 //! an unauthenticated surface is ever added here.
 //!
-//! Design: docs/plans/coding-agent-kb-plan.md §4.
+//! Design: docs/archive/plans/coding-agent-kb-plan.md §4.
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -359,6 +359,7 @@ fn tool_specs() -> Vec<Value> {
     vec![
         json!({
             "name": "search",
+            "annotations": { "readOnlyHint": true },
             "description": "Hybrid semantic + keyword (BM25) search over the knowledge base. \
                 Returns matching chunks with file path, score and content. \
                 TIP: set detail_level='abstract' first — each hit then carries a ~100-token \
@@ -378,6 +379,7 @@ fn tool_specs() -> Vec<Value> {
         }),
         json!({
             "name": "grep",
+            "annotations": { "readOnlyHint": true },
             "description": "Literal substring scan (NOT a regex) across all text files. \
                 Returns path, 1-indexed line number and the matching line — the only tool that \
                 gives exact line positions. Use for identifiers, error codes, exact phrases.",
@@ -394,6 +396,7 @@ fn tool_specs() -> Vec<Value> {
         }),
         json!({
             "name": "read_file",
+            "annotations": { "readOnlyHint": true },
             "description": "Read a file's text content. PDF and Word files return their extracted \
                 text. Whole-file reads over 64KB are truncated — page through big files with \
                 start_line/end_line instead.",
@@ -409,6 +412,7 @@ fn tool_specs() -> Vec<Value> {
         }),
         json!({
             "name": "list_dir",
+            "annotations": { "readOnlyHint": true },
             "description": "List a directory. recursive=true walks the whole subtree \
                 (paths only, capped at 10000 entries).",
             "inputSchema": {
@@ -421,6 +425,7 @@ fn tool_specs() -> Vec<Value> {
         }),
         json!({
             "name": "overview",
+            "annotations": { "readOnlyHint": true },
             "description": "Structured L1 overview (~2k tokens) of one file or directory — richer \
                 than a search snippet, far cheaper than reading a large file. Generated \
                 asynchronously after upload, so very fresh paths may report 'not ready yet'.",
@@ -434,6 +439,7 @@ fn tool_specs() -> Vec<Value> {
         }),
         json!({
             "name": "ask",
+            "annotations": { "readOnlyHint": true },
             "description": "One-shot RAG answer: the server searches the knowledge base itself and \
                 answers with inline [n] citations plus the source paths. Use for open or \
                 multi-document questions when you want a synthesized answer rather than raw \
@@ -954,6 +960,13 @@ mod tests {
                 t["name"]
             );
             assert_eq!(t["inputSchema"]["type"], "object", "{}", t["name"]);
+            // All six tools are read-only; the annotation lets compliant
+            // clients relax per-call confirmation.
+            assert_eq!(
+                t["annotations"]["readOnlyHint"], true,
+                "{} must declare readOnlyHint",
+                t["name"]
+            );
         }
         // Required fields spelled correctly — a typo here surfaces as LLMs
         // omitting the argument at call time, which is painful to debug.
