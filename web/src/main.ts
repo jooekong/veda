@@ -1196,9 +1196,11 @@ function claimModal(vk: string) {
 }
 
 // ── Docs ──────────────────────────────────────────────────────────────────
-const DOCS_META: Record<Lang, { sectionLabel: string; items: { id: string; title: string }[]; loadFailed: (m: string) => string }> = {
+const DOCS_META: Record<Lang, { sectionLabel: string; searchPlaceholder: string; searchNoResults: string; items: { id: string; title: string }[]; loadFailed: (m: string) => string }> = {
   zh: {
     sectionLabel: "文档",
+    searchPlaceholder: "搜索文档…",
+    searchNoResults: "无匹配结果",
     items: [
       { id: "introduction", title: "功能与场景" },
       { id: "quickstart", title: "快速开始" },
@@ -1213,6 +1215,8 @@ const DOCS_META: Record<Lang, { sectionLabel: string; items: { id: string; title
   },
   en: {
     sectionLabel: "Docs",
+    searchPlaceholder: "Search docs…",
+    searchNoResults: "No matches",
     items: [
       { id: "introduction", title: "Introduction" },
       { id: "quickstart", title: "Quickstart" },
@@ -1227,6 +1231,95 @@ const DOCS_META: Record<Lang, { sectionLabel: string; items: { id: string; title
   },
 };
 
+// Client-side docs search: the corpus is ~8 small markdown files per
+// language, lazy-fetched once per session and substring-matched — no index
+// library needed at this size.
+const docsCorpusCache: Partial<Record<Lang, { id: string; title: string; text: string }[]>> = {};
+
+async function loadDocsCorpus(lang: Lang) {
+  if (!docsCorpusCache[lang]) {
+    docsCorpusCache[lang] = await Promise.all(
+      DOCS_META[lang].items.map(async (d) => {
+        try {
+          const res = await fetch(`/docs/${lang}/${d.id}.md`);
+          return { id: d.id, title: d.title, text: res.ok ? await res.text() : "" };
+        } catch {
+          return { id: d.id, title: d.title, text: "" };
+        }
+      }),
+    );
+  }
+  return docsCorpusCache[lang]!;
+}
+
+function docsSearchSnippet(text: string, idx: number, qLen: number): string {
+  const start = Math.max(0, idx - 30);
+  const end = Math.min(text.length, idx + qLen + 60);
+  const before = esc((start > 0 ? "…" : "") + text.slice(start, idx).replace(/\s+/g, " "));
+  const match = esc(text.slice(idx, idx + qLen));
+  const after = esc(text.slice(idx + qLen, end).replace(/\s+/g, " ") + (end < text.length ? "…" : ""));
+  return `${before}<mark>${match}</mark>${after}`;
+}
+
+function bindDocsSearch(lang: Lang, noResults: string) {
+  const input = document.getElementById("docs-search") as HTMLInputElement;
+  const results = document.getElementById("docs-search-results")!;
+  let timer: number | undefined;
+  input.addEventListener("input", () => {
+    window.clearTimeout(timer);
+    timer = window.setTimeout(async () => {
+      const q = input.value.trim();
+      if (q.length < 2) {
+        results.classList.add("hidden");
+        results.innerHTML = "";
+        return;
+      }
+      const corpus = await loadDocsCorpus(lang);
+      if (input.value.trim() !== q) return; // stale — a newer keystroke won
+      const needle = q.toLowerCase();
+      const hits = corpus
+        .map((p) => {
+          const lower = p.text.toLowerCase();
+          const idx = lower.indexOf(needle);
+          if (idx < 0) return null;
+          return {
+            id: p.id,
+            title: p.title,
+            count: lower.split(needle).length - 1,
+            snippet: docsSearchSnippet(p.text, idx, q.length),
+          };
+        })
+        .filter((h): h is NonNullable<typeof h> => h !== null)
+        .sort((a, b) => b.count - a.count);
+      results.innerHTML = hits.length
+        ? hits
+            .map(
+              (h) => `<a href="#/docs/${h.id}" class="block px-3 py-2 hover:bg-slate-50 border-b border-slate-100 last:border-0">
+                <span class="text-sm font-medium text-slate-900">${esc(h.title)}</span>
+                <span class="ml-1 text-xs text-slate-400">${h.count}</span>
+                <span class="block text-xs text-slate-500 mt-0.5">${h.snippet}</span>
+              </a>`,
+            )
+            .join("")
+        : `<p class="px-3 py-2 text-sm text-slate-500">${esc(noResults)}</p>`;
+      results.classList.remove("hidden");
+    }, 150);
+  });
+  input.addEventListener("keydown", (e) => {
+    if (e.key === "Escape") {
+      input.value = "";
+      results.classList.add("hidden");
+    }
+  });
+  // Delay lets a click on a result navigate before the dropdown hides.
+  input.addEventListener("blur", () => {
+    window.setTimeout(() => results.classList.add("hidden"), 150);
+  });
+  input.addEventListener("focus", () => {
+    if (results.innerHTML) results.classList.remove("hidden");
+  });
+}
+
 async function renderDocs(app: HTMLElement) {
   const lang = getLang();
   const meta = DOCS_META[lang];
@@ -1235,6 +1328,11 @@ async function renderDocs(app: HTMLElement) {
     <div class="grid grid-cols-1 md:grid-cols-[200px_1fr] gap-8">
       <aside class="text-sm">
         <p class="text-xs uppercase tracking-wide text-slate-500 font-semibold mb-2">${esc(meta.sectionLabel)}</p>
+        <div class="relative mb-3" id="docs-search-box">
+          <input id="docs-search" type="search" autocomplete="off" placeholder="${esc(meta.searchPlaceholder)}"
+            class="w-full border border-slate-300 rounded px-2 py-1 text-sm focus:outline-none focus:border-slate-500" />
+          <div id="docs-search-results" class="absolute z-10 left-0 w-full md:w-72 mt-1 bg-white border border-slate-200 rounded shadow-lg max-h-80 overflow-auto hidden"></div>
+        </div>
         ${meta.items
           .map(
             (d) => `<a href="#/docs/${d.id}" class="block py-1 ${
@@ -1248,6 +1346,7 @@ async function renderDocs(app: HTMLElement) {
       <article id="md" class="prose max-w-none">…</article>
     </div>
   `;
+  bindDocsSearch(lang, meta.searchNoResults);
   try {
     const res = await fetch(`/docs/${lang}/${id}.md`);
     if (!res.ok) throw new Error(`doc not found: ${lang}/${id}`);
