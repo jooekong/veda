@@ -5294,7 +5294,7 @@ checksum = "accd4ea62f7bb7a82fe23066fb0957d48ef677f6eeb8215f372f52e48bb32426"
 
 [[package]]
 name = "veda-cli"
-version = "0.1.20"
+version = "0.1.21"
 dependencies = [
  "anyhow",
  "chrono",
@@ -5317,7 +5317,7 @@ dependencies = [
 
 [[package]]
 name = "veda-core"
-version = "0.1.20"
+version = "0.1.21"
 dependencies = [
  "async-trait",
  "chrono",
@@ -5334,7 +5334,7 @@ dependencies = [
 
 [[package]]
 name = "veda-fuse"
-version = "0.1.20"
+version = "0.1.21"
 dependencies = [
  "anyhow",
  "chrono",
@@ -5354,7 +5354,7 @@ dependencies = [
 
 [[package]]
 name = "veda-pipeline"
-version = "0.1.20"
+version = "0.1.21"
 dependencies = [
  "async-trait",
  "encoding_rs",
@@ -5377,7 +5377,7 @@ dependencies = [
 
 [[package]]
 name = "veda-server"
-version = "0.1.20"
+version = "0.1.21"
 dependencies = [
  "anyhow",
  "argon2",
@@ -5421,7 +5421,7 @@ dependencies = [
 
 [[package]]
 name = "veda-sql"
-version = "0.1.20"
+version = "0.1.21"
 dependencies = [
  "anyhow",
  "arrow",
@@ -5441,7 +5441,7 @@ dependencies = [
 
 [[package]]
 name = "veda-store"
-version = "0.1.20"
+version = "0.1.21"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -5462,7 +5462,7 @@ dependencies = [
 
 [[package]]
 name = "veda-tunnel"
-version = "0.1.20"
+version = "0.1.21"
 dependencies = [
  "anyhow",
  "axum 0.8.9",
@@ -5484,7 +5484,7 @@ dependencies = [
 
 [[package]]
 name = "veda-types"
-version = "0.1.20"
+version = "0.1.21"
 dependencies = [
  "chrono",
  "serde",
