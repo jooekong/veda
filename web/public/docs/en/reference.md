@@ -297,7 +297,7 @@ Native tool surface for coding agents (Claude Code / Cursor / Codex) — [MCP](h
 
 ```bash
 curl -s -H "Authorization: Bearer wk_..." -H 'Content-Type: application/json' \
-  -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}' https://<host>/mcp
+  -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}' https://veda.ddmc-inc.com/mcp
 ```
 
 ### Change stream (`GET /v1/events`, SSE)

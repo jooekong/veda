@@ -17,14 +17,28 @@ veda-server natively serves an MCP endpoint (`POST /mcp`, Streamable HTTP transp
 // Claude Code: .mcp.json at project root / Cursor: .cursor/mcp.json
 {
   "mcpServers": {
-    "veda-wiki": {
+    "veda-kb": {
       "type": "http",
-      "url": "https://<your-veda-host>/mcp",
-      "headers": { "Authorization": "Bearer wk_yourkey" }
+      "url": "https://veda.ddmc-inc.com/mcp",
+      "headers": { "Authorization": "Bearer wk_..." }
     }
   }
 }
 ```
+
+**Which config level?** Pick by who the knowledge base belongs to:
+
+- **User level (recommended for a cross-project company KB)** — the KB follows the person, not any single repo; configure once, every project gets it:
+
+  ```bash
+  claude mcp add --transport http --scope user veda-kb \
+    https://veda.ddmc-inc.com/mcp \
+    --header "Authorization: Bearer wk_..."
+  ```
+
+  Cursor's global config lives at `~/.cursor/mcp.json` (same JSON as above).
+
+- **Project level** — when one project binds its own dedicated KB, commit the `.mcp.json` above into the repo; teammates get it on clone.
 
 The agent then discovers six read-only tools — no prompt engineering needed:
 
@@ -32,11 +46,20 @@ The agent then discovers six read-only tools — no prompt engineering needed:
 
 Notes:
 
-- **One entry binds one workspace** (the key decides). Multiple knowledge bases = multiple entries with distinct names.
+- **One entry binds one workspace** (the key decides). Multiple knowledge bases = multiple entries with distinct names (`veda-kb` / `veda-api-docs`).
 - `.mcp.json` can live in your project's git repo so teammates get it on clone (inject the key via env, don't commit it).
 - Tools are read-only — content maintenance goes through the CLI path below.
+- **Fewer permission prompts**: since every tool is read-only, it's safe to allowlist `mcp__veda-kb__*` in Claude Code's `permissions.allow`; newer servers also declare `readOnlyHint` per the MCP spec, and clients that honor it relax confirmation automatically.
 - For stdio-only clients, bridge with the community [`mcp-remote`](https://www.npmjs.com/package/mcp-remote) package.
 - Protocol details: see the MCP section in the [API reference](#/docs/reference).
+
+### Teach the agent when to look (drop into your project's CLAUDE.md / AGENTS.md template)
+
+Mounting the tools is step one — the agent also needs to know **when to query**. Paste this into the project's agent-guidance file:
+
+> Before acting, check the company knowledge base (veda-kb MCP tools) whenever the task involves: interfaces, conventions, or deployment of **other teams / other repos**; internal middleware usage or ops SOPs; "why is this system designed this way" questions. Usage: `search` first (`detail_level='abstract'` is the cheap relevance scan), then `read_file` the promising paths; use `grep` for exact identifiers; use `ask` only when you want a synthesized, cited answer (slow, 10-90s). **For this repo's own code and docs, read locally — don't query the KB.**
+
+That last boundary matters: without the "local vs cross-project" line, agents either never query or query for everything.
 
 ---
 

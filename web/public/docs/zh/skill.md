@@ -17,14 +17,28 @@ veda-server 原生提供 MCP 端点(`POST /mcp`,Streamable HTTP,协议 2025-06-1
 // Claude Code: 项目根 .mcp.json / Cursor: .cursor/mcp.json
 {
   "mcpServers": {
-    "veda-wiki": {
+    "veda-kb": {
       "type": "http",
-      "url": "https://<你的-veda-入口>/mcp",
-      "headers": { "Authorization": "Bearer wk_你的key" }
+      "url": "https://veda.ddmc-inc.com/mcp",
+      "headers": { "Authorization": "Bearer wk_..." }
     }
   }
 }
 ```
+
+**配置放哪一级?** 按知识库归属选:
+
+- **用户级(跨项目的公司知识库推荐)**——知识库跟人走、不属于某个项目,配一次所有项目可用:
+
+  ```bash
+  claude mcp add --transport http --scope user veda-kb \
+    https://veda.ddmc-inc.com/mcp \
+    --header "Authorization: Bearer wk_..."
+  ```
+
+  Cursor 的全局配置在 `~/.cursor/mcp.json`(内容同上面的 JSON)。
+
+- **项目级**——某个项目要绑定专属知识库时,用上面的 `.mcp.json` 提交进仓库,团队 clone 即得。
 
 配好后 agent 自动获得 6 个只读工具,不需要任何提示词教学:
 
@@ -32,11 +46,20 @@ veda-server 原生提供 MCP 端点(`POST /mcp`,Streamable HTTP,协议 2025-06-1
 
 要点:
 
-- **一个条目绑一个 workspace**(key 决定)。接多个知识库就配多个条目,起不同名字(`veda-wiki` / `veda-api-docs`)。
+- **一个条目绑一个 workspace**(key 决定)。接多个知识库就配多个条目,起不同名字(`veda-kb` / `veda-api-docs`)。
 - `.mcp.json` 可以提交进项目 git 仓库,团队 clone 即用(key 建议走各自环境注入,不要把 key 提交进库)。
 - 工具全只读——上传维护知识库内容走下方的 CLI 路径。
+- **减确认弹窗**:工具全只读,可以放心把 `mcp__veda-kb__*` 加进 Claude Code settings 的 `permissions.allow`;新版 server 已按 MCP 规范声明 `readOnlyHint`,支持该标注的 client 会自动放宽确认。
 - 个别只支持 stdio 的老工具,用社区 [`mcp-remote`](https://www.npmjs.com/package/mcp-remote) 桥接到同一个 url 即可。
 - 端点协议细节见 [API 参考的 MCP 章节](#/docs/reference)。
+
+### 让 agent 知道何时来查（建议放进项目 CLAUDE.md / AGENTS.md 模板）
+
+工具挂上只是第一步——agent 还要知道**什么时候该查**。把下面这段放进项目的 agent 指引文件即可直接用:
+
+> 遇到以下情况,先用 veda-kb 的 MCP 工具查公司知识库再动手:涉及**其他团队 / 其他仓库**的接口、约定、部署方式;公司内部中间件用法、运维 SOP;「这个系统为什么这样设计」类问题。用法:先 `search`(`detail_level='abstract'` 便宜地筛相关)再 `read_file` 读原文;查精确标识符用 `grep`;需要一段带出处的结论才用 `ask`(慢,10-90s,少用)。**本仓库自己的代码和文档直接读本地,不查知识库。**
+
+最后一句的边界很重要:不划「本地 vs 跨项目」这条线,agent 要么不查、要么什么都查。
 
 ---
 

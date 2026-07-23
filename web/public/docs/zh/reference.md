@@ -298,7 +298,7 @@ app_id 账号是 passwordless 的：不能 login、不能 claim，`app_id` 与 `
 
 ```bash
 curl -s -H "Authorization: Bearer wk_..." -H 'Content-Type: application/json' \
-  -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}' https://<入口>/mcp
+  -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}' https://veda.ddmc-inc.com/mcp
 ```
 
 ### 变更流（`GET /v1/events`，SSE）
