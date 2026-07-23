@@ -11,7 +11,7 @@ Building anything retrieval-heavy (an AI agent's memory, a RAG backend, an inter
 Veda collapses this pipeline into one service:
 
 ```bash
-veda cp ./design.pdf /docs/design.pdf        # store (text or binary; PDFs get their text extracted)
+veda cp ./design.pdf /docs/design.pdf        # store (text or binary; PDF/Word get their text extracted)
 veda search "why did we pick an outbox"      # hybrid semantic + BM25 search, a few seconds later
 veda sql "SELECT path, size_bytes FROM files WHERE path LIKE '/docs/%'"
 ```
@@ -20,21 +20,22 @@ Chunking, embedding, indexing, and summarization happen server-side and asynchro
 
 ## Use Cases
 
-- **AI agent memory / knowledge base** — agents talk to it through the `veda` CLI (an agent-facing `skill.md` ships with the installer). Tiered summaries (L0 one-liner → L1 overview → full content) let an agent triage many files without burning tokens on full reads.
-- **RAG backend** — upload documents (Markdown, source code, PDFs), get hybrid search with relevance scores over chunks; no separate ETL to operate.
+- **AI agent memory / knowledge base** — coding agents (Claude Code, Cursor, …) attach through the server-native MCP endpoint with one `.mcp.json` entry, or through the `veda` CLI (an agent-facing `skill.md` ships with the installer). Tiered summaries (L0 one-liner → L1 overview → full content) let an agent triage many files without burning tokens on full reads.
+- **RAG backend** — upload documents (Markdown, source code, PDF/Word), get hybrid search with relevance scores over chunks — or a synthesized answer with inline citations via `/v1/answer` / `veda ask`; no separate ETL to operate.
 - **Self-hosted vector database** — `kind=db` workspaces expose a Pinecone-style raw-vector data plane (upsert/search/query/delete + metadata filters) for apps that just need vectors, with a Java SDK available.
 - **A filesystem you can grep by meaning** — mount a workspace with FUSE and edit it with vim/IDE like a local directory, while everything stays semantically indexed; or use `veda grep` for literal matches and `veda search` for conceptual ones.
 - **Platform building block** — a gateway-facing surface (`/v1/workspace/{workspace}/project/...`) lets an AI platform embed veda as its storage layer, with auth externalized to the platform gateway.
 
 ## Features
 
-- **Filesystem** — `cp`, `cat`, `ls`, `mv`, `rm`, `append`, `mkdir` over plain absolute paths. Text is chunked and indexed; binary files (PDF/images/jars) are stored verbatim as blobs with real MIME types. PDFs additionally get their text layer extracted and embedded, so the original stays byte-for-byte downloadable while its content becomes searchable.
+- **Filesystem** — `cp`, `cat`, `ls`, `mv`, `rm`, `append`, `mkdir` over plain absolute paths. Text is chunked and indexed; binary files (PDF/Word/images/jars) are stored verbatim as blobs with real MIME types. PDF and Word files additionally get their text extracted and embedded, so the original stays byte-for-byte downloadable while its content becomes searchable.
 - **Hybrid search** — every text file is automatically chunked, embedded, and BM25-indexed. Three modes: `hybrid` (dense + BM25 fused with RRF, default), `semantic`, `fulltext`. Chinese tokenization via jieba.
 - **Tiered summaries** — an LLM generates an L0 abstract (~100 tokens) and L1 overview (~2k tokens) per file, aggregated bottom-up for directories. Search can return any tier via `detail_level`.
 - **Structured collections** — schema-first tables with one auto-embedded field; insert JSON rows, search them semantically, filter them with SQL.
 - **Vector workspaces** — a raw-vector data plane (`kind=db`) for apps that bring their own records: upsert/search/query/delete with metadata filters and `write_mode=insert` for ~3× bulk-load throughput.
 - **SQL** — an embedded DataFusion engine queries files and collections (`SELECT`, `WHERE`, `JOIN`, aggregates), plus UDFs for filesystem ops and vector search inside SQL.
 - **FUSE mount** — `veda-fuse mount` exposes a workspace as a local directory: native tools just work, a write-back mode debounces editor noise (vim swap files, git lockfiles), and SSE keeps caches consistent with remote changes.
+- **MCP endpoint** — the server speaks the Model Context Protocol natively (`POST /mcp`, Streamable HTTP, stateless): coding agents attach with one `.mcp.json` entry and get six read-only tools — search / grep / read_file / list_dir / overview / `ask` (one-shot RAG answer with citations).
 - **Multi-tenant** — Account → Workspace hierarchy. Account key (`vk_`) drives the control plane; per-workspace keys (`wk_`, revocable, read-only variant available) drive the data plane. Plain key auth, no JWT.
 
 ## How It Works

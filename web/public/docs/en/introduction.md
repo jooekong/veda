@@ -18,12 +18,13 @@ A Veda workspace is one of two kinds, fixed at creation — pick by scenario:
 
 Below, the **File Workspace comes first** (file ops, hybrid search, structured collections, SQL, FUSE, tiered summaries), **then the Vector Workspace** (managed embedding, hybrid retrieval, meta filtering). If you came here to add vector search to an application, jump straight to "Vector Workspace: capabilities & use cases".
 
-## Three ways to use it
+## Four ways to use it
 
-Same data, three surfaces — pick by scenario:
+Same data, four surfaces — pick by scenario:
 
 - **CLI** — the `veda` binary, for scripts and everyday shell
 - **FUSE mount** — `veda-fuse` mounts a workspace as a local directory. **vim / VSCode / `make` / `rsync` don't know it's cloud storage** — every write auto-uploads and re-embeds
+- **MCP** — the server-native `/mcp` endpoint: Claude Code / Cursor and other coding agents attach with one `.mcp.json` entry (URL + `wk_` bearer), zero install (see [AI agent skill](#/docs/skill))
 - **HTTP API** — REST + SSE JSON interface. Direct integration for frontends, custom agents, data pipelines; the Vector Workspace also ships a Java SDK and Python examples (see [Vector Workspace API](#/docs/vectors))
 
 ---
@@ -39,6 +40,7 @@ Same data, three surfaces — pick by scenario:
 | **Multi-tenant** | Two tiers: Account → Workspace; control-plane account key `vk_`, data-plane workspace key `wk_` |
 | **FUSE mount** | Mount a workspace as a local directory; use vim / IDE / `make` like any native tree |
 | **Layered summaries** | Auto-generated L0 (one-sentence) and L1 (~2k-token) summaries — saves tokens for LLM recall |
+| **Agent access / RAG answering** | MCP endpoint with 6 read-only tools for coding agents; `/v1/answer` / `veda ask` return answers with inline [n] citations |
 
 ---
 
@@ -224,7 +226,7 @@ For the field-level contract (all endpoints, limits, error codes, idempotency se
 
 | Use case | Limit |
 |---|---|
-| Binary blobs (PDF / images / video) | ❌ UTF-8 text only (both workspace kinds) |
+| Images / video / scans | ❌ Not parsed (no OCR yet). In the File Workspace, PDF / Word get text-extracted and searchable; other binaries are stored but not indexed. The Vector Workspace still accepts text only |
 | Strict ACLs / quotas | ❌ Fine-grained perms not in alpha |
 | High-concurrency OLTP | ❌ It's a knowledge / retrieval store, not a transactional DB |
 | Massive small files (>1M chunks) | ⚠️ Alpha is single-replica; scale requires the multi-replica evolution |

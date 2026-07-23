@@ -23,6 +23,16 @@ veda workspace add my-project
 
 Config lives at `~/.config/veda/config.toml`. Inspect with `veda config show`.
 
+Config-free direct connection (CI / scripts / agents — nothing written to disk):
+
+```bash
+export VEDA_SERVER=https://veda.ddmc-inc.com
+export VEDA_KEY=wk_xxx
+veda search "..."               # every data-plane command works as-is
+```
+
+Precedence: `--server` / `--key` flags > env > config.toml (same names and order as `veda-fuse`); `veda status` labels where credentials came from (env / config).
+
 ## Filesystem
 
 ```bash
@@ -44,7 +54,7 @@ veda cat /docs/readme.md --head 10           # first 10 lines
 veda cat /docs/readme.md --tail 5            # last 5 lines
 ```
 
-UTF-8 text only — binaries (PDF / images) are rejected client-side.
+Text and binary both `cp` / `cat` fine (server ≥0.1.15). PDF / Word files get their text extracted and indexed — `cat` prints the extracted text by default, `--raw` fetches the original bytes; other binaries (images / jars / …) are stored but not indexed, and `cat` emits raw bytes (redirect to a file).
 
 ## Search
 
@@ -57,6 +67,16 @@ veda search "auth" --limit 20
 veda search "auth" --detail-level abstract        # hits return L0 summary only
 veda grep "TODO(joe)" --limit 200                 # literal match (sync, no embedding lag); returns file:line
 ```
+
+## Ask (RAG)
+
+```bash
+veda ask "how is this system deployed"   # one-shot answer with inline [n] citations + source list
+veda ask "…" --path /docs                # restrict retrieval to a subtree
+veda ask "…" --json                      # raw JSON (parse citations with jq)
+```
+
+The server retrieves and synthesizes the answer itself; may take 10-90s. Returns 501 when the server has no LLM configured and 429 when the workspace's answer concurrency is full — distinct exit codes for scripts.
 
 ## Layered summaries
 
@@ -96,7 +116,9 @@ veda sql "SELECT category, COUNT(*) FROM articles GROUP BY category"
 ## Misc
 
 ```bash
-veda status                     # current config + server reachability
+veda status                     # current config + server reachability (labels env/config credential source)
+veda status --index             # indexing progress {pending, processing, dead}
+veda status --index --wait      # poll until everything is searchable; non-zero exit on permanent failures (CI gate)
 veda config show                # config details
 veda --version                  # client version
 ```

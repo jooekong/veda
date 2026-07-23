@@ -11,7 +11,7 @@
 Veda 把这条流水线收进一个服务：
 
 ```bash
-veda cp ./design.pdf /docs/design.pdf        # 存储（文本或二进制；PDF 自动抽取文本层）
+veda cp ./design.pdf /docs/design.pdf        # 存储（文本或二进制；PDF/Word 自动抽取文本）
 veda search "为什么选 outbox 模式"            # 几秒后即可 hybrid（语义 + BM25）搜索
 veda sql "SELECT path, size_bytes FROM files WHERE path LIKE '/docs/%'"
 ```
@@ -20,21 +20,22 @@ Chunking、embedding、索引、摘要全部在服务端异步完成。文件存
 
 ## 适用场景
 
-- **AI agent 记忆 / 知识库** — agent 通过 `veda` CLI 交互（安装器自带面向 agent 的 `skill.md`）。三层摘要（L0 一句话 → L1 概览 → 全文）让 agent 在不读全文、不烧 token 的前提下快速筛选大量文件。
-- **RAG 后端** — 上传文档（Markdown、源代码、PDF），直接获得带相关性分数的 chunk 级 hybrid 搜索，不用单独运维一套 ETL。
+- **AI agent 记忆 / 知识库** — Coding Agent（Claude Code / Cursor 等）通过 server 原生 MCP 端点一段 `.mcp.json` 即接入，或走 `veda` CLI（安装器自带面向 agent 的 `skill.md`）。三层摘要（L0 一句话 → L1 概览 → 全文）让 agent 在不读全文、不烧 token 的前提下快速筛选大量文件。
+- **RAG 后端** — 上传文档（Markdown、源代码、PDF/Word），直接获得带相关性分数的 chunk 级 hybrid 搜索，或经 `/v1/answer` / `veda ask` 拿带内联引用的合成答案，不用单独运维一套 ETL。
 - **自托管向量数据库** — `kind=db` workspace 提供 Pinecone 风格的裸向量数据面（upsert/search/query/delete + 元数据过滤），适合只需要向量的应用，另有 Java SDK。
 - **能按语义 grep 的文件系统** — 用 FUSE 把 workspace 挂载成本地目录，vim/IDE 直接编辑，所有内容保持语义索引；字面匹配用 `veda grep`，概念搜索用 `veda search`。
 - **平台构建块** — 面向网关的 surface（`/v1/workspace/{workspace}/project/...`）让 AI 平台把 veda 嵌入为自己的存储层，鉴权外置给平台网关。
 
 ## 功能
 
-- **文件系统** — `cp`、`cat`、`ls`、`mv`、`rm`、`append`、`mkdir`，路径就是普通绝对路径。文本自动分块索引；二进制文件（PDF/图片/jar）以 blob 原样存储并带真实 MIME 类型。PDF 额外抽取文本层并 embedding——原件保持 byte-for-byte 可下载，内容变得可搜索。
+- **文件系统** — `cp`、`cat`、`ls`、`mv`、`rm`、`append`、`mkdir`，路径就是普通绝对路径。文本自动分块索引；二进制文件（PDF/Word/图片/jar）以 blob 原样存储并带真实 MIME 类型。PDF 与 Word 额外抽取文本并 embedding——原件保持 byte-for-byte 可下载，内容变得可搜索。
 - **Hybrid 搜索** — 每个文本文件自动 chunking、embedding、BM25 索引。三种模式：`hybrid`（dense + BM25，RRF 融合，默认）、`semantic`、`fulltext`。中文分词用 jieba。
 - **三层摘要** — LLM 为每个文件生成 L0 摘要（约 100 token）和 L1 概览（约 2k token），目录自底向上聚合。搜索可通过 `detail_level` 返回任意一层。
 - **结构化 collection** — schema 先行的表，指定一个自动 embedding 字段；插入 JSON 行、语义搜索、SQL 过滤。
 - **向量 workspace** — 裸向量数据面（`kind=db`），适合自带记录的应用：upsert/search/query/delete + 元数据过滤，`write_mode=insert` 提供约 3 倍的批量写入吞吐。
 - **SQL** — 内嵌 DataFusion 引擎查询文件和 collection（`SELECT`、`WHERE`、`JOIN`、聚合），另有文件系统操作和向量搜索的 UDF 可在 SQL 里直接用。
 - **FUSE 挂载** — `veda-fuse mount` 把 workspace 暴露为本地目录：原生工具开箱即用，write-back 模式吸收编辑器噪音（vim swap 文件、git 锁文件），SSE 保证缓存与远端变更一致。
+- **MCP 端点** — server 原生说 Model Context Protocol（`POST /mcp`，Streamable HTTP，stateless）：Coding Agent 一段 `.mcp.json` 即接入，得到 6 个只读工具——search / grep / read_file / list_dir / overview / `ask`（一站式带引用 RAG 问答）。
 - **多租户** — Account → Workspace 两级。账号 key（`vk_`）驱动控制面；workspace key（`wk_`，可吊销、有只读变体）驱动数据面。纯 key 校验，无 JWT。
 
 ## 工作原理

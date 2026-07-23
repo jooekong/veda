@@ -51,6 +51,20 @@ renaming back.
 on argv (`ps` leak). All five modes accept `--non-interactive` to fail
 instead of prompting.
 
+### Env-only auth (no config file)
+
+Data-plane commands also take credentials straight from the environment —
+nothing is written to disk (CI / one-off agent sessions):
+
+```sh
+export VEDA_SERVER=https://veda.ddmc-inc.com
+export VEDA_KEY=wk_…                 # workspace key
+veda search "…"                      # works with zero config.toml
+```
+
+Precedence: `--server` / `--key` flags > env > config.toml (same variables
+FUSE reads). `veda status` labels env-sourced credentials.
+
 ### Workspace profiles
 
 `veda init` creates one profile named `default`. Add more only when juggling
@@ -96,15 +110,17 @@ veda mkdir /new-dir                       # create directory
 veda append /notes/log "entry"            # append (use "-" for stdin)
 ```
 
-`veda cp` uploads raw bytes for text **and** binary (PDF / image / jar):
-the server sniffs UTF-8 to pick storage — valid UTF-8 → text (chunked,
-grep / SQL / line reads); non-UTF-8 → blob, stored verbatim with a real
-MIME type. **PDFs** additionally get their text layer extracted (async)
-and embedded, so the original downloads byte-for-byte while its content
-becomes searchable; images / jars / other binaries are stored but **not**
-indexed. `veda cat` returns raw bytes (redirect binary to a file);
-`--head` / `--tail` / `--range` reject a binary file. Binary `cp` / `cat`
-need a server at v0.1.15+ (older servers return 400 on binary `cp`).
+`veda cp` uploads raw bytes for text **and** binary (PDF / Word / image /
+jar): the server sniffs UTF-8 to pick storage — valid UTF-8 → text
+(chunked, grep / SQL / line reads); non-UTF-8 → blob, stored verbatim with
+a real MIME type. **PDF and Word** files additionally get their text
+extracted (async) and embedded, so the original stays downloadable
+byte-for-byte while the content becomes searchable; images / jars / other
+binaries are stored but **not** indexed. `veda cat` prints the extracted
+text for PDF / Word (`--raw` for the original bytes) and raw bytes for
+other binaries (redirect to a file); `--head` / `--tail` / `--range` work
+on extracted text too and reject non-extracted binaries. Binary `cp` /
+`cat` need a server at v0.1.15+; PDF / Word extraction needs v0.1.20+.
 
 ## Search
 
@@ -126,7 +142,9 @@ cheaper than client-side post-filter.
 
 **Embedding is async**: a just-uploaded file may not appear in semantic
 results for a few seconds. Retry after 5s if a search misses an obviously
-present file.
+present file. After batch uploads, `veda status --index --wait` blocks
+until everything is searchable (non-zero exit if any file permanently
+failed — usable as a CI gate).
 
 ## Grep (literal substring)
 
@@ -142,6 +160,23 @@ veda grep "fn main" --limit 200      # raise cap (default 100, max 1000)
 Output: `path:line_no: line` per hit. Use grep when you want every literal
 occurrence with file:line; use `search --mode fulltext` when you want BM25
 ranking on the same string.
+
+## Ask (one-shot RAG answer)
+
+`veda ask` sends a question; the **server** does the retrieval itself and
+returns a synthesized answer with inline `[n]` citations plus a source
+list:
+
+```sh
+veda ask "how do I deploy this system"
+veda ask "…" --path /docs            # restrict retrieval to a subtree
+veda ask "…" --json                  # raw JSON (answer / citations / hit_count)
+```
+
+May take 10-90s. Distinct exit codes for "LLM not configured" (501) and
+"concurrency full" (429). Prefer `ask` for open / multi-document
+questions; prefer `search` when you want raw hits to reason over
+yourself.
 
 ## Summary layers (abstract / overview)
 
@@ -308,6 +343,7 @@ reachable via `veda cat` / `veda mv` to rename it.
 | Find exact identifier / string (ranked) | `veda search --mode fulltext`                |
 | Find every literal occurrence + line #  | `veda grep` (exhaustive)                     |
 | Recall conceptually similar content     | `veda search --mode semantic`                |
+| Open question needing a cited answer    | `veda ask` (server-side RAG)                 |
 | Save tokens on long results             | `veda search --detail-level abstract`        |
 | Tabular data with schema                | Collection (not file)                        |
 | Filter / aggregate over a collection    | `veda sql` (collection search has no filter) |
@@ -333,8 +369,8 @@ FUSE-specific errors are in the "FUSE error handling" sub-section above.
 
 ## Don't do
 
-- Expect images / jars to be searchable — only **PDFs** are text-extracted
-  and indexed; other binaries are stored but not searchable.
+- Expect images / jars to be searchable — only **PDF / Word** files are
+  text-extracted and indexed; other binaries are stored but not searchable.
 - Use `veda search` for exact path lookups — use `ls` / `cat`.
 - Write to `/` root — pick a semantic prefix (`/notes/`, `/code/`, `/docs/`).
 - Repeat the user's password / API key in chat — they live in

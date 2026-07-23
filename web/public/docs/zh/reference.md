@@ -365,7 +365,7 @@ curl -s -H "Authorization: Bearer wk_..." -H 'Content-Type: application/json' \
 诚实说清楚现在不擅长什么、上线前要盯什么：
 
 **能力边界**
-- 只支持 **UTF-8 文本**；PDF / 图片 / 视频不解析（`extract_text` 是占位，OCR 未做），二进制在客户端就被拒。
+- 图片 / 视频 / 扫描版 PDF（无文本层）不解析——**OCR 未做**。PDF / Word 会自动抽取文本层入索引可搜；其余二进制（非 UTF-8）原样存 blob，只存不索引，原件可无损下载。
 - 隔离只到 **workspace 级**：持某 workspace `wk_` 的人能看到它全部内容，无行级 / 文档级 ACL、无字段级权限。HR / 合规这类多人混合敏感场景目前不适配。
 - 不是 OLTP 数据库，是知识库；高并发交易场景不合适。
 

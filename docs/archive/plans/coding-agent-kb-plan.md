@@ -1,9 +1,10 @@
 # wiki 知识库 × Coding Agent 接入方案（MCP + 入库体验）
 
-> 状态：**已过三轮 Joe review（2026-07-22），P0 开工**——①Word 已随 0.1.20 上线出方案；HTML 提取、`veda sync` 降级 P2（理由见各节状态框）；②MCP 形态定为 **veda-server 原生 `/mcp` 端点**（用户零安装，纯 json 配置）；③**stdio 形态被否决**（Joe 拍板：veda 只支持 Streamable HTTP，不做 stdio）
+> 状态：**已完成，归档（2026-07-23）**——P0 `/mcp` 端点 07-22 全量上线三节点（手测 SOP 22 项全过，`docs/mcp-manual-test-sop.md`）；P1 三件套（env 鉴权 / index-status / `veda ask`）已随 0.1.21 实现（fdc8b6a，server 侧生产 .85/.95 待部署窗口）；Word 已随 0.1.20 上线。HTML 提取、`veda sync` 留 P2 背包（触发条件见各节状态框，设计存档可直接用）。
+> 历史：三轮 Joe review（07-22）定 MCP 形态为 veda-server 原生 `/mcp`（Streamable HTTP，stateless；stdio 被否决）
 > 来源：2026-07-22 需求 —— 公司同事想把 wiki 文件传进 veda fs 知识库，在 Coding Agent（Claude Code / Cursor / Codex）里让 AI 检索知识库获取更准确的上下文
 > 现状论断均经代码核实（2026-07-22），关键论断带 `文件:行号`
-> 关联：[`okf-knowledge-base.md`](okf-knowledge-base.md)（知识**格式/生态**战略，未开工）与本方案互补不冲突——本方案解决眼前的**接入与体验**工程，OKF 是格式层演进；两者共享「L0/L1/L2 分层喂 agent」的核心思路
+> 关联：[`okf-knowledge-base.md`](../../plans/okf-knowledge-base.md)（知识**格式/生态**战略，未开工）与本方案互补不冲突——本方案解决眼前的**接入与体验**工程，OKF 是格式层演进；两者共享「L0/L1/L2 分层喂 agent」的核心思路
 
 ## 0. TL;DR
 
@@ -46,12 +47,12 @@
 
 | # | 缺口 | 影响 | 证据 |
 |---|---|---|---|
-| G1 | **无 MCP server**（全仓零代码，仅计划提及） | B 的接入只剩「装 CLI+init」或「手搓 REST」，每个同事都要教一遍 | grep 全仓；`onepaas-veda-skill.md:12,135` |
+| G1 | **✅ 已解决（P0，07-22 上线 `/mcp`）**——原：无 MCP server（全仓零代码） | B 的接入只剩「装 CLI+init」或「手搓 REST」，每个同事都要教一遍 | grep 全仓；`onepaas-veda-skill.md:12,135` |
 | G2 | HTML 标签随正文入库（无提取分支）——**对检索质量的实际影响未实测**，语义向量一路受影响概率大于 BM25（标签为英文 token，不与中文查询相撞）；agent read_file 读到标签汤费 context | 质量优化项而非功能缺口；待真实语料实测（§6） | `extraction.rs:8-21` 无 html 分支 |
 | G3 | 删除不同步——`cp -r` 只增改不删，本地删页远端仍被检索命中（过期信息污染）。增量上传**已被服务端解决**：`If-None-Match` sha 短路，重跑 `cp -r` 不重复 embed（带宽照花，内网可接受） | 有零开发替代：FUSE 挂载 + `rsync --delete`（§8） | `client.rs:185-194`；CLI 无 sync（`main.rs:52-220`） |
-| G4 | **索引进度黑盒**——embedding 全异步（写入与 outbox 入队同事务，worker 消费），但 FileInfo/DirEntry 无任何 indexing 状态，用户不知道「什么时候能搜到」 | 批量传 500 个文件后只能盲等/盲试 | `api.rs:112-134`；worker 异步链路 `ARCHITECTURE.md` |
-| G5 | **CLI 数据面不认环境变量**——wk_ 只从 config.toml 读，必须先 `veda init`；默认 server 还是 `localhost:3000`。FUSE 反而认 `$VEDA_SERVER`/`$VEDA_KEY`，不对称 | agent/CI/脚本场景没有「一行 export 即用」的路径 | `veda-cli/src/config.rs:64`；`veda-fuse/src/main.rs:40-52,259-273` |
-| G6 | **`/v1/answer` 不可发现**——reference.md 无章节、CLI 无 ask 子命令 | 照文档接入的人不知道有一站式带引用问答 | grep `reference.md` 无 answer；CLI 无 ask |
+| G4 | **✅ 已解决（P1-2，`GET /v1/index-status` + `veda status --index [--wait]`）**——原：索引进度黑盒，FileInfo/DirEntry 无 indexing 状态 | 批量传 500 个文件后只能盲等/盲试 | `api.rs:112-134`；worker 异步链路 `ARCHITECTURE.md` |
+| G5 | **✅ 已解决（P1-1，CLI 认 `$VEDA_SERVER`/`$VEDA_KEY`，flag>env>config）**——原：wk_ 只从 config.toml 读，与 FUSE 不对称 | agent/CI/脚本场景没有「一行 export 即用」的路径 | `veda-cli/src/config.rs:64`；`veda-fuse/src/main.rs:40-52,259-273` |
+| G6 | **✅ 已解决（P1-3，reference 中英补章节 + `veda ask`）**——原：answer 不可发现 | 照文档接入的人不知道有一站式带引用问答 | grep `reference.md` 无 answer；CLI 无 ask |
 | G7 | search 出处只到 chunk、无行号——`SemanticChunk{index,content}` 生成时就没记行号（行号只在 256KB 存储分块上，与语义 chunk 不对齐） | coding agent 无法精确跳转原文行；grep 可兜底 | `veda-types/src/types.rs:591-595`；`chunking.rs:119-141` |
 | G8 | 单 chunk 无邻接上下文；hybrid 无 min_score（RRF 分数不可解释） | 边界片段断章；无法按阈值过滤 | 调研结论 |
 
@@ -59,16 +60,16 @@
 
 | 期 | 项 | 一句话 | 状态/前置 |
 |---|---|---|---|
-| **P0** | veda-server `/mcp` 端点 | Streamable HTTP MCP，只读工具集 6 个，用户侧纯 json 配置零安装 | 纯 server 改动 |
-| **P1-1** | CLI 认 `$VEDA_SERVER`/`$VEDA_KEY` | 数据面命令 env 直连，与 FUSE 对齐（CI/脚本场景；HTTP MCP 已不依赖它） | 改动极小 |
-| **P1-2** | 索引进度可见性 | workspace 级 pending 计数端点 + CLI 展示 | 无 |
-| **P1-3** | answer 可发现性 | reference.md 补章节 + `veda ask` 子命令 | 无 |
+| **P0** | veda-server `/mcp` 端点 | Streamable HTTP MCP，只读工具集 6 个，用户侧纯 json 配置零安装 | ✅ 07-22 三节点上线 |
+| **P1-1** | CLI 认 `$VEDA_SERVER`/`$VEDA_KEY` | 数据面命令 env 直连，与 FUSE 对齐（CI/脚本场景；HTTP MCP 已不依赖它） | ✅ 随 0.1.21（fdc8b6a） |
+| **P1-2** | 索引进度可见性 | workspace 级 pending 计数端点 + CLI 展示 | ✅ 随 0.1.21（fdc8b6a） |
+| **P1-3** | answer 可发现性 | reference.md 补章节 + `veda ask` 子命令 | ✅ 随 0.1.21（fdc8b6a） |
 | ~~完成~~ | Word 提取 | **已随 0.1.20 上线**（07-22 三节点 + backfill），出方案 | — |
 | **P2** | HTML 提取 | 降级（07-22 review）：先用真实语料实测检索质量，数据不行再做 | 见 §6 状态框 |
 | **P2** | `veda sync` | 降级（07-22 review）：增量上传已被 sha 短路解决；删除同步先走 FUSE+rsync | 见 §8 状态框 |
 | **P2** | 其余背包 | 行号出处 / 邻接上下文 / OCR / min_score / wiki 平台 connector | 看真实反馈 |
 
-**第一批交付 = P0（纯 server 发版，三节点源码 build）**。P1 三项均小、以 CLI 为主，随后一批。
+**已全部交付**：P0 07-22 三节点源码 build 上线；P1 三项随 0.1.21（fdc8b6a，CLI 已发版，server 侧生产待部署窗口）。
 
 ## 4. P0 MCP server（veda-server `/mcp` 端点）
 
@@ -199,7 +200,7 @@
 3. 覆盖写 html→image：旧向量被清（复用 Word e2e 同一测试模式，SOP 见 `docs/word-e2e-sop.md`）。
 4. 一个 20+ 页的真实 wiki 导出目录 `cp -r` 全量入库，抽 5 页人工检查检索质量。
 
-## 7. P1-1 CLI 认 `$VEDA_SERVER` / `$VEDA_KEY`
+## 7. P1-1 CLI 认 `$VEDA_SERVER` / `$VEDA_KEY`（✅ 已随 0.1.21 实现）
 
 - 数据面命令（cp/cat/ls/search/grep/ask/sync/…）读取顺序：**`--server`/`--key` flag > env > config.toml**（与 FUSE 现有顺序一致，`veda-fuse/src/main.rs:143`）。
 - 命名沿用 FUSE 的 `$VEDA_SERVER`/`$VEDA_KEY`（=数据面 wk_）；已有的 `$VEDA_API_KEY`（vk_，仅 claim/upgrade 用，`main.rs:1098-1103`）职责不变，文档里把两者的分工写成表格，避免混淆。
@@ -245,7 +246,7 @@
 4. 规模：1000+ 文件目录跑通，耗时可接受（记录基线数据进 plan 回写）。
 5. `DirEntry.checksum` 字段：web console / FUSE 等现有消费者不受影响（加字段是兼容变更，但按项目「可自由打破」约定无需特殊处理，验一下编译面即可）。
 
-## 9. P1-2 索引进度可见性
+## 9. P1-2 索引进度可见性（✅ 已随 0.1.21 实现）
 
 ### 9.1 方案
 
@@ -268,7 +269,7 @@
 2. 端点鉴权：`AuthWorkspace`（wk_ 可查自己 workspace），不暴露跨租户信息。
 3. 性能：outbox 表按 `(workspace_id, status)` 的 count 走索引（EXPLAIN 验证），不做全表扫。
 
-## 10. P1-3 `/v1/answer` 可发现性
+## 10. P1-3 `/v1/answer` 可发现性（✅ 已随 0.1.21 实现）
 
 两个动作：
 
@@ -317,5 +318,5 @@
 1. **对方 wiki 的导出格式是什么？**（Markdown / Confluence HTML / docx / 混合）——含 HTML 则跑一次 §6 的半小时质量实验（灌真实语料测 10 条查询），用数据决定 HTML 提取是否触发。
 2. **对方 wiki 的更新/删除频率？**——决定 §8 sync 的触发时机；低频维护则「cp 重跑 + FUSE rsync --delete」长期够用。
 3. 消费者 key 策略：按 §4.3 建议「B 一律 read-only wk_」，是否需要管理端批量发 key 的便利（现有 console 已可发，暂判够用）？
-4. 发版节奏：P0（`/mcp`）是纯 server 改动——CI 不发 server，三节点源码 build 窗口安排；P1 三项以 CLI 为主随下一个 CLI 版本（0.1.21？）。
+4. ~~发版节奏~~ **已回答**：P0 07-22 三节点源码 build 上线；P1 三项随 0.1.21 发版（server 侧生产 .85/.95 待部署窗口）。
 5. MCP 工具名/参数名发布后即是对外契约，v0 定稿前是否请一位真实用户（需求方同事）过一遍工具描述？

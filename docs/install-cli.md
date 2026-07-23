@@ -25,7 +25,7 @@ env -u http_proxy -u https_proxy -u HTTP_PROXY -u HTTPS_PROXY \
 验证：
 
 ```sh
-veda --version          # → veda 0.1.16
+veda --version          # → veda 0.1.21（以最新发布为准）
 ```
 
 两个入口等价：都执行同一份 `install.sh`，从 GitLab 拉同一批产物。Linux 无代理环境可去掉 `env -u …` 前缀。
@@ -66,7 +66,7 @@ curl: (35) LibreSSL SSL_connect: SSL_ERROR_SYSCALL in connection to git.ddxq.mob
 | 选项 | 作用 | 默认 |
 |------|------|------|
 | `--with-fuse` | 同时安装 `veda-fuse`（FUSE 挂载） | 否 |
-| `VEDA_VERSION=0.1.16` | 锁定版本 | 自动取最新 |
+| `VEDA_VERSION=<x.y.z>` | 锁定版本（如 `0.1.21`） | 自动取最新 |
 | `VEDA_INSTALL_DIR=/path` | 安装目录 | root→`/usr/local/bin`，非 root→`$HOME/.local/bin` |
 | `VEDA_SOURCE=gitlab\|github` | 产物来源 | `gitlab`（内网） |
 

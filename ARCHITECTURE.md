@@ -62,7 +62,7 @@ veda-tunnel     外部 IM 接入（企微长连接）             (已上生产 
 
 ## MCP 端点 `POST /mcp`（2026-07-22）
 
-Coding Agent（Claude Code/Cursor/Codex）原生接入面：**Streamable HTTP transport 的 stateless 模式**，手写 JSON-RPC（无 SDK 依赖），协议版本只宣称 `2025-06-18`（03-26 要求 batch，stateless 单消息服务器不实现故不宣称）。用户侧零安装——`.mcp.json` 配 `url` + `Authorization: Bearer wk_` 即接入。设计：`docs/plans/coding-agent-kb-plan.md` §4。
+Coding Agent（Claude Code/Cursor/Codex）原生接入面：**Streamable HTTP transport 的 stateless 模式**，手写 JSON-RPC（无 SDK 依赖），协议版本只宣称 `2025-06-18`（03-26 要求 batch，stateless 单消息服务器不实现故不宣称）。用户侧零安装——`.mcp.json` 配 `url` + `Authorization: Bearer wk_` 即接入。设计：`docs/archive/plans/coding-agent-kb-plan.md` §4。
 
 - **`veda-server/routes/mcp.rs`**：`POST /mcp`（`AuthWorkspace`，fs only，与 REST 同一道鉴权闸；GET/DELETE 由 axum 自动 405 = 无下行 SSE/无会话）。挂在 30s TimeoutLayer **之外**（`ask` 需 90s），每工具自带超时（普通 30s / ask 95s）。严格 JSON-RPC 2.0 校验（`jsonrpc`/id 类型/params object，非法一律 -32600+id:null；无 id=notification→202）；`MCP-Protocol-Version` header 校验（有且不支持→400，无→放行）。错误分层：协议错→JSON-RPC error，领域错→`isError:true`+可读文本（LLM 可自愈）。**不做 Origin 校验**（rebinding 页面带不上 Bearer，见模块注释）。
 - **6 个只读工具**（进程内直调 service 层，非 HTTP 回环）：`search`（hybrid 固定+detail_level 三层，描述里引导「先 abstract 后 read_file」的 token 经济学）/ `grep`（字面量+行号，**每行截 500B**）/ `read_file`（PDF/Word 返提取文本，整读 64KB 截断+行分页，行读同样过 byte cap）/ `list_dir`（flat 截 10k+truncated；recursive 复用服务层 QuotaExceeded 语义，成功即完整）/ `overview`（L1，pending/disabled 双话术）/ `ask`（非流式 `/v1/answer` 语义，**与 REST 共享 per-workspace 并发闸与全部 answer 指标**）。

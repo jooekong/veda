@@ -23,6 +23,16 @@ veda workspace add my-project
 
 配置在 `~/.config/veda/config.toml`。`veda config show` 看当前状态。
 
+无 config 直连（CI / 脚本 / agent 场景，零落盘）：
+
+```bash
+export VEDA_SERVER=https://veda.ddmc-inc.com
+export VEDA_KEY=wk_xxx
+veda search "..."               # 数据面命令直接可用，不写任何本地文件
+```
+
+优先级 `--server` / `--key` flag > 环境变量 > config.toml（与 `veda-fuse` 同名同序）；`veda status` 会标注凭证来源（env / config）。
+
 ## 文件系统
 
 ```bash
@@ -44,7 +54,7 @@ veda cat /docs/readme.md --head 10           # 头 10 行
 veda cat /docs/readme.md --tail 5            # 尾 5 行
 ```
 
-仅支持 UTF-8 文本，二进制（PDF / 图片）会被客户端拒绝。
+文本与二进制都能 `cp` / `cat`（需 server ≥0.1.15）。PDF / Word 会自动抽取文本入索引可搜，`cat` 默认输出提取文本、`--raw` 拿原始字节；图片 / jar 等其余二进制只存不索引，`cat` 输出原始字节（重定向到文件）。
 
 ## 搜索
 
@@ -57,6 +67,16 @@ veda search "auth" --limit 20
 veda search "auth" --detail-level abstract         # 命中只返回 L0 摘要
 veda grep "TODO(joe)" --limit 200                  # 字面匹配（同步，无 embedding 延迟），返回 file:line
 ```
+
+## 问答（RAG）
+
+```bash
+veda ask "这个系统怎么部署"            # 一站式回答，内联 [n] 引用 + 出处列表
+veda ask "……" --path /docs             # 限定检索子树
+veda ask "……" --json                   # 原始 JSON（jq .data.citations 可解析）
+```
+
+服务端自主检索并生成带引用的答案，可能需要 10-90s。server 未配 LLM 返回 501、同 workspace 并发问答超限返回 429，均有独立退出码，脚本可区分。
 
 ## 摘要分层
 
@@ -96,7 +116,9 @@ veda sql "SELECT category, COUNT(*) FROM articles GROUP BY category"
 ## 杂项
 
 ```bash
-veda status                     # 当前配置 + server 可达性
+veda status                     # 当前配置 + server 可达性（含凭证来源 env/config）
+veda status --index             # 索引进度 {pending, processing, dead}
+veda status --index --wait      # 轮询到全部可搜再退出；有永久失败则退出码非 0（可当 CI 门）
 veda config show                # 配置详情
 veda --version                  # 客户端版本
 ```

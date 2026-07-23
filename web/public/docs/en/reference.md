@@ -364,7 +364,7 @@ The `metrics_token` (also gating reconcile) is set via `VEDA_METRICS_TOKEN` or T
 An honest list of what it's not good at today and what to watch before going to production:
 
 **Capability boundaries**
-- **UTF-8 text only**; PDF / images / video are not parsed (`extract_text` is a placeholder, no OCR yet), and binaries are rejected client-side.
+- Images / video / scanned PDFs (no text layer) are not parsed — **no OCR yet**. PDF / Word files get their text extracted and indexed automatically; other binaries (non-UTF-8) are stored verbatim as blobs — downloadable byte-for-byte, but not indexed.
 - Isolation stops at the **workspace level**: anyone holding a workspace's `wk_` sees all of its content — no row-level / document-level ACLs, no field-level permissions. Mixed-sensitivity multi-user scenarios like HR / compliance are not a fit today.
 - It's a knowledge store, not an OLTP database; high-concurrency transactional workloads don't belong here.
 

@@ -18,12 +18,13 @@ Veda 的 workspace 分两种，建库时选定，按场景挑：
 
 下面**先讲文件库**（文件操作、混合搜索、结构化 collection、SQL、FUSE、摘要分层），**再讲向量库**（托管嵌入、混合检索、meta 过滤）。如果你是带着"给业务应用加向量检索"来的，直接跳到「向量库：能力与场景」一节。
 
-## 三种使用形态
+## 四种使用形态
 
-同一份数据，三种姿态消费，按场景选：
+同一份数据，四种姿态消费，按场景选：
 
 - **CLI** — `veda` 二进制，脚本和日常 shell 都用它
 - **FUSE 挂载** — `veda-fuse` 把 workspace 挂成本地目录，**vim / VSCode / `make` / `rsync` 不感知背后是云存储**，写文件即同步上传、自动嵌入
+- **MCP** — server 原生 `/mcp` 端点，Claude Code / Cursor 等 Coding Agent 在 `.mcp.json` 配一段 URL + `wk_` 即接入，零安装（见 [AI 助手集成](#/docs/skill)）
 - **HTTP API** — REST + SSE 的 JSON 接口。前端、自建 agent、数据 pipeline 直接接入；向量库另有 Java SDK 与 Python 示例（见 [向量库 API](#/docs/vectors)）
 
 ---
@@ -39,6 +40,7 @@ Veda 的 workspace 分两种，建库时选定，按场景挑：
 | **多租户隔离** | Account → Workspace 两层；控制面账号 key `vk_`、数据面 workspace key `wk_` |
 | **FUSE 挂载** | 把 workspace 挂成本地目录，用 vim / IDE / `make` 任意原生工具访问 |
 | **摘要分层** | 每个文件自动生成 L0（一句话）和 L1（约 2k token 的概要），LLM 召回时省 token |
+| **Agent 接入 / RAG 问答** | MCP 端点提供 6 个只读工具给 Coding Agent；`/v1/answer` / `veda ask` 返回带 [n] 引用的答案 |
 
 ---
 
@@ -224,7 +226,7 @@ curl -sX POST $BASE/v1/vectors/search \
 
 | 场景 | 限制 |
 |---|---|
-| 二进制大文件（PDF / 图片 / 视频） | ❌ 目前只支持 UTF-8 文本（两种库都是） |
+| 图片 / 视频 / 扫描件 | ❌ 不解析（OCR 未做）。文件库中 PDF / Word 会抽取文本可搜，其余二进制只存不索引；向量库仍只收文本 |
 | 严格 ACL / 配额 | ❌ alpha 阶段没做细粒度权限和限额 |
 | 高并发交易场景 | ❌ 是知识库 / 检索服务，不是 OLTP 数据库 |
 | 海量小文件（>100 万 chunks） | ⚠️ alpha 单副本，规模化要等多副本演进 |
