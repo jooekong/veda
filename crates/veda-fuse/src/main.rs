@@ -21,7 +21,11 @@ enum WriteMode {
 }
 
 #[derive(Parser)]
-#[command(name = "veda-fuse", about = "Mount a Veda workspace as a local filesystem")]
+#[command(
+    name = "veda-fuse",
+    version,
+    about = "Mount a Veda workspace as a local filesystem"
+)]
 struct Cli {
     #[command(subcommand)]
     command: Cmd,

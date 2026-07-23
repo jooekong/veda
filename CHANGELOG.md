@@ -9,6 +9,8 @@ that matters.
 
 ## [Unreleased]
 
+## [0.1.21] — 2026-07-23
+
 ### Added
 - **`veda ask` — RAG answering from the CLI.** One-shot question → answer
   with inline `[n]` citations and a deduplicated source list; `--json`
@@ -31,6 +33,9 @@ that matters.
   tunnel rendered one line per citation — users saw duplicate-looking
   entries. Same-file citations now collapse into a single line carrying
   all their `[n]` indices.
+- **`veda-fuse --version` works.** The binary had the right Cargo version
+  since 0.1.17 but never exposed it — the clap root command lacked
+  `version`, so `-V/--version` errored.
 
 - **MCP endpoint (`POST /mcp`)**: veda-server now speaks the Model Context
   Protocol (Streamable HTTP transport, stateless, protocol revision
