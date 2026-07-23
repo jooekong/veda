@@ -50,7 +50,8 @@ git push origin main && git push origin X.Y.Z
 git push ddxq  main && git push ddxq  X.Y.Z   # ← gitlab tag 触发 CLI CI build
 
 # 1.4 确认 GitLab CLI 发布完成(CI 不发 server,只发 CLI)
-NO_PROXY=git.ddxq.mobi glab ci list -R middleware/dbpaas/veda | head -3   # 0.1.x 行应 (success)
+# 新版 glab 表格前有两行说明,head -3 只剩表头看不到 pipeline 行(0.1.21 发版实测踩坑)
+NO_PROXY=git.ddxq.mobi glab ci list -R middleware/dbpaas/veda | head -8   # 0.1.x 行应 (success)
 TOKEN=$(grep -oE 'GITLAB_DEPLOY_TOKEN="[^"]+"' install.sh | cut -d'"' -f2)
 curl -s --noproxy '*' --header "Deploy-Token: $TOKEN" \
   https://git.ddxq.mobi/api/v4/projects/9462/packages/generic/veda/latest/LATEST_VERSION
