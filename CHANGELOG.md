@@ -10,6 +10,17 @@ that matters.
 ## [Unreleased]
 
 ### Changed
+- **WeCom bot: upstream AI outages are no longer blamed on the knowledge
+  base.** When the LLM gateway or embedding upstream fails
+  (`LLM_UNAVAILABLE` / `EMBEDDING_FAILED`), the bot now replies "上游 AI
+  模型服务暂时不可用（外部依赖故障，非知识库问题）…" instead of the
+  generic "知识库暂时不可用", across the one-shot, streaming and raw-search
+  paths. These land in the QA log as a distinct `upstream_error` outcome
+  (admin console shows a "上游故障" badge and filter; the platform QA API
+  accepts it), so dependency outages and veda's own errors are separable in
+  stats. Timeouts (`ANSWER_TIMEOUT`) keep the generic wording — their
+  deadline spans retrieval too, so pinning them on the upstream could
+  misattribute.
 - **Embedding throughput, stage 1 (server-side).** Every upstream embedding
   call now passes a global **two-priority** concurrency gate
   (`[embedding].max_concurrency`, default 8): interactive callers (search /

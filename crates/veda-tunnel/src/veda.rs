@@ -123,7 +123,46 @@ pub enum SearchError {
     /// streaming endpoint. The handler falls back to the one-shot path, so
     /// tunnel and server can be deployed in either order.
     StreamUnsupported,
+    /// An *external AI dependency* (LLM gateway / embedding upstream) failed —
+    /// veda and the knowledge base itself are fine. Kept separate from
+    /// `Unavailable` so the user-facing wording can name the dependency
+    /// instead of letting an upstream outage read as "the KB is flaky".
+    /// Carries the server `error_code` for logs / qa_log.
+    AiUpstream(String),
     Unavailable(String),
+}
+
+/// Server `error_code`s that pin the failure on an external AI dependency
+/// rather than veda itself. Shared by the HTTP error paths here and the
+/// stream `error` event mapping in the handler — keep the set in one place.
+///
+/// `ANSWER_TIMEOUT` is deliberately NOT here: the server emits it for the
+/// pre-search deadline (Milvus/MySQL side) and the total answer budget as
+/// well as LLM-attempt timeouts, so blaming "外部依赖" for it could be a
+/// lie — misattribution costs more credibility than the generic wording
+/// (Codex review 2026-07-30).
+pub fn is_ai_upstream_code(code: &str) -> bool {
+    matches!(code, "LLM_UNAVAILABLE" | "EMBEDDING_FAILED")
+}
+
+/// Classify a non-2xx response: AI-upstream `error_code`s get their own
+/// variant; everything else stays `Unavailable` with the raw snippet.
+fn classify_error_body(status: u16, body: &str) -> SearchError {
+    #[derive(Deserialize)]
+    struct ErrBody {
+        #[serde(default)]
+        error_code: String,
+    }
+    if let Ok(e) = serde_json::from_str::<ErrBody>(body) {
+        if is_ai_upstream_code(&e.error_code) {
+            return SearchError::AiUpstream(e.error_code);
+        }
+    }
+    SearchError::Unavailable(format!(
+        "HTTP {}: {}",
+        status,
+        body.chars().take(200).collect::<String>()
+    ))
 }
 
 /// One event from `POST /v1/answer/stream`. `Final` is authoritative — the
@@ -200,11 +239,7 @@ impl VedaClient {
         }
         if !status.is_success() {
             let body = resp.text().await.unwrap_or_default();
-            return Err(SearchError::Unavailable(format!(
-                "HTTP {}: {}",
-                status.as_u16(),
-                body.chars().take(200).collect::<String>()
-            )));
+            return Err(classify_error_body(status.as_u16(), &body));
         }
 
         let parsed: SearchResp = resp
@@ -250,11 +285,7 @@ impl VedaClient {
         }
         if !status.is_success() {
             let body = resp.text().await.unwrap_or_default();
-            return Err(SearchError::Unavailable(format!(
-                "HTTP {}: {}",
-                status.as_u16(),
-                body.chars().take(200).collect::<String>()
-            )));
+            return Err(classify_error_body(status.as_u16(), &body));
         }
 
         let parsed: AnswerResp = resp
@@ -308,11 +339,7 @@ impl VedaClient {
         }
         if !status.is_success() {
             let body = resp.text().await.unwrap_or_default();
-            return Err(SearchError::Unavailable(format!(
-                "HTTP {}: {}",
-                status.as_u16(),
-                body.chars().take(200).collect::<String>()
-            )));
+            return Err(classify_error_body(status.as_u16(), &body));
         }
 
         let (tx, rx) = tokio::sync::mpsc::channel::<AnswerStreamItem>(32);
@@ -431,5 +458,47 @@ mod tests {
         assert_eq!(lines.len(), 1);
         assert_eq!(lines[0], "data: {\"text\":\"中文答案\"}");
         assert!(!lines[0].contains('\u{FFFD}'), "no replacement char: {}", lines[0]);
+    }
+
+    #[test]
+    fn ai_upstream_codes_get_their_own_variant() {
+        // The exact envelope /v1/answer sends on LLM outage (502).
+        let body = r#"{"success":false,"error_code":"LLM_UNAVAILABLE","error":"llm upstream unavailable"}"#;
+        assert!(matches!(
+            classify_error_body(502, body),
+            SearchError::AiUpstream(c) if c == "LLM_UNAVAILABLE"
+        ));
+        // ANSWER_TIMEOUT covers pre-search / total-budget deadlines too, so
+        // it must NOT be pinned on the upstream — generic wording.
+        let body = r#"{"success":false,"error_code":"ANSWER_TIMEOUT","error":"answer generation exceeded the deadline"}"#;
+        assert!(matches!(
+            classify_error_body(504, body),
+            SearchError::Unavailable(m) if m.starts_with("HTTP 504:")
+        ));
+        // /v1/search with the embedding upstream down (500, opaque message).
+        let body = r#"{"success":false,"error_code":"EMBEDDING_FAILED","error":"internal server error"}"#;
+        assert!(matches!(
+            classify_error_body(500, body),
+            SearchError::AiUpstream(c) if c == "EMBEDDING_FAILED"
+        ));
+    }
+
+    #[test]
+    fn other_errors_stay_unavailable_with_snippet() {
+        // veda's own internal error must NOT be blamed on upstream.
+        let body = r#"{"success":false,"error_code":"INTERNAL","error":"internal server error"}"#;
+        assert!(matches!(
+            classify_error_body(500, body),
+            SearchError::Unavailable(m) if m.starts_with("HTTP 500:")
+        ));
+        // Non-JSON bodies (nginx 502 page, empty) degrade to the raw snippet.
+        assert!(matches!(
+            classify_error_body(502, "<html>bad gateway</html>"),
+            SearchError::Unavailable(m) if m.starts_with("HTTP 502:")
+        ));
+        assert!(matches!(
+            classify_error_body(500, ""),
+            SearchError::Unavailable(m) if m == "HTTP 500: "
+        ));
     }
 }

@@ -358,12 +358,13 @@ const QA_MAX_SIZE: u32 = 100;
 /// `veda-tunnel/src/wecom/handler.rs` (answer + search + error paths). A filter
 /// outside this set is a typo, so reject it early instead of silently
 /// returning nothing.
-const KNOWN_OUTCOMES: [&str; 7] = [
+const KNOWN_OUTCOMES: [&str; 8] = [
     "answered",
     "no_context",
     "ungrounded",
     "raw_search",
     "error",
+    "upstream_error",
     "disabled",
     "throttled",
 ];

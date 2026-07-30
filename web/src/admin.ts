@@ -779,6 +779,7 @@ const OUTCOME_BADGE: Record<string, [string, string]> = {
   ungrounded: ["无引用", "bg-orange-100 text-orange-700"],
   raw_search: ["纯检索", "bg-sky-100 text-sky-700"],
   error: ["错误", "bg-rose-100 text-rose-700"],
+  upstream_error: ["上游故障", "bg-purple-100 text-purple-700"],
   throttled: ["限流", "bg-slate-100 text-slate-500"],
   disabled: ["未启用", "bg-slate-100 text-slate-500"],
 };
@@ -841,6 +842,7 @@ async function renderQaStats(root: HTMLElement) {
         <option value="ungrounded">无引用</option>
         <option value="answered">已回答</option>
         <option value="error">错误</option>
+        <option value="upstream_error">上游故障</option>
       </select>
       <label class="text-xs text-slate-600 flex items-center gap-1">
         <input type="checkbox" id="qa-down"> 仅被踩

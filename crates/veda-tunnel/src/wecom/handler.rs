@@ -17,7 +17,7 @@ use super::protocol::{respond_stream_frame, MsgCallbackBody, MSGTYPE_TEXT};
 use crate::config::BotConfig;
 use crate::qa_log::{QaLogEntry, QaLogStore};
 use crate::registry::{self, Registry};
-use crate::veda::{AnswerData, AnswerStreamItem, Hit, SearchError, VedaClient};
+use crate::veda::{is_ai_upstream_code, AnswerData, AnswerStreamItem, Hit, SearchError, VedaClient};
 
 /// Minimum gap between interim WeCom frame refreshes while streaming.
 /// Whether interim refreshes count against the 30 msg/min quota is not
@@ -48,6 +48,12 @@ pub struct HandlerCtx {
 /// as a prefix; the wire text may carry trailing punctuation). Rows matching
 /// this are the "missing docs" backlog, the QA log's primary product.
 const NO_CONTEXT_ANSWER: &str = "知识库中没有找到相关内容";
+
+/// User-facing wording when an *external AI dependency* (LLM gateway /
+/// embedding upstream) is down. Deliberately names the dependency and
+/// vouches for the KB itself — an upstream outage phrased as "知识库暂时
+/// 不可用" reads as veda being flaky, which it isn't (2026-07-30 Joe).
+const AI_UPSTREAM_MSG: &str = "上游 AI 模型服务暂时不可用（外部依赖故障，非知识库问题），请稍后再试";
 
 /// Citation entries shown on the compact "出处：" line; the rest collapse
 /// into "等 N 篇". Grounded answers rarely cite more than this.
@@ -192,6 +198,14 @@ async fn search_reply(ctx: &HandlerCtx, query: &str, started: std::time::Instant
             warn!(bot = %ctx.bot.name, "search unauthorized (401)");
             err_reply("知识库鉴权失败，请联系管理员", "error")
         }
+        Err(SearchError::AiUpstream(code)) => {
+            registry::update(&ctx.registry, &ctx.bot.bot_id, |s| {
+                s.error_count += 1;
+                s.last_error = Some(format!("ai upstream: {code}"));
+            });
+            warn!(bot = %ctx.bot.name, code = %code, "search failed: ai upstream unavailable");
+            err_reply(AI_UPSTREAM_MSG, "upstream_error")
+        }
         Err(SearchError::Unavailable(e)) => {
             registry::update(&ctx.registry, &ctx.bot.bot_id, |s| {
                 s.error_count += 1;
@@ -262,6 +276,14 @@ fn answer_error_to_reply(ctx: &HandlerCtx, e: SearchError) -> Reply {
             // drop the long connection (§9).
             warn!(bot = %ctx.bot.name, "answer unauthorized (401)");
             err_reply("知识库鉴权失败，请联系管理员", "error")
+        }
+        SearchError::AiUpstream(code) => {
+            registry::update(&ctx.registry, &ctx.bot.bot_id, |s| {
+                s.error_count += 1;
+                s.last_error = Some(format!("ai upstream: {code}"));
+            });
+            warn!(bot = %ctx.bot.name, code = %code, "answer failed: ai upstream unavailable");
+            err_reply(AI_UPSTREAM_MSG, "upstream_error")
         }
         // StreamUnsupported is handled by the caller's fallback before this.
         SearchError::StreamUnsupported | SearchError::Unavailable(_) => {
@@ -395,12 +417,7 @@ async fn answer_reply_stream(
                 return reply;
             }
             Some(AnswerStreamItem::Error(code)) => {
-                let e = match code.as_str() {
-                    "THROTTLED" => SearchError::Throttled,
-                    "FEATURE_DISABLED" => SearchError::Disabled,
-                    other => SearchError::Unavailable(format!("stream error: {other}")),
-                };
-                return answer_error_to_reply(ctx, e);
+                return answer_error_to_reply(ctx, stream_error_to_search_error(code));
             }
             None => {
                 return answer_error_to_reply(
@@ -409,6 +426,19 @@ async fn answer_reply_stream(
                 );
             }
         }
+    }
+}
+
+/// Maps a mid-stream `error` event's `error_code` onto the same
+/// `SearchError` taxonomy the HTTP paths use, so all three answer paths
+/// share one wording table (notably: AI-upstream codes → the dependency
+/// wording, ANSWER_TIMEOUT stays generic).
+fn stream_error_to_search_error(code: String) -> SearchError {
+    match code.as_str() {
+        "THROTTLED" => SearchError::Throttled,
+        "FEATURE_DISABLED" => SearchError::Disabled,
+        c if is_ai_upstream_code(c) => SearchError::AiUpstream(code.clone()),
+        other => SearchError::Unavailable(format!("stream error: {other}")),
     }
 }
 
@@ -549,6 +579,33 @@ fn cap_frame_bytes(s: &str, cap: usize) -> String {
 mod tests {
     use super::*;
     use crate::veda::AnswerCitation;
+
+    #[test]
+    fn stream_error_codes_map_like_the_http_paths() {
+        // Mid-stream LLM outage must reach the dependency wording, not the
+        // generic one — this pins the mapping the HTTP-path tests can't see.
+        assert!(matches!(
+            stream_error_to_search_error("LLM_UNAVAILABLE".into()),
+            SearchError::AiUpstream(c) if c == "LLM_UNAVAILABLE"
+        ));
+        // Timeouts span retrieval too → stay generic.
+        assert!(matches!(
+            stream_error_to_search_error("ANSWER_TIMEOUT".into()),
+            SearchError::Unavailable(_)
+        ));
+        assert!(matches!(
+            stream_error_to_search_error("THROTTLED".into()),
+            SearchError::Throttled
+        ));
+        assert!(matches!(
+            stream_error_to_search_error("FEATURE_DISABLED".into()),
+            SearchError::Disabled
+        ));
+        assert!(matches!(
+            stream_error_to_search_error("INTERNAL".into()),
+            SearchError::Unavailable(_)
+        ));
+    }
 
     #[test]
     fn strips_leading_mention() {
