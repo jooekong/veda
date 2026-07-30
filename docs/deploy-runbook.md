@@ -74,6 +74,8 @@ TAG=0.1.15   # 阶段 1 发版确定的版本
 TMP=$(mktemp -d); git archive "$TAG" | tar -x -C "$TMP"
 rsync -a --checksum --delete --exclude=/target --exclude=/.git -e "ssh -o ServerAliveInterval=20" "$TMP"/ 10.79.55.89:/root/veda-build/
 rm -rf "$TMP"
+# ⚠️ Mac 自带 rsync 是 openrsync,其 --checksum 的 dry-run itemize 有假阳性(2026-07-30 实测
+# 338 个文件误报 11 个)。传输本身可用,但**源码一致性判据**要用两侧 sha256 manifest 对比,别信 dry-run。
 ssh -o ServerAliveInterval=20 10.79.55.89 'find /root/veda-build \( -type d \( -name target -o -name .git \) \) -prune -o -type f -print0 | xargs -0 touch'
 
 # detached build(铁律 1),后台等完成(新依赖首次约 9min,纯增量更快)
@@ -114,6 +116,9 @@ ssh -o ServerAliveInterval=20 <node> '
   echo "ready:   $(curl -s localhost:3000/v1/ready)"
 '
 ```
+
+> 远程多行脚本用 `ssh <node> 'bash -s' < script.sh` 传;**别把 heredoc 接在管道后面**——
+> `ssh ... 2>&1 | tee log <<'EOS'` 会把 heredoc 喂给 `tee` 而不是 `ssh`,远端 `bash -s` 挂起等输入直到超时(2026-07-30 踩坑,幸好只读核查确认零副作用)。
 
 **顺序(铁律 4)**:先 `.161` + `.89`(测试)→ 走阶段 3 验证 → **通过后**再 `.85`(生产)。生产复用的就是测试已验过的**同一个 binary**,确定性最高。
 - `.161`(有 git)若不想等 scp,也能 `git fetch && git checkout $TAG` 本地 build,但同为测试环境,复用 `.89` 的 binary 更省。
@@ -184,6 +189,9 @@ ssh -o ServerAliveInterval=20 <node> '
   ```
   (本次 0.1.15 只新增 `veda_file_blobs` 一张 `CREATE TABLE`,无新 ALTER。)
 - **OTLP 关**:这台没装 monitor-agent。
+- **.85 上没有 mysql 客户端**(mysql/mariadb/mycli/docker 全无,pip 不能联网):MySQL 操作(权限预检/outbox 查询)走
+  Mac 本地 mysql client + SSH 隧道:`ssh -f -N -L 13385:<mysql-host>:3306 10.79.55.85`。凭证从节点 config.toml 的
+  DSN 取(密码是 percent-encoded,记得 decode),写进 600 权限临时文件用 `--defaults-extra-file` 喂,用完即删。
 
 ---
 
