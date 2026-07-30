@@ -188,7 +188,21 @@ ssh -o ServerAliveInterval=20 <node> '
   DROP TABLE _veda_perm_check;          -- 四条全过 = migrate 权限够
   ```
   (本次 0.1.15 只新增 `veda_file_blobs` 一张 `CREATE TABLE`,无新 ALTER。)
-- **OTLP 关**:这台没装 monitor-agent。
+- **OTLP 已开**(2026-07-30 补配)。此前长期是关的,根因是一条错误结论——"这台没装 monitor-agent 所以推不了"。
+  **veda 的 OTLP 不走本地 agent**:`obs/otlp/discovery.rs` 向 `monitor` 配置服务 GET collector 列表,
+  再 gRPC 直推远端 `10.79.11.x:5318`,本地有没有 agent 无关(三台节点本地 5317/5318 都无 listener)。
+  实测:`.85` curl discovery 返 200 + 12 个 metrics collector(与测试节点同一批),5318 TCP 全 OPEN。
+  **新节点/换库时 `[otlp]` 属于必配段**,漏了不会报错——只会静默无指标(启动日志唯一线索是
+  `OTLP metrics exporter disabled`)。`.85` 现配(值取自本机 `/etc/ddmc/env.yaml`,root 才能读):
+  ```toml
+  [otlp]
+  enabled = true
+  appname = "veda-reach"
+  env_name = "hw-pe1"        # 生产;.89 测试是 hw-tes
+  monitor = "paasconf-hw-sh.ddmc-inc.com"
+  ```
+  ⚠️ **`.85` 生产与 `.89` 测试的 appname 同为 `veda-reach`**,平台上按 appname 查会把两个环境混在一起,
+  必须用 `env_name`/`env_level` label 区分。别为了区分改 appname——平台只认注册过的 appname。
 - **.85 上没有 mysql 客户端**(mysql/mariadb/mycli/docker 全无,pip 不能联网):MySQL 操作(权限预检/outbox 查询)走
   Mac 本地 mysql client + SSH 隧道:`ssh -f -N -L 13385:<mysql-host>:3306 10.79.55.85`。凭证从节点 config.toml 的
   DSN 取(密码是 percent-encoded,记得 decode),写进 600 权限临时文件用 `--defaults-extra-file` 喂,用完即删。
