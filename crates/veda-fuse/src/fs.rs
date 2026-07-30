@@ -45,8 +45,12 @@ fn is_magic_name(name: &str) -> Option<SummaryKind> {
         .map(|(_, kind)| *kind)
 }
 
+/// Same semantics as `veda_core::path::parent`; veda-fuse is a pure HTTP
+/// client and deliberately does not depend on veda-core for one helper.
 pub(crate) fn parent_path(path: &str) -> &str {
-    if path == "/" { return "/"; }
+    if path == "/" {
+        return "/";
+    }
     match path.rfind('/') {
         Some(0) => "/",
         Some(i) => &path[..i],

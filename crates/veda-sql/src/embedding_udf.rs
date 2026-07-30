@@ -10,6 +10,27 @@ use veda_core::store::EmbeddingService;
 
 use crate::fs_udf::block_on;
 
+/// The block_on bridge cannot be cancelled by the HTTP layer's timeout
+/// (dropping the request future does not unwind a blocked thread), so this
+/// path carries its own deadline instead of relying on the caller's — the
+/// one exception to the embedding gate's "no acquire timeout" premise.
+const UDF_EMBED_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
+fn embed_blocking(
+    embedding: &Arc<dyn EmbeddingService>,
+    texts: &[String],
+) -> std::result::Result<Vec<Vec<f32>>, datafusion::error::DataFusionError> {
+    block_on(tokio::time::timeout(UDF_EMBED_TIMEOUT, embedding.embed(texts)))
+        .map_err(|_| {
+            datafusion::error::DataFusionError::Execution(
+                "embedding() timed out waiting for upstream capacity".to_string(),
+            )
+        })?
+        .map_err(|e| {
+            datafusion::error::DataFusionError::Execution(format!("embedding() failed: {e}"))
+        })
+}
+
 #[derive(Clone)]
 pub struct EmbeddingUdf {
     sig: Signature,
@@ -79,11 +100,7 @@ impl ScalarUDFImpl for EmbeddingUdf {
                     .downcast_ref::<StringArray>()
                     .map(|a| a.value(0).to_string())
                     .unwrap_or_default();
-                let vecs = block_on(self.embedding.embed(&[s])).map_err(|e| {
-                    datafusion::error::DataFusionError::Execution(format!(
-                        "embedding() failed: {e}"
-                    ))
-                })?;
+                let vecs = embed_blocking(&self.embedding, &[s])?;
                 let vec = match vecs.as_slice() {
                     [one] => one,
                     [] => {
@@ -137,9 +154,7 @@ impl ScalarUDFImpl for EmbeddingUdf {
         let vectors = if non_null_texts.is_empty() {
             Vec::new()
         } else {
-            block_on(self.embedding.embed(&non_null_texts)).map_err(|e| {
-                datafusion::error::DataFusionError::Execution(format!("embedding() failed: {e}"))
-            })?
+            embed_blocking(&self.embedding, &non_null_texts)?
         };
 
         let mut vec_iter = vectors.iter();

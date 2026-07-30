@@ -30,8 +30,8 @@ const SUMMARY_BURST_WINDOW_SECS: i64 = 5 * 60;
 
 /// Heartbeat period for renewing the lease on the batch in flight. Must be
 /// well under the 10-minute lease (`OUTBOX_LEASE_MINUTES` in veda-store):
-/// at 3 minutes a worker survives two missed renewals before another server
-/// is allowed to take its tasks over.
+/// at 3 minutes a worker survives two missed renewals before its rows
+/// become claimable again as expired.
 const LEASE_RENEW_INTERVAL: Duration = Duration::from_secs(180);
 
 pub struct Worker {
@@ -43,10 +43,6 @@ pub struct Worker {
     batch_size: usize,
     poll_interval: Duration,
     max_overview_tokens: usize,
-    /// Lease identity for outbox fencing: host distinguishes servers sharing
-    /// one MySQL, pid guards same-host overlap (old process still draining a
-    /// batch while its replacement starts).
-    owner: String,
 }
 
 impl Worker {
@@ -69,21 +65,16 @@ impl Worker {
             batch_size,
             poll_interval: Duration::from_secs(poll_interval_secs),
             max_overview_tokens,
-            owner: format!(
-                "{}:{}",
-                gethostname::gethostname().to_string_lossy(),
-                std::process::id()
-            ),
         }
     }
 
     pub async fn run(&self, mut shutdown: watch::Receiver<bool>) {
-        info!(owner = %self.owner, "worker started");
+        info!("worker started");
         loop {
             if *shutdown.borrow() {
                 break;
             }
-            match self.task_queue.claim(&self.owner, self.batch_size).await {
+            match self.task_queue.claim(self.batch_size).await {
                 Ok(tasks) if tasks.is_empty() => {
                     tokio::select! {
                         _ = shutdown.changed() => {}
@@ -110,18 +101,17 @@ impl Worker {
 
     /// Run one claimed batch to completion, heartbeating the lease on every
     /// task in it while any are still in flight. Already-finished tasks make
-    /// the renew a no-op (it is fenced on owner + `processing`), so no
-    /// per-task bookkeeping is needed. If this process dies mid-batch the
-    /// heartbeat stops with it and the leases expire — the takeover path.
+    /// the renew a no-op (it is fenced on `processing`), so no per-task
+    /// bookkeeping is needed. If this process dies mid-batch the heartbeat
+    /// stops with it and the leases expire — a later claim retries the rows.
     async fn process_batch(&self, tasks: Vec<OutboxEvent>) {
         let ids: Vec<i64> = tasks.iter().map(|t| t.id).collect();
         let renewer = tokio::spawn({
             let queue = Arc::clone(&self.task_queue);
-            let owner = self.owner.clone();
             async move {
                 loop {
                     sleep(LEASE_RENEW_INTERVAL).await;
-                    if let Err(e) = queue.renew(&ids, &owner).await {
+                    if let Err(e) = queue.renew(&ids).await {
                         warn!(err = %e, "outbox lease renew failed");
                     }
                 }
@@ -161,7 +151,7 @@ impl Worker {
                         "event_type" => event_type,
                     )
                     .increment(1);
-                    let _ = self.task_queue.fail(task.id, &self.owner, &err_msg).await;
+                    let _ = self.task_queue.fail(task.id, &err_msg).await;
                 }
             })
             .await;
@@ -206,7 +196,7 @@ impl Worker {
                         .delete_summary(&task.workspace_id, file_id)
                         .await?;
                 }
-                self.task_queue.complete(task.id, &self.owner).await?;
+                self.task_queue.complete(task.id).await?;
             }
             OutboxEventType::ChunkDelete => {
                 self.vector
@@ -216,12 +206,12 @@ impl Worker {
                     .delete_summary(&task.workspace_id, file_id)
                     .await?;
                 self.meta.delete_summary_by_file(file_id).await?;
-                self.task_queue.complete(task.id, &self.owner).await?;
+                self.task_queue.complete(task.id).await?;
             }
             OutboxEventType::SummarySync => {
                 self.handle_summary_sync(&task.workspace_id, file_id)
                     .await?;
-                self.task_queue.complete(task.id, &self.owner).await?;
+                self.task_queue.complete(task.id).await?;
             }
             OutboxEventType::DirSummarySync => {
                 let dentry_id = task
@@ -236,12 +226,12 @@ impl Worker {
                     .unwrap_or("");
                 self.handle_dir_summary_sync(&task.workspace_id, dentry_id, parent_path)
                     .await?;
-                self.task_queue.complete(task.id, &self.owner).await?;
+                self.task_queue.complete(task.id).await?;
             }
             OutboxEventType::ExtractSync => {
                 self.handle_extract_sync(&task.workspace_id, file_id, force_reembed)
                     .await?;
-                self.task_queue.complete(task.id, &self.owner).await?;
+                self.task_queue.complete(task.id).await?;
             }
         }
         Ok(())
@@ -747,14 +737,7 @@ impl Worker {
 }
 
 fn parent_path_of(path: &str) -> String {
-    if path == "/" {
-        return "/".to_string();
-    }
-    match path.rfind('/') {
-        Some(0) => "/".to_string(),
-        Some(i) => path[..i].to_string(),
-        None => "/".to_string(),
-    }
+    veda_core::path::parent(path).to_string()
 }
 
 /// Static label string for `OutboxEventType`, used as a Prometheus label.

@@ -73,13 +73,17 @@ async fn main() -> anyhow::Result<()> {
         cfg.milvus.db.clone(),
     ));
 
-    let embedding = Arc::new(EmbeddingProvider::new(
+    let embedding = Arc::new(EmbeddingProvider::new_tuned(
         &cfg.embedding.api_url,
         &cfg.embedding.api_key,
         &cfg.embedding.model,
         Some(cfg.embedding.dimension),
         cfg.embedding.batch_size,
+        cfg.embedding.max_concurrency,
     )?);
+    // Worker indexing embeds at LOW gate priority: idle it may saturate
+    // every permit, but interactive callers get the next freed one.
+    let embedding_bg = embedding.background();
     // Vector data plane (db-kind workspace) gets its own L1 cache wrap.
     // fs path uses the raw `embedding` to avoid double-caching with the
     // existing search/collection services.
@@ -106,15 +110,14 @@ async fn main() -> anyhow::Result<()> {
     );
 
     // On-demand MySQL↔Milvus reconciler. No background loop — driven by
-    // POST /admin/v1/reconcile/{ws}. grace_passes=0: an operator runs it
-    // attended, and the in-pass get_file/has_pending_event re-checks already
-    // guard the read-skew race within a single pass.
-    let reconciler = Arc::new(reconciler::Reconciler::with_grace_passes(
+    // POST /admin/v1/reconcile/{ws}. An operator runs it attended, and the
+    // in-pass get_file/has_pending_event re-checks guard the read-skew race
+    // within a single pass.
+    let reconciler = Arc::new(reconciler::Reconciler::new(
         mysql.clone(),
         mysql.clone(),
         milvus.clone(),
         mysql.clone(),
-        0,
     ));
 
     let llm: Option<Arc<dyn LlmService>> = match &cfg.llm {
@@ -189,7 +192,7 @@ async fn main() -> anyhow::Result<()> {
             mysql.clone(),
             mysql.clone(),
             milvus.clone(),
-            embedding.clone(),
+            embedding_bg.clone(),
             llm.clone(),
             cfg.worker.batch_size,
             cfg.worker.poll_interval_secs,

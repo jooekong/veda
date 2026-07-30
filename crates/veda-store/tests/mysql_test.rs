@@ -356,12 +356,12 @@ async fn mysql_task_queue_enqueue_claim_complete() {
     let ws = Uuid::new_v4().to_string();
     // drain stale pending entries from previous test runs
     loop {
-        let batch = store.claim("test-owner", 100).await.expect("drain");
+        let batch = store.claim(100).await.expect("drain");
         if batch.is_empty() {
             break;
         }
         for e in &batch {
-            let _ = store.complete(e.id, "test-owner").await;
+            let _ = store.complete(e.id).await;
         }
     }
     let ev = OutboxEvent {
@@ -377,14 +377,14 @@ async fn mysql_task_queue_enqueue_claim_complete() {
         created_at: Utc::now(),
     };
     store.enqueue(&ev).await.expect("enqueue");
-    let claimed = store.claim("test-owner", 10).await.expect("claim");
+    let claimed = store.claim(10).await.expect("claim");
     let mine = claimed
         .iter()
         .find(|e| e.workspace_id == ws)
         .expect("claimed row for this workspace");
     let id = mine.id;
-    store.complete(id, "test-owner").await.expect("complete");
-    let claimed2 = store.claim("test-owner", 10).await.expect("claim2");
+    store.complete(id).await.expect("complete");
+    let claimed2 = store.claim(10).await.expect("claim2");
     assert!(
         !claimed2.iter().any(|e| e.id == id),
         "completed task should not be claimed again"
@@ -407,8 +407,8 @@ fn lease_test_event(ws: &str) -> OutboxEvent {
     }
 }
 
-async fn outbox_status_owner(store: &MysqlStore, task_id: i64) -> (String, Option<String>) {
-    sqlx::query_as("SELECT status, lease_owner FROM veda_outbox WHERE id = ?")
+async fn outbox_status(store: &MysqlStore, task_id: i64) -> String {
+    sqlx::query_scalar("SELECT status FROM veda_outbox WHERE id = ?")
         .bind(task_id)
         .fetch_one(store.pool())
         .await
@@ -439,7 +439,7 @@ async fn purge_outbox(store: &MysqlStore) {
 
 #[tokio::test]
 #[ignore]
-async fn mysql_outbox_lease_fencing_on_takeover() {
+async fn mysql_outbox_lease_expiry_reclaim() {
     let url = load_mysql_url();
     let store = MysqlStore::new(&url).await.expect("connect");
     store.migrate().await.expect("migrate");
@@ -447,20 +447,21 @@ async fn mysql_outbox_lease_fencing_on_takeover() {
     let ws = Uuid::new_v4().to_string();
     store.enqueue(&lease_test_event(&ws)).await.expect("enqueue");
 
-    let claimed = store.claim("hostA:1", 100).await.expect("claim A");
+    let claimed = store.claim(100).await.expect("claim 1");
     let task = claimed
         .iter()
         .find(|e| e.workspace_id == ws)
-        .expect("A claimed the task");
+        .expect("first claim got the task");
 
-    // While A's lease is live the row must be invisible to other claimers.
-    let parallel = store.claim("hostB:1", 100).await.expect("claim B early");
+    // While the lease is live the row must be invisible to further claims.
+    let parallel = store.claim(100).await.expect("claim while leased");
     assert!(
         !parallel.iter().any(|e| e.id == task.id),
         "live lease must not be re-claimable"
     );
 
-    // Simulate A stalling past its lease (crash / SIGKILL: heartbeat stops).
+    // Simulate the executor stalling past its lease (crash / SIGKILL:
+    // heartbeat stops).
     sqlx::query(
         "UPDATE veda_outbox SET lease_until = DATE_SUB(UTC_TIMESTAMP(), INTERVAL 1 MINUTE) WHERE id = ?",
     )
@@ -469,39 +470,35 @@ async fn mysql_outbox_lease_fencing_on_takeover() {
     .await
     .expect("expire lease");
 
-    let reclaimed = store.claim("hostB:1", 100).await.expect("claim B");
+    let reclaimed = store.claim(100).await.expect("claim after expiry");
     let taken = reclaimed
         .iter()
         .find(|e| e.id == task.id)
-        .expect("B took over the expired lease");
-    assert_eq!(taken.retry_count, task.retry_count + 1, "takeover counts as a retry");
+        .expect("expired lease must be reclaimable");
+    assert_eq!(taken.retry_count, task.retry_count + 1, "reclaim counts as a retry");
 
-    // Stale executor A reports its outcomes — both must be fenced off.
-    store.complete(task.id, "hostA:1").await.expect("stale complete no-ops");
-    let (status, owner) = outbox_status_owner(&store, task.id).await;
-    assert_eq!(status, "processing", "stale complete must not finish B's task");
-    assert_eq!(owner.as_deref(), Some("hostB:1"));
-
+    // Whoever finishes first lands the terminal state; later lifecycle
+    // calls hit a non-`processing` row and are logged no-ops.
+    store.complete(task.id).await.expect("complete");
+    assert_eq!(outbox_status(&store, task.id).await, "completed");
+    store.complete(task.id).await.expect("duplicate complete no-ops");
+    assert_eq!(outbox_status(&store, task.id).await, "completed");
     store
-        .fail(task.id, "hostA:1", "stale failure")
+        .fail(task.id, "late failure")
         .await
-        .expect("stale fail no-ops");
-    let (status, owner) = outbox_status_owner(&store, task.id).await;
-    assert_eq!(status, "processing", "stale fail must not re-pend B's task");
-    assert_eq!(owner.as_deref(), Some("hostB:1"));
-
-    // The live owner's outcome lands.
-    store.complete(task.id, "hostB:1").await.expect("owner complete");
-    let (status, owner) = outbox_status_owner(&store, task.id).await;
-    assert_eq!(status, "completed");
-    assert_eq!(owner, None, "terminal rows carry no owner");
+        .expect("late fail no-ops");
+    assert_eq!(
+        outbox_status(&store, task.id).await,
+        "completed",
+        "fail on a terminal row must not resurrect it"
+    );
 
     cleanup_workspace(&store, &ws).await;
 }
 
 #[tokio::test]
 #[ignore]
-async fn mysql_outbox_lease_renew_extends_only_for_owner() {
+async fn mysql_outbox_lease_renew_extends_processing_only() {
     let url = load_mysql_url();
     let store = MysqlStore::new(&url).await.expect("connect");
     store.migrate().await.expect("migrate");
@@ -509,7 +506,7 @@ async fn mysql_outbox_lease_renew_extends_only_for_owner() {
     let ws = Uuid::new_v4().to_string();
     store.enqueue(&lease_test_event(&ws)).await.expect("enqueue");
 
-    let claimed = store.claim("hostA:1", 100).await.expect("claim");
+    let claimed = store.claim(100).await.expect("claim");
     let task = claimed
         .iter()
         .find(|e| e.workspace_id == ws)
@@ -525,28 +522,19 @@ async fn mysql_outbox_lease_renew_extends_only_for_owner() {
     .expect("shrink lease");
     let before = outbox_lease_until(&store, task.id).await.expect("lease set");
 
-    // A non-owner heartbeat must not touch the lease.
-    store.renew(&[task.id], "hostB:1").await.expect("foreign renew");
-    assert_eq!(
-        outbox_lease_until(&store, task.id).await,
-        Some(before),
-        "foreign renew must not extend the lease"
-    );
-
-    // The owner's heartbeat pushes it back out to the full window.
-    store.renew(&[task.id], "hostA:1").await.expect("owner renew");
+    // The heartbeat pushes the lease back out to the full window.
+    store.renew(&[task.id]).await.expect("renew");
     let after = outbox_lease_until(&store, task.id).await.expect("lease still set");
     assert!(
         after > before + chrono::Duration::minutes(5),
-        "owner renew must extend the lease (before={before}, after={after})"
+        "renew must extend the lease (before={before}, after={after})"
     );
 
     // Renewing a finished task is a no-op — the batch heartbeat renews all
     // claimed ids without tracking which already completed.
-    store.complete(task.id, "hostA:1").await.expect("complete");
-    store.renew(&[task.id], "hostA:1").await.expect("renew after complete");
-    let (status, _) = outbox_status_owner(&store, task.id).await;
-    assert_eq!(status, "completed");
+    store.complete(task.id).await.expect("complete");
+    store.renew(&[task.id]).await.expect("renew after complete");
+    assert_eq!(outbox_status(&store, task.id).await, "completed");
     assert_eq!(
         outbox_lease_until(&store, task.id).await,
         None,

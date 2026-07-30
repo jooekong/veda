@@ -22,8 +22,8 @@ use veda_types::{Workspace, WorkspaceKind, WorkspaceStatus};
 /// MySQL+Milvus instance with each other AND with whatever external Veda
 /// instance is also pointed at the same database. We can't fix the external
 /// case here, but holding this lock at least eliminates *intra-suite*
-/// interference (one test's grace-period workspace getting clobbered by
-/// another test's grace=0 reconciler iterating all workspaces, etc.).
+/// interference (one test's in-flight workspace getting clobbered by
+/// another test's reconciler iterating all workspaces, etc.).
 static TEST_SERIAL: OnceLock<Mutex<()>> = OnceLock::new();
 
 async fn serial_guard() -> MutexGuard<'static, ()> {
@@ -197,30 +197,10 @@ async fn drain_outbox(
     let _ = handle.await;
 }
 
-/// Reconciler with grace_passes=0 — orphans are deleted on first observation.
-/// Use this when the test needs deterministic single-pass behavior. The
-/// race-protection grace is exercised separately by `*_grace_period` tests.
+/// Orphans are deleted on first observation (production behavior); the
+/// snapshot race is guarded by the reconciler's in-pass re-checks.
 fn make_reconciler_immediate(mysql: Arc<MysqlStore>, milvus: Arc<MilvusStore>) -> Reconciler {
-    Reconciler::with_grace_passes(
-        mysql.clone(),
-        mysql.clone(),
-        milvus.clone(),
-        mysql.clone(),
-        0,
-    )
-}
-
-/// Reconciler with grace_passes=1 — matches production. First pass records
-/// orphans, second pass deletes. Used to test that a freshly-written file
-/// caught between MySQL/Milvus reads is NOT misclassified as orphan.
-fn make_reconciler_with_grace(mysql: Arc<MysqlStore>, milvus: Arc<MilvusStore>) -> Reconciler {
-    Reconciler::with_grace_passes(
-        mysql.clone(),
-        mysql.clone(),
-        milvus.clone(),
-        mysql.clone(),
-        1,
-    )
+    Reconciler::new(mysql.clone(), mysql.clone(), milvus.clone(), mysql.clone())
 }
 
 // ── Tests ──────────────────────────────────────────────
@@ -559,69 +539,6 @@ async fn reconciler_reenqueues_missing_dir_summary() {
     cleanup_workspace(&mysql, &ws).await;
 }
 
-/// Codex finding #3 regression: with grace_passes=1, an orphan observed
-/// for the first time MUST NOT be deleted. This protects against the
-/// snapshot race (user writes between MySQL read and Milvus read).
-#[tokio::test]
-#[ignore]
-async fn reconciler_grace_period_defers_first_pass_orphan_delete() {
-    let _g = serial_guard().await;
-    let _ = tracing_subscriber::fmt::try_init();
-    let (mysql, milvus, embedding, fs) = build_runtime().await;
-    let ws = Uuid::new_v4().to_string();
-    create_workspace(&mysql, &ws).await;
-
-    let resp = fs
-        .write_file(&ws, "/grace.md", "for grace test", None, None)
-        .await
-        .expect("write");
-    let file_id = resp.file_id.clone();
-    drain_outbox(
-        mysql.clone(),
-        milvus.clone(),
-        embedding.clone(),
-        Duration::from_secs(8),
-    )
-    .await;
-
-    sqlx::query("DELETE FROM veda_dentries WHERE workspace_id = ?")
-        .bind(&ws)
-        .execute(mysql.pool())
-        .await
-        .unwrap();
-    sqlx::query("DELETE FROM veda_files WHERE id = ?")
-        .bind(&file_id)
-        .execute(mysql.pool())
-        .await
-        .unwrap();
-
-    let reconciler = make_reconciler_with_grace(mysql.clone(), milvus.clone());
-    let report1 = reconciler.reconcile_workspace(&ws, false).await.expect("pass 1");
-    let ws_report1 = &report1;
-    assert_eq!(
-        ws_report1.chunk_orphan, 0,
-        "grace period: first pass must not delete"
-    );
-    assert!(
-        milvus
-            .list_chunk_file_ids(&ws)
-            .await
-            .unwrap()
-            .contains(&file_id),
-        "first pass must not have deleted Milvus chunks"
-    );
-
-    let report2 = reconciler.reconcile_workspace(&ws, false).await.expect("pass 2");
-    let ws_report2 = &report2;
-    assert_eq!(ws_report2.chunk_orphan, 1, "second pass must delete");
-    assert!(
-        !milvus
-            .list_chunk_file_ids(&ws)
-            .await
-            .unwrap()
-            .contains(&file_id),
-        "second pass must have deleted Milvus chunks"
-    );
-
-    cleanup_workspace(&mysql, &ws).await;
-}
+// (The former grace_passes=1 two-pass regression test was removed with the
+// grace machinery itself: production has always run grace_passes=0, where
+// the in-pass get_file/has_pending_event re-checks cover the snapshot race.)

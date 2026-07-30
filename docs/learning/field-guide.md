@@ -71,8 +71,8 @@ handle_chunk_sync               worker.rs:289
 │       → ③ delete_chunks_above 清旧尾块 → ④ 最后才写水印
 │       Milvus chunk PK = "{file_id}_{chunk_index}"
 ▼
-成功→complete（带 lease_owner fencing）
-失败→fail：retry_count+1，退避 30*2^n 秒（上限 3600），超限→status='dead'（无自动告警）
+成功→complete（栅栏=status='processing'；lease_owner fencing 已于 2026-07 删除——单 pod 简化，重复执行由内容水印兜底）
+失败→fail：retry_count+1，退避 30*2^n 秒（上限 3600），超限→status='dead'（`veda_outbox_dead_total` 已上报 Monitor；告警规则是否配好需平台侧核实——06-12 的 8192 死信当时就是没人看见）
 ```
 
 ### 1.2 搜索链路 `POST /v1/search`
@@ -109,8 +109,8 @@ POST /admin/v1/reconcile/{workspace_id}   routes/reconcile.rs:34
 Reconciler   reconciler.rs
 ├─ reconcile_chunks：MySQL file_ids ⟷ Milvus chunk file_ids 对账
 │    Milvus 缺 → 入队 ChunkSync，payload 带 force_reembed=true（绕过水印）
-│    Milvus 多（孤儿）→ 复查 MySQL + 检查 pending + grace counter
-│    ⚠️ main.rs 传 grace_passes=0 → admin 触发时孤儿立即删
+│    Milvus 多（孤儿）→ 复查 MySQL + 检查 pending ChunkSync 后立即删
+│    （grace counter 已于 2026-07 删除——生产恒 grace_passes=0，本就是死机制）
 └─ reconcile_summaries：同理对账摘要
 ⚠️ 大 workspace（>16383 行）reconcile 直接 500（offset 翻页天花板，review 已知）
 ```
@@ -200,7 +200,7 @@ Reconciler   reconciler.rs
 
 1. **`commit_queue.rs::fire()` 结果侧协议**：PUT 后重锁→is_current→三分支（提交/什么都不做/追 DELETE）。把「仅 entry_gone」当删除条件会误删新内容；漏 tombstone 追杀会把已删文件泄漏回 server。
 2. **`fs.rs::destroy()` 双 flush 防护**：shadow 已 drain 的 path 其 legacy buf 是空的，去掉「在 shadow 里就跳过 flush_handle」的过滤会在 unmount 时 PUT 空体覆盖刚提交的数据。
-3. **outbox 租约无 fencing**（review A-3，三方独立收敛的架构头号问题）：`complete`/`fail` 无 `AND status='processing'`，慢任务超 10min 租约被双 claim → Milvus 可能留 v1/v2 混合 chunk 而水印谎称干净。**地板修复几行**（加 status 条件），真解是 fencing token + 心跳。见 `docs/reviews/review-2026-06-10-154815.md` A-3。
+3. **outbox 租约 fencing 的来回**（review A-3 → 2026-07 简化）：当年 `complete`/`fail` 连 `AND status='processing'` 都没有，慢任务超 10min 租约被双 claim 会写坏状态；A-3 修了 status 条件并加了 owner(host:pid) fencing token + 心跳。**2026-07 按「单 pod 不上多 pod 并发保护」把 owner 栅栏删回**——现行形态 = `status='processing'` 条件 + lease_until 心跳续租,重复执行由内容水印幂等兜底。前提是**同一 MySQL 库只有一个 server 进程**(本地 dev 与集成测试别同时指 veda_it)。见 `docs/reviews/review-2026-06-10-154815.md` A-3。
 4. **outbox 毒丸**（review A-4）：一条解码失败的行让 claim 事务回滚，`ORDER BY id ASC` 让它每轮最先被选 → 整个异步队列停摆。修复：解码失败标 dead 并 continue。
 5. **InodeTable 双分配器**（local ino 用 `1<<63` 高位段，与 server ino 互踢）+ setattr-truncate 的 adopt-before-lock + readdir 三层 overlay 合并。
 

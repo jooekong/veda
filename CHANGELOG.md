@@ -9,6 +9,35 @@ that matters.
 
 ## [Unreleased]
 
+### Changed
+- **Embedding throughput, stage 1 (server-side).** Every upstream embedding
+  call now passes a global **two-priority** concurrency gate
+  (`[embedding].max_concurrency`, default 8): interactive callers (search /
+  ask / synchronous vector writes) always receive the next freed permit
+  ahead of background indexing, while an idle system lets the worker
+  saturate every permit — bulk imports no longer add seconds to search
+  latency, and off-peak backfills still run at full speed. A request waiting out
+  a 429 backoff no longer pins a slot, large calls embed their chunks
+  concurrently (bounded fan-out) instead of serially, and a caller that
+  gives up abandons its queue slot safely. New metrics:
+  `veda_embed_inflight`, `veda_embed_permit_wait_seconds{priority}`,
+  `veda_embed_429_total`, `veda_embed_batch_texts`.
+
+### Removed
+- **Reconciler grace-pass machinery.** Production has always run with
+  `grace_passes=0`, making the cross-pass orphan counter inert; deleted.
+  The in-pass re-checks (file reappeared / pending ChunkSync) remain the
+  race guard for the attended, on-demand reconcile.
+- **Outbox `lease_owner` fencing** — single-pod simplification. Lifecycle
+  calls now fence on `status='processing'` alone; `lease_until` expiry
+  (crash recovery) is unchanged, and the content-hash watermark keeps a
+  rare duplicate execution idempotent. The column is dropped automatically
+  on server boot; metrics `veda_outbox_lease_takeover_total` /
+  `veda_outbox_lease_lost_total` no longer exist. This makes the
+  single-writer assumption explicit: never point two server processes at
+  one database (local dev vs. integration tests included), and this
+  migration is stop-then-start only — not compatible with rolling deploys.
+
 ## [0.1.21] — 2026-07-23
 
 ### Added

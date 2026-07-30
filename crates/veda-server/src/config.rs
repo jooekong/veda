@@ -93,10 +93,20 @@ pub struct EmbeddingConfig {
     /// at 10, so set `batch_size = 10` for those providers.
     #[serde(default = "default_embedding_batch_size")]
     pub batch_size: usize,
+    /// Global cap on concurrent upstream embedding calls (429-storm gate).
+    /// The provider quota is RPM-based and shared company-wide, so this is
+    /// a conservative budget, not a measured ceiling. Interactive callers
+    /// (search/ask) hold priority over worker indexing at this gate.
+    #[serde(default = "default_embedding_max_concurrency")]
+    pub max_concurrency: usize,
 }
 
 fn default_embedding_batch_size() -> usize {
     100
+}
+
+fn default_embedding_max_concurrency() -> usize {
+    8
 }
 
 #[derive(Debug, Deserialize)]
@@ -315,6 +325,10 @@ impl ServerConfig {
         env_str("VEDA_EMBEDDING_MODEL", &mut self.embedding.model);
         env_parse("VEDA_EMBEDDING_DIMENSION", &mut self.embedding.dimension);
         env_parse("VEDA_EMBEDDING_BATCH_SIZE", &mut self.embedding.batch_size);
+        env_parse(
+            "VEDA_EMBEDDING_MAX_CONCURRENCY",
+            &mut self.embedding.max_concurrency,
+        );
 
         // LLM: API_URL acts as the "enable" switch — it lazily creates the
         // section if absent. KEY and MODEL only override when LLM is already

@@ -133,13 +133,7 @@ async fn metrics_render_contains_expected_series() {
     let _ = tx.send(true);
     let _ = h.await;
 
-    let recon = Reconciler::with_grace_passes(
-        mysql.clone(),
-        mysql.clone(),
-        milvus.clone(),
-        mysql.clone(),
-        0,
-    );
+    let recon = Reconciler::new(mysql.clone(), mysql.clone(), milvus.clone(), mysql.clone());
     // Use run_once, not reconcile_workspace: the cluster-wide drift gauges
     // are only emitted after the per-pass aggregation in run_once. Single-
     // workspace reconciliation does the work but doesn't update metrics.

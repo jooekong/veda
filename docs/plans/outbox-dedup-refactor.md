@@ -1,6 +1,8 @@
 # Outbox 去重激进重构
 
-> 状态：待开工（仅记录，未改代码）
+> 状态：**搁置（2026-07-29 简化审计结论）**——本重构的复杂度是平移不是净减（coalesce 分组 + reconciler 需补 `count_inflight_for_file` 替代查询），且没有任何性能证据表明 enqueue 期去重是瓶颈（pending 表稳态接近空，`idx_dedup` 索引已挡全扫描）。
+> 备忘一条更简的中间路线（若未来有 fs 写路径 p99 证据再启）：`last_embedded_content_hash` 水印已让重复 ChunkSync 第二次消费即 no-op，故**写路径 ChunkSync 可直接裸 insert**（行为不变，watermark 吸收重复），只有 SummarySync/DirSummarySync（费 LLM、无短路）保留 enqueue 去重——不引入 coalesce 即砍掉一半调用点。
+> 关联：2026-07-29 已删 outbox `lease_owner` fencing（单 pod 简化，lease_until 保留），本文提及 fencing 处按此理解。
 > 来源：2026-05-29 deep review 的去重方案评审，Joe 选定「激进重构」方向
 
 ## 动机

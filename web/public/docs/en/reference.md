@@ -352,6 +352,7 @@ The `metrics_token` (also gating reconcile) is set via `VEDA_METRICS_TOKEN` or T
 | `VEDA_MILVUS_URL` | — | Milvus address (required) |
 | `VEDA_EMBEDDING_API_URL` / `_API_KEY` / `_MODEL` / `_DIMENSION` | — | Embedding service (required) |
 | `VEDA_EMBEDDING_BATCH_SIZE` | 100 | Set to `10` for Alibaba Bailian / DashScope (its `input.contents` cap is 10) |
+| `VEDA_EMBEDDING_MAX_CONCURRENCY` | 8 | Upstream embedding concurrency gate (interactive retrieval takes permits ahead of background indexing); governs search latency during bulk imports and 429 exposure |
 | `VEDA_LLM_API_URL` | — | Enables summaries when set (otherwise `/v1/abstract` etc. return 501) |
 | `VEDA_ALLOWED_ORIGINS` | `[]` | CORS allowlist (comma-separated); production must list domains explicitly |
 | `VEDA_METRICS_TOKEN` | unset | Gates `/v1/metrics` and reconcile |

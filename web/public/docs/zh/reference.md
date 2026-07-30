@@ -353,6 +353,7 @@ curl -s -H "Authorization: Bearer wk_..." -H 'Content-Type: application/json' \
 | `VEDA_MILVUS_URL` | — | Milvus 地址（必填） |
 | `VEDA_EMBEDDING_API_URL` / `_API_KEY` / `_MODEL` / `_DIMENSION` | — | 嵌入服务（必填） |
 | `VEDA_EMBEDDING_BATCH_SIZE` | 100 | 阿里百炼 / DashScope 要设 `10`（其 `input.contents` 上限 10） |
+| `VEDA_EMBEDDING_MAX_CONCURRENCY` | 8 | 上游 embedding 并发闸（交互检索优先于后台索引拿号）；决定灌库期间的搜索延迟与 429 暴露面 |
 | `VEDA_LLM_API_URL` | — | 配上才启用摘要功能（不配则 `/v1/abstract` 等返 501） |
 | `VEDA_ALLOWED_ORIGINS` | `[]` | CORS 白名单（逗号分隔）；生产必须显式列域名 |
 | `VEDA_METRICS_TOKEN` | 无 | 门控 `/v1/metrics` 和 reconcile |

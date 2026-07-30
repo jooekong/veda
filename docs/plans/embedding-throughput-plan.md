@@ -1,6 +1,8 @@
 # Embedding 吞吐优化方案
 
-> 状态:**已设计、未实现**。决策见下「决策(2026-06-08)」。优先级:**先上线,后优化**。
+> 状态:**阶段 1 已实现(2026-07-29 最终形态:两级优先闸)**——`TwoLevelGate`(High=交互 search/ask/同步 vectors 写,Low=worker 异步索引,worker 经 `EmbeddingProvider::background()` 低优先视图接入):空闲时后台可占满全部 permit,交互调用到达即获得**下一个释放的号**(物理下限=等一次在飞调用 ~200-500ms);同级 FIFO;取消的等待者在派号时被跳过,号不丢。全部调用直发:按 batch_size 切块、`buffered(4)` 限单调用扇出(同级内公平)、**429 backoff 期间还号**、acquire 无超时(各调用方自己的 deadline 兜底)。config `[embedding] max_concurrency=8`;指标 `veda_embed_permit_wait_seconds{priority}`/`inflight`/`429_total`/`batch_texts`。验证:5 个闸行为单测(插队/空闲占满/取消不吞号/同级保序/并发上限)+ 真实 airouter 集成 7/7;压测复跑待部署后对比 §背景 36 QPS 基线。
+> 演进记录(07-29 当天三步):①先实现「闸+跨请求攒批」;②Codex(xhigh)+Claude 交叉 review 修四处(攒批单飞串行/分流漏斗/permit 超时烧 retry 预算/gauge 取消泄漏);③Joe 简化审查拍板**整体撤回攒批器**——其收益前提(search QPS 数百)与现实(个位数,429 起爆点 600 req/min≈10 QPS)差两个数量级,而复杂度当天就贡献了 review 4 个 MAJOR 中的 3 个;30s permit 超时随之一并删除。攒批完整实现(含全员放弃中止等修复)在 git 历史,**重启触发条件:search 侧 429 率持续可见或实测 QPS 逼近 10**。「优先级闸」形态优于备选「后台限额」(限额会浪费空闲时段 3/4 吞吐)——Joe 直接点破本质后采纳。已知边界(第二轮交叉 review 确认):①High 持续满载时 Low 理论上无限等待——现实 QPS 到不了,且后果不是死信而是 worker 任务**静默卡 processing**(renewer 持续续租,租约永不过期),观测抓手=`veda_embed_permit_wait_seconds{priority="low"}` 高分位 + `veda_outbox_depth{status="processing"}`,真出现再加 aging;②单条 search 直发使突发场景 RPM 高于攒批形态(均匀低 QPS 下无差),已含在重启触发条件内;③permit_wait 只记录成功获取的等待(被取消的排队不产生样本),放弃可观测性列 backlog。
+> **阶段 2(upsert sync/async)未实现**,等阶段 1 生产数据再启。
 > 压测实锤见 [`docs/loadtest-2026-06-05.md`](../loadtest-2026-06-05.md)。
 
 ## 背景
@@ -38,6 +40,8 @@
 ## 设计:读写分治(两条路径平衡点不同)
 
 ### 读(search):延迟敏感,不能异步 → 攒批 + 双触发窗口
+
+> ⚠️ **本节为历史设计存档**——攒批器已于 07-29 实现后整体撤回(见头部状态框的演进记录与重启触发条件),当前实现为两级优先闸+全部直发。以下内容触发重启时参考。
 
 跨请求 micro-batching:多个并发 query 的单条 text 攒成一批(≤10)发一次。
 

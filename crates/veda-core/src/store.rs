@@ -450,24 +450,24 @@ pub trait VectorStore: Send + Sync {
 #[async_trait]
 pub trait TaskQueue: Send + Sync {
     async fn enqueue(&self, event: &OutboxEvent) -> Result<()>;
-    /// Claim up to `batch_size` runnable tasks for `owner` (one identity per
-    /// worker process, e.g. `host:pid`), marking them `processing` under a
-    /// fresh lease. Rows whose lease expired are re-claimable: ownership
-    /// transfers to the new claimant and the previous owner's `complete` /
-    /// `fail` / `renew` calls become no-ops (fenced on `lease_owner`).
-    async fn claim(&self, owner: &str, batch_size: usize) -> Result<Vec<OutboxEvent>>;
-    /// Mark a task completed. No-op if `owner` no longer holds the lease
-    /// (it expired and another worker took the row over) — the new owner's
-    /// state must not be overwritten by a stale executor.
-    async fn complete(&self, task_id: i64, owner: &str) -> Result<()>;
+    /// Claim up to `batch_size` runnable tasks, marking them `processing`
+    /// under a fresh lease. Rows whose lease expired (executor crashed and
+    /// stopped heartbeating) are re-claimable; the re-claim counts as a
+    /// retry. Single-worker deployment: there is no per-owner fencing —
+    /// lifecycle calls fence on `status = 'processing'` alone, and the
+    /// content-hash watermark makes a rare duplicate execution idempotent.
+    async fn claim(&self, batch_size: usize) -> Result<Vec<OutboxEvent>>;
+    /// Mark a task completed. No-op if the row is no longer `processing`
+    /// (duplicate completion, or the row was re-driven to a terminal state
+    /// after its lease expired).
+    async fn complete(&self, task_id: i64) -> Result<()>;
     /// Record a failure: re-pend with backoff, or dead-letter once retries
-    /// are exhausted. Same lease fencing as `complete`.
-    async fn fail(&self, task_id: i64, owner: &str, error: &str) -> Result<()>;
-    /// Heartbeat: extend the lease on the given tasks where `owner` still
-    /// holds them and they are still `processing`. Finished or taken-over
-    /// rows are silently skipped, so callers can renew a whole claimed batch
-    /// without tracking per-task completion.
-    async fn renew(&self, task_ids: &[i64], owner: &str) -> Result<()>;
+    /// are exhausted. Same `processing`-status fencing as `complete`.
+    async fn fail(&self, task_id: i64, error: &str) -> Result<()>;
+    /// Heartbeat: extend the lease on the given tasks while they are still
+    /// `processing`. Finished rows are silently skipped, so callers can
+    /// renew a whole claimed batch without tracking per-task completion.
+    async fn renew(&self, task_ids: &[i64]) -> Result<()>;
     async fn has_pending_event(
         &self,
         event_type: OutboxEventType,

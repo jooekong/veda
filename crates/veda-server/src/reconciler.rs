@@ -18,8 +18,8 @@
 //! with `?dry_run=true` to inspect, then `?dry_run=false` to heal, beats a
 //! 6-hourly background scan that silently skipped the largest workspaces.
 
-use std::collections::{HashMap, HashSet};
-use std::sync::{Arc, Mutex};
+use std::collections::HashSet;
+use std::sync::Arc;
 
 use chrono::Utc;
 use serde::Serialize;
@@ -129,17 +129,6 @@ pub struct Reconciler {
     auth: Arc<dyn AuthStore>,
     vector: Arc<dyn VectorStore>,
     task_queue: Arc<dyn TaskQueue>,
-    /// Tracks orphans seen on previous passes. An orphan is only deleted
-    /// after being observed on N+1 consecutive passes (where N =
-    /// `grace_passes`). This avoids the non-atomic snapshot race: user
-    /// writes a file between our MySQL read and our Milvus read, worker
-    /// upserts to Milvus, we then see the file only on the Milvus side
-    /// and would otherwise misclassify it as orphan.
-    ///
-    /// Counts saturate at `grace_passes + 1`. Tests that want immediate
-    /// deletion can construct with `grace_passes=0`.
-    orphan_seen: Mutex<HashMap<(String, String), usize>>,
-    grace_passes: usize,
 }
 
 impl Reconciler {
@@ -149,23 +138,11 @@ impl Reconciler {
         vector: Arc<dyn VectorStore>,
         task_queue: Arc<dyn TaskQueue>,
     ) -> Self {
-        Self::with_grace_passes(meta, auth, vector, task_queue, 1)
-    }
-
-    pub fn with_grace_passes(
-        meta: Arc<dyn MetadataStore>,
-        auth: Arc<dyn AuthStore>,
-        vector: Arc<dyn VectorStore>,
-        task_queue: Arc<dyn TaskQueue>,
-        grace_passes: usize,
-    ) -> Self {
         Self {
             meta,
             auth,
             vector,
             task_queue,
-            orphan_seen: Mutex::new(HashMap::new()),
-            grace_passes,
         }
     }
 
@@ -308,15 +285,14 @@ impl Reconciler {
             report.chunk_missing += 1;
         }
 
-        // Orphan in Milvus: delete with two safety nets, in this order:
-        //   1. Re-fetch MySQL state to handle "user wrote between our two
-        //      reads" race (Codex finding #3). If the file is now present
-        //      or there's a pending/processing ChunkSync for it, skip.
-        //   2. Grace period: only delete on the second consecutive pass
-        //      where this id is still orphaned. First-time orphans get
-        //      recorded; we delete only if seen at least one full interval
-        //      ago. This handles races that span multiple reconciler runs
-        //      and operator races (e.g. someone mid-import).
+        // Orphan in Milvus: delete guarded by an in-pass re-check — re-fetch
+        // MySQL state to handle the "user wrote between our two reads" race
+        // (Codex finding #3). If the file is now present or there's a
+        // queued ChunkSync for it (has_pending_event checks status
+        // 'pending' only; an in-flight 'processing' one is a residual race
+        // window accepted for this pass), skip. (Reconcile is an
+        // attended, on-demand admin action, so a single-pass re-check is the
+        // whole race window we need to cover.)
         let mut still_orphan: HashSet<String> = HashSet::new();
         for fid in milvus_ids.difference(&mysql_ids) {
             // Re-confirm MySQL state.
@@ -347,61 +323,18 @@ impl Reconciler {
             still_orphan.insert(fid.clone());
         }
 
-        // Grace period: an orphan must be observed on `grace_passes + 1`
-        // consecutive passes before deletion. Entries that no longer appear
-        // orphan are dropped (their counter resets if they reappear later).
         if dry_run {
             for fid in &still_orphan {
                 info!(workspace_id, file_id = %fid, "dry-run: would delete chunk orphan (in Milvus, gone from MySQL)");
             }
             report.chunk_orphan += still_orphan.len();
         } else {
-            let to_delete = self.advance_orphan_counter(workspace_id, "chunk:", &still_orphan);
-            for fid in to_delete {
+            for fid in still_orphan {
                 self.vector.delete_chunks(workspace_id, &fid).await?;
                 report.chunk_orphan += 1;
             }
         }
         Ok(())
-    }
-
-    /// Increment the orphan-seen counter for each id in `still_orphan` and
-    /// return ids that have crossed the grace threshold. Entries no longer
-    /// orphan are pruned. `kind_prefix` namespaces chunk vs summary orphans
-    /// since the same id (e.g. file_id) can be tracked independently.
-    fn advance_orphan_counter(
-        &self,
-        workspace_id: &str,
-        kind_prefix: &'static str,
-        still_orphan: &HashSet<String>,
-    ) -> Vec<String> {
-        let mut tracked = self.orphan_seen.lock().unwrap();
-        // Drop any tracked entry of this kind in this workspace that is no
-        // longer orphan — its counter must reset before the next time.
-        tracked.retain(|(ws, key), _| {
-            if ws != workspace_id || !key.starts_with(kind_prefix) {
-                return true;
-            }
-            let id = key.trim_start_matches(kind_prefix);
-            still_orphan.contains(id)
-        });
-
-        let mut to_delete = Vec::new();
-        for id in still_orphan {
-            let key = (workspace_id.to_string(), format!("{kind_prefix}{id}"));
-            let count = tracked.entry(key.clone()).or_insert(0);
-            *count += 1;
-            if *count > self.grace_passes {
-                to_delete.push(id.clone());
-                tracked.remove(&key);
-            } else {
-                debug!(
-                    workspace_id, id = %id, count = *count, grace_passes = self.grace_passes,
-                    "orphan in grace period"
-                );
-            }
-        }
-        to_delete
     }
 
     /// Diff veda_summaries (MySQL) vs Milvus summary collection. Summary
@@ -458,7 +391,7 @@ impl Reconciler {
             }
         }
 
-        // Orphan in Milvus: same race + grace protection as chunks.
+        // Orphan in Milvus: same in-pass re-check protection as chunks.
         let mut still_orphan: HashSet<String> = HashSet::new();
         for id in milvus_ids.difference(&mysql_id_set) {
             // Re-confirm: MySQL may have caught up between our two reads.
@@ -479,8 +412,7 @@ impl Reconciler {
             }
             report.summary_orphan += still_orphan.len();
         } else {
-            let to_delete = self.advance_orphan_counter(workspace_id, "summary:", &still_orphan);
-            for id in to_delete {
+            for id in still_orphan {
                 self.vector.delete_summary(workspace_id, &id).await?;
                 report.summary_orphan += 1;
             }

@@ -560,12 +560,13 @@ impl MysqlStore {
             // "needs backfill" sentinel; new keys insert the real value.
             "ALTER TABLE veda_workspace_keys ADD COLUMN kind VARCHAR(16) NOT NULL DEFAULT 'fs'",
             "ALTER TABLE veda_workspace_keys ADD COLUMN account_id VARCHAR(36) NOT NULL DEFAULT ''",
-            // Lease ownership for workers on multiple servers sharing one
-            // MySQL: claim stamps the claimant's identity (host:pid) and
-            // complete/fail/renew are fenced on it, so an executor whose
-            // lease expired (and was re-claimed elsewhere) cannot overwrite
-            // the new owner's task state.
-            "ALTER TABLE veda_outbox ADD COLUMN lease_owner VARCHAR(128) NULL",
+            // lease_owner dropped (2026-07 single-pod simplification): the
+            // host:pid fencing was multi-server protection this deployment
+            // never runs. Lifecycle calls fence on `status='processing'`
+            // alone; the content-hash watermark keeps a rare duplicate
+            // execution idempotent. Error 1091 (can't drop, doesn't exist)
+            // is swallowed below so fresh schemas boot clean.
+            "ALTER TABLE veda_outbox DROP COLUMN lease_owner",
             // Outbox dedup (try_insert_outbox_for_file / has_pending_event)
             // filters on these three equalities before its JSON_EXTRACT;
             // without the index it scans the whole pending backlog inside
@@ -590,11 +591,13 @@ impl MysqlStore {
         ];
         for s in alters {
             if let Err(e) = sqlx::query(s).execute(&self.pool).await {
-                let is_dup = matches!(&e, sqlx::Error::Database(db)
+                // 1060/1061: duplicate column/index (ADD already applied);
+                // 1091: can't DROP, doesn't exist (DROP already applied).
+                let is_applied = matches!(&e, sqlx::Error::Database(db)
                     if db.try_downcast_ref::<sqlx::mysql::MySqlDatabaseError>()
-                        .map(|me| matches!(me.number(), 1060 | 1061))
+                        .map(|me| matches!(me.number(), 1060 | 1061 | 1091))
                         .unwrap_or(false));
-                if !is_dup {
+                if !is_applied {
                     return Err(VedaError::Storage(e.to_string()));
                 }
             }
@@ -2050,8 +2053,8 @@ impl MetadataTx for MysqlMetadataTx {
 
 /// Outbox lease duration. Workers heartbeat-renew at a fraction of this
 /// (veda-server `LEASE_RENEW_INTERVAL`), so a lease only expires when its
-/// owner stopped renewing for the whole window — i.e. crashed or was
-/// SIGKILLed — after which any claimer may take the row over.
+/// holder stopped renewing for the whole window — i.e. crashed or was
+/// SIGKILLed — after which a later claim retries the row.
 const OUTBOX_LEASE_MINUTES: i32 = 10;
 
 #[async_trait]
@@ -2061,12 +2064,12 @@ impl TaskQueue for MysqlStore {
         insert_outbox_conn(&mut *conn, event).await
     }
 
-    async fn claim(&self, owner: &str, batch_size: usize) -> Result<Vec<OutboxEvent>> {
+    async fn claim(&self, batch_size: usize) -> Result<Vec<OutboxEvent>> {
         let batch_size_i64 = i64::try_from(batch_size).unwrap_or(100);
         let mut tx = self.pool.begin().await.map_err(storage_err)?;
         let rows = sqlx::query(
             r#"SELECT id, workspace_id, event_type, payload, status, retry_count, max_retries,
-                      available_at, lease_until, lease_owner, created_at
+                      available_at, lease_until, created_at
                FROM veda_outbox
                WHERE (status = 'pending' AND available_at <= UTC_TIMESTAMP())
                   OR (status = 'processing' AND lease_until IS NOT NULL AND lease_until <= UTC_TIMESTAMP())
@@ -2080,7 +2083,7 @@ impl TaskQueue for MysqlStore {
         .map_err(storage_err)?;
         let mut events = Vec::new();
         let mut dead_ids: Vec<(i64, String)> = Vec::new();
-        let mut takeovers: Vec<(i64, String, String)> = Vec::new();
+        let mut reclaims: Vec<(i64, String)> = Vec::new();
         for r in &rows {
             let mut evt = row_to_outbox(r)?;
             let was_processing = evt.status == OutboxStatus::Processing;
@@ -2093,19 +2096,13 @@ impl TaskQueue for MysqlStore {
                     dead_ids.push((evt.id, db_enum_str(&evt.event_type)));
                     continue;
                 }
-                let prev_owner: Option<String> = r.try_get("lease_owner").map_err(storage_err)?;
-                takeovers.push((
-                    evt.id,
-                    db_enum_str(&evt.event_type),
-                    prev_owner.unwrap_or_default(),
-                ));
+                reclaims.push((evt.id, db_enum_str(&evt.event_type)));
                 sqlx::query(
                     r#"UPDATE veda_outbox SET status = 'processing', retry_count = ?,
-                       lease_owner = ?, lease_until = DATE_ADD(UTC_TIMESTAMP(), INTERVAL ? MINUTE)
+                       lease_until = DATE_ADD(UTC_TIMESTAMP(), INTERVAL ? MINUTE)
                        WHERE id = ?"#,
                 )
                 .bind(next_retry)
-                .bind(owner)
                 .bind(OUTBOX_LEASE_MINUTES)
                 .bind(evt.id)
                 .execute(&mut *tx)
@@ -2117,10 +2114,9 @@ impl TaskQueue for MysqlStore {
             } else {
                 sqlx::query(
                     r#"UPDATE veda_outbox SET status = 'processing',
-                       lease_owner = ?, lease_until = DATE_ADD(UTC_TIMESTAMP(), INTERVAL ? MINUTE)
+                       lease_until = DATE_ADD(UTC_TIMESTAMP(), INTERVAL ? MINUTE)
                        WHERE id = ?"#,
                 )
-                .bind(owner)
                 .bind(OUTBOX_LEASE_MINUTES)
                 .bind(evt.id)
                 .execute(&mut *tx)
@@ -2131,7 +2127,7 @@ impl TaskQueue for MysqlStore {
         }
         for (id, _event_type) in &dead_ids {
             sqlx::query(
-                r#"UPDATE veda_outbox SET status = 'dead', lease_until = NULL, lease_owner = NULL WHERE id = ?"#,
+                r#"UPDATE veda_outbox SET status = 'dead', lease_until = NULL WHERE id = ?"#,
             )
             .bind(id)
             .execute(&mut *tx)
@@ -2151,62 +2147,49 @@ impl TaskQueue for MysqlStore {
             ::metrics::counter!("veda_outbox_dead_total", "event_type" => event_type.clone())
                 .increment(1);
         }
-        // A takeover means the previous executor stopped heartbeating (crash /
-        // SIGKILL) — or, if it is somehow still alive, its complete/fail will
-        // now be fenced off and its side effects (embedding spend) duplicated.
-        for (id, event_type, prev_owner) in &takeovers {
+        // A reclaim means the previous attempt stopped heartbeating (crash /
+        // SIGKILL / restart mid-batch); the row is retried here.
+        for (id, event_type) in &reclaims {
             tracing::warn!(
                 task_id = *id,
                 event_type = %event_type,
-                prev_owner = %prev_owner,
-                new_owner = %owner,
-                "outbox lease taken over from expired owner"
+                "outbox lease expired; task reclaimed for retry"
             );
-            ::metrics::counter!("veda_outbox_lease_takeover_total", "event_type" => event_type.clone())
-                .increment(1);
         }
         Ok(events)
     }
 
-    async fn complete(&self, task_id: i64, owner: &str) -> Result<()> {
+    async fn complete(&self, task_id: i64) -> Result<()> {
         let res = sqlx::query(
-            r#"UPDATE veda_outbox SET status = 'completed', lease_until = NULL, lease_owner = NULL
-               WHERE id = ? AND lease_owner = ? AND status = 'processing'"#,
+            r#"UPDATE veda_outbox SET status = 'completed', lease_until = NULL
+               WHERE id = ? AND status = 'processing'"#,
         )
         .bind(task_id)
-        .bind(owner)
         .execute(&self.pool)
         .await
         .map_err(storage_err)?;
         if res.rows_affected() == 0 {
-            // Lease lost mid-flight: it expired and another worker re-claimed
-            // the row (which now owns its lifecycle). The work this executor
-            // did still happened — the new owner repeats it — so surface the
-            // duplicate side effects instead of silently overwriting state.
-            tracing::warn!(task_id, owner, "outbox complete dropped: lease no longer held");
-            ::metrics::counter!("veda_outbox_lease_lost_total", "op" => "complete").increment(1);
+            // Row is no longer processing: duplicate completion, or the row
+            // was dead-lettered / re-driven after its lease expired.
+            tracing::warn!(task_id, "outbox complete dropped: task no longer processing");
         }
         Ok(())
     }
 
-    async fn fail(&self, task_id: i64, owner: &str, error: &str) -> Result<()> {
-        // Owner check up front: if the lease was lost (expired → re-claimed
-        // elsewhere) this executor must not touch retry bookkeeping the new
-        // owner now drives. The SELECT→UPDATE pair is not transactional; a
-        // takeover between the two is caught by the owner condition on the
-        // UPDATEs below (rows_affected = 0).
+    async fn fail(&self, task_id: i64, error: &str) -> Result<()> {
+        // The SELECT→UPDATE pair is not transactional; a state change in
+        // between is caught by the status condition on the UPDATEs below
+        // (rows_affected = 0).
         let row = sqlx::query(
             r#"SELECT id, retry_count, max_retries, payload, event_type FROM veda_outbox
-               WHERE id = ? AND lease_owner = ? AND status = 'processing'"#,
+               WHERE id = ? AND status = 'processing'"#,
         )
         .bind(task_id)
-        .bind(owner)
         .fetch_optional(&self.pool)
         .await
         .map_err(storage_err)?;
         let Some(r) = row else {
-            tracing::warn!(task_id, owner, "outbox fail dropped: lease no longer held");
-            ::metrics::counter!("veda_outbox_lease_lost_total", "op" => "fail").increment(1);
+            tracing::warn!(task_id, "outbox fail dropped: task no longer processing");
             return Ok(());
         };
         let retry: i32 = r.try_get("retry_count").map_err(storage_err)?;
@@ -2224,19 +2207,18 @@ impl TaskQueue for MysqlStore {
             serde_json::to_string(&payload).map_err(|e| storage_err(e.to_string()))?;
         let next_retry = retry + 1;
         if next_retry >= max {
-            // Owner+status fencing makes the terminal transition idempotent
-            // and exclusive: a lease lost between the SELECT above and here
-            // (another worker re-claimed, or claim() already dead-lettered
-            // the row) leaves rows_affected = 0 and the dead counter exact.
+            // Status fencing makes the terminal transition idempotent: a
+            // state change between the SELECT above and here (e.g. claim()
+            // already dead-lettered the row) leaves rows_affected = 0 and
+            // the dead counter exact.
             let res = sqlx::query(
                 r#"UPDATE veda_outbox SET status = 'dead', retry_count = ?, payload = CAST(? AS JSON),
-                   lease_until = NULL, lease_owner = NULL
-                   WHERE id = ? AND lease_owner = ? AND status = 'processing'"#,
+                   lease_until = NULL
+                   WHERE id = ? AND status = 'processing'"#,
             )
             .bind(next_retry)
             .bind(&payload_str)
             .bind(task_id)
-            .bind(owner)
             .execute(&self.pool)
             .await
             .map_err(storage_err)?;
@@ -2249,42 +2231,39 @@ impl TaskQueue for MysqlStore {
                 ::metrics::counter!("veda_outbox_dead_total", "event_type" => event_type)
                     .increment(1);
             } else {
-                tracing::warn!(task_id, owner, "outbox fail dropped: lease no longer held");
-                ::metrics::counter!("veda_outbox_lease_lost_total", "op" => "fail").increment(1);
+                tracing::warn!(task_id, "outbox fail dropped: task no longer processing");
             }
         } else {
             let backoff_secs: i64 = (30 * (1i64 << next_retry.min(10))).min(3600);
             let res = sqlx::query(
                 "UPDATE veda_outbox SET status = 'pending', retry_count = ?, payload = CAST(? AS JSON), \
-                 available_at = DATE_ADD(UTC_TIMESTAMP(), INTERVAL ? SECOND), lease_until = NULL, \
-                 lease_owner = NULL WHERE id = ? AND lease_owner = ? AND status = 'processing'",
+                 available_at = DATE_ADD(UTC_TIMESTAMP(), INTERVAL ? SECOND), lease_until = NULL \
+                 WHERE id = ? AND status = 'processing'",
             )
                 .bind(next_retry)
                 .bind(&payload_str)
                 .bind(backoff_secs)
                 .bind(task_id)
-                .bind(owner)
                 .execute(&self.pool)
                 .await
                 .map_err(storage_err)?;
             if res.rows_affected() == 0 {
-                tracing::warn!(task_id, owner, "outbox fail dropped: lease no longer held");
-                ::metrics::counter!("veda_outbox_lease_lost_total", "op" => "fail").increment(1);
+                tracing::warn!(task_id, "outbox fail dropped: task no longer processing");
             }
         }
         Ok(())
     }
 
-    async fn renew(&self, task_ids: &[i64], owner: &str) -> Result<()> {
+    async fn renew(&self, task_ids: &[i64]) -> Result<()> {
         if task_ids.is_empty() {
             return Ok(());
         }
         let placeholders = vec!["?"; task_ids.len()].join(",");
         let sql = format!(
             "UPDATE veda_outbox SET lease_until = DATE_ADD(UTC_TIMESTAMP(), INTERVAL ? MINUTE) \
-             WHERE lease_owner = ? AND status = 'processing' AND id IN ({placeholders})"
+             WHERE status = 'processing' AND id IN ({placeholders})"
         );
-        let mut q = sqlx::query(&sql).bind(OUTBOX_LEASE_MINUTES).bind(owner);
+        let mut q = sqlx::query(&sql).bind(OUTBOX_LEASE_MINUTES);
         for id in task_ids {
             q = q.bind(id);
         }

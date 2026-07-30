@@ -3,8 +3,13 @@ use std::sync::RwLock;
 use std::time::Duration;
 
 use async_trait::async_trait;
+use futures_util::stream::{self, StreamExt, TryStreamExt};
 use moka::future::Cache;
 use serde::{Deserialize, Serialize};
+use std::collections::VecDeque;
+use std::sync::Mutex;
+
+use tokio::sync::oneshot;
 use tracing::warn;
 use unicode_normalization::UnicodeNormalization;
 use veda_core::checksum::sha256_hex;
@@ -18,6 +23,15 @@ const BASE_BACKOFF_MS: u64 = 500;
 /// hours — beyond the 10-min outbox lease, the task gets reclaimed and
 /// re-enters the same sleep, effectively deadlocking that slot.
 const MAX_RETRY_AFTER_SECS: u64 = 60;
+
+/// Default cap on concurrent upstream embedding calls. The provider quota
+/// is RPM-based and shared company-wide (2026-06-11 load test), so the gate
+/// is a conservative budget, not a measured ceiling. `[embedding].max_concurrency`.
+const DEFAULT_MAX_CONCURRENCY: usize = 8;
+/// Concurrent upstream calls one large (multi-chunk) embed() may issue.
+/// Same-priority waiters are FIFO, so this stops one bulk upsert from
+/// parking dozens of waiters ahead of concurrent interactive queries.
+const DIRECT_CHUNK_CONCURRENCY: usize = 4;
 
 fn compute_backoff_ms(attempt: u32, retry_after_secs: Option<u64>) -> u64 {
     if let Some(secs) = retry_after_secs {
@@ -51,9 +65,150 @@ struct EmbeddingItem {
     embedding: Vec<f32>,
 }
 
-/// OpenAI-compatible embedding HTTP client with batching and retry.
-#[derive(Debug)]
-pub struct EmbeddingProvider {
+// ── TwoLevelGate: priority-aware concurrency gate ───────────────────
+
+/// Which queue a caller waits in when every permit is taken.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum GatePriority {
+    /// Interactive: someone is waiting on the result (search / ask /
+    /// synchronous vector upsert).
+    High,
+    /// Background: worker indexing. Throughput matters, latency doesn't.
+    Low,
+}
+
+impl GatePriority {
+    fn label(self) -> &'static str {
+        match self {
+            GatePriority::High => "high",
+            GatePriority::Low => "low",
+        }
+    }
+}
+
+struct GateState {
+    free: usize,
+    high: VecDeque<oneshot::Sender<GatePermit>>,
+    low: VecDeque<oneshot::Sender<GatePermit>>,
+}
+
+/// Two-priority concurrency gate. Idle background traffic may saturate
+/// every permit; the moment an interactive caller shows up it gets the
+/// NEXT permit released (in-flight upstream calls can't be preempted —
+/// that one round-trip is the physical floor of the hand-off latency).
+/// Within a level the hand-off order is FIFO. Cancellation can't lose a
+/// permit: the hand-off signal carries the `GatePermit` ITSELF, so a
+/// waiter that dies before the send is skipped (send returns it), and one
+/// that dies after the send drops the channel — which drops the armed
+/// permit — which re-releases it. Ownership accounting is the type
+/// system's job, not the protocol's. (Cross-review 07-29: an earlier
+/// `send(())`+construct-on-receive protocol leaked a permit whenever the
+/// waiter was cancelled between a successful send and its next poll.)
+///
+/// No third-party priority-semaphore crate carries its weight here: the
+/// whole mechanism is one mutex over a counter and two queues.
+struct TwoLevelGate {
+    state: Mutex<GateState>,
+}
+
+struct GatePermit {
+    gate: Arc<TwoLevelGate>,
+    /// Disarmed permits skip the Drop-release: used only inside `release`
+    /// when a send bounced and the SAME logical permit keeps being handed
+    /// on by the loop — letting the bounced copy release would double it.
+    armed: bool,
+}
+
+impl Drop for GatePermit {
+    fn drop(&mut self) {
+        if self.armed {
+            self.gate.release();
+        }
+    }
+}
+
+impl TwoLevelGate {
+    fn new(permits: usize) -> Arc<Self> {
+        Arc::new(Self {
+            state: Mutex::new(GateState {
+                free: permits,
+                high: VecDeque::new(),
+                low: VecDeque::new(),
+            }),
+        })
+    }
+
+    /// Wait for a permit. No timeout by design: every async caller already
+    /// lives under its own deadline (router 30s, answer 90s, worker lease +
+    /// heartbeat) and cancelling this future safely abandons the queue
+    /// slot. The one non-cancellable caller — the SQL `embedding()` UDF's
+    /// block_on bridge — wraps its embed in an explicit timeout instead.
+    async fn acquire(self: &Arc<Self>, prio: GatePriority) -> GatePermit {
+        loop {
+            let rx = {
+                let mut s = self.state.lock().unwrap();
+                if s.free > 0 {
+                    s.free -= 1;
+                    return GatePermit {
+                        gate: Arc::clone(self),
+                        armed: true,
+                    };
+                }
+                let (tx, rx) = oneshot::channel();
+                match prio {
+                    GatePriority::High => s.high.push_back(tx),
+                    GatePriority::Low => s.low.push_back(tx),
+                }
+                rx
+            };
+            // The signal IS the permit. If this future is cancelled after
+            // the sender delivered it, the channel drops the armed permit
+            // and its Drop re-releases — nothing is stranded.
+            if let Ok(permit) = rx.await {
+                return permit;
+            }
+            // Sender dropped without delivering: unreachable by
+            // construction (release only drops a sender whose receiver is
+            // already gone — and ours is alive). Re-queue defensively.
+        }
+    }
+
+    fn release(self: &Arc<Self>) {
+        loop {
+            // Pop inside the lock, hand off outside it: keeps the critical
+            // section minimal.
+            let next = {
+                let mut s = self.state.lock().unwrap();
+                match s.high.pop_front().or_else(|| s.low.pop_front()) {
+                    Some(tx) => tx,
+                    None => {
+                        s.free += 1;
+                        return;
+                    }
+                }
+            };
+            let permit = GatePermit {
+                gate: Arc::clone(self),
+                armed: true,
+            };
+            match next.send(permit) {
+                Ok(()) => return,
+                // Waiter cancelled BEFORE the send: the permit bounces
+                // back. Disarm the bounced copy (the loop keeps handing the
+                // logical permit on; a Drop-release here would double it)
+                // and try the next waiter.
+                Err(mut bounced) => {
+                    bounced.armed = false;
+                }
+            }
+        }
+    }
+}
+
+/// HTTP + retry + the global concurrency gate. One instance is shared by
+/// every embedding path in the process (fs search, summary worker,
+/// collections, SQL, vectors), so the gate here IS the global gate.
+struct EmbedCore {
     client: reqwest::Client,
     api_url: String,
     api_key: String,
@@ -64,6 +219,16 @@ pub struct EmbeddingProvider {
     /// Max texts per upstream call. Aliyun Bailian caps at 10; OpenAI
     /// tolerates 2048+. Configurable via `[embedding].batch_size`.
     batch_size: usize,
+    /// Global priority gate on concurrent upstream calls (429-storm
+    /// prevention + interactive-over-background ordering).
+    gate: Arc<TwoLevelGate>,
+}
+
+/// OpenAI-compatible embedding client: priority-gated concurrency + retry.
+/// This handle embeds at High (interactive) priority; `background()` yields
+/// a Low-priority view over the same gate for the worker.
+pub struct EmbeddingProvider {
+    core: Arc<EmbedCore>,
 }
 
 impl EmbeddingProvider {
@@ -73,6 +238,24 @@ impl EmbeddingProvider {
         model: impl Into<String>,
         dimension: Option<u32>,
         batch_size: usize,
+    ) -> Result<Self> {
+        Self::new_tuned(
+            api_url,
+            api_key,
+            model,
+            dimension,
+            batch_size,
+            DEFAULT_MAX_CONCURRENCY,
+        )
+    }
+
+    pub fn new_tuned(
+        api_url: impl Into<String>,
+        api_key: impl Into<String>,
+        model: impl Into<String>,
+        dimension: Option<u32>,
+        batch_size: usize,
+        max_concurrency: usize,
     ) -> Result<Self> {
         let client = reqwest::Client::builder()
             .connect_timeout(Duration::from_secs(5))
@@ -88,19 +271,50 @@ impl EmbeddingProvider {
                 "[embedding].batch_size must be >= 1".into(),
             ));
         }
+        if max_concurrency == 0 {
+            return Err(VedaError::InvalidInput(
+                "[embedding].max_concurrency must be >= 1".into(),
+            ));
+        }
 
         Ok(Self {
-            client,
-            api_url: api_url.into(),
-            api_key: api_key.into(),
-            model: model.into(),
-            request_dimensions: dimension,
-            configured_dim,
-            discovered_dim: RwLock::new(None),
-            batch_size,
+            core: Arc::new(EmbedCore {
+                client,
+                api_url: api_url.into(),
+                api_key: api_key.into(),
+                model: model.into(),
+                request_dimensions: dimension,
+                configured_dim,
+                discovered_dim: RwLock::new(None),
+                batch_size,
+                gate: TwoLevelGate::new(max_concurrency),
+            }),
         })
     }
 
+    /// Low-priority view over the same upstream and the same gate, for the
+    /// background worker: idle it can saturate every permit, but any
+    /// interactive caller gets the next freed one.
+    pub fn background(&self) -> Arc<dyn EmbeddingService> {
+        Arc::new(BackgroundEmbedding(Arc::clone(&self.core)))
+    }
+}
+
+/// Worker-facing wrapper: identical behavior at Low gate priority.
+struct BackgroundEmbedding(Arc<EmbedCore>);
+
+#[async_trait]
+impl EmbeddingService for BackgroundEmbedding {
+    async fn embed(&self, texts: &[String]) -> Result<Vec<Vec<f32>>> {
+        self.0.embed_direct(texts, GatePriority::Low).await
+    }
+
+    fn dimension(&self) -> usize {
+        self.0.dimension_inner()
+    }
+}
+
+impl EmbedCore {
     fn resolve_dimension(&self, embedding_len: usize) -> Result<()> {
         if let Some(expected) = self.configured_dim {
             if embedding_len != expected {
@@ -157,6 +371,7 @@ impl EmbeddingProvider {
         })?;
 
         if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
+            ::metrics::counter!("veda_embed_429_total").increment(1);
             return Err(EmbedError {
                 inner: VedaError::EmbeddingFailed("rate limited (429)".into()),
                 retry_after,
@@ -221,10 +436,35 @@ impl EmbeddingProvider {
         Ok(out)
     }
 
-    async fn embed_with_retry(&self, texts: &[String]) -> Result<Vec<Vec<f32>>> {
+    /// One gated upstream call per attempt. The permit is acquired inside
+    /// the loop and dropped before the backoff sleep, so a request waiting
+    /// out a 429 does not pin a concurrency slot (the pre-gate design had
+    /// every retrying caller camping on the upstream simultaneously).
+    /// No acquire timeout: every caller already lives under its own
+    /// deadline, and cancelling this future abandons the queue slot safely.
+    async fn embed_with_retry(
+        &self,
+        texts: &[String],
+        prio: GatePriority,
+    ) -> Result<Vec<Vec<f32>>> {
         let mut last_err = None;
         for attempt in 0..=MAX_RETRIES {
-            match self.embed_single_batch(texts).await {
+            let waited = std::time::Instant::now();
+            let permit = self.gate.acquire(prio).await;
+            ::metrics::histogram!(
+                "veda_embed_permit_wait_seconds",
+                "priority" => prio.label(),
+            )
+            .record(waited.elapsed().as_secs_f64());
+            // Drop-guard, not manual inc/dec: this future can be cancelled
+            // at the await below (router timeout), which would leak a
+            // permanent +1 on the gauge.
+            let _inflight = InflightGuard::new();
+            ::metrics::histogram!("veda_embed_batch_texts").record(texts.len() as f64);
+            let result = self.embed_single_batch(texts).await;
+            drop(_inflight);
+            drop(permit);
+            match result {
                 Ok(v) => return Ok(v),
                 Err(e) => {
                     if !e.retryable || attempt == MAX_RETRIES {
@@ -241,34 +481,60 @@ impl EmbeddingProvider {
     }
 }
 
-struct EmbedError {
-    inner: VedaError,
-    retry_after: Option<u64>,
-    retryable: bool,
+/// Cancellation-safe in-flight gauge: decrement happens on Drop, so a
+/// caller cancelled mid-request still balances the metric.
+struct InflightGuard;
+
+impl InflightGuard {
+    fn new() -> Self {
+        ::metrics::gauge!("veda_embed_inflight").increment(1.0);
+        Self
+    }
 }
 
-#[async_trait]
-impl EmbeddingService for EmbeddingProvider {
-    async fn embed(&self, texts: &[String]) -> Result<Vec<Vec<f32>>> {
+impl Drop for InflightGuard {
+    fn drop(&mut self) {
+        ::metrics::gauge!("veda_embed_inflight").decrement(1.0);
+    }
+}
+
+impl EmbedCore {
+    fn dimension_inner(&self) -> usize {
+        if let Some(d) = self.configured_dim {
+            return d;
+        }
+        self.discovered_dim
+            .read()
+            .ok()
+            .and_then(|g| *g)
+            .unwrap_or(0)
+    }
+
+    /// Chunk + gate + retry + metrics: the one embedding path. Chunks run
+    /// concurrently under the gate; `buffered` (ordered) caps one call's
+    /// fan-out at DIRECT_CHUNK_CONCURRENCY so a bulk load can't park dozens
+    /// of same-priority waiters ahead of concurrent interactive queries.
+    async fn embed_direct(&self, texts: &[String], prio: GatePriority) -> Result<Vec<Vec<f32>>> {
         if texts.is_empty() {
             return Ok(Vec::new());
         }
 
         let started = std::time::Instant::now();
-        // Use an async block so the inner `?` short-circuits to the block
-        // boundary, NOT out of `embed`. Without this wrapper, a failed batch
-        // returns straight from `embed`, skipping the metrics emission below
-        // and silently under-counting `veda_embed_total{outcome="err"}` for
-        // multi-batch failures.
+        // Async block so the inner `?` short-circuits to the block boundary,
+        // not out of the method — otherwise a failed chunk would skip the
+        // metrics emission below.
         let result: Result<Vec<Vec<f32>>> = async {
-            if texts.len() <= self.batch_size {
-                return self.embed_with_retry(texts).await;
-            }
-            let mut all = Vec::with_capacity(texts.len());
-            for batch in texts.chunks(self.batch_size) {
-                all.extend(self.embed_with_retry(batch).await?);
-            }
-            Ok(all)
+            // Materialize the futures first: a lazy `map` closure trips
+            // rustc's higher-ranked lifetime inference under `buffered`.
+            let futs: Vec<_> = texts
+                .chunks(self.batch_size)
+                .map(|c| self.embed_with_retry(c, prio))
+                .collect();
+            let chunk_results: Vec<Vec<Vec<f32>>> = stream::iter(futs)
+                .buffered(DIRECT_CHUNK_CONCURRENCY)
+                .try_collect()
+                .await?;
+            Ok(chunk_results.into_iter().flatten().collect())
         }
         .await;
         let outcome = if result.is_ok() { "ok" } else { "err" };
@@ -284,16 +550,22 @@ impl EmbeddingService for EmbeddingProvider {
         .increment(1);
         result
     }
+}
+
+struct EmbedError {
+    inner: VedaError,
+    retry_after: Option<u64>,
+    retryable: bool,
+}
+
+#[async_trait]
+impl EmbeddingService for EmbeddingProvider {
+    async fn embed(&self, texts: &[String]) -> Result<Vec<Vec<f32>>> {
+        self.core.embed_direct(texts, GatePriority::High).await
+    }
 
     fn dimension(&self) -> usize {
-        if let Some(d) = self.configured_dim {
-            return d;
-        }
-        self.discovered_dim
-            .read()
-            .ok()
-            .and_then(|g| *g)
-            .unwrap_or(0)
+        self.core.dimension_inner()
     }
 }
 
@@ -539,6 +811,211 @@ mod tests {
             .unwrap();
         assert_eq!(stub.call_count(), 3);
         assert_eq!(stub.last_call(), vec![oversize]);
+    }
+
+    // ── TwoLevelGate tests ─────────────────────────────────────
+
+    #[tokio::test]
+    async fn gate_high_priority_gets_next_released_permit() {
+        let gate = TwoLevelGate::new(1);
+        let held = gate.acquire(GatePriority::Low).await;
+
+        // A Low waiter queues FIRST, then a High one arrives.
+        let g1 = Arc::clone(&gate);
+        let low_waiter = tokio::spawn(async move { g1.acquire(GatePriority::Low).await });
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        let g2 = Arc::clone(&gate);
+        let high_waiter = tokio::spawn(async move { g2.acquire(GatePriority::High).await });
+        tokio::time::sleep(Duration::from_millis(20)).await;
+
+        drop(held);
+        let high_permit = tokio::time::timeout(Duration::from_secs(1), high_waiter)
+            .await
+            .expect("high must get the freed permit despite queueing later")
+            .unwrap();
+        assert!(!low_waiter.is_finished(), "low must still be parked");
+        drop(high_permit);
+        tokio::time::timeout(Duration::from_secs(1), low_waiter)
+            .await
+            .expect("low gets the permit once high releases")
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn gate_idle_background_saturates_all_permits() {
+        let gate = TwoLevelGate::new(4);
+        let mut permits = Vec::new();
+        for _ in 0..4 {
+            permits.push(
+                tokio::time::timeout(
+                    Duration::from_millis(100),
+                    gate.acquire(GatePriority::Low),
+                )
+                .await
+                .expect("an idle gate must hand every permit to background"),
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn gate_cancelled_waiter_does_not_lose_the_permit() {
+        let gate = TwoLevelGate::new(1);
+        let held = gate.acquire(GatePriority::High).await;
+
+        let g = Arc::clone(&gate);
+        let doomed = tokio::spawn(async move { g.acquire(GatePriority::High).await });
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        doomed.abort(); // caller gave up while queued
+        let _ = doomed.await;
+
+        drop(held);
+        // The freed permit must skip the dead waiter and stay claimable.
+        tokio::time::timeout(Duration::from_millis(200), gate.acquire(GatePriority::Low))
+            .await
+            .expect("permit must survive a cancelled waiter");
+    }
+
+    #[tokio::test]
+    async fn gate_permit_survives_cancellation_after_handoff() {
+        // The nasty window (cross-review 07-29 BLOCKER): release() sends
+        // the hand-off signal successfully, then the waiter is cancelled
+        // BEFORE its next poll. On a current_thread runtime this sequence
+        // is deterministic: the spawned waiter is parked in rx.await and
+        // gets no poll between drop(held) and abort(). With the old
+        // `send(())` protocol the permit evaporated here; carrying the
+        // permit in the channel makes its Drop re-release it.
+        let gate = TwoLevelGate::new(1);
+        let held = gate.acquire(GatePriority::High).await;
+
+        let g = Arc::clone(&gate);
+        let waiter = tokio::spawn(async move { g.acquire(GatePriority::High).await });
+        tokio::time::sleep(Duration::from_millis(20)).await; // waiter queued
+
+        drop(held); // hand-off: send succeeds, waiter not yet polled
+        waiter.abort(); // cancelled before consuming the signal
+        let _ = waiter.await;
+
+        tokio::time::timeout(Duration::from_millis(200), gate.acquire(GatePriority::Low))
+            .await
+            .expect("permit must survive a waiter cancelled after a successful hand-off");
+    }
+
+    #[tokio::test]
+    async fn gate_fifo_within_a_level() {
+        let gate = TwoLevelGate::new(1);
+        let held = gate.acquire(GatePriority::Low).await;
+        let order = Arc::new(Mutex::new(Vec::new()));
+        let mut handles = Vec::new();
+        for i in 0..3 {
+            let g = Arc::clone(&gate);
+            let ord = Arc::clone(&order);
+            handles.push(tokio::spawn(async move {
+                let _p = g.acquire(GatePriority::Low).await;
+                ord.lock().unwrap().push(i);
+            }));
+            // Deterministic enqueue order.
+            tokio::time::sleep(Duration::from_millis(15)).await;
+        }
+        drop(held);
+        for h in handles {
+            h.await.unwrap();
+        }
+        assert_eq!(*order.lock().unwrap(), vec![0, 1, 2]);
+    }
+
+    // ── Gate test (local HTTP stub) ────────────────────────────
+
+    /// Minimal OpenAI-compatible embedding endpoint: parses `input` length,
+    /// sleeps `delay`, answers matching vectors; records peak concurrency.
+    async fn spawn_embed_stub(
+        delay: Duration,
+        peak: Arc<std::sync::atomic::AtomicUsize>,
+    ) -> String {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let inflight = Arc::new(AtomicUsize::new(0));
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut sock, _)) = listener.accept().await else { break };
+                let inflight = inflight.clone();
+                let peak = peak.clone();
+                tokio::spawn(async move {
+                    let mut buf = Vec::new();
+                    let mut tmp = [0u8; 4096];
+                    // Read until the full body arrived (Content-Length).
+                    let body_start = loop {
+                        let n = sock.read(&mut tmp).await.unwrap_or(0);
+                        if n == 0 {
+                            return;
+                        }
+                        buf.extend_from_slice(&tmp[..n]);
+                        if let Some(pos) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
+                            break pos + 4;
+                        }
+                    };
+                    let headers = String::from_utf8_lossy(&buf[..body_start]).to_lowercase();
+                    let content_length: usize = headers
+                        .lines()
+                        .find_map(|l| l.strip_prefix("content-length:"))
+                        .and_then(|v| v.trim().parse().ok())
+                        .unwrap_or(0);
+                    while buf.len() < body_start + content_length {
+                        let n = sock.read(&mut tmp).await.unwrap_or(0);
+                        if n == 0 {
+                            break;
+                        }
+                        buf.extend_from_slice(&tmp[..n]);
+                    }
+                    let n_inputs = serde_json::from_slice::<serde_json::Value>(
+                        &buf[body_start..],
+                    )
+                    .ok()
+                    .and_then(|v| v["input"].as_array().map(|a| a.len()))
+                    .unwrap_or(1);
+
+                    let now = inflight.fetch_add(1, Ordering::SeqCst) + 1;
+                    peak.fetch_max(now, Ordering::SeqCst);
+                    tokio::time::sleep(delay).await;
+                    inflight.fetch_sub(1, Ordering::SeqCst);
+
+                    let items: Vec<String> = (0..n_inputs)
+                        .map(|i| format!(r#"{{"index":{i},"embedding":[1.0,2.0,3.0,4.0]}}"#))
+                        .collect();
+                    let body = format!(r#"{{"data":[{}]}}"#, items.join(","));
+                    let resp = format!(
+                        "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+                        body.len(),
+                        body
+                    );
+                    let _ = sock.write_all(resp.as_bytes()).await;
+                });
+            }
+        });
+        format!("http://{addr}")
+    }
+
+    #[tokio::test]
+    async fn gate_caps_upstream_concurrency() {
+        let peak = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let url = spawn_embed_stub(Duration::from_millis(100), peak.clone()).await;
+
+        let provider =
+            Arc::new(EmbeddingProvider::new_tuned(url, "", "m", Some(4), 10, 2).unwrap());
+        let calls = (0..8).map(|i| {
+            let p = provider.clone();
+            tokio::spawn(async move { p.embed(&[format!("t{i}")]).await })
+        });
+        for h in calls {
+            h.await.unwrap().unwrap();
+        }
+        let observed = peak.load(std::sync::atomic::Ordering::SeqCst);
+        assert!(
+            observed <= 2,
+            "gate must cap upstream concurrency at 2, observed {observed}"
+        );
     }
 
     #[tokio::test]
