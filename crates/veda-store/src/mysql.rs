@@ -969,6 +969,77 @@ impl MetadataStore for MysqlStore {
         Ok(out)
     }
 
+    async fn list_children_capped(
+        &self,
+        workspace_id: &str,
+        parent_path: &str,
+        limit: usize,
+    ) -> Result<Vec<Dentry>> {
+        // ORDER BY is_dir DESC puts directories first so that truncation at
+        // `limit` keeps the entries worth naming. Uses idx_parent
+        // (workspace_id, parent_path(255)).
+        //
+        // COLLATE utf8mb4_bin because the column's collation is
+        // utf8mb4_0900_ai_ci: under it `/Docs` and `/docs` compare EQUAL, so
+        // their relative order is unspecified and a truncation boundary
+        // landing between them would return different rows run to run.
+        // Binary collation makes this a total order.
+        let mut rows = sqlx::query(
+            r#"SELECT id, workspace_id, parent_path, name, path, file_id, is_dir, created_at, updated_at
+               FROM veda_dentries WHERE workspace_id = ? AND parent_path = ?
+               ORDER BY is_dir DESC, path COLLATE utf8mb4_bin
+               LIMIT ?"#,
+        )
+        .bind(workspace_id)
+        .bind(parent_path)
+        .bind(limit as u64)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(storage_err)?;
+        let mut out = Vec::with_capacity(rows.len());
+        for r in rows.drain(..) {
+            out.push(row_to_dentry(&r)?);
+        }
+        Ok(out)
+    }
+
+    async fn count_files_by_top_level(
+        &self,
+        workspace_id: &str,
+    ) -> Result<std::collections::HashMap<String, i64>> {
+        // Paths are normalised absolute ("/docs/a/b.md"), so dropping the
+        // leading slash and taking the first segment yields the top-level
+        // area. A root-level file ("/README.md") groups under its own name —
+        // callers must only read this map for entries where is_dir is true.
+        //
+        // The grouping deliberately inherits the column's own
+        // utf8mb4_0900_ai_ci collation, which folds case and accents. That
+        // matches how the rest of veda compares paths: `get_dentry` and
+        // `list_dentries` both do a plain `path = ?` / `parent_path = ?`
+        // against this column, so `/Docs` and `/docs` already resolve to one
+        // directory and a listing of it returns files written under either
+        // spelling. Forcing a binary collation here would split the count
+        // while `list_dir` kept showing the union — the map would then
+        // disagree with the directory it describes.
+        let rows = sqlx::query(
+            r#"SELECT SUBSTRING_INDEX(SUBSTRING(path, 2), '/', 1) AS top_seg, COUNT(*) AS n
+               FROM veda_dentries
+               WHERE workspace_id = ? AND is_dir = false
+               GROUP BY top_seg"#,
+        )
+        .bind(workspace_id)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(storage_err)?;
+        let mut map = std::collections::HashMap::new();
+        for r in &rows {
+            let seg: String = r.try_get("top_seg").map_err(storage_err)?;
+            let n: i64 = r.try_get("n").map_err(storage_err)?;
+            map.insert(seg, n);
+        }
+        Ok(map)
+    }
+
     async fn list_dentries_under_page(
         &self,
         workspace_id: &str,
@@ -1396,6 +1467,34 @@ impl MetadataStore for MysqlStore {
             let s = row_to_summary(r)?;
             if let Some(fid) = &s.file_id {
                 map.insert(fid.clone(), s);
+            }
+        }
+        Ok(map)
+    }
+
+    async fn get_summaries_by_dentry_ids(
+        &self,
+        dentry_ids: &[String],
+    ) -> Result<std::collections::HashMap<String, FileSummary>> {
+        if dentry_ids.is_empty() {
+            return Ok(std::collections::HashMap::new());
+        }
+        let placeholders = vec!["?"; dentry_ids.len()].join(",");
+        let sql = format!(
+            r#"SELECT id, workspace_id, file_id, dentry_id, l0_abstract, l1_overview,
+                      status, created_at, updated_at
+               FROM veda_summaries WHERE dentry_id IN ({placeholders})"#
+        );
+        let mut q = sqlx::query(&sql);
+        for did in dentry_ids {
+            q = q.bind(did);
+        }
+        let rows = q.fetch_all(&self.pool).await.map_err(storage_err)?;
+        let mut map = std::collections::HashMap::new();
+        for r in &rows {
+            let s = row_to_summary(r)?;
+            if let Some(did) = &s.dentry_id {
+                map.insert(did.clone(), s);
             }
         }
         Ok(map)

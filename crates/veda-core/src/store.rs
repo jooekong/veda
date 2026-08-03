@@ -22,6 +22,33 @@ pub trait MetadataStore: Send + Sync {
 
     async fn get_dentry(&self, workspace_id: &str, path: &str) -> Result<Option<Dentry>>;
     async fn list_dentries(&self, workspace_id: &str, parent_path: &str) -> Result<Vec<Dentry>>;
+    /// Direct children of `parent_path`, directories first and each group
+    /// ordered by `path`, capped at `limit`.
+    ///
+    /// `list_dentries` is an unbounded `fetch_all`; the workspace map only
+    /// renders ~200 entries but would otherwise load every root-level row
+    /// (and build an `IN (...)` over every root-level file id) just to throw
+    /// them away. Ordering is pushed into SQL so the cap keeps the entries
+    /// that survive truncation — directories are subtrees worth naming,
+    /// loose root files are not.
+    async fn list_children_capped(
+        &self,
+        workspace_id: &str,
+        parent_path: &str,
+        limit: usize,
+    ) -> Result<Vec<Dentry>>;
+    /// File counts grouped by top-level path segment (`/docs/a/b.md` ->
+    /// `docs`). Lets the map answer "how big is this area" without walking
+    /// each subtree.
+    ///
+    /// Cost is O(dentries in the workspace): the GROUP BY is on an
+    /// expression, so no index can serve the grouping — only the leading
+    /// `workspace_id` of `idx_ws_path` narrows the scan. Same order of
+    /// magnitude as `storage_stats`, which the map also calls.
+    async fn count_files_by_top_level(
+        &self,
+        workspace_id: &str,
+    ) -> Result<std::collections::HashMap<String, i64>>;
     /// Return up to `limit` dentries under `path_prefix` ordered by `path`
     /// ASC, strictly after `after_path` (exclusive cursor; `None` starts
     /// from the beginning). Caller pages by passing the last returned
@@ -226,6 +253,13 @@ pub trait MetadataStore: Send + Sync {
         Ok(map)
     }
     async fn get_summary_by_dentry(&self, dentry_id: &str) -> Result<Option<FileSummary>>;
+    /// Batch sibling of `get_summaries_by_file_ids`, keyed by dentry_id —
+    /// directory summaries hang off a dentry, not a file. Deliberately has
+    /// no default implementation: a looping default would silently be N+1.
+    async fn get_summaries_by_dentry_ids(
+        &self,
+        dentry_ids: &[String],
+    ) -> Result<std::collections::HashMap<String, FileSummary>>;
     /// Return (file_id_set, dentry_id_set) of every `Ready` summary in
     /// `workspace_id`. Reconciler bulk-checks the dentry list against
     /// these sets, replacing per-dentry get_summary_by_* lookups (O(N)

@@ -7,9 +7,9 @@
 //! per POST. GET/DELETE on `/mcp` get axum's automatic 405, which per spec
 //! tells clients "no downstream stream / no client-terminated sessions".
 //!
-//! Six read-only tools, all thin wrappers over the in-process service layer
-//! (never the HTTP loopback): search / grep / read_file / list_dir /
-//! overview / ask. `ask` shares the per-workspace concurrency gate and
+//! Seven read-only tools, all thin wrappers over the in-process service
+//! layer (never the HTTP loopback): map / search / grep / read_file /
+//! list_dir / overview / ask. `ask` shares the per-workspace concurrency gate and
 //! metrics histograms with `POST /v1/answer` (routes/answer.rs) so both
 //! surfaces draw from one LLM budget.
 //!
@@ -319,6 +319,7 @@ fn record_mcp(method: &'static str, outcome: &'static str, started: Instant) {
 /// Whitelisted metric label for a tools/call — never the raw client string.
 fn tool_metric_label(tool: &str) -> &'static str {
     match tool {
+        "map" => "tool:map",
         "search" => "tool:search",
         "grep" => "tool:grep",
         "read_file" => "tool:read_file",
@@ -346,7 +347,8 @@ fn initialize_result(params: &Value) -> Value {
         "capabilities": { "tools": {} },
         "serverInfo": { "name": "veda", "version": env!("CARGO_PKG_VERSION") },
         "instructions": "Read-only access to a veda knowledge workspace. \
-            Start with `search` (detail_level='abstract' scans relevance at ~100 tokens/hit), \
+            Call `map` first to see the layout of an unfamiliar workspace, then \
+            `search` (detail_level='abstract' scans relevance at ~100 tokens/hit), \
             then `read_file` the promising paths. `grep` finds exact strings with line numbers. \
             `ask` returns a complete answer with [n] citations for open questions."
     })
@@ -357,6 +359,17 @@ fn initialize_result(params: &Value) -> Value {
 /// model useful, and they spell out sharp edges (literal grep, truncation).
 fn tool_specs() -> Vec<Value> {
     vec![
+        // First in the list on purpose: an agent facing an unfamiliar
+        // workspace should orient before it starts probing.
+        json!({
+            "name": "map",
+            "annotations": { "readOnlyHint": true },
+            "description": "Workspace map: the top-level layout of this knowledge base, with a \
+                one-line summary and file count per area. Call this FIRST when you do not yet \
+                know what the workspace contains — one call replaces a round of list_dir probing \
+                and tells you which subtree to search or read. Costs ~100 tokens per entry.",
+            "inputSchema": { "type": "object", "properties": {} }
+        }),
         json!({
             "name": "search",
             "annotations": { "readOnlyHint": true },
@@ -495,6 +508,7 @@ async fn run_tool(
     args: &Value,
 ) -> Result<String, ToolError> {
     match name {
+        "map" => tool_map(state, auth).await,
         "search" => tool_search(state, auth, args).await,
         "grep" => tool_grep(state, auth, args).await,
         "read_file" => tool_read_file(state, auth, args).await,
@@ -568,7 +582,7 @@ fn to_json_text<T: serde::Serialize>(v: &T) -> Result<String, ToolError> {
     })
 }
 
-// ── the six tools ──────────────────────────────────────
+// ── the tools ──────────────────────────────────────────
 
 async fn tool_search(
     state: &Arc<AppState>,
@@ -733,6 +747,15 @@ async fn tool_list_dir(
         entries.truncate(LIST_FLAT_CAP);
         to_json_text(&json!({ "entries": entries, "truncated": truncated }))
     }
+}
+
+/// Same payload the REST `GET /v1/map` puts in its `data` field, as JSON
+/// text. No markdown rendering: JSON is cheaper in tokens and unambiguous.
+async fn tool_map(state: &Arc<AppState>, auth: &AuthWorkspace) -> Result<String, ToolError> {
+    let map = super::search::build_workspace_map(state, &auth.workspace_id)
+        .await
+        .map_err(domain)?;
+    to_json_text(&map)
 }
 
 async fn tool_overview(
@@ -939,19 +962,43 @@ mod tests {
         assert!(r["capabilities"]["tools"].is_object());
         assert_eq!(r["serverInfo"]["name"], "veda");
         assert_eq!(r["serverInfo"]["version"], env!("CARGO_PKG_VERSION"));
-        assert!(r["instructions"].as_str().unwrap().contains("search"));
+        let instructions = r["instructions"].as_str().unwrap();
+        assert!(instructions.contains("search"));
+        // A tool the instructions never mention is a tool the model does not
+        // reach for — `map` only pays off if orienting is the suggested
+        // first move.
+        assert!(instructions.contains("map"), "got: {instructions}");
     }
 
     #[test]
-    fn tool_specs_lists_six_valid_tools() {
+    fn tool_metric_labels_are_whitelisted() {
+        // Every advertised tool needs its own label, and anything else must
+        // collapse to a constant: the label becomes a metric dimension, so a
+        // passthrough would let any client string explode the cardinality.
+        for t in tool_specs() {
+            let name = t["name"].as_str().unwrap();
+            assert_eq!(
+                tool_metric_label(name),
+                format!("tool:{name}"),
+                "{name} has no metric label"
+            );
+        }
+        assert_eq!(tool_metric_label("../../etc/passwd"), "tool:unknown");
+        assert_eq!(tool_metric_label(""), "tool:unknown");
+    }
+
+    #[test]
+    fn tool_specs_lists_seven_valid_tools() {
         let specs = tool_specs();
         let names: Vec<&str> = specs
             .iter()
             .map(|t| t["name"].as_str().unwrap())
             .collect();
+        // Order matters: `map` is first so an agent orienting in an unknown
+        // workspace reaches for it before it starts probing with list_dir.
         assert_eq!(
             names,
-            ["search", "grep", "read_file", "list_dir", "overview", "ask"]
+            ["map", "search", "grep", "read_file", "list_dir", "overview", "ask"]
         );
         for t in &specs {
             assert!(
@@ -960,7 +1007,7 @@ mod tests {
                 t["name"]
             );
             assert_eq!(t["inputSchema"]["type"], "object", "{}", t["name"]);
-            // All six tools are read-only; the annotation lets compliant
+            // Every tool is read-only; the annotation lets compliant
             // clients relax per-call confirmation.
             assert_eq!(
                 t["annotations"]["readOnlyHint"], true,
@@ -970,11 +1017,24 @@ mod tests {
         }
         // Required fields spelled correctly — a typo here surfaces as LLMs
         // omitting the argument at call time, which is painful to debug.
-        assert_eq!(specs[0]["inputSchema"]["required"][0], "query");
-        assert_eq!(specs[1]["inputSchema"]["required"][0], "pattern");
-        assert_eq!(specs[2]["inputSchema"]["required"][0], "path");
-        assert_eq!(specs[4]["inputSchema"]["required"][0], "path");
-        assert_eq!(specs[5]["inputSchema"]["required"][0], "question");
+        // Looked up by name: positional indices silently shift when a tool
+        // is inserted, turning a real check into an assertion about the
+        // wrong tool.
+        let spec = |name: &str| {
+            specs
+                .iter()
+                .find(|t| t["name"] == name)
+                .unwrap_or_else(|| panic!("no {name} tool"))
+                .clone()
+        };
+        assert_eq!(spec("search")["inputSchema"]["required"][0], "query");
+        assert_eq!(spec("grep")["inputSchema"]["required"][0], "pattern");
+        assert_eq!(spec("read_file")["inputSchema"]["required"][0], "path");
+        assert_eq!(spec("overview")["inputSchema"]["required"][0], "path");
+        assert_eq!(spec("ask")["inputSchema"]["required"][0], "question");
+        // `map` takes no arguments — an empty property bag, not a missing key.
+        assert!(spec("map")["inputSchema"]["required"].is_null());
+        assert!(spec("map")["inputSchema"]["properties"].is_object());
     }
 
     #[test]

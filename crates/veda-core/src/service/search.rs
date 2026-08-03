@@ -1,9 +1,31 @@
 use std::sync::Arc;
 
 use tracing::warn;
+use unicode_normalization::UnicodeNormalization;
 use veda_types::*;
 
 use crate::store::{EmbeddingService, MetadataStore, VectorStore};
+
+/// Approximate MySQL's `utf8mb4_0900_ai_ci` folding for one path segment:
+/// case-insensitive and accent-insensitive.
+///
+/// Needed because path comparison in veda happens in the database — the
+/// `path` column carries that collation and `get_dentry` / `list_dentries`
+/// compare against it directly — while the workspace map has to line
+/// database-side grouping results up with dentry names in Rust. Decompose to
+/// NFD and drop combining marks, which is what "accent-insensitive" means
+/// for the Latin range; then lowercase.
+///
+/// This is deliberately an approximation of a full collation table. A
+/// segment it folds differently from MySQL loses its `file_count` (reported
+/// as 0) — it never produces a wrong count for another directory.
+fn fold_path_segment(segment: &str) -> String {
+    segment
+        .nfd()
+        .filter(|c| !unicode_normalization::char::is_combining_mark(*c))
+        .collect::<String>()
+        .to_lowercase()
+}
 
 /// Cloneable: every field is an `Arc`, so cloning is cheap ref-count bumps.
 /// `AnswerService` holds its own clone rather than an `Arc<SearchService>`.
@@ -207,5 +229,95 @@ impl SearchService {
         } else {
             Ok(None)
         }
+    }
+
+    /// Assemble the workspace map: top-level layout plus a one-line summary
+    /// per area. Pure assembly of data that already exists — no LLM call.
+    ///
+    /// This *is* the root-level view. The workspace root has no dentry, so
+    /// it has no L0/L1 row to serve (a bare `/v1/abstract` route was tried
+    /// and removed for producing misleading 404s); building the view from
+    /// the children sidesteps that instead of teaching the worker to
+    /// summarise the root.
+    ///
+    /// Returns `Ready` or `Partial`. Only the caller knows whether summary
+    /// generation is configured at all, so promoting to `Disabled` is the
+    /// HTTP layer's job.
+    pub async fn workspace_map(&self, workspace_id: &str, cap: usize) -> Result<api::WorkspaceMap> {
+        // Over-fetch by one so "is there more?" costs no extra query.
+        let mut children = self
+            .meta
+            .list_children_capped(workspace_id, "/", cap + 1)
+            .await?;
+        let truncated = children.len() > cap;
+        children.truncate(cap);
+
+        let file_ids: Vec<String> = children.iter().filter_map(|d| d.file_id.clone()).collect();
+        let dir_ids: Vec<String> = children
+            .iter()
+            .filter(|d| d.is_dir)
+            .map(|d| d.id.clone())
+            .collect();
+
+        let files = self.meta.get_files_batch(&file_ids).await?;
+        let sizes: std::collections::HashMap<&str, i64> =
+            files.iter().map(|f| (f.id.as_str(), f.size_bytes)).collect();
+        let file_summaries = self.meta.get_summaries_by_file_ids(&file_ids).await?;
+        let dir_summaries = self.meta.get_summaries_by_dentry_ids(&dir_ids).await?;
+        // MySQL groups these segments under the path column's collation and
+        // returns one arbitrary spelling per group, so a directory named
+        // `Docs` may come back keyed `docs` and `café` keyed `cafe`. Fold
+        // both sides the same way or the lookup below silently reports 0.
+        let counts: std::collections::HashMap<String, i64> = self
+            .meta
+            .count_files_by_top_level(workspace_id)
+            .await?
+            .into_iter()
+            .map(|(k, v)| (fold_path_segment(&k), v))
+            .collect();
+        let stats = self.meta.storage_stats(workspace_id).await?;
+
+        let entries: Vec<api::MapEntry> = children
+            .into_iter()
+            .map(|d| {
+                let summary = if d.is_dir {
+                    dir_summaries.get(&d.id)
+                } else {
+                    d.file_id.as_deref().and_then(|fid| file_summaries.get(fid))
+                };
+                api::MapEntry {
+                    // Key the count off is_dir, never off "the map happens to
+                    // have this name" — a root-level file groups under its own
+                    // file name and would otherwise report a bogus count.
+                    file_count: if d.is_dir {
+                        Some(counts.get(&fold_path_segment(&d.name)).copied().unwrap_or(0))
+                    } else {
+                        None
+                    },
+                    size_bytes: d
+                        .file_id
+                        .as_deref()
+                        .and_then(|fid| sizes.get(fid).copied()),
+                    l0_abstract: summary.map(|s| s.l0_abstract.clone()),
+                    path: d.path,
+                    is_dir: d.is_dir,
+                }
+            })
+            .collect();
+
+        // Coverage is over what we return, not the whole workspace: entries
+        // dropped by truncation must not drag the state down to Partial.
+        let summary_state = if entries.iter().all(|e| e.l0_abstract.is_some()) {
+            api::MapSummaryState::Ready
+        } else {
+            api::MapSummaryState::Partial
+        };
+
+        Ok(api::WorkspaceMap {
+            stats,
+            summary_state,
+            truncated,
+            entries,
+        })
     }
 }

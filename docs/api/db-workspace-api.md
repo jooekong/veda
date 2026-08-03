@@ -509,7 +509,7 @@ Qdrant 风格的严格子集，仅用于 `/v1/vectors/search` 的 `filter`：
 
 以下端点属于 **fs workspace**（个人知识库 / FUSE）能力面，服务端强制目标 workspace 为 `kind=fs`——用 db workspace 的 `wk_` 调用会 `400 WORKSPACE_KIND_MISMATCH`，不要在 db SDK 里暴露：
 
-- `POST /v1/search`、`POST /v1/grep`、`POST /v1/sql`、`POST /v1/answer`、`GET /v1/index-status`、`GET /v1/abstract/{path}`、`GET /v1/overview/{path}`、`/v1/fs/*`、`/v1/events`、`/v1/collections/*`、`POST /mcp`（MCP 端点）
+- `POST /v1/search`、`POST /v1/grep`、`POST /v1/sql`、`POST /v1/answer`、`GET /v1/index-status`、`GET /v1/map`、`GET /v1/abstract/{path}`、`GET /v1/overview/{path}`、`/v1/fs/*`、`/v1/events`、`/v1/collections/*`、`POST /mcp`（MCP 端点）
 
 它们与向量服务是两条独立产品线。fs 数据面同样以 `wk_` 鉴权，但绑定的是 `kind=fs` 的 workspace。
 

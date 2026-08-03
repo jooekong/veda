@@ -40,6 +40,27 @@ impl MetadataStore for MockMetaFull {
             .find(|d| d.workspace_id == ws && d.path == path)
             .cloned())
     }
+    // Map endpoint only; this SQL fixture never exercises it.
+    async fn list_children_capped(
+        &self,
+        _ws: &str,
+        _parent: &str,
+        _limit: usize,
+    ) -> Result<Vec<Dentry>> {
+        Ok(vec![])
+    }
+    async fn count_files_by_top_level(
+        &self,
+        _ws: &str,
+    ) -> Result<std::collections::HashMap<String, i64>> {
+        Ok(Default::default())
+    }
+    async fn get_summaries_by_dentry_ids(
+        &self,
+        _ids: &[String],
+    ) -> Result<std::collections::HashMap<String, FileSummary>> {
+        Ok(Default::default())
+    }
     async fn list_dentries(&self, ws: &str, parent: &str) -> Result<Vec<Dentry>> {
         Ok(self
             .dentries
@@ -508,6 +529,27 @@ impl MetadataStore for MockMeta {
             .cloned())
     }
 
+    // Map endpoint only; this SQL fixture never exercises it.
+    async fn list_children_capped(
+        &self,
+        _ws: &str,
+        _parent: &str,
+        _limit: usize,
+    ) -> Result<Vec<Dentry>> {
+        Ok(vec![])
+    }
+    async fn count_files_by_top_level(
+        &self,
+        _ws: &str,
+    ) -> Result<std::collections::HashMap<String, i64>> {
+        Ok(Default::default())
+    }
+    async fn get_summaries_by_dentry_ids(
+        &self,
+        _ids: &[String],
+    ) -> Result<std::collections::HashMap<String, FileSummary>> {
+        Ok(Default::default())
+    }
     async fn list_dentries(&self, _ws: &str, parent: &str) -> Result<Vec<Dentry>> {
         Ok(self
             .dentries

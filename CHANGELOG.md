@@ -9,6 +9,23 @@ that matters.
 
 ## [Unreleased]
 
+### Added
+- **`GET /v1/map` and an MCP `map` tool — one call for "what is this
+  knowledge base".** Returns the workspace's top-level entries with a
+  one-line summary and file count each, plus workspace-wide stats. It makes
+  no LLM call: everything is assembled from summaries that already exist.
+  The workspace root has no dentry and therefore no summary of its own, so
+  this *is* the root-level view — previously an agent facing an unfamiliar
+  workspace had nothing to orient with and had to probe with repeated
+  `list_dir` calls. Directories sort ahead of files so the 200-entry cap
+  keeps the areas worth naming (`truncated: true` beyond that), and
+  `summary_state` reports `ready` / `partial` / `disabled` in the body
+  rather than as an HTTP status — it aggregates many summaries, so the
+  202/501 tri-state of `/v1/abstract` does not apply. A server with no
+  `[llm]` still returns the abstracts it already has, matching what
+  `/v1/abstract` serves. `map` is listed first in `tools/list` and named
+  first in the MCP `initialize` instructions.
+
 ### Fixed
 - **`veda cp <dir>` ignored `.gitignore`, so uploading a repo flooded the
   knowledge base.** The skip list was four hard-coded directory names

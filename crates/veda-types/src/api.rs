@@ -187,6 +187,61 @@ pub struct OverviewResponse {
     pub l1_overview: String,
 }
 
+/// How much of the map carries a summary. The workspace root has no dentry
+/// and therefore no L0/L1 row of its own, so the map cannot be a three-state
+/// response like `/v1/abstract`; it always returns 200 and states its
+/// coverage here instead.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MapSummaryState {
+    /// Every returned entry carries an abstract.
+    Ready,
+    /// Coverage of the returned entries is incomplete. This is a statement
+    /// of fact, NOT a promise that retrying will help: a directory that
+    /// became empty has its summary deleted outright and will never have
+    /// one again.
+    Partial,
+    /// No *new* summaries will be generated (server has no `[llm]`).
+    /// Abstracts already in the database are still returned — hiding them
+    /// would contradict `/v1/abstract/{path}`, which serves a cached
+    /// summary regardless of whether generation is currently enabled.
+    Disabled,
+}
+
+/// One top-level entry in the workspace map.
+#[derive(Debug, Serialize)]
+pub struct MapEntry {
+    pub path: String,
+    pub is_dir: bool,
+    /// L0 one-liner. Omitted (not null) when this entry has no summary yet.
+    #[serde(rename = "abstract", skip_serializing_if = "Option::is_none")]
+    pub l0_abstract: Option<String>,
+    /// Files anywhere beneath this directory. Directories only.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub file_count: Option<i64>,
+    /// Files only.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub size_bytes: Option<i64>,
+}
+
+/// Response for `GET /v1/map` — the workspace's top-level layout with a
+/// one-line summary per area, assembled from data that already exists (no
+/// LLM call). Intended as an agent's first call against an unfamiliar
+/// workspace, replacing a round of `list_dir` probing.
+///
+/// Assembled from several independent reads, so it is a best-effort view
+/// rather than a consistent snapshot: under concurrent writes `entries`,
+/// `stats` and the per-entry counts may reflect slightly different moments.
+#[derive(Debug, Serialize)]
+pub struct WorkspaceMap {
+    pub stats: crate::types::StorageStats,
+    pub summary_state: MapSummaryState,
+    /// More top-level entries exist than the response cap; those returned
+    /// are the directories (then files) that sort first.
+    pub truncated: bool,
+    pub entries: Vec<MapEntry>,
+}
+
 // ── Answer (RAG) ───────────────────────────────────────
 
 // deny_unknown_fields mirrors SearchApiRequest: reject typo'd fields with a

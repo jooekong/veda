@@ -13,3 +13,24 @@
 - [x] CJK 语言检测把日/韩文误标 zh-CN — 随 4b8edf2 修复（`veda-pipeline/src/summary.rs:139` 加 kana/hangul 占比判定，>25% Han 数即回退 en）
 - [x] veda-fuse 暴露 `--version`（clap root 挂 `version`）— 随 0.1.21 发版 2026-07-23
 - [x] 删除 `tests/server_test.rs`（整文件 mock-only，对生产零覆盖、会与生产 drift）+ 连带清理死 JWT 脚手架与 `jsonwebtoken` 依赖 — 2026-06-24
+
+## veda_dentries 的 collation 未固定（2026-08-03 发现）
+
+`veda_dentries` 的 bootstrap DDL（`crates/veda-store/src/mysql.rs`）没有指定
+`CHARACTER SET` / `COLLATE`，`path` / `parent_path` / `name` 三列继承**建库时的
+默认值**。测试库上是 `utf8mb4_0900_ai_ci`（大小写 + 重音均不敏感）。
+
+`get_dentry` / `list_dentries` 都是 `WHERE path = ?` / `parent_path = ?` 直接比较
+该列，所以**路径查找的大小写敏感性取决于建库默认值，不是代码决定的**：
+
+- 当前测试库上，`/Docs` 与 `/docs` 是同一个目录（第二次 `ensure_parents` 复用第一个），
+  但两个文件因 `path_hash = SHA2(path)` 各自存在 —— 目录不敏感、文件敏感的混合语义
+- 换一个默认 `utf8mb4_bin` 的库部署，同一份代码行为就不同
+
+影响面比看起来大（FUSE / CLI / 平台面所有按路径定位的操作）。固定它需要：
+1. DDL 显式声明 collation
+2. 对已有生产表做 `ALTER TABLE ... CONVERT TO` 迁移
+3. 想清楚要哪种语义 —— 改成敏感会让现在互相覆盖的路径突然分裂
+
+未排期。发现于 workspace map 的 `file_count` 实现（见
+`docs/plans/gitignore-and-workspace-map.md` v4 记录）。

@@ -5,7 +5,9 @@ use axum::http::{header, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
-use veda_types::api::{AbstractResponse, OverviewResponse, SearchApiRequest};
+use veda_types::api::{
+    AbstractResponse, MapSummaryState, OverviewResponse, SearchApiRequest, WorkspaceMap,
+};
 use veda_types::{ApiResponse, DetailLevel, SearchHit};
 
 use crate::auth::AuthWorkspace;
@@ -22,8 +24,45 @@ pub fn routes() -> Router<Arc<AppState>> {
     // here.
     Router::new()
         .route("/v1/search", post(search))
+        .route("/v1/map", get(get_map))
         .route("/v1/abstract/{*path}", get(get_abstract))
         .route("/v1/overview/{*path}", get(get_overview))
+}
+
+/// Top-level entries a single map response will carry. Each costs ~100
+/// tokens of abstract, so 200 is already about as much as an agent can
+/// absorb in one call; past that the honest answer is `truncated: true`
+/// and "use search instead".
+pub(crate) const MAP_ENTRY_CAP: usize = 200;
+
+/// Shared by the REST route and the MCP `map` tool so the two surfaces
+/// cannot drift — in particular on the rule that `Disabled` relabels the
+/// state without stripping abstracts.
+pub(crate) async fn build_workspace_map(
+    state: &Arc<AppState>,
+    workspace_id: &str,
+) -> Result<WorkspaceMap, veda_types::VedaError> {
+    let mut map = state
+        .search_service
+        .workspace_map(workspace_id, MAP_ENTRY_CAP)
+        .await?;
+    // The service only knows about coverage; whether summaries can ever be
+    // produced is server config. This rewrites the state label only —
+    // cached abstracts stay in the response, matching what
+    // `/v1/abstract/{path}` serves when [llm] is absent.
+    if !state.summary_enabled {
+        map.summary_state = MapSummaryState::Disabled;
+    }
+    Ok(map)
+}
+
+async fn get_map(
+    State(state): State<Arc<AppState>>,
+    auth: AuthWorkspace,
+) -> Result<Json<ApiResponse<WorkspaceMap>>, AppError> {
+    Ok(Json(ApiResponse::ok(
+        build_workspace_map(&state, &auth.workspace_id).await?,
+    )))
 }
 
 async fn search(

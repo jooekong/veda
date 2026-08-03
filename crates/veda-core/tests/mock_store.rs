@@ -17,6 +17,21 @@ pub struct MockState {
     pub file_chunks: Vec<FileChunk>,
     pub outbox: Vec<OutboxEvent>,
     pub fs_events: Vec<FsEvent>,
+    /// Summaries keyed by file_id, for `get_summaries_by_file_ids`.
+    pub file_summaries: HashMap<String, FileSummary>,
+    /// Summaries keyed by dentry_id, for `get_summaries_by_dentry_ids`.
+    pub dir_summaries: HashMap<String, FileSummary>,
+    /// Pre-computed answer for `count_files_by_top_level`.
+    pub top_level_counts: HashMap<String, i64>,
+    /// Every `limit` `list_children_capped` was called with. The workspace
+    /// map must push its cap down into the query rather than reading
+    /// everything and truncating afterwards; asserting on the returned
+    /// length alone cannot tell those two implementations apart.
+    pub children_capped_limits: Vec<usize>,
+    /// How many ids each batch lookup was handed. The map must build its
+    /// `IN (...)` lists from the *truncated* entry set, so these have to
+    /// stay bounded by the cap however large the workspace is.
+    pub batch_id_counts: Vec<(&'static str, usize)>,
 }
 
 pub struct MockMetadataStore {
@@ -80,6 +95,41 @@ impl MetadataStore for MockMetadataStore {
             .collect())
     }
 
+    async fn list_children_capped(
+        &self,
+        workspace_id: &str,
+        parent_path: &str,
+        limit: usize,
+    ) -> Result<Vec<Dentry>> {
+        let mut st = self.state.lock().unwrap();
+        st.children_capped_limits.push(limit);
+        let mut rows: Vec<Dentry> = st
+            .dentries
+            .iter()
+            .filter(|d| d.workspace_id == workspace_id && d.parent_path == parent_path)
+            .cloned()
+            .collect();
+        // Mirror the SQL: ORDER BY is_dir DESC, path — then LIMIT.
+        rows.sort_by(|a, b| b.is_dir.cmp(&a.is_dir).then_with(|| a.path.cmp(&b.path)));
+        rows.truncate(limit);
+        Ok(rows)
+    }
+
+    async fn count_files_by_top_level(
+        &self,
+        workspace_id: &str,
+    ) -> Result<HashMap<String, i64>> {
+        Ok(self
+            .state
+            .lock()
+            .unwrap()
+            .top_level_counts
+            .clone()
+            .into_iter()
+            .filter(|_| !workspace_id.is_empty())
+            .collect())
+    }
+
     async fn list_dentries_under_page(
         &self,
         workspace_id: &str,
@@ -113,6 +163,17 @@ impl MetadataStore for MockMetadataStore {
     async fn get_file(&self, file_id: &str) -> Result<Option<FileRecord>> {
         let st = self.state.lock().unwrap();
         Ok(st.files.iter().find(|f| f.id == file_id).cloned())
+    }
+
+    async fn get_files_batch(&self, file_ids: &[String]) -> Result<Vec<FileRecord>> {
+        let mut st = self.state.lock().unwrap();
+        st.batch_id_counts.push(("files_batch", file_ids.len()));
+        Ok(st
+            .files
+            .iter()
+            .filter(|f| file_ids.iter().any(|id| id == &f.id))
+            .cloned()
+            .collect())
     }
 
     async fn get_file_content(&self, file_id: &str) -> Result<Option<String>> {
@@ -312,11 +373,33 @@ impl MetadataStore for MockMetadataStore {
         }))
     }
 
-    async fn get_summary_by_file(&self, _file_id: &str) -> Result<Option<FileSummary>> {
-        Ok(None)
+    async fn get_summary_by_file(&self, file_id: &str) -> Result<Option<FileSummary>> {
+        Ok(self.state.lock().unwrap().file_summaries.get(file_id).cloned())
     }
-    async fn get_summary_by_dentry(&self, _dentry_id: &str) -> Result<Option<FileSummary>> {
-        Ok(None)
+    async fn get_summaries_by_file_ids(
+        &self,
+        file_ids: &[String],
+    ) -> Result<HashMap<String, FileSummary>> {
+        let mut st = self.state.lock().unwrap();
+        st.batch_id_counts.push(("summaries_by_file", file_ids.len()));
+        Ok(file_ids
+            .iter()
+            .filter_map(|id| st.file_summaries.get(id).map(|s| (id.clone(), s.clone())))
+            .collect())
+    }
+    async fn get_summary_by_dentry(&self, dentry_id: &str) -> Result<Option<FileSummary>> {
+        Ok(self.state.lock().unwrap().dir_summaries.get(dentry_id).cloned())
+    }
+    async fn get_summaries_by_dentry_ids(
+        &self,
+        dentry_ids: &[String],
+    ) -> Result<HashMap<String, FileSummary>> {
+        let mut st = self.state.lock().unwrap();
+        st.batch_id_counts.push(("summaries_by_dentry", dentry_ids.len()));
+        Ok(dentry_ids
+            .iter()
+            .filter_map(|id| st.dir_summaries.get(id).map(|s| (id.clone(), s.clone())))
+            .collect())
     }
     async fn list_ready_summary_keys(
         &self,
