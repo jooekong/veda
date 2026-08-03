@@ -1,0 +1,135 @@
+# veda-server configuration template.
+#
+#   cp config/server.toml.example config/server.toml   # then edit
+#   ./veda-server config/server.toml
+#
+# The binary takes a single positional config path and defaults to
+# `config/server.toml` when omitted. It accepts no flags other than `--help`
+# (there is no `--version`, and no version endpoint either: `/capabilities`
+# reports only `summary_enabled`, and the MCP `initialize` `serverInfo.version`
+# is the crate version, which does not track an unreleased build. Identify a
+# deployed binary by its sha256 — see docs/deploy-runbook.md).
+#
+# Every key below is shown with its built-in default. Only `[mysql]`,
+# `[milvus]` and `[embedding]` are mandatory — the rest can be deleted.
+# Most keys have a `VEDA_*` environment override, noted inline; env wins
+# over TOML.
+
+# Ignored under systemd socket activation — the socket unit owns the listener.
+listen = "0.0.0.0:3000"                  # VEDA_LISTEN
+
+# CORS allow-list. Empty + dev_mode=false (the default) DENIES all
+# cross-origin browser requests. Production must list explicit origins.
+allowed_origins = []                     # VEDA_ALLOWED_ORIGINS (comma-separated)
+
+# Only set true for local development: an empty allowed_origins then falls
+# back to permissive CORS. The server logs a warning when it does.
+dev_mode = false                         # VEDA_DEV_MODE
+
+# Bearer token gating `/v1/metrics` AND `POST /admin/v1/reconcile/*`.
+# Unset => both return 404. Prometheus supplies it via bearer_token_file.
+# metrics_token = "change-me"            # VEDA_METRICS_TOKEN
+
+# Bearer token gating the cross-tenant read-only dashboard
+# `/admin/v1/workspaces*` (the console). Unset => those routes 404 and the
+# console dashboard stops working. Note the scope: it does NOT cover
+# `/admin/v1/tokens` (authed with `vk_`) or `/admin/v1/reconcile/*` (gated by
+# `metrics_token`), and veda-tunnel's admin surface has its own token in
+# tunnel's own config.
+# admin_token = "change-me"              # VEDA_ADMIN_TOKEN
+
+# Seconds to keep serving after SIGTERM while `/v1/ready` reports 503
+# "draining", so a load balancer pulls this node before the listener stops.
+# Must exceed the LB's (check interval x unhealthy threshold).
+# Single-node deployments MUST leave this at 0 — there is no peer to take
+# over, so a drain window is pure downtime.
+drain_secs = 0                           # VEDA_DRAIN_SECS
+
+[mysql]
+# REQUIRED. Schema bootstraps itself on first start (CREATE TABLE IF NOT
+# EXISTS); there is no separate migration step or binary.
+database_url = "mysql://user:password@localhost:3306/veda"   # VEDA_MYSQL_URL
+max_connections = 50                     # VEDA_MYSQL_MAX_CONNECTIONS
+min_connections = 0                      # VEDA_MYSQL_MIN_CONNECTIONS
+acquire_timeout_secs = 30                # VEDA_MYSQL_ACQUIRE_TIMEOUT_SECS
+idle_timeout_secs = 600                  # VEDA_MYSQL_IDLE_TIMEOUT_SECS
+max_lifetime_secs = 1800                 # VEDA_MYSQL_MAX_LIFETIME_SECS — keep
+                                         # under the server's wait_timeout
+
+[milvus]
+# REQUIRED. Milvus 2.5+ — hybrid search needs the BM25 Function, absent in 2.4.x.
+url = "http://localhost:19530"           # VEDA_MILVUS_URL
+# token = ""                             # VEDA_MILVUS_TOKEN
+# Database name injected into every Milvus request — the whole Milvus side is
+# namespaced by it. Omit for "default".
+# db = "veda"
+
+[embedding]
+# REQUIRED — all four fields. `dimension` must match the model's real output;
+# changing it later invalidates existing collections.
+api_url = "https://api.openai.com/v1/embeddings"   # VEDA_EMBEDDING_API_URL
+api_key = "sk-xxx"                                 # VEDA_EMBEDDING_API_KEY
+model = "text-embedding-3-small"                   # VEDA_EMBEDDING_MODEL
+dimension = 1024                                   # VEDA_EMBEDDING_DIMENSION
+# Texts per upstream call. 100 suits OpenAI; Aliyun Bailian / DashScope cap
+# `input.contents` at 10 — set 10 for those providers or every call 400s.
+batch_size = 100                         # VEDA_EMBEDDING_BATCH_SIZE
+# Global gate on concurrent upstream embedding calls. Interactive callers
+# (search / ask / synchronous vector writes) take permits ahead of background
+# indexing, so a bulk import no longer adds seconds to search latency.
+max_concurrency = 8                      # VEDA_EMBEDDING_MAX_CONCURRENCY
+
+# Optional. Without this whole block, L0/L1 summaries and `/v1/answer` are
+# disabled and return 501 FEATURE_DISABLED; the MCP `ask` tool instead returns
+# HTTP 200 with `result.isError = true` and a readable notice (domain error,
+# not a protocol error).
+# Note: VEDA_LLM_API_URL alone is enough to enable the section at runtime, and
+# api_key/model have env overrides that apply once the section exists. Only
+# max_summary_tokens and the answer_* fields are TOML-only.
+# [llm]
+# api_url = "https://api.openai.com/v1/chat/completions"   # VEDA_LLM_API_URL
+# api_key = "sk-xxx"                                       # VEDA_LLM_API_KEY
+# model = "gpt-4o-mini"                                    # VEDA_LLM_MODEL
+# Generous on purpose: reasoning models may count thinking tokens against
+# this budget, which produced empty abstracts in production at 150/2048.
+# max_summary_tokens = 8192
+# `/v1/answer` agentic loop: tool round-trip cap. 0 degrades to pre-search +
+# one forced answer (the emergency knob if the loop misbehaves).
+# answer_max_tool_rounds = 4
+# Output token ceiling per LLM round.
+# answer_max_output_tokens = 4096
+# Per-workspace in-flight `/v1/answer` permits — a read-only wk_ can still
+# burn LLM budget. Excess requests get 429 THROTTLED immediately, no queue.
+# answer_concurrency = 2
+
+# Outbox consumer (chunk / embed / summarize / extract). TOML-only, no env
+# overrides. IMPORTANT: the outbox assumes a SINGLE writer — host:pid fencing
+# was removed in the 2026-07 single-pod simplification. Never point two
+# server processes with worker.enabled=true at one database.
+[worker]
+enabled = true
+batch_size = 10
+poll_interval_secs = 2
+
+# Background sweep that keeps the two append-only tables bounded.
+[retention]
+enabled = true                           # VEDA_RETENTION_ENABLED
+interval_secs = 86400                    # VEDA_RETENTION_INTERVAL_SECS (min 60)
+# SSE clients whose cursor is older than this get HTTP 410 and must resync.
+events_retention_days = 14               # VEDA_RETENTION_EVENTS_DAYS
+# Terminal (completed/dead) outbox rows. Raise it for longer post-mortems.
+outbox_retention_days = 1                # VEDA_RETENTION_OUTBOX_DAYS
+
+# OTLP metrics push. Metrics go DIRECTLY to the remote collector — no agent
+# is installed on this host. Leave `endpoint` empty to discover collectors
+# through the monitor config service; set it to bypass discovery.
+[otlp]
+enabled = false                          # VEDA_OTLP_ENABLED
+interval_secs = 5                        # VEDA_OTLP_INTERVAL_SECS
+endpoint = ""                            # VEDA_OTLP_ENDPOINT ("host:port")
+env_yaml_path = "/etc/ddmc/env.yaml"     # VEDA_OTLP_ENV_YAML_PATH
+# The three below default to the corresponding env.yaml field when empty.
+# Test and production share an appname, so set env_name to tell them apart.
+appname = ""                             # VEDA_OTLP_APPNAME
+env_name = ""                            # VEDA_OTLP_ENV_NAME
+monitor = ""                             # VEDA_OTLP_MONITOR
