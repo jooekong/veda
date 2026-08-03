@@ -1,7 +1,9 @@
-# Observability-only compose file for alpha. Brings up Prometheus (and
-# optionally Grafana) to scrape a locally-running veda-server. The full
-# end-to-end compose (mysql + milvus + server + worker + reconciler) lives
-# in Week 5; this file is enough for "I want to see metrics while I dev".
+# Observability-only compose file. Brings up Prometheus (and optionally
+# Grafana) to scrape a veda-server running on the host — enough for "I want
+# to see metrics while I dev". The full end-to-end stack (mysql + milvus +
+# veda-server) is deploy/docker-compose.yml; the worker is a thread inside
+# veda-server, and there is no reconciler service — reconcile is on-demand
+# via `POST /admin/v1/reconcile/{ws}`.
 #
 # Setup (one-time):
 #   1. Set the same token in the server config / env (VEDA_METRICS_TOKEN).

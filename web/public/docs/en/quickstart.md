@@ -33,7 +33,9 @@ The binary goes into `/usr/local/bin/` (root) or `~/.local/bin/` (non-root). Reo
 veda init --server https://veda.ddmc-inc.com --import-key vk_xxx
 ```
 
-Config is written to `~/.config/veda/config.toml` (an existing file is backed up to `config.toml.bak.<timestamp>` first).
+`--import-key` accepts either key: `vk_` (the account key — importing it also mints a workspace key for you) or `wk_` (a workspace key — file / search operations only, no workspace management).
+
+Config is written to `~/.config/veda/config.toml` (an existing file is backed up to `config.toml.bak.<timestamp>` first). If this machine is already onboarded, a bare `veda init` exits with an error by design — it refuses to silently overwrite an existing identity. Use `--import-key` to swap identities (a backup is made), or delete the config file first.
 
 ### 4. Upload, read, list
 

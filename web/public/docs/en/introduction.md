@@ -61,7 +61,7 @@ veda cat /docs/readme.md           # raw text
 
 ### Why this matters
 
-- **Token cost scales with depth, not up front**: 100 L0s ≈ 5k tokens; 100 L1s ≈ 200k tokens; 100 full files ≈ MB-scale. Escalate L0 → L1 → full on demand instead of paying all-in.
+- **Token cost scales with depth, not up front**: 100 L0s ≈ 10k tokens; 100 L1s ≈ 200k tokens; 100 full files ≈ MB-scale. Escalate L0 → L1 → full on demand instead of paying all-in.
 - **Directory exploration is nearly free**: `veda abstract /knowledge/internal/auth` tells you what a subtree is "about" in one sentence — no `ls && cat` loop.
 - **Computed once on the server, shared across clients**: CLI, FUSE, and custom agents all read the same precomputed summaries — no two agents inventing inconsistent summaries from different prompts.
 - **The model picks the depth**: instead of a fixed top-k cutoff, agents look at L0 hits and decide per-result whether to expand to L1 or accept the one-sentence answer.
@@ -96,7 +96,7 @@ Notes, docs, paper highlights, code snippets — drop them in and recall by mean
 
 ```bash
 veda cp ~/Notes/2026-blockchain-paper.md /papers/blockchain-2026.md
-veda cp -r ~/Notes/work /notes/work
+veda cp ~/Notes/work /notes/work        # a directory uploads recursively (no -r needed)
 veda search "how does raft handle leader change"
 ```
 
@@ -110,7 +110,7 @@ veda search "the deployment plan we discussed" --detail-level abstract
 veda overview /conversations/2026-05-19.md     # escalate when needed
 ```
 
-**b. Cross-host / cross-instance distributed state** — multiple agent instances share one workspace; SSE pushes file changes within ~120s:
+**b. Cross-host / cross-instance distributed state** — multiple agent instances share one workspace; SSE pushes file changes within seconds (the server polls the event table once per second):
 
 ```bash
 veda cp /tmp/todo.json /state/agent-todo.json   # instance A writes
@@ -134,7 +134,7 @@ veda search "deployment plan" --path /agents/planner --limit 1
 **e. Pre-warmed knowledge bases (RAG)** — embed repos / docs upfront; agents recall with zero latency:
 
 ```bash
-veda cp -r ~/work/internal-docs /knowledge/internal
+veda cp ~/work/internal-docs /knowledge/internal
 veda search "how is our retry policy defined" --detail-level abstract
 ```
 
@@ -143,8 +143,8 @@ With the bundled [skill system](#/docs/skill), Claude Code / Codex / Cursor auto
 ### 3. Search across multiple repos
 
 ```bash
-veda cp -r ~/work/repo-a /code/repo-a
-veda cp -r ~/work/repo-b /code/repo-b
+veda cp ~/work/repo-a /code/repo-a      # a directory uploads recursively (no -r needed)
+veda cp ~/work/repo-b /code/repo-b
 veda search "how is retry handled" --path /code
 veda grep "TODO(joe)" --limit 200      # literal, sync, file:line
 ```

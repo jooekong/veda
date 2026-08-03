@@ -61,7 +61,7 @@ veda cat /docs/readme.md           # 原文
 
 ### 为什么这是收益
 
-- **Token 阶梯式投入**：100 个 L0 ≈ 5k token，100 个 L1 ≈ 200k token，100 个全文 ≈ MB 级。L0 → L1 → full 按需升级，不一上来 all-in。
+- **Token 阶梯式投入**：100 个 L0 ≈ 10k token，100 个 L1 ≈ 200k token，100 个全文 ≈ MB 级。L0 → L1 → full 按需升级，不一上来 all-in。
 - **目录探索几乎零成本**：`veda abstract /knowledge/internal/auth` 一句话就告诉你这个子树大概是什么，省掉 `ls && cat` 一圈。
 - **服务端一次生成，多端共享**：摘要预计算，CLI / FUSE / 自建 agent 读同一份，不会出现"两个 agent 用不同 prompt 给出不一致摘要"。
 - **模型自己决定深度**：RAG 不再固定 top-k 截断，在 L0 命中里 agent 自己挑哪些升 L1、哪些一句话就够。
@@ -96,7 +96,7 @@ cat /mnt/veda/docs/.overview       # 当前目录的 L1
 
 ```bash
 veda cp ~/Notes/2026-blockchain-paper.md /papers/blockchain-2026.md
-veda cp -r ~/Notes/work /notes/work
+veda cp ~/Notes/work /notes/work        # 目录自动递归上传（不需要 -r）
 veda search "raft consensus 怎么处理 leader 切换"
 ```
 
@@ -110,7 +110,7 @@ veda search "上次说到的部署方案" --detail-level abstract
 veda overview /conversations/2026-05-19.md     # 必要时升级
 ```
 
-**b. 跨机器 / 跨实例的分布式状态** —— 多个 agent 实例共用一个 workspace，SSE 流自动推送变更（~120s 内）：
+**b. 跨机器 / 跨实例的分布式状态** —— 多个 agent 实例共用一个 workspace，SSE 流秒级推送变更（服务端每秒轮询一次事件表）：
 
 ```bash
 veda cp /tmp/todo.json /state/agent-todo.json   # 实例 A 写
@@ -134,7 +134,7 @@ veda search "deployment plan" --path /agents/planner --limit 1
 **e. 预热知识库（RAG）** —— 代码库 / 文档预先嵌入，agent 启动零延迟召回：
 
 ```bash
-veda cp -r ~/work/internal-docs /knowledge/internal
+veda cp ~/work/internal-docs /knowledge/internal
 veda search "我们的 retry 策略怎么定的" --detail-level abstract
 ```
 
@@ -143,8 +143,8 @@ veda search "我们的 retry 策略怎么定的" --detail-level abstract
 ### 3. 跨多个代码库的搜索
 
 ```bash
-veda cp -r ~/work/repo-a /code/repo-a
-veda cp -r ~/work/repo-b /code/repo-b
+veda cp ~/work/repo-a /code/repo-a      # 目录自动递归上传（不需要 -r）
+veda cp ~/work/repo-b /code/repo-b
 veda search "如何处理 retry" --path /code
 veda grep "TODO(joe)" --limit 200      # 字面 grep，同步 + 行号
 ```

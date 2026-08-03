@@ -35,6 +35,7 @@ Chunking, embedding, indexing, and summarization happen server-side and asynchro
 - **Vector workspaces** — a raw-vector data plane (`kind=db`) for apps that bring their own records: upsert/search/query/delete with metadata filters and `write_mode=insert` for ~3× bulk-load throughput.
 - **SQL** — an embedded DataFusion engine queries files and collections (`SELECT`, `WHERE`, `JOIN`, aggregates), plus UDFs for filesystem ops and vector search inside SQL.
 - **FUSE mount** — `veda-fuse mount` exposes a workspace as a local directory: native tools just work, a write-back mode debounces editor noise (vim swap files, git lockfiles), and SSE keeps caches consistent with remote changes.
+- **RAG answers** — `POST /v1/answer` (and `/v1/answer/stream`, SSE) runs an agentic retrieve-then-answer loop over a workspace and returns prose with verifiable inline `[n]` citations; refuses rather than fabricating when nothing grounds the question. `veda ask` and the MCP `ask` tool are the same engine.
 - **MCP endpoint** — the server speaks the Model Context Protocol natively (`POST /mcp`, Streamable HTTP, stateless): coding agents attach with one `.mcp.json` entry and get six read-only tools — search / grep / read_file / list_dir / overview / `ask` (one-shot RAG answer with citations).
 - **Multi-tenant** — Account → Workspace hierarchy. Account key (`vk_`) drives the control plane; per-workspace keys (`wk_`, revocable, read-only variant available) drive the data plane. Plain key auth, no JWT.
 
@@ -79,7 +80,7 @@ Chunking, embedding, indexing, and summarization happen server-side and asynchro
 
 ### Key Design Decisions
 
-- **Outbox pattern for consistency**: a file write and its sync tasks (ChunkSync / SummarySync / ExtractSync) commit in one MySQL transaction; a background worker replays them into Milvus. Eventual consistency by default, on-demand drift reconcile (`POST /admin/v1/reconcile/{ws}`) for disasters. Lease fencing makes the outbox safe for multiple servers sharing one MySQL.
+- **Outbox pattern for consistency**: a file write and its sync tasks (ChunkSync / SummarySync / ExtractSync) commit in one MySQL transaction; a background worker replays them into Milvus. Eventual consistency by default, on-demand drift reconcile (`POST /admin/v1/reconcile/{ws}`) for disasters. A `lease_until` heartbeat reclaims a crashed worker's in-flight tasks; the outbox assumes **one server per MySQL** — host:pid fencing was dropped in the 2026-07 single-pod simplification.
 - **Storage tiers by content**: UTF-8 text ≤256KB inline, >256KB chunked; non-UTF-8 stored as blobs with MIME sniffed from magic bytes. Content-addressed dedup (SHA256) skips writes when nothing changed.
 - **Search that admits keyword search matters**: dense vectors for meaning, BM25 for identifiers and exact terms, RRF to fuse them — per-query mode selection instead of pretending one ranker fits all.
 - **Tiered context loading**: L0/L1 summaries are first-class stored objects (searchable in Milvus, not computed on read), designed for agents that need to triage before they read.
@@ -105,9 +106,18 @@ docker compose up -d mysql milvus
 cd ..
 ```
 
-Prefer everything in containers? `docker compose up -d` builds and runs the
-full single-host stack (dependencies + veda-server + Prometheus) — then skip
-steps 2 and 3.
+Prefer everything in containers? Two files must exist first — compose
+bind-mounts both and refuses to start without them:
+
+```bash
+cd deploy
+cp config.docker.toml.example config.docker.toml   # then edit
+mkdir -p secrets && printf '%s' "<your-metrics-token>" > secrets/veda_metrics_token
+docker compose up -d          # dependencies + veda-server + Prometheus + Grafana
+```
+
+Then skip steps 2 and 3. `VEDA_METRICS_TOKEN` in `.env` is required as well —
+compose interpolates it with `${...:?}` and aborts if it is unset.
 
 ### 2. Configure
 
@@ -115,8 +125,12 @@ The server reads `config/server.toml` by default, or takes a config path as
 its only positional argument (`veda-server /etc/veda/config.toml`).
 
 ```bash
-cp config/test.toml.example config/server.toml   # then edit
+cp config/server.toml.example config/server.toml   # then edit
 ```
+
+`config/server.toml.example` documents every key, including the production-only
+ones (`metrics_token`, `admin_token`, `allowed_origins`, `[otlp]`, `[retention]`,
+pool sizing). Only the blocks below are mandatory — the rest have defaults.
 
 ```toml
 listen = "0.0.0.0:3000"   # optional — this is the default
@@ -156,8 +170,12 @@ Build from source (`cargo build --release -p veda-cli`), or pull a prebuilt
 binary from a running server — every server serves its own installer:
 
 ```bash
-curl -fL http://<your-server>/install.sh | sh        # add --with-fuse for the FUSE client
+curl -fL http://<your-server>/install.sh | sh                      # CLI only
+curl -fL http://<your-server>/install.sh | sh -s -- --with-fuse    # + FUSE client
 ```
+
+Arguments must go through `sh -s --` when piping; `| sh --with-fuse` is parsed
+by `sh` itself and fails.
 
 ### 5. Create account and workspace
 
@@ -182,13 +200,14 @@ another machine? `veda init --import-key vk_…` (auto-backs up old config).
 # as a blob, PDFs get their text layer extracted and indexed.
 veda cp ./README.md /docs/readme.md
 veda cp ./design.pdf /docs/design.pdf
-veda cp -r ./src /code                   # recursive directory upload
+veda cp ./src /code                      # a directory uploads recursively (no -r flag)
 
 # Browse
 veda ls /docs
 veda cat /docs/readme.md
 veda cat /docs/readme.md --range 10:20   # line slice; also --head N / --tail N
-veda cat /docs/design.pdf > local.pdf    # binary round-trips byte-for-byte
+veda cat /docs/design.pdf                # PDF/Word print their extracted text
+veda cat --raw /docs/design.pdf > local.pdf   # --raw round-trips the original bytes
 
 # Organize
 veda mv /docs/old.md /archive/old.md
@@ -248,8 +267,11 @@ veda-fuse umount ~/veda-mount
 ```
 
 Default is daemon mode with a read cache and SSE-driven invalidation.
-`--write-mode=writeback` buffers writes locally (5s debounce) so editor
-temp files never reach the server.
+`--write-mode=writeback` buffers writes locally with a 5s debounce, so
+short-lived editor temp files created *and* removed inside that window never
+reach the server — anything still present when the window closes is uploaded.
+The buffer is memory-only, so a crash inside the window loses uncommitted
+writes; use the default `sync` when you need write-time confirmation.
 
 ### Vector Workspaces (Pinecone-style)
 
@@ -296,11 +318,12 @@ veda/
 │   ├── veda-types/      # Domain types, error definitions (zero dep)
 │   ├── veda-core/       # Traits + business logic (no storage impl)
 │   ├── veda-store/      # MySQL + Milvus implementations
-│   ├── veda-pipeline/   # Embedding, chunking, PDF text extraction, LLM summaries
+│   ├── veda-pipeline/   # Embedding, chunking, PDF/Word text extraction, LLM summaries
 │   ├── veda-sql/        # DataFusion SQL engine
-│   ├── veda-server/     # Axum HTTP server (thin shell) + outbox worker
+│   ├── veda-server/     # Axum HTTP layer + in-process background tasks
 │   ├── veda-cli/        # CLI client (binary name: veda)
-│   └── veda-fuse/       # FUSE mount (workspace member; install via --with-fuse)
+│   ├── veda-fuse/       # FUSE mount (workspace member; install via --with-fuse)
+│   └── veda-tunnel/     # WeCom bot: long-lived IM connection over the wk_ data plane
 ├── sdk/java/            # Java SDK for the db-workspace data plane
 ├── web/                 # Landing page + user docs site + admin console
 ├── deploy/              # Dockerfile, docker-compose, systemd units

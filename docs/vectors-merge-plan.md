@@ -15,7 +15,8 @@
 >   JOIN accounts 验 active，不读 workspace.status），请求体不再有 `workspace_id`；
 >   JWT 全删。现行见 `ARCHITECTURE.md`「Workspace kinds」节。
 > - **§0/§1.1「app 不是安全边界、不建 app 实体」已被平台账号模型取代**（`a904e2d`）：
->   `app_id` 现在是 account 级唯一键 + 平台控制面租户边界（`/v1/apps/{app_id}/workspaces`），
+>   `app_id` 现在是 account 级唯一键 + 平台控制面租户边界（当时的路径 `/v1/apps/{app_id}/workspaces`
+>   **已于 2026-06-17 改名为 `/v1/workspace/{workspace}/projects`，旧路径已无路由**），
 >   "不建 veda_apps 表"仍成立。
 > - **§3.2 upsert 新增 `write_mode=insert|upsert`**（`fdc42a9`，insert 跳 dedup ~3x 吞吐）。
 > - **§3.4「score_threshold (v1) 不暴露」已过时**：`min_score` 已实现（`1f6ac0b`，

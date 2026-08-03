@@ -7,7 +7,7 @@ Your account key or workspace key was revoked or expired. Either:
 - Re-onboard from the [home page](/) and paste the new `vk_` with `veda init --import-key vk_…`.
 - Or, from the [Console](#/console), mint a new workspace key for an existing workspace and re-import.
 
-The config file is at `~/.config/veda/config.toml`. Editing the `api_key` directly works too.
+The config file is at `~/.config/veda/config.toml`. The account key is the top-level `api_key` (`vk_`); file / search operations use `key` under `[workspaces.<alias>]` (`wk_`) — that's the one to fix when a data command says unauthorized.
 
 ## `veda` complains about server URL
 
@@ -20,13 +20,14 @@ veda --server https://veda.ddmc-inc.com ls
 ## Search returns nothing
 
 - Embedding is **asynchronous** — give it a few seconds, then retry after ~5s if still missing.
+- Check the indexing backlog: `veda status --index` (add `--wait` to poll every 5s until it drains) — it reports pending / processing / dead counts and exits non-zero if any task is permanently dead. The CLI also points you at this after a bulk upload.
 - Check the server is reachable: `veda status`.
 - Tiny files (a few words) may not match BM25. Try `--mode semantic`.
 - For a guaranteed literal hit: `veda grep "string"` (sync, no embedding lag).
 
 ## FUSE mount shows stale data
 
-The SSE event stream may have disconnected. The mount reconnects automatically; if you can't wait, `fusermount -u ~/veda && veda-fuse mount …` resets cleanly.
+The SSE event stream may have disconnected. The mount reconnects automatically; if you can't wait, `veda-fuse umount ~/veda && veda-fuse mount ~/veda` resets cleanly.
 
 ## Anonymous account got "lost"
 

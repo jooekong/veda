@@ -174,6 +174,14 @@ ssh -o ServerAliveInterval=20 <node> '
   ```
   任一 > 0 → **只能 roll-forward**(发修复版),不能退 pre-blob。`veda_file_blobs` 表留着无害,致命的是**数据格式**旧码不认。
 
+**退到 d94bd20 之前的 binary(单 pod 简化)**:d94bd20 的 migrate 会 `ALTER TABLE veda_outbox DROP COLUMN lease_owner`。schema 本身可自愈——旧码启动时自己会把这个可空列加回来——但**退版瞬间处于 `processing` 的行 `lease_owner` 是 NULL**,而旧码的 `complete()`/`fail()` 都 fence 在 `WHERE lease_owner = ?` 上,这些行会 no-op 卡住,要等 10 分钟 lease 过期才被重新 claim。
+- 退版前 gate check:
+  ```sql
+  SELECT COUNT(*) FROM veda_outbox WHERE status='processing';   -- 为 0 再退
+  ```
+  非 0 就先 stop server 等 worker 把在途任务跑完(或直接等满 10 分钟 lease),再换 binary。
+- 反向同理:**升到 d94bd20 是 stop-then-start,不兼容滚动发布**——DROP COLUMN 期间不能有旧码进程还在按 `lease_owner` fence。
+
 ---
 
 ## 生产 `.85` 专项注意

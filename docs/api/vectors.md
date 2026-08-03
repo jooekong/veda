@@ -159,6 +159,7 @@ cosine floor sits well above that (e.g. 0.4–0.6) — there is no universal "0.
   "mode": "semantic",          // hybrid (default) | semantic | fulltext
   "top_k": 10,                 // default 10, max 100
   "min_score": 0.4,            // optional; semantic/fulltext only (400 on hybrid)
+  "output_fields": ["text", "meta"],  // optional projection; omit = all fields
   "filter": {                  // optional
     "must": [
       {"field": "meta.price", "op": "lt", "value": 1500},
@@ -171,22 +172,47 @@ cosine floor sits well above that (e.g. 0.4–0.6) — there is no universal "0.
 Each hit returns `id / dataset / category / tags / text / meta / created_at
 / updated_at / score / score_type`.
 
+#### `output_fields` (projection)
+
+Optional whitelist selecting which **projectable** fields come back:
+
+```
+dataset | category | tags | text | meta | created_at | updated_at
+```
+
+- **Omitted → every field is returned** (the full hit shape above).
+- Present → only the listed fields are returned; unselected ones are absent
+  from the JSON entirely (not `null`), so SDK hit types must model them as
+  optional. An empty array is legal and means "id/score/score_type only".
+- `id`, `score` and `score_type` are **always** returned and must **not** be
+  listed. Listing them — or any internal column (`pk`, `vector`,
+  `sparse_vector`, `status`, `expire_at`) — is a `400 INVALID_INPUT`.
+  (`id` is always fetched from Milvus regardless of the projection.)
+- Validation happens **before** the embedding call, so a bad projection fails
+  fast without spending an embed.
+
 ### POST `/v1/vectors/query`
 
 Direct lookup by `id`. Order not preserved; missing ids silently absent
 (no error). Max 500 ids per call.
 
 ```json
-{"dataset": "products", "ids": ["sku-1", "sku-2"]}
+{"dataset": "products", "ids": ["sku-1", "sku-2"], "output_fields": ["text"]}
 ```
+
+`output_fields` is optional here too, with the same whitelist and semantics
+as `search` (omit = all fields; `id` always returned). This endpoint has no
+`score` / `score_type`, so there is nothing score-shaped to list.
 
 ### POST `/v1/vectors/delete`
 
 Hard-deletes by `id`. Returns `delete_count` — Milvus's number of delete
-markers created (mirrored from REST `data.deleteCount`). For our `id in
-[...]` filter this always equals `len(ids)` regardless of which ids
-physically existed; it is **not** "rows that existed and were removed".
-Use `query` first if you need to distinguish. Max 500 per call.
+markers created (mirrored from REST `data.deleteCount`). The server deletes
+with a `pk in [...]` filter (`pk` is the internal composite `{dataset}:{id}`,
+built by `build_pk_in_filter`), so `delete_count` always equals `len(ids)`
+regardless of which ids physically existed; it is **not** "rows that existed
+and were removed". Use `query` first if you need to distinguish. Max 500 per
+call.
 
 ```json
 {"dataset": "products", "ids": ["sku-1", "sku-2"]}
@@ -205,9 +231,21 @@ Strict subset of Qdrant-style:
 - Only `meta.<top_level_key>` paths. Platform fields (`dataset`, `tags`,
   …) are not filterable through this DSL — `dataset` is part of the base
   scope and others are unexposed.
+- The meta key must be non-empty and match `[a-zA-Z0-9_-]+`. Nested paths
+  (`meta.a.b`) are rejected — one top-level key only.
 - Operators: `eq`, `in`, `gt`, `gte`, `lt`, `lte`.
+- `eq` takes a JSON **scalar** (string / number / bool). Arrays, objects and
+  `null` are rejected.
+- Range ops (`gt` / `gte` / `lt` / `lte`) take **only a number or a string**.
+  bool / `null` / array / object are rejected (Milvus comparison semantics on
+  bool/null are undefined).
+- `in` takes an array of scalars: **non-empty and ≤100 items** (an empty array
+  matches nothing and is almost always a caller bug; the cap bounds the
+  generated expression).
 - `in` is parser-expanded to an OR-chain: `(meta["x"] == "a" || meta["x"]
   == "b")`. Don't rely on Milvus 2.6 TermExpr support over JSON paths.
+
+Every violation above is a `400 INVALID_INPUT`.
 
 ## Control plane
 
@@ -227,11 +265,52 @@ a data-plane `wk_` with `POST /v1/workspaces/{id}/keys` and hand it to the app.
 | GET | `/v1/workspaces/{ws}/datasets` | List active datasets (paginated) |
 | DELETE | `/v1/workspaces/{ws}/datasets/{name}` | Soft-delete (`status='archived'`). Cannot delete `default`. |
 
-> Platform integration drives the control plane by `app_id`
-> (`/v1/apps/{app_id}/...`, auth externalized) instead of `vk_` — see the
-> platform management API docs. The `vk_` plane above is the current
-> direct-access form; `/admin/v1/tokens` (scoped `vk_` minting) still exists
-> for account-level service tokens.
+### Platform surface (AI Platform gateway)
+
+Platform integration uses a **separate** set of routes with auth externalized
+to the gateway instead of `vk_`. There is **no `/v1/apps/*` route** — don't
+generate SDKs against that shape.
+
+Terminology: `{workspace}` in the paths is the platform **tenant code**
+(stored internally as `app_id`); a veda workspace underneath it is called a
+**project** (`{id}` is the workspace id).
+
+Control plane (`crates/veda-server/src/routes/apps.rs`):
+
+| Method | Path | Purpose |
+|---|---|---|
+| GET | `/v1/my/projects` | The gateway user's projects, flattened across workspaces |
+| POST / GET | `/v1/workspace/{workspace}/projects` | Create / list projects |
+| GET / PATCH / DELETE | `/v1/workspace/{workspace}/project/{id}` | Get / update / delete a project |
+| POST / GET | `/v1/workspace/{workspace}/project/{id}/keys` | Issue / list `wk_` data-plane keys |
+| DELETE | `/v1/workspace/{workspace}/project/{id}/keys/{key_id}` | Revoke a key |
+| GET | `/v1/workspace/{workspace}/project/{id}/keys/{key_id}/token` | Fetch a key's plaintext |
+| POST / GET | `/v1/workspace/{workspace}/project/{id}/datasets` | Create / list datasets |
+
+Data plane (`crates/veda-server/src/routes/project_data.rs`), same core logic
+as the `wk_` endpoints above:
+
+`POST /v1/workspace/{workspace}/project/{id}/vectors/{upsert|search|query|delete}`
+
+**Different envelope.** The platform surface returns the company envelope, not
+veda's `{success, data}`:
+
+| Case | Body |
+|---|---|
+| list | `{ "data": [...], "page", "size", "order_by", "order", "total", "total_page", "has_next_page", "has_prev_page" }` |
+| single object (create / update / getToken) | the object **bare** — no `data` wrapper |
+| no content (delete / revoke) | `{}` |
+| error | `{ "error": { "code", "reason", "message", "external" } }` (REST status unchanged) |
+
+**Different pagination.** Offset-based, not the cursor scheme below: `page`
+(from 1), `size` (default 20, max 200), `order_by` (`created_at` \| `id`,
+default `created_at`), `order` (`asc` \| `desc`, default `desc`), `keyword`
+(**accepted only on `GET /v1/my/projects`** — the other list endpoints parse
+and discard it; case-insensitive substring match on a project's `name` **or**
+`description`, with `%` / `_` acting as LIKE wildcards; blank = no filter).
+
+The `vk_` plane above is the current direct-access form; `/admin/v1/tokens`
+(scoped `vk_` minting) still exists for account-level service tokens.
 
 ### Pagination (GET list endpoints)
 
@@ -292,3 +371,5 @@ Charset and size limits:
 - `dataset` / `id`: `[a-zA-Z0-9_-]+`, must not contain `:` (PK separator)
 - `dataset` ≤ 64 bytes, `id` ≤ 64 bytes (composite physical pk `{dataset}:{id}` ≤ 128 bytes)
 - `text` ≤ 65535 bytes UTF-8 (Milvus VARCHAR hard cap), `meta` (JSON-serialized) ≤ 16 KB, `tags` ≤ 8 entries × 128 bytes each
+- `category`: non-empty, ≤ 64 bytes
+- `filter` `in` array: non-empty, ≤ 100 items

@@ -6,7 +6,8 @@
 
 ## 0. 范围（推断）
 
-只在 **平台面**（OnePaaS 网关 fronting 的 router：`/v1/apps/*` 及经网关暴露的数据面）套 OnePaaS 信封。
+只在 **平台面**（OnePaaS 网关 fronting 的 router：`/v1/workspace/{workspace}/*` + `/v1/my/projects` 及经网关暴露的数据面）套 OnePaaS 信封。
+（本文写作时该面还叫 `/v1/apps/{app_id}/*`，2026-06-17 已改名成 workspace/project 模型，旧路径无路由。）
 veda-core、直连 `vk_`/`wk_` Pinecone API、已发布 Java SDK **不动**——平滑过渡，扩大范围只是给更多 router 挂同一适配层。
 
 ## 1. 标准（规范原文要点）

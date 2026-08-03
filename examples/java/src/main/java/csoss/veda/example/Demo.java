@@ -21,7 +21,9 @@ import csoss.veda.sdk.model.UpsertResult;
  * Run against a Veda server with a db-kind workspace already created and a wk_
  * workspace key for it (the wk_ binds the workspace). Env vars:
  *
- *   VEDA_URL       e.g. http://localhost:9009
+ *   VEDA_URL       e.g. http://localhost:3000 for a server you run yourself;
+ *                  the deployed data plane is https://veda.ddmc-inc.com (prod)
+ *                  or https://veda.dbpaas.dingdongxiaoqu.com (test)
  *   VEDA_API_KEY   wk_... workspace key (data-plane; not an account vk_)
  *
  * First install the SDK locally:  (cd sdk/java && mvn install)

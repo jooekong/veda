@@ -173,10 +173,11 @@ veda ask "…" --path /docs            # restrict retrieval to a subtree
 veda ask "…" --json                  # raw JSON (answer / citations / hit_count)
 ```
 
-May take 10-90s. Distinct exit codes for "LLM not configured" (501) and
-"concurrency full" (429). Prefer `ask` for open / multi-document
-questions; prefer `search` when you want raw hits to reason over
-yourself.
+May take 10-90s. Distinct *messages* for "LLM not configured" (501) and
+"concurrency full" (429), but both exit 1 — match on stderr, not the exit
+code. `--json` prints the bare data object, so citations are `jq
+.citations`. Prefer `ask` for open / multi-document questions; prefer
+`search` when you want raw hits to reason over yourself.
 
 ## Summary layers (abstract / overview)
 

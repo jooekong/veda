@@ -14,7 +14,7 @@
 |---|---|---|
 | `kind` | `fs`（默认） | `db` |
 | 数据模型 | 文件 / 目录 | 向量记录（text + meta） |
-| 数据面 | `/v1/fs/*`、`/v1/search`、`/v1/grep`、`/v1/sql`、`/v1/abstract`、`/v1/overview`、`/v1/collections/*`、`/v1/events`、FUSE | `/v1/vectors/{upsert,search,query,delete}` |
+| 数据面 | `/v1/fs/*`、`/v1/search`、`/v1/grep`、`/v1/sql`、`/v1/abstract`、`/v1/overview`、`/v1/answer`、`/v1/collections/*`、`/v1/events`、`/mcp`、FUSE | `/v1/vectors/{upsert,search,query,delete}` |
 | 接入 | CLI / FUSE / HTTP | REST API / SDK |
 | 典型场景 | 个人知识库、Agent 记忆、代码搜索 | 业务应用的托管向量检索 |
 
@@ -47,7 +47,7 @@
 
 ### 平台接入（AI Platform）
 
-公司 AI Platform 走另一套按 `app_id` 的控制面 `/v1/apps/{app_id}/*`：鉴权外移到平台网关，veda 信任路径里的 `app_id`、首次访问自动开户。业务方在这套模型里同样只拿 `wk_`。详见 §4.6。
+公司 AI Platform 走另一套控制面 `/v1/workspace/{workspace}/*`：`{workspace}` 是平台租户 code（veda 内部存为 `app_id`），其下的 veda workspace 在这套模型里称为 **project**。鉴权外移到平台网关——veda 不读 `Authorization`，而是拿网关透传的 `user` 头 + `Cookie` 回调平台 authz 校验（fail-closed）。业务方在这套模型里同样只拿 `wk_`。详见 §4.6。
 
 ---
 
@@ -74,9 +74,9 @@
 
 ### HTTP 状态码
 
-成功用 `200`（一般）/ `201`（建 dataset、铸 token、apps 面建 workspace）/ `204`（删 dataset、撤 key、禁用 token）。失败时状态码与 `error_code` 一一对应，见 §7。
+成功用 `200`（一般）/ `201`（建 dataset、铸 token）/ `204`（删 dataset、撤 key、禁用 token）。失败时状态码与 `error_code` 一一对应，见 §7。
 
-> ⚠️ 状态码有个不对称：`vk_` 直连建 workspace（`POST /v1/workspaces`）返 **200**，但 apps 平台面建 workspace（`POST /v1/apps/{app_id}/workspaces`）返 **201**。同时打两套面的 SDK 要特判。
+> 建 workspace 两条面都返 **200**：`vk_` 直连的 `POST /v1/workspaces` 和平台面的 `POST /v1/workspace/{workspace}/projects` 一致，无需特判。
 
 ### 时间格式（两种并存）
 
@@ -106,7 +106,7 @@
 
 ## 4. 控制面 API（🔑 `vk_`）
 
-汇总（🔑 `vk_` 账号鉴权 · 🔓 无需鉴权 · 🏢 apps 平台面无 veda 凭据 · 🛠 ops `metrics_token`）：
+汇总（🔑 `vk_` 账号鉴权 · 🔓 无需鉴权 · 🏢 平台面无 veda 凭据、由网关身份 + 平台 authz 决定 · 🛠 ops `metrics_token`）：
 
 | 方法 | 路径 | 鉴权 | 成功码 | 用途 |
 |---|---|:--:|:--:|---|
@@ -125,9 +125,14 @@
 | DELETE | `/v1/workspaces/{ws}/datasets/{name}` | 🔑 | 204 | 软删 dataset（不能删 `default`） |
 | POST | `/admin/v1/tokens` | 🔑 | 201 | 铸账号级 scoped `vk_` 服务令牌 |
 | POST | `/admin/v1/tokens/{id}/disable` | 🔑 | 204 | 撤销令牌 |
-| POST | `/v1/apps/{app_id}/workspaces` | 🏢 | 201 | 平台面建 workspace |
-| GET | `/v1/apps/{app_id}/workspaces` | 🏢 | 200 | 平台面列 workspace |
-| DELETE | `/v1/apps/{app_id}/workspaces/{id}` | 🏢 | 200 | 平台面删 workspace |
+| POST | `/v1/workspace/{workspace}/projects` | 🏢 | 200 | 平台面建 project |
+| GET | `/v1/workspace/{workspace}/projects` | 🏢 | 200 | 平台面列 project（offset 分页） |
+| GET/PATCH/DELETE | `/v1/workspace/{workspace}/project/{id}` | 🏢 | 200 | 平台面查 / 改 / 软删 project |
+| POST/GET | `/v1/workspace/{workspace}/project/{id}/keys` | 🏢 | 200 | 签发 / 列 `wk_` |
+| DELETE | `/v1/workspace/{workspace}/project/{id}/keys/{key_id}` | 🏢 | 200 | 撤销 `wk_` |
+| GET | `/v1/workspace/{workspace}/project/{id}/keys/{key_id}/token` | 🏢 | 200 | 取回 `wk_` 明文 |
+| POST/GET | `/v1/workspace/{workspace}/project/{id}/datasets` | 🏢 | 200 | 建 / 列 dataset |
+| GET | `/v1/my/projects` | 🏢 | 200 | 当前网关用户可见的全部 project（跨 workspace 拍平） |
 
 ### 4.1 账号
 
@@ -148,7 +153,7 @@
 
 **POST `/v1/workspaces`** 🔑 — `{ name, kind?: "fs"|"db", description? }`（`kind` 省略默认 `fs`，**做向量库必须显式 `"db"`**）。`kind=db` 时服务端在单事务里建 workspace + `default` dataset，再 provision Milvus collection（失败回滚，不留僵尸）。返回完整 `Workspace` 对象（200）。同名 → `409`；Milvus provision 失败 → `500`（已回滚）。
 
-**GET `/v1/workspaces`** 🔑 — 列账号下所有 workspace（fs+db），分页。
+**GET `/v1/workspaces`** 🔑 — 列账号下所有 **active** workspace（fs+db），分页。已归档的不返回（软删后即从列表消失，但名称仍不可复用）。
 
 **DELETE `/v1/workspaces/{id}`** 🔑 — 软删（`status=archived`），同事务级联撤销名下 `wk_`。返回 **200** `{ "success": true, "data": null }`。非本账号 → `403`，不存在 → `404`。
 > ⚠️ 当前是软删，**不回收 Milvus 向量**（存储泄漏），名称暂不可复用。
@@ -186,16 +191,30 @@
 
 > `app_id` 在令牌上只是**治理标签**，不是安全边界；真正的隔离是 `allowed_workspaces` + `workspace.kind`。
 
-### 4.6 apps 平台面（🏢 `/v1/apps/{app_id}/*`）
+### 4.6 平台面（🏢 `/v1/workspace/{workspace}/*`）
 
-供公司 AI Platform 接入。这组端点**不读 `Authorization`**——平台网关已证明调用方可代表 `app_id`，veda 信任路径里的 `app_id` 并据此解析 / 自动开户。与上面的 `vk_` 直连面并存。
+供公司 AI Platform / AI Workbench 接入。术语对齐：路径里的 **`{workspace}` 是平台租户 code**（veda 内部存为 `app_id`），它下面的 veda workspace 称为 **project**——别和 `vk_` 直连面的 "workspace" 混淆。与上面的 `vk_` 直连面并存。
 
-- **POST `/v1/apps/{app_id}/workspaces`** — 首次访问该 `app_id` 时**自动开户**（passwordless 账号，不铸 `vk_`），建 workspace（请求体的 `app_id` 被路径覆盖）。返回 **201** `Workspace`。
-- **GET `/v1/apps/{app_id}/workspaces`** — 列该 app 的 workspace。未知 app_id → **空页**（不自动开户，GET 无副作用）。返回 200 分页。
-- **DELETE `/v1/apps/{app_id}/workspaces/{id}`** — 软删。跨租户的不存在统一返 `404`。返回 **200**。
+**鉴权**：这组端点**不读 `Authorization`**。身份由网关透传的 `user` 头 + `Cookie` 承载，veda 回调平台 authz（`GET {VEDA_PLATFORM_BASE}/open/v1/auth/service/veda-reach/action/workspace-create`）校验。**过闸范围**：全部写操作 + `GET .../keys/{key_id}/token`（回读明文等于发数据面权限）+ **整个平台数据面（含读）**；控制面的纯列表 / 详情 GET（列 project、查 project、列 key、列 dataset、`/v1/my/projects`）不过闸。**fail-closed**：缺 cookie / 缺 user / 非 2xx / 传输失败一律 `403`。只有 `VEDA_PLATFORM_BASE` 未配置时才整体跳过（仅限内网自测）。
+
+- **POST `/v1/workspace/{workspace}/projects`** — 首次访问该租户时**自动开户**（passwordless 账号，不铸 `vk_`），建 project。返回 **200**。
+- **GET `/v1/workspace/{workspace}/projects`** — 列 project。未知租户 → **空页**（不自动开户，GET 无副作用）。
+- **GET / PATCH / DELETE `/v1/workspace/{workspace}/project/{id}`** — 查 / 改 / 软删。跨租户的不存在统一返 `404`。
+- **`.../project/{id}/keys`**（POST 签发、GET 列）、**`.../keys/{key_id}`**（DELETE 撤销）、**`.../keys/{key_id}/token`**（GET 取回明文）、**`.../datasets`**（POST 建、GET 列）。
+- **GET `/v1/my/projects`** — 当前网关用户可见的全部 project，跨租户拍平。
 - 账号被 suspend → 这组端点统一 `401`（`account suspended`）。
 
-app_id 账号是 passwordless 的：不能 login、不能 claim，`app_id` 与 `(email,password)` 在一个账号上互斥。
+> ⚠️ **响应信封不同**。本面走公司信封，不是 `{success, data}`：
+> - 列表 → `{ data: [...], page, size, order_by, order, total, total_page, has_next_page, has_prev_page }`
+> - 单对象（建 / 改 / 取 token）→ **裸对象直接展开，没有 `data` 包裹**
+> - 无内容（删 / 撤销）→ `{}`
+> - 错误 → `{ "error": { "code", "reason", "message", "external" } }`（`code` 就是 veda 的 `error_code`）
+>
+> **分页也不同**：本面是 offset 分页 `page`（从 1）/ `size`（默认 20，最大 200）/ `order_by`（`created_at`|`id`）/ `order`（`asc`|`desc`）/ `keyword`（**仅 `/v1/my/projects` 生效**，按 project 的 name 或 description 大小写不敏感子串过滤；其余列表端点会解析但忽略它），不是 `vk_` 面的游标 `after` / `next_cursor`。
+
+平台租户账号是 passwordless 的：不能 login、不能 claim，`app_id` 与 `(email,password)` 在一个账号上互斥。
+
+平台面还有对应的**数据面**（`.../project/{id}/` 下的 `vectors/*`、`search`、`files`、`file`、`file/content`、`sql`、`grep`）和 **tunnel 管理面**（`.../project/{id}/tunnel/{bots,qa/stats,qa/logs}`），同样走网关鉴权 + 公司信封。
 
 ---
 
@@ -240,8 +259,9 @@ app_id 账号是 passwordless 的：不能 login、不能 claim，`app_id` 与 `
 |---|---|
 | `PUT /v1/fs/{path}` | 写原始字节。有效 UTF-8 按文本存储、分块和索引；非 UTF-8 原样存为 blob（PDF 额外抽取文本用于搜索，图片等二进制不索引）。支持 `If-Match: "<rev>"`（CAS，不匹配 `412`）、`If-None-Match: "<sha256>"`（内容相同则不重写，返回 `content_unchanged:true`）。返回 `{ file_id, revision, content_unchanged }` + `ETag`。路径是目录 → `409`；单文件上限 50MB。 |
 | `POST /v1/fs/{path}` | 追加内容（无 CAS）。 |
-| `GET /v1/fs/{path}` | 读原始字节并返回存储的 `Content-Type`。`?stat` 取元数据、`?list` 列目录、`?lines=start:end` 取行片段；`Range: bytes=a-b` 返回 `206`。无参数返回全文。 |
-| `HEAD /v1/fs/{path}` | 取 `FileInfo`（path/file_id/is_dir/size/mime/revision/checksum/时间）。 |
+| `GET /v1/fs/{path}` | 读原始字节并返回存储的 `Content-Type`。`?stat` 取元数据、`?list` 列目录、`?lines=start:end` 取行片段、`?view=text` 取文本视图（PDF / Word 返回服务端抽取的文本，`text/plain; charset=utf-8`；`view` 传其他值 → `400`）；`Range: bytes=a-b` 返回 `206`。无参数返回全文原始字节。 |
+| `GET /v1/fs?list` / `GET /v1/fs?stat` | 根目录列表 / 根元数据。`{*path}` 匹配不到空段，所以列 workspace 根**只能**走这个裸路径。不带参数的 `GET /v1/fs` → `400 INVALID_INPUT`（`use ?stat or ?list`）。 |
+| `HEAD /v1/fs/{path}` | 存在性探针：存在 `200`、不存在 `404`。**HEAD 不带响应体**——要元数据请用 `GET /v1/fs/{path}?stat`。 |
 | `DELETE /v1/fs/{path}` | 删（目录递归）。 |
 | `POST /v1/fs-copy` | `{ from, to }` 服务端复制（内容寻址去重）。 |
 | `POST /v1/fs-rename` | `{ from, to }` 重命名。 |
@@ -249,6 +269,8 @@ app_id 账号是 passwordless 的：不能 login、不能 claim，`app_id` 与 `
 | `POST /v1/grep` | `{ pattern, path_prefix?, ignore_case?, max_results?=100 }` 字面子串扫描（非正则，同步），返回 `{path, line_no, line}[]`。 |
 
 > 删根 `DELETE /v1/fs` 恒返 `400`（禁止）。
+>
+> `FileInfo`（`?stat` 的响应体）字段名是 `path` / `file_id` / `is_dir` / **`size_bytes`** / **`mime_type`** / `revision` / `checksum` / `created_at` / `updated_at`——注意是 `size_bytes` 和 `mime_type`，不是 `size` / `mime`。`?list` 返回的 `DirEntry` 用同样的两个名字。
 
 **索引进度**：`GET /v1/index-status` 返回本 workspace 待索引任务计数 `{pending, processing, dead}`（只统计决定可搜索性的 chunk/extract 任务）。批量上传后轮询它判断「什么时候全部可搜」；`dead > 0` 表示有文件永久索引失败，需联系管理员。CLI：`veda status --index [--wait]`（`--wait` 轮询到清零，dead>0 退出码非零，可做 CI gate）。
 
@@ -275,8 +297,8 @@ app_id 账号是 passwordless 的：不能 login、不能 claim，`app_id` 与 `
 - **请求**：`{ query（≤1024 字符）, path_prefix?, limit?（预检索条数，默认 12 上限 24）, prompt?（自定义 bot 人设，≤4000）}`。
 - **响应**：`{ answer, citations: [{index, path, spans}], hit_count, estimated_context_tokens }`。`spans` 是 chunk 区间；**空数组 = 引用整篇文件**。同一文件的多个段落会产生多条同 path 的 citation（chunk 粒度，属预期）——展示层建议按 path 聚合。找不到依据时返回固定拒答话术且 citations 为空（不编造）。
 - **流式**：`POST /v1/answer/stream`（SSE）五事件：`delta`（增量文本）/ `reset`（丢弃已积累 delta）/ `tool`（工具进度提示）/ `final`（权威完整结果，消费者必须用它替换累积文本）/ `error`。
-- **错误**：`429 THROTTLED`（每 workspace 并发上限，默认 2）；`501 FEATURE_DISABLED`（未配 LLM）；`504 ANSWER_TIMEOUT`（超 90s 截止）。耗时通常 10–90s。
-- **CLI**：`veda ask "问题" [--path 前缀] [--json]`；MCP 的 `ask` 工具同能力。
+- **错误**：`429 THROTTLED`（每 workspace 并发上限，默认 2）；`501 FEATURE_DISABLED`（未配 LLM）；`502 LLM_UNAVAILABLE`（LLM 上游不可用）；`504 ANSWER_TIMEOUT`（超 90s 截止）。流式下这些以 `error` 事件的 `error_code` 出现。耗时通常 10–90s。
+- **CLI**：`veda ask "问题" [--path 前缀] [--json]`；MCP 的 `ask` 工具走同一条检索链路，但载荷更窄（见下）。
 
 ### SQL（`POST /v1/sql`）
 
@@ -284,15 +306,15 @@ app_id 账号是 passwordless 的：不能 login、不能 claim，`app_id` 与 `
 
 ### 结构化 Collection（`/v1/collections/*`）
 
-定义 schema + 自动嵌入字段，按字段过滤搜索。`POST /v1/collections`（建）、`GET /v1/collections`（列）、`GET/DELETE /v1/collections/{name}`、`POST /v1/collections/{name}/rows`（插入，body 是 JSON 数组）、`POST /v1/collections/{name}/search`（`{ query, limit? }`）。过滤 / 聚合走 `veda sql`。
+定义 schema + 自动嵌入字段，按字段过滤搜索。`POST /v1/collections`（建）、`GET /v1/collections`（列）、`GET/DELETE /v1/collections/{name}`、`POST /v1/collections/{name}/rows`（插入，body 是 `{"rows": [ {...}, ... ]}`——裸数组会被拒）、`POST /v1/collections/{name}/search`（`{ query, limit? }`）。过滤 / 聚合走 `veda sql`。
 
 ### MCP 端点（`POST /mcp`）
 
 给 Coding Agent(Claude Code / Cursor / Codex)的原生工具面——[MCP](https://modelcontextprotocol.io)(Model Context Protocol)Streamable HTTP transport 的 **stateless** 模式,协议版本 `2025-06-18`。用户侧零安装,配置示例见 [AI 助手集成](#/docs/skill)。
 
 - **鉴权**:与 REST 数据面同一道闸——`Authorization: Bearer wk_…`(fs workspace;db kind 返 400)。只读 `wk_` 全功能可用(6 个工具均只读),这是推荐发给消费者的 key。
-- **协议行为**:每个 POST 一条 JSON-RPC 消息、回一个 JSON 响应;无 `id` 字段的 notification 返 `202`;不支持 batch;`GET /mcp` 返 `405`(无服务端 SSE 下行流);请求头 `MCP-Protocol-Version` 若存在且非支持版本返 `400`。
-- **工具(6 个,均只读)**:`search`(hybrid 检索,`detail_level` 三层)/ `grep`(字面量,带行号,匹配行截断 500B)/ `read_file`(PDF/Word 返提取文本;整读上限 64KB,`start_line`/`end_line` 分页)/ `list_dir`(`recursive` 上限 10000 条)/ `overview`(L1 摘要,未就绪/未启用返回可读提示)/ `ask`(等价 `POST /v1/answer` 非流式,带 citations;与 REST 共享每 workspace 并发上限,超出返回「too many concurrent」提示,10–90s)。
+- **协议行为**:每个 POST 一条 JSON-RPC 消息、回一个 JSON 响应;无 `id` 字段的 notification 返 `202`;不支持 batch;`GET /mcp` 返 `405`(无服务端 SSE 下行流);请求头 `MCP-Protocol-Version` 若存在且非支持版本返 `400`。单次工具调用 30s 上限(`ask` 95s),超时返回 `isError:true` + `tool '<name>' timed out`。
+- **工具(6 个,均只读)**:`search`(hybrid 检索,`detail_level` 三层;`limit` 默认 10 上限 100)/ `grep`(字面量,带行号,匹配行截断 500B;`limit` 默认 100 上限 1000;注意路径参数叫 `path`,不是 REST 的 `path_prefix`)/ `read_file`(PDF/Word 返提取文本;整读上限 64KB,`start_line`/`end_line` 分页)/ `list_dir`(平铺超 10000 条截断并带 `truncated: true`;递归超 10000 条**直接返回错误不截断**——所以递归成功即完整,`truncated` 恒为 `false`)/ `overview`(L1 摘要,未就绪/未启用返回可读提示)/ `ask`(服务端 RAG,与 `POST /v1/answer` 同一条检索链路;返回 `{answer, citations, hit_count}`,只收 `question`/`path_prefix`——`limit` 固定 12、不支持 `prompt`、不返 `estimated_context_tokens`;与 REST 共享每 workspace 并发上限,超出返回「too many concurrent」提示,10–90s)。
 - **错误语义**:协议错误(坏 JSON、未知方法/工具、参数校验)→ JSON-RPC `error`;领域错误(文件不存在、功能未启用、限流、超时)→ `result.isError=true` + 可读文本,调用方 LLM 可据此自愈。
 - 冒烟示例:
 
@@ -303,7 +325,7 @@ curl -s -H "Authorization: Bearer wk_..." -H 'Content-Type: application/json' \
 
 ### 变更流（`GET /v1/events`，SSE）
 
-游标式订阅 workspace 变更：`?since_id`（默认 0）、`?path_prefix`。`text/event-stream`，每条事件 `{ id, event_type, path, file_id }`。FUSE / 多实例靠它做近实时失效（~120s 内）。这是**裸 SSE 协议**（错误体不走 `ApiResponse` 信封），`410` 表示游标已过保留窗口、需重新订阅。
+游标式订阅 workspace 变更：`?since_id`（默认 0）、`?path_prefix`。`text/event-stream`，每条事件 `{ id, event_type, path, file_id }`。FUSE / 多实例靠它做近实时失效：server 每 1s 轮询事件表推送，客户端收到即失效对应缓存，通常亚秒级（连接静默断开的最坏情况下由重连补上，最长约 120s——那是 FUSE 客户端单条连接的读超时，不是推送延迟）。这是**裸 SSE 协议**（错误体不走 `ApiResponse` 信封），`410` 表示游标已过保留窗口（默认 14 天，见 `[retention]`）、需重新订阅。
 
 ---
 
@@ -324,8 +346,12 @@ curl -s -H "Authorization: Bearer wk_..." -H 'Content-Type: application/json' \
 | `PRECONDITION_FAILED` | 412 | CAS 前置条件不满足（`If-Match` revision 不符） |
 | `PAYLOAD_TOO_LARGE` | 413 | **仅**批量条数超限（`records`/`ids` >500、`top_k` >100）；单字段超限走 `INVALID_INPUT` |
 | `QUOTA_EXCEEDED` | 429 | 保留（当前仅 SQL / fs 列举的扫描上限会触发） |
+| `THROTTLED` | 429 | 该 workspace 并发问答已满（`/v1/answer`、MCP `ask`），立即拒绝不排队 |
 | `EMBEDDING_FAILED` | 500 | 服务端嵌入上游错误。注意：保留此 code，但 `error` 文案被抹成 `internal server error` |
 | `INTERNAL` | 500 | 存储 / 死锁 / 未预期错误的兜底，故意不透出细节 |
+| `FEATURE_DISABLED` | 501 | server 未配 `[llm]`：问答 / 摘要（`/v1/abstract`、`/v1/overview`）不可用，带 `Cache-Control: no-store` |
+| `LLM_UNAVAILABLE` | 502 | LLM 上游不可用 |
+| `ANSWER_TIMEOUT` | 504 | 问答超过 90s 截止（流式下作为 `error` 事件的 `error_code`） |
 
 ---
 
@@ -357,7 +383,7 @@ curl -s -H "Authorization: Bearer wk_..." -H 'Content-Type: application/json' \
 | `VEDA_LLM_API_URL` | — | 配上才启用摘要功能（不配则 `/v1/abstract` 等返 501） |
 | `VEDA_ALLOWED_ORIGINS` | `[]` | CORS 白名单（逗号分隔）；生产必须显式列域名 |
 | `VEDA_METRICS_TOKEN` | 无 | 门控 `/v1/metrics` 和 reconcile |
-| `VEDA_OTLP_ENABLED` | false | OTLP（metric/trace 发本地 agent） |
+| `VEDA_OTLP_ENABLED` | false | OTLP（metric/trace **直推远端 collector**；地址由 monitor 配置服务下发，或用 `[otlp].endpoint` 直配 `host:port`，**本机不需要装 agent**） |
 
 ---
 
@@ -371,7 +397,7 @@ curl -s -H "Authorization: Bearer wk_..." -H 'Content-Type: application/json' \
 - 不是 OLTP 数据库，是知识库；高并发交易场景不合适。
 
 **规模与吞吐（上线前重点）**
-- **嵌入吞吐受云商 QPM 硬限**：当前无客户端并发闸，压测下 hybrid 检索会塌（~36 QPS / p99 ~4s / 25% 429）。大批量导入请控制并发、用 `fulltext` mode（不走嵌入）或分批退避。
+- **嵌入吞吐受云商 QPM 硬限**：客户端并发闸已上线（`VEDA_EMBEDDING_MAX_CONCURRENCY`，默认 8，交互检索优先于后台索引拿号），此前压测中的雪崩已消除——灌库不再拖垮检索延迟。剩余天花板是上游 RPM 本身：大批量导入仍请控制并发、用 `fulltext` mode（不走嵌入）或分批退避。
 - **db workspace 数量天花板**：每个 db workspace 一个常驻 Milvus collection（建库即 load、不 unload），库数量受 Milvus 内存上限约束，超限会导致新建库失败。海量库需等懒加载 / 多副本演进。
 - **写入吞吐 << 读取**：Milvus 写入在中等并发就排队。批量写优先用 `write_mode=insert`（id 天然唯一时）+ 合理批大小（≤500/次）。
 - **单进程单副本 alpha**：server 与 worker 同进程，无 HA、无 Docker/Helm；这是当前部署形态的可用性上限。

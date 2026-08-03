@@ -49,7 +49,7 @@ import csoss.veda.sdk.filter.Filter;
 import csoss.veda.sdk.model.*;
 
 try (VedaClient veda = VedaClient.builder()
-        .baseUrl("http://10.79.51.161:9009")
+        .baseUrl("http://localhost:3000")
         .apiKey("wk_...")            // workspace key (data-plane), not an account vk_
         .workspaceId("ws-...")       // optional now — the wk_ already binds the workspace
         .dataset("products")         // optional; default = server's "default"
@@ -89,6 +89,15 @@ try (VedaClient veda = VedaClient.builder()
 
 `VedaClient` is thread-safe; build one and share it. It owns an OkHttp
 connection pool — `close()` it (or use try-with-resources) when done.
+
+**Base URL.** `http://localhost:3000` above is a server you run yourself
+(veda-server listens on `0.0.0.0:3000` by default). Against the shared data
+plane use the deployed entry points instead:
+
+| environment | base URL |
+|---|---|
+| production | `https://veda.ddmc-inc.com` |
+| test | `https://veda.dbpaas.dingdongxiaoqu.com` |
 
 ## Scope: workspaceId / dataset
 
@@ -153,6 +162,17 @@ disabled so the SDK is the sole authority.
 Retries use exponential backoff for: network/timeout errors, HTTP `5xx`
 (`EMBEDDING_FAILED`/`INTERNAL`), and `429`. `4xx` (except `429`) is never
 retried. Tune with `.maxRetries(n)` (default 2; 0 disables).
+
+> **`write_mode` is not exposed by this SDK version.** The server's upsert body
+> accepts `write_mode`: `upsert` (default — idempotent dedup by id) or `insert`,
+> a ~3x fast path that skips Milvus's dedup and so requires the caller to
+> guarantee id uniqueness. A repeated id under `insert` is **undefined
+> behavior**: rows accumulate and are not reclaimed by compaction, and reads
+> return an unspecified copy — so retry-prone or re-importable pipelines must
+> stay on the default `upsert`. This SDK has
+> no `writeMode` field, so every `upsert()` uses the server default. If you need
+> the `insert` fast path — bulk import of freshly-minted ids — issue the raw
+> `POST /v1/vectors/upsert` REST call yourself.
 
 ## Errors
 
@@ -235,9 +255,11 @@ of this SDK).
   embedding stack (no mocks) — the release gate. Run manually before tagging:
 
 ```bash
-VEDA_URL=http://10.79.51.161:9009 VEDA_API_KEY=wk_... VEDA_WS_ID=ws-... \
+VEDA_URL=https://veda.dbpaas.dingdongxiaoqu.com VEDA_API_KEY=wk_... VEDA_WS_ID=ws-... \
   mvn -P integration verify
 ```
+
+(or `VEDA_URL=http://localhost:3000` against a server you run yourself).
 
 They auto-skip when `VEDA_URL` is unset, so the default build and CI runners
 without internal access stay green. **Run them before every SDK release.**

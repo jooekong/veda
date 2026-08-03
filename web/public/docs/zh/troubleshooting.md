@@ -7,7 +7,7 @@
 - 回 [首页](/) 重新匿名注册，把新 `vk_` 用 `veda init --import-key vk_…` 导入。
 - 或者在 [Console](#/console) 给现有 workspace 重新生成一把 key，再导入。
 
-配置在 `~/.config/veda/config.toml`。直接编辑里面的 `api_key` 也行。
+配置在 `~/.config/veda/config.toml`。账号 key 是顶层的 `api_key`（`vk_`）；文件 / 搜索用的是 `[workspaces.<别名>]` 下的 `key`（`wk_`）——数据面报 unauthorized 时要改的是后者。
 
 ## `veda` 抱怨 server URL
 
@@ -20,13 +20,14 @@ veda --server https://veda.ddmc-inc.com ls
 ## 搜索返回空
 
 - 嵌入是**异步**的——上传后等几秒；如果没命中，过 5s 再试一次。
+- 看索引积压：`veda status --index`（加 `--wait` 每 5s 轮询到清空）——输出 pending / processing / dead 三个计数，有永久失败的任务时退出码非 0。批量上传后 CLI 也会提示这条命令。
 - 检查 server 是否可达：`veda status`。
 - 文件特别小（几个词）BM25 可能不命中。试 `--mode semantic`。
 - 字面匹配确保命中：`veda grep "字符串"`（同步，无 embedding 延迟）。
 
 ## FUSE 挂载显示旧数据
 
-SSE 事件流可能断了。Mount 会自动重连；等不及的话 `fusermount -u ~/veda && veda-fuse mount …` 彻底重置。
+SSE 事件流可能断了。Mount 会自动重连；等不及的话 `veda-fuse umount ~/veda && veda-fuse mount ~/veda` 彻底重置。
 
 ## 匿名账号"丢了"
 

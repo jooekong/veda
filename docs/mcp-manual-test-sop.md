@@ -58,7 +58,7 @@ curl -s --noproxy '*' -o /dev/null -w '%{http_code}\n' -H "Authorization: Bearer
 
 ```bash
 # 上传(在 repo 根目录):
-veda cp -r docs/sop-fixtures/mcp /mcp-test        # 或逐个 curl PUT /v1/fs/mcp-test/...
+veda cp docs/sop-fixtures/mcp /mcp-test           # 目录自动递归,没有 -r;或逐个 curl PUT /v1/fs/mcp-test/...
 # 约 30-60s 后(异步 embedding;pdf/word 多一道提取)用 §1 的 curl 或 REST search
 # 搜任一哨兵词确认已可检索,再进 §3
 ```

@@ -5,7 +5,9 @@ Run against a Veda server with a db-kind workspace already created and a
 `wk_` workspace key for it. The target workspace is bound to the `wk_` key, so
 requests carry NO workspace_id. Env vars:
 
-    VEDA_URL       e.g. http://localhost:9009
+    VEDA_URL       e.g. http://localhost:3000 for a server you run yourself;
+                   the deployed data plane is https://veda.ddmc-inc.com (prod)
+                   or https://veda.dbpaas.dingdongxiaoqu.com (test)
     VEDA_API_KEY   wk_... workspace key (data-plane; NOT an account vk_)
 
 Demonstrates: upsert with defaults, search with a meta-field filter,

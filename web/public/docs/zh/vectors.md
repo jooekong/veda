@@ -284,7 +284,7 @@ Qdrant 风格的严格子集，仅用于 `/v1/vectors/search` 的 `filter`：
 
 ## 12. 上线前注意
 
-- **嵌入吞吐受云商 QPM 硬限**，无客户端并发闸：大批量写 / 高并发检索请控制并发、分批退避，或对纯关键词用 `mode=fulltext`（不走嵌入）。
+- **嵌入吞吐受云商 QPM 硬限**：服务端有两级优先并发闸（`[embedding].max_concurrency`，默认 8，交互调用优先于后台索引拿号），但闸只防雪崩、不抬上限——大批量写 / 高并发检索仍请控制并发、分批退避，或对纯关键词用 `mode=fulltext`（不走嵌入）。
 - **写入吞吐 << 读取**：批量写优先 `write_mode=insert`（id 唯一时）+ ≤500/次。
 - 软删 workspace / dataset **不回收 Milvus 向量**。
 - Java SDK 仍是旧 `vk_` 契约，**未适配 `wk_`**；现阶段建议直接按本页裸 HTTP 接入。

@@ -1,7 +1,7 @@
 # Veda config tuned for the docker-compose stack. Most connection strings
-# are overridden by environment variables (VEDA_MYSQL_DATABASE_URL etc.)
-# defined in docker-compose.yml; this file supplies the structural shape
-# and the sections that don't have env overrides yet.
+# are overridden by environment variables (VEDA_MYSQL_URL etc.) defined in
+# docker-compose.yml; this file supplies the structural shape and the
+# sections that don't have env overrides yet.
 #
 # Copy to deploy/config.docker.toml and fill in [embedding] / [llm].
 
@@ -9,7 +9,7 @@ listen = "0.0.0.0:3000"
 metrics_token = "set-via-env"
 
 [mysql]
-# Overridden by VEDA_MYSQL_DATABASE_URL.
+# Overridden by VEDA_MYSQL_URL.
 database_url = "mysql://veda:veda-dev@mysql:3306/veda"
 # Pool sized for a single-replica alpha. See PoolConfig docs in
 # crates/veda-store/src/mysql.rs for the full knob set.

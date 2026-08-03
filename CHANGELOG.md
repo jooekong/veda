@@ -9,6 +9,38 @@ that matters.
 
 ## [Unreleased]
 
+### Fixed
+- **Documentation accuracy sweep — the published reference described a
+  control plane that does not exist.** The platform surface was renamed to
+  `/v1/workspace/{workspace}/*` (tenant code + *project*) back in
+  2026-06-17, but the docs site, `docs/api/vectors.md` and
+  `docs/api/db-workspace-api.md` all still documented `/v1/apps/{app_id}/*`
+  — a path the server has no route for — along with a fictitious 201/200
+  "status-code asymmetry" warning and the wrong response envelope. That
+  whole surface is now documented as it is built: real routes, the company
+  envelope, offset pagination, and the fail-closed gateway authz.
+  Other corrections a reader could have been burned by: `veda cp -r` and a
+  `veda --key` flag (neither exists), `veda cat <pdf>` described as a
+  byte-exact download (it prints extracted text — `--raw` is the download),
+  `veda ask` promising distinct exit codes (both paths exit 1),
+  `POST /v1/collections/{name}/rows` documented as a bare JSON array (it
+  takes `{"rows": [...]}`), `FileInfo` fields as `size` / `mime` (they are
+  `size_bytes` / `mime_type`), HEAD documented as returning a body, OTLP
+  described as pushing to a local agent, FUSE's writeback mode advertised
+  without its durability cost or size caps, a "no client-side concurrency
+  gate" limitation that shipped in 0.1.21, and `~120s` SSE propagation that
+  is actually sub-second. `/v1/answer`, `/mcp`, `?view=text`,
+  `GET /v1/fs?list`, `output_fields`, and `GET /v1/whoami` were implemented
+  but undocumented; they are documented now.
+
+### Added
+- **`config/server.toml.example`** — the server had no config template. Every
+  key, its default, and its `VEDA_*` override in one file, with the
+  production-only settings (`metrics_token`, `admin_token`,
+  `allowed_origins`, `[otlp]`, `[retention]`, pool sizing) called out.
+  Both READMEs pointed at `config/test.toml.example`, which omits all of
+  them.
+
 ### Changed
 - **WeCom bot: upstream AI outages are no longer blamed on the knowledge
   base.** When the LLM gateway or embedding upstream fails

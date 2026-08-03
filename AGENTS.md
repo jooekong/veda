@@ -9,10 +9,12 @@
 
 | 文档                | 职责                      | 何时读     |
 | ----------------- | ----------------------- | ------- |
-| `ARCHITECTURE.md`       | 系统现状：模块结构、已实现能力、已知问题    | 每次开始工作前 |
+| `ARCHITECTURE.md`       | 系统现状：模块结构、已实现能力、待实现    | 每次开始工作前 |
 | `docs/design/plans.md`  | 计划索引：活跃计划 + 归档导航 | 找计划/开新计划前 |
 | `docs/api/db-workspace-api.md` + `web/public/docs/zh/reference.md` | API 契约（repo 内参考 / 对外权威） | 改 API 前 |
+| `CHANGELOG.md`          | 用户可见变更（Keep a Changelog，`[Unreleased]` 累积到发版） | 发版 / 写变更说明前 |
 | `docs/todos.md`         | 零散待办（/todo 管理）  | 接小任务前 |
+| `config/server.toml.example` | 全量配置键 + 默认值 + `VEDA_*` 覆盖 | 改配置 / 部署前 |
 
 
 ---
@@ -32,15 +34,16 @@
 
 ## 技术约定
 
-- Rust Cargo workspace，八个 crate：
+- Rust Cargo workspace，九个 crate：
   - `veda-types` — 零依赖的领域类型和错误定义
   - `veda-core` — trait 定义 + 业务逻辑（不依赖具体存储实现）
   - `veda-store` — MySQL + Milvus 的 trait 实现
-  - `veda-pipeline` — embedding、chunking、文本提取（PDF/OCR planned）
+  - `veda-pipeline` — embedding、chunking、文本提取（PDF / Word 已实现，OCR planned）、LLM 摘要
   - `veda-sql` — DataFusion SQL 引擎
-  - `veda-server` — Axum HTTP 层（薄壳，只做路由和中间件）
+  - `veda-server` — Axum HTTP 层 + 进程内后台任务（outbox worker、retention sweep、OTLP 导出、按需 reconcile）；路由层保持薄，业务逻辑下沉 `veda-core`
   - `veda-cli` — CLI 客户端（纯 HTTP，不直接连数据库；二进制名 `veda`）
   - `veda-fuse` — FUSE 挂载（workspace member，`cargo build -p veda-fuse`）
+  - `veda-tunnel` — 外部 IM 接入（企微长连接机器人），独立进程，veda 数据面的标准 `wk_` 消费者（二进制 `veda-tunnel`）
 - 错误处理：lib crate 用 `thiserror`，bin crate 用 `anyhow`
 - 远程路径就是普通绝对路径（如 `/docs/readme.md`），无 `:` 前缀
 - 认证体系：Account -> Workspace 两级；控制面账号 key `vk_`，数据面 workspace key `wk_`（纯 key 校验，JWT 已移除）

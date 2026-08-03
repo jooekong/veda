@@ -35,6 +35,7 @@ Chunking、embedding、索引、摘要全部在服务端异步完成。文件存
 - **向量 workspace** — 裸向量数据面（`kind=db`），适合自带记录的应用：upsert/search/query/delete + 元数据过滤，`write_mode=insert` 提供约 3 倍的批量写入吞吐。
 - **SQL** — 内嵌 DataFusion 引擎查询文件和 collection（`SELECT`、`WHERE`、`JOIN`、聚合），另有文件系统操作和向量搜索的 UDF 可在 SQL 里直接用。
 - **FUSE 挂载** — `veda-fuse mount` 把 workspace 暴露为本地目录：原生工具开箱即用，write-back 模式吸收编辑器噪音（vim swap 文件、git 锁文件），SSE 保证缓存与远端变更一致。
+- **RAG 问答** — `POST /v1/answer`（及流式 `/v1/answer/stream`，SSE）在 workspace 上跑 agentic「检索—回答」循环，产出带可验证 `[n]` 内联引用的答案；找不到依据时明确拒答，不编造。`veda ask` 和 MCP 的 `ask` 工具是同一套引擎。
 - **MCP 端点** — server 原生说 Model Context Protocol（`POST /mcp`，Streamable HTTP，stateless）：Coding Agent 一段 `.mcp.json` 即接入，得到 6 个只读工具——search / grep / read_file / list_dir / overview / `ask`（一站式带引用 RAG 问答）。
 - **多租户** — Account → Workspace 两级。账号 key（`vk_`）驱动控制面；workspace key（`wk_`，可吊销、有只读变体）驱动数据面。纯 key 校验，无 JWT。
 
@@ -79,7 +80,7 @@ Chunking、embedding、索引、摘要全部在服务端异步完成。文件存
 
 ### 关键设计决策
 
-- **Outbox 模式保一致性**：文件写入和它的同步任务（ChunkSync / SummarySync / ExtractSync）在一个 MySQL 事务里提交；后台 worker 把它们回放进 Milvus。默认最终一致，灾难场景用按需漂移修复（`POST /admin/v1/reconcile/{ws}`）。Lease fencing 让多台 server 共享一个 MySQL 时 outbox 依然安全。
+- **Outbox 模式保一致性**：文件写入和它的同步任务（ChunkSync / SummarySync / ExtractSync）在一个 MySQL 事务里提交；后台 worker 把它们回放进 Milvus。默认最终一致，灾难场景用按需漂移修复（`POST /admin/v1/reconcile/{ws}`）。`lease_until` 心跳负责回收崩溃 worker 的在途任务；outbox 假设**一个 MySQL 只有一台 server 写**——host:pid fencing 已在 2026-07 单 pod 简化中删除。
 - **按内容分层存储**：UTF-8 文本 ≤256KB inline、>256KB 分块；非 UTF-8 存为 blob，MIME 从 magic bytes 判定。内容寻址去重（SHA256），内容没变就跳过写入。
 - **承认关键词搜索重要的搜索设计**：dense 向量管语义，BM25 管标识符和精确词，RRF 融合两者——按查询选模式，而不是假装一种 ranker 包打天下。
 - **分层上下文加载**：L0/L1 摘要是一等存储对象（存在 Milvus 里可搜索，不是读时计算），专为需要先筛后读的 agent 设计。
@@ -105,15 +106,26 @@ docker compose up -d mysql milvus
 cd ..
 ```
 
-想全部跑在容器里？`docker compose up -d` 构建并运行完整单机栈（依赖 + veda-server + Prometheus）——然后跳过第 2、3 步。
+想全部跑在容器里？先准备两个文件——compose 直接 bind-mount 它们，缺了起不来：
+
+```bash
+cd deploy
+cp config.docker.toml.example config.docker.toml   # 然后编辑
+mkdir -p secrets && printf '%s' "<你的 metrics token>" > secrets/veda_metrics_token
+docker compose up -d          # 依赖 + veda-server + Prometheus + Grafana
+```
+
+然后跳过第 2、3 步。`.env` 里的 `VEDA_METRICS_TOKEN` 也是必填——compose 用 `${...:?}` 插值，没设直接中止。
 
 ### 2. 配置
 
 服务端默认读 `config/server.toml`，也可以把配置路径作为唯一位置参数传入（`veda-server /etc/veda/config.toml`）。
 
 ```bash
-cp config/test.toml.example config/server.toml   # 然后编辑
+cp config/server.toml.example config/server.toml   # 然后编辑
 ```
+
+`config/server.toml.example` 列了全部配置键，包括只在生产用的那些（`metrics_token`、`admin_token`、`allowed_origins`、`[otlp]`、`[retention]`、连接池）。下面这几段是**必填**，其余都有默认值。
 
 ```toml
 listen = "0.0.0.0:3000"   # 可选——这就是默认值
@@ -151,8 +163,11 @@ cargo build --release
 从源码构建（`cargo build --release -p veda-cli`），或从任何运行中的服务端拉预编译二进制——每个 server 都自带安装器：
 
 ```bash
-curl -fL http://<your-server>/install.sh | sh        # 加 --with-fuse 安装 FUSE 客户端
+curl -fL http://<your-server>/install.sh | sh                      # 只装 CLI
+curl -fL http://<your-server>/install.sh | sh -s -- --with-fuse    # 额外装 FUSE 客户端
 ```
+
+管道传参必须走 `sh -s --`；写成 `| sh --with-fuse` 会被 `sh` 当成自己的选项而失败。
 
 ### 5. 创建账号和 workspace
 
@@ -176,13 +191,14 @@ veda init --email joe@example.com --password 'something-strong'
 # PDF 额外抽取文本层并索引。
 veda cp ./README.md /docs/readme.md
 veda cp ./design.pdf /docs/design.pdf
-veda cp -r ./src /code                   # 递归上传目录
+veda cp ./src /code                      # 目录自动递归上传（没有 -r 参数）
 
 # 浏览
 veda ls /docs
 veda cat /docs/readme.md
 veda cat /docs/readme.md --range 10:20   # 行切片；还有 --head N / --tail N
-veda cat /docs/design.pdf > local.pdf    # 二进制 byte-for-byte 无损往返
+veda cat /docs/design.pdf                # PDF/Word 输出的是抽取出的文本
+veda cat --raw /docs/design.pdf > local.pdf   # --raw 才是原始字节 byte-for-byte 往返
 
 # 整理
 veda mv /docs/old.md /archive/old.md
@@ -241,7 +257,7 @@ cat ~/veda-mount/docs/.abstract          # 每个目录的只读摘要 sidecar
 veda-fuse umount ~/veda-mount
 ```
 
-默认 daemon 模式，带读缓存和 SSE 驱动的缓存失效。`--write-mode=writeback` 在本地缓冲写入（5 秒防抖），编辑器临时文件不会打到 server。
+默认 daemon 模式，带读缓存和 SSE 驱动的缓存失效。`--write-mode=writeback` 在本地缓冲写入（5 秒防抖）：在防抖窗口内**建后即删**的编辑器临时文件不会打到 server，窗口关闭时还在的文件照样上传。缓冲只在内存里，窗口内崩溃会丢未提交的写；要写入即确认就用默认的 `sync`。
 
 ### 向量 Workspace（Pinecone 风格）
 
@@ -284,11 +300,12 @@ veda/
 │   ├── veda-types/      # 领域类型、错误定义（零依赖）
 │   ├── veda-core/       # trait + 业务逻辑（不含存储实现）
 │   ├── veda-store/      # MySQL + Milvus 实现
-│   ├── veda-pipeline/   # embedding、chunking、PDF 文本提取、LLM 摘要
+│   ├── veda-pipeline/   # embedding、chunking、PDF/Word 文本提取、LLM 摘要
 │   ├── veda-sql/        # DataFusion SQL 引擎
-│   ├── veda-server/     # Axum HTTP 服务端（薄壳）+ outbox worker
+│   ├── veda-server/     # Axum HTTP 层 + 进程内后台任务
 │   ├── veda-cli/        # CLI 客户端（二进制名：veda）
-│   └── veda-fuse/       # FUSE 挂载（workspace member；--with-fuse 安装）
+│   ├── veda-fuse/       # FUSE 挂载（workspace member；--with-fuse 安装）
+│   └── veda-tunnel/     # 企微机器人：走 wk_ 数据面的 IM 长连接
 ├── sdk/java/            # db workspace 数据面的 Java SDK
 ├── web/                 # 落地页 + 用户文档站 + admin 控制台
 ├── deploy/              # Dockerfile、docker-compose、systemd 单元

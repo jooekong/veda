@@ -14,7 +14,7 @@ There are two workspace kinds, chosen at creation and immutable afterwards; the 
 |---|---|---|
 | `kind` | `fs` (default) | `db` |
 | Data model | files / directories | vector records (text + meta) |
-| Data plane | `/v1/fs/*`, `/v1/search`, `/v1/grep`, `/v1/sql`, `/v1/abstract`, `/v1/overview`, `/v1/collections/*`, `/v1/events`, FUSE | `/v1/vectors/{upsert,search,query,delete}` |
+| Data plane | `/v1/fs/*`, `/v1/search`, `/v1/grep`, `/v1/sql`, `/v1/abstract`, `/v1/overview`, `/v1/answer`, `/v1/collections/*`, `/v1/events`, `/mcp`, FUSE | `/v1/vectors/{upsert,search,query,delete}` |
 | Access | CLI / FUSE / HTTP | REST API / SDK |
 | Typical use | personal knowledge base, agent memory, code search | managed vector retrieval for applications |
 
@@ -41,12 +41,13 @@ Rules:
 - **Wrong plane = 401**: a `vk_` hitting the data plane, or a `wk_` hitting the control plane, is rejected as an invalid credential with `401 UNAUTHORIZED`.
 - **Revocation is immediate**: archiving a workspace sets all of its `wk_` to `revoked` in the same transaction; suspending an account invalidates all of its keys (`vk_` + `wk_`) on the very next request.
 - **JWT is fully removed**: no `POST /v1/workspaces/{id}/token`, no `jwt_secret` — auth is pure key validation (keys are stored as SHA-256 hashes).
+- **Identity introspection**: `GET /v1/whoami` (Bearer `wk_`; works for both fs and db keys — no kind check) returns that key's `{workspace_id, kind, permission}`. Use it when all you hold is a bare `wk_` and need to know which workspace it points at — the CLI's `veda status` / `veda init --import-key wk_…` uses it to backfill the workspace id in the local config.
 
 > A `vk_` is account-root authority — there are no capability tiers. To restrict a token to a few specific workspaces, use the `allowed_workspaces` scope on `POST /admin/v1/tokens` (see §4.5).
 
 ### Platform integration (AI Platform)
 
-The company AI Platform uses a separate `app_id`-keyed control plane at `/v1/apps/{app_id}/*`: authentication is pushed out to the platform gateway, veda trusts the `app_id` in the path, and accounts are auto-provisioned on first access. Application teams still only get a `wk_` under this model. See §4.6.
+The company AI Platform uses a separate control plane at `/v1/workspace/{workspace}/*`, where `{workspace}` is the platform tenant code (stored internally as `app_id`) and a veda workspace under it is called a **project**. Authentication is pushed out to the platform gateway: veda does not read `Authorization` — it takes the gateway-forwarded `user` header plus `Cookie` and calls back to the platform's authz service (fail-closed). Application teams still only get a `wk_` under this model. See §4.6.
 
 ---
 
@@ -73,9 +74,9 @@ With few exceptions, every endpoint that returns a body uses `ApiResponse<T>`:
 
 ### HTTP status codes
 
-Success uses `200` (general) / `201` (create dataset, mint token, create workspace on the apps plane) / `204` (delete dataset, revoke key, disable token). On failure, status codes map one-to-one to `error_code` — see §7.
+Success uses `200` (general) / `201` (create dataset, mint token) / `204` (delete dataset, revoke key, disable token). On failure, status codes map one-to-one to `error_code` — see §7.
 
-> ⚠️ One status-code asymmetry: creating a workspace via direct `vk_` (`POST /v1/workspaces`) returns **200**, but via the apps platform plane (`POST /v1/apps/{app_id}/workspaces`) returns **201**. SDKs that target both planes must special-case this.
+> Both planes return **200** when creating a workspace: direct `vk_` (`POST /v1/workspaces`) and platform (`POST /v1/workspace/{workspace}/projects`) agree, so no special-casing is needed.
 
 ### Time formats (two coexist)
 
@@ -105,7 +106,7 @@ Don't unify the two when generating types.
 
 ## 4. Control plane API (🔑 `vk_`)
 
-Summary (🔑 `vk_` account auth · 🔓 no auth · 🏢 apps platform plane, no veda credential · 🛠 ops `metrics_token`):
+Summary (🔑 `vk_` account auth · 🔓 no auth · 🏢 platform plane — no veda credential; gateway identity + platform authz decide · 🛠 ops `metrics_token`):
 
 | Method | Path | Auth | Success | Purpose |
 |---|---|:--:|:--:|---|
@@ -124,9 +125,14 @@ Summary (🔑 `vk_` account auth · 🔓 no auth · 🏢 apps platform plane, no
 | DELETE | `/v1/workspaces/{ws}/datasets/{name}` | 🔑 | 204 | Soft-delete a dataset (`default` is protected) |
 | POST | `/admin/v1/tokens` | 🔑 | 201 | Mint an account-level scoped `vk_` service token |
 | POST | `/admin/v1/tokens/{id}/disable` | 🔑 | 204 | Revoke a token |
-| POST | `/v1/apps/{app_id}/workspaces` | 🏢 | 201 | Create a workspace (platform plane) |
-| GET | `/v1/apps/{app_id}/workspaces` | 🏢 | 200 | List workspaces (platform plane) |
-| DELETE | `/v1/apps/{app_id}/workspaces/{id}` | 🏢 | 200 | Delete a workspace (platform plane) |
+| POST | `/v1/workspace/{workspace}/projects` | 🏢 | 200 | Create a project (platform plane) |
+| GET | `/v1/workspace/{workspace}/projects` | 🏢 | 200 | List projects (offset pagination) |
+| GET/PATCH/DELETE | `/v1/workspace/{workspace}/project/{id}` | 🏢 | 200 | Get / update / soft-delete a project |
+| POST/GET | `/v1/workspace/{workspace}/project/{id}/keys` | 🏢 | 200 | Issue / list `wk_` |
+| DELETE | `/v1/workspace/{workspace}/project/{id}/keys/{key_id}` | 🏢 | 200 | Revoke a `wk_` |
+| GET | `/v1/workspace/{workspace}/project/{id}/keys/{key_id}/token` | 🏢 | 200 | Read back the `wk_` plaintext |
+| POST/GET | `/v1/workspace/{workspace}/project/{id}/datasets` | 🏢 | 200 | Create / list datasets |
+| GET | `/v1/my/projects` | 🏢 | 200 | Every project visible to the current gateway user (flattened across tenants) |
 
 ### 4.1 Accounts
 
@@ -147,7 +153,7 @@ Summary (🔑 `vk_` account auth · 🔓 no auth · 🏢 apps platform plane, no
 
 **POST `/v1/workspaces`** 🔑 — `{ name, kind?: "fs"|"db", description? }` (`kind` defaults to `fs` when omitted; **a vector workspace requires an explicit `"db"`**). For `kind=db`, the server creates the workspace + `default` dataset in a single transaction, then provisions the Milvus collection (rolled back on failure — no zombies left behind). Returns the full `Workspace` object (200). Duplicate name → `409`; Milvus provisioning failure → `500` (already rolled back).
 
-**GET `/v1/workspaces`** 🔑 — lists all workspaces on the account (fs + db), paginated.
+**GET `/v1/workspaces`** 🔑 — lists all **active** workspaces on the account (fs + db), paginated. Archived ones are not returned (a soft-deleted workspace disappears from the list, though its name still cannot be reused).
 
 **DELETE `/v1/workspaces/{id}`** 🔑 — soft delete (`status=archived`); revokes all of its `wk_` in the same transaction. Returns **200** `{ "success": true, "data": null }`. Not your account → `403`; not found → `404`.
 > ⚠️ Currently a soft delete: **Milvus vectors are not reclaimed** (storage leak), and the name cannot be reused for now.
@@ -185,16 +191,30 @@ All three endpoints require the target workspace to be `kind=db` and active — 
 
 > On a token, `app_id` is just a **governance label**, not a security boundary; the real isolation is `allowed_workspaces` + `workspace.kind`.
 
-### 4.6 The apps platform plane (🏢 `/v1/apps/{app_id}/*`)
+### 4.6 The platform plane (🏢 `/v1/workspace/{workspace}/*`)
 
-For the company AI Platform. These endpoints **don't read `Authorization`** — the platform gateway has already proven the caller may act for the `app_id`, so veda trusts the `app_id` in the path to resolve the account / auto-provision it. Coexists with the direct `vk_` plane above.
+For the company AI Platform / AI Workbench. Terminology: **`{workspace}` in the path is the platform tenant code** (stored internally as `app_id`), and a veda workspace under it is called a **project** — don't confuse it with "workspace" on the direct `vk_` plane. Coexists with the direct `vk_` plane above.
 
-- **POST `/v1/apps/{app_id}/workspaces`** — on first access for an `app_id`, the account is **auto-provisioned** (passwordless, no `vk_` minted), then the workspace is created (any `app_id` in the body is overridden by the path). Returns **201** `Workspace`.
-- **GET `/v1/apps/{app_id}/workspaces`** — lists the app's workspaces. Unknown app_id → **empty page** (no auto-provisioning; GET has no side effects). Returns 200, paginated.
-- **DELETE `/v1/apps/{app_id}/workspaces/{id}`** — soft delete. Cross-tenant and not-found both return `404`. Returns **200**.
+**Auth**: these endpoints **don't read `Authorization`**. Identity comes from the gateway-forwarded `user` header plus `Cookie`, and veda calls the platform's authz service (`GET {VEDA_PLATFORM_BASE}/open/v1/auth/service/veda-reach/action/workspace-create`). **What it gates**: every mutation, plus `GET .../keys/{key_id}/token` (reading back a plaintext key hands out data-plane access), plus **the entire platform data plane including reads**. Plain control-plane GETs — list/get project, list keys, list datasets, `/v1/my/projects` — are not gated. It is **fail-closed**: a missing cookie, a missing user, a non-2xx, or any transport error all deny with `403`. The check is skipped entirely only when `VEDA_PLATFORM_BASE` is unset (internal testing only).
+
+- **POST `/v1/workspace/{workspace}/projects`** — on first access for a tenant, the account is **auto-provisioned** (passwordless, no `vk_` minted), then the project is created. Returns **200**.
+- **GET `/v1/workspace/{workspace}/projects`** — lists projects. Unknown tenant → **empty page** (no auto-provisioning; GET has no side effects).
+- **GET / PATCH / DELETE `/v1/workspace/{workspace}/project/{id}`** — get / update / soft-delete. Cross-tenant and not-found both return `404`.
+- **`.../project/{id}/keys`** (POST issue, GET list), **`.../keys/{key_id}`** (DELETE revoke), **`.../keys/{key_id}/token`** (GET read back the plaintext), **`.../datasets`** (POST create, GET list).
+- **GET `/v1/my/projects`** — every project visible to the current gateway user, flattened across tenants.
 - Suspended account → all of these endpoints return `401` (`account suspended`).
 
-app_id accounts are passwordless: no login, no claim — `app_id` and `(email, password)` are mutually exclusive on one account.
+> ⚠️ **A different response envelope.** This plane uses the company envelope, not `{success, data}`:
+> - list → `{ data: [...], page, size, order_by, order, total, total_page, has_next_page, has_prev_page }`
+> - single object (create / update / get token) → **the bare object, expanded directly, with no `data` wrapper**
+> - no content (delete / revoke) → `{}`
+> - error → `{ "error": { "code", "reason", "message", "external" } }` (`code` is veda's `error_code`)
+>
+> **Pagination differs too**: this plane is offset-based — `page` (from 1) / `size` (default 20, max 200) / `order_by` (`created_at`|`id`) / `order` (`asc`|`desc`) / `keyword` (**honored only by `/v1/my/projects`**, matching a project's name *or* description case-insensitively; the other list endpoints parse it and ignore it) — not the `after` / `next_cursor` cursor used on the `vk_` plane.
+
+Platform tenant accounts are passwordless: no login, no claim — `app_id` and `(email, password)` are mutually exclusive on one account.
+
+This plane also carries a **data plane** (under `.../project/{id}/`: `vectors/*`, `search`, `files`, `file`, `file/content`, `sql`, `grep`) and a **tunnel management surface** (`.../project/{id}/tunnel/{bots,qa/stats,qa/logs}`), both with the same gateway auth and company envelope.
 
 ---
 
@@ -239,8 +259,9 @@ All fs endpoints authenticate with a `wk_` (bound to an fs workspace); writes re
 |---|---|
 | `PUT /v1/fs/{path}` | Write raw bytes. Valid UTF-8 is stored, chunked, and indexed as text; non-UTF-8 is stored verbatim as a blob (PDFs additionally have their text extracted for search; other binaries such as images are not indexed). Supports `If-Match: "<rev>"` (CAS; mismatch → `412`) and `If-None-Match: "<sha256>"` (skips the rewrite when content is identical, returning `content_unchanged:true`). Returns `{ file_id, revision, content_unchanged }` + `ETag`. A directory path → `409`; maximum file size 50MB. |
 | `POST /v1/fs/{path}` | Append content (no CAS). |
-| `GET /v1/fs/{path}` | Read raw bytes with the stored `Content-Type`. `?stat` for metadata, `?list` for directory listing, `?lines=start:end` for a line slice; `Range: bytes=a-b` returns `206`. No parameters returns the full content. |
-| `HEAD /v1/fs/{path}` | Fetch `FileInfo` (path/file_id/is_dir/size/mime/revision/checksum/timestamps). |
+| `GET /v1/fs/{path}` | Read raw bytes with the stored `Content-Type`. `?stat` for metadata, `?list` for directory listing, `?lines=start:end` for a line slice, `?view=text` for the text view (PDF / Word return the server-extracted text as `text/plain; charset=utf-8`; any other `view` value → `400`); `Range: bytes=a-b` returns `206`. No parameters returns the full raw content. |
+| `GET /v1/fs?list` / `GET /v1/fs?stat` | Root listing / root metadata. `{*path}` never matches an empty segment, so this bare path is the **only** way to list the workspace root. A bare `GET /v1/fs` with no parameter → `400 INVALID_INPUT` (`use ?stat or ?list`). |
+| `HEAD /v1/fs/{path}` | Existence probe: `200` if present, `404` if not. **HEAD carries no response body** — for metadata use `GET /v1/fs/{path}?stat`. |
 | `DELETE /v1/fs/{path}` | Delete (directories recurse). |
 | `POST /v1/fs-copy` | `{ from, to }` server-side copy (content-addressed dedup). |
 | `POST /v1/fs-rename` | `{ from, to }` rename. |
@@ -248,6 +269,8 @@ All fs endpoints authenticate with a `wk_` (bound to an fs workspace); writes re
 | `POST /v1/grep` | `{ pattern, path_prefix?, ignore_case?, max_results?=100 }` literal substring scan (not regex, synchronous); returns `{path, line_no, line}[]`. |
 
 > Deleting the root — `DELETE /v1/fs` — always returns `400` (forbidden).
+>
+> `FileInfo` (the `?stat` response body) has fields `path` / `file_id` / `is_dir` / **`size_bytes`** / **`mime_type`** / `revision` / `checksum` / `created_at` / `updated_at` — note `size_bytes` and `mime_type`, not `size` / `mime`. The `DirEntry` returned by `?list` uses the same two names.
 
 **Indexing progress**: `GET /v1/index-status` returns this workspace's backlog of index-gating tasks as `{pending, processing, dead}` (chunk/extract tasks only — the ones that gate searchability). Poll it after batch uploads to answer "is everything searchable yet"; `dead > 0` means some files permanently failed to index and need an operator. CLI: `veda status --index [--wait]` (`--wait` polls until drained; exits non-zero on dead > 0 — usable as a CI gate).
 
@@ -274,8 +297,8 @@ One call, one answer **with verifiable citations**: a server-side LLM loop retri
 - **Request**: `{ query (≤1024 chars), path_prefix?, limit? (pre-search count, default 12, cap 24), prompt? (custom bot persona, ≤4000) }`.
 - **Response**: `{ answer, citations: [{index, path, spans}], hit_count, estimated_context_tokens }`. `spans` are chunk ranges; **an empty array means the whole file**. Two passages of one file yield two citations with the same path (chunk granularity, by design) — display layers should group by path. When nothing supports an answer, a fixed refusal phrase comes back with empty citations (no fabrication).
 - **Streaming**: `POST /v1/answer/stream` (SSE), five events: `delta` / `reset` (drop accumulated deltas) / `tool` (progress note) / `final` (authoritative full result — consumers must replace accumulated text with it) / `error`.
-- **Errors**: `429 THROTTLED` (per-workspace concurrency cap, default 2); `501 FEATURE_DISABLED` (no LLM configured); `504 ANSWER_TIMEOUT` (90s deadline). Typical latency 10–90s.
-- **CLI**: `veda ask "question" [--path PREFIX] [--json]`; the MCP `ask` tool exposes the same capability.
+- **Errors**: `429 THROTTLED` (per-workspace concurrency cap, default 2); `501 FEATURE_DISABLED` (no LLM configured); `502 LLM_UNAVAILABLE` (LLM upstream unavailable); `504 ANSWER_TIMEOUT` (90s deadline). On the streaming path these arrive as the `error` event's `error_code`. Typical latency 10–90s.
+- **CLI**: `veda ask "question" [--path PREFIX] [--json]`; the MCP `ask` tool runs the same retrieval path but takes a narrower payload (see below).
 
 ### SQL (`POST /v1/sql`)
 
@@ -283,15 +306,15 @@ One call, one answer **with verifiable citations**: a server-side LLM loop retri
 
 ### Structured collections (`/v1/collections/*`)
 
-Define a schema + an auto-embedded field, then filter and search by field. `POST /v1/collections` (create), `GET /v1/collections` (list), `GET/DELETE /v1/collections/{name}`, `POST /v1/collections/{name}/rows` (insert; body is a JSON array), `POST /v1/collections/{name}/search` (`{ query, limit? }`). Filters / aggregates go through `veda sql`.
+Define a schema + an auto-embedded field, then filter and search by field. `POST /v1/collections` (create), `GET /v1/collections` (list), `GET/DELETE /v1/collections/{name}`, `POST /v1/collections/{name}/rows` (insert; body is `{"rows": [ {...}, ... ]}` — a bare array is rejected), `POST /v1/collections/{name}/search` (`{ query, limit? }`). Filters / aggregates go through `veda sql`.
 
 ### MCP endpoint (`POST /mcp`)
 
 Native tool surface for coding agents (Claude Code / Cursor / Codex) — [MCP](https://modelcontextprotocol.io) Streamable HTTP transport in **stateless** mode, protocol revision `2025-06-18`. Zero client install; config examples in [AI agent integration](#/docs/skill).
 
 - **Auth**: the same gate as the REST data plane — `Authorization: Bearer wk_…` (fs workspace; db kind → 400). A read-only `wk_` runs every tool (all six are read-only) and is the recommended key to hand to consumers.
-- **Protocol behavior**: one JSON-RPC message per POST, one JSON response; notifications (no `id` member) → `202`; batches unsupported; `GET /mcp` → `405` (no server-initiated SSE stream); an `MCP-Protocol-Version` header with an unsupported value → `400`.
-- **Tools (6, all read-only)**: `search` (hybrid, tiered `detail_level`) / `grep` (literal, line numbers, matched lines clipped at 500B) / `read_file` (PDF/Word return extracted text; whole-file reads capped at 64KB, page with `start_line`/`end_line`) / `list_dir` (`recursive` capped at 10000 entries) / `overview` (L1 summary; pending/disabled return readable notices) / `ask` (equivalent to non-streaming `POST /v1/answer`, with citations; shares the per-workspace concurrency cap with REST — excess returns a "too many concurrent" notice; 10–90s).
+- **Protocol behavior**: one JSON-RPC message per POST, one JSON response; notifications (no `id` member) → `202`; batches unsupported; `GET /mcp` → `405` (no server-initiated SSE stream); an `MCP-Protocol-Version` header with an unsupported value → `400`. Each tool call has a 30s wall clock (`ask`: 95s); on elapse the tool returns `isError: true` with `tool '<name>' timed out`.
+- **Tools (6, all read-only)**: `search` (hybrid, tiered `detail_level`; `limit` default 10, cap 100) / `grep` (literal, line numbers, matched lines clipped at 500B; `limit` default 100, cap 1000; note its path argument is `path`, not REST's `path_prefix`) / `read_file` (PDF/Word return extracted text; whole-file reads capped at 64KB, page with `start_line`/`end_line`) / `list_dir` (a flat listing over 10000 entries is clipped and reports `truncated: true`; a recursive listing over 10000 entries **errors instead of clipping** — so a successful recursive call is always the complete subtree and `truncated` is always `false`) / `overview` (L1 summary; pending/disabled return readable notices) / `ask` (server-side RAG over the same retrieval path as `POST /v1/answer`; returns `{answer, citations, hit_count}` and takes only `question` / `path_prefix` — `limit` is fixed at 12, `prompt` is not exposed, and `estimated_context_tokens` is not returned; shares the per-workspace concurrency cap with REST — excess returns a "too many concurrent" notice; 10–90s).
 - **Error split**: protocol errors (bad JSON, unknown method/tool, invalid params) → JSON-RPC `error`; domain errors (missing file, feature disabled, throttled, timeout) → `result.isError=true` with readable text the calling LLM can react to.
 - Smoke test:
 
@@ -302,7 +325,7 @@ curl -s -H "Authorization: Bearer wk_..." -H 'Content-Type: application/json' \
 
 ### Change stream (`GET /v1/events`, SSE)
 
-Cursor-based subscription to workspace changes: `?since_id` (default 0), `?path_prefix`. `text/event-stream`; each event is `{ id, event_type, path, file_id }`. FUSE / multi-instance setups rely on it for near-real-time invalidation (within ~120s). This is **raw SSE** (error bodies don't use the `ApiResponse` envelope); `410` means the cursor has fallen out of the retention window — resubscribe.
+Cursor-based subscription to workspace changes: `?since_id` (default 0), `?path_prefix`. `text/event-stream`; each event is `{ id, event_type, path, file_id }`. FUSE / multi-instance setups rely on it for near-real-time invalidation: the server polls the event table once per second and clients invalidate on receipt, so propagation is usually sub-second. (The ~120s figure quoted elsewhere is the FUSE client's per-connection SSE read timeout — a worst-case reconnect ceiling, not push latency.) This is **raw SSE** (error bodies don't use the `ApiResponse` envelope); `410` means the cursor has fallen out of the retention window (14 days by default — see `[retention]`) — resubscribe.
 
 ---
 
@@ -323,8 +346,12 @@ Failure responses are always `{ "success": false, "error_code": "...", "error": 
 | `PRECONDITION_FAILED` | 412 | CAS precondition not met (`If-Match` revision mismatch) |
 | `PAYLOAD_TOO_LARGE` | 413 | **Only** batch-count overruns (`records`/`ids` >500, `top_k` >100); single-field overruns are `INVALID_INPUT` |
 | `QUOTA_EXCEEDED` | 429 | Reserved (currently only triggered by SQL / fs listing scan caps) |
+| `THROTTLED` | 429 | The workspace's answer concurrency is full (`/v1/answer`, MCP `ask`); rejected immediately, never queued |
 | `EMBEDDING_FAILED` | 500 | Upstream embedding error on the server. Note: the code is kept, but the `error` message is scrubbed to `internal server error` |
 | `INTERNAL` | 500 | Catch-all for storage / deadlock / unexpected errors; details deliberately withheld |
+| `FEATURE_DISABLED` | 501 | The server has no `[llm]`: answering / summaries (`/v1/abstract`, `/v1/overview`) are unavailable; sent with `Cache-Control: no-store` |
+| `LLM_UNAVAILABLE` | 502 | LLM upstream unavailable |
+| `ANSWER_TIMEOUT` | 504 | Answering exceeded the 90s deadline (on the streaming path, the `error` event's `error_code`) |
 
 ---
 
@@ -356,7 +383,7 @@ The `metrics_token` (also gating reconcile) is set via `VEDA_METRICS_TOKEN` or T
 | `VEDA_LLM_API_URL` | — | Enables summaries when set (otherwise `/v1/abstract` etc. return 501) |
 | `VEDA_ALLOWED_ORIGINS` | `[]` | CORS allowlist (comma-separated); production must list domains explicitly |
 | `VEDA_METRICS_TOKEN` | unset | Gates `/v1/metrics` and reconcile |
-| `VEDA_OTLP_ENABLED` | false | OTLP (metrics/traces to a local agent) |
+| `VEDA_OTLP_ENABLED` | false | OTLP (metrics/traces pushed **directly to the remote collector**; the address is discovered via the monitor config service or set explicitly as `host:port` in `[otlp].endpoint` — **no local agent needs to be installed**) |
 
 ---
 
@@ -370,7 +397,7 @@ An honest list of what it's not good at today and what to watch before going to 
 - It's a knowledge store, not an OLTP database; high-concurrency transactional workloads don't belong here.
 
 **Scale and throughput (the pre-production checklist)**
-- **Embedding throughput is hard-capped by the cloud provider's QPM**: there is no client-side concurrency gate yet, and hybrid search collapses under load tests (~36 QPS / p99 ~4s / 25% 429). For bulk imports, throttle concurrency, use `fulltext` mode (no embedding), or batch with backoff.
+- **Embedding throughput is hard-capped by the cloud provider's QPM**: a client-side concurrency gate now ships (`VEDA_EMBEDDING_MAX_CONCURRENCY`, default 8; interactive retrieval takes permits ahead of background indexing), so the collapse earlier load tests saw is gone — bulk indexing no longer drags down search latency. The remaining ceiling is the upstream RPM itself: for bulk imports, still throttle concurrency, use `fulltext` mode (no embedding), or batch with backoff.
 - **db workspace count has a ceiling**: each db workspace is one resident Milvus collection (loaded at creation, never unloaded), so the count is bounded by Milvus memory; past the limit, new workspace creation fails. Massive workspace counts have to wait for the lazy-loading / multi-replica evolution.
 - **Write throughput << read**: Milvus writes start queueing at moderate concurrency. For bulk writes, prefer `write_mode=insert` (when ids are naturally unique) + sensible batch sizes (≤500 per call).
 - **Single-process, single-replica alpha**: server and worker share one process; no HA, no Docker/Helm. That's the availability ceiling of the current deployment shape.

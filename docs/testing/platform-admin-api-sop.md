@@ -217,30 +217,41 @@ curl -s -o /dev/null -w "%{http_code}\n" -X POST \
 # 期望: 404（路由已移除）
 ```
 
-## 9. apps 平台面（鉴权外移，无 veda 凭据；🆕 a904e2d）
+## 9. 平台面（鉴权外移，无 veda 凭据；a904e2d，2026-06-17 改名 workspace/project）
 
-> `/v1/apps/{app_id}/...` 给 AI Platform 网关用：**不带任何 veda 凭据**，path 里的
-> `app_id` 就是租户边界（由网关负责证明调用方身份）。仅限可信内网暴露。
+> ⚠️ **路径已改名**：旧的 `/v1/apps/{app_id}/workspaces` 已不存在（server 里零路由）。
+> 现在是 `/v1/workspace/{workspace}/projects`——`{workspace}` 是平台租户 code（内部仍存为
+> `app_id`），其下的 veda workspace 改叫 **project**。
+>
+> 这组端点给 AI Platform 网关用：**不带任何 veda 凭据**，身份来自网关透传的 `user` 头 +
+> `Cookie`，veda 再回调平台 authz 校验（fail-closed）。仅限可信内网暴露。
+>
+> **响应是公司信封**，不是 `{success,data}`：列表 `{data:[...], page, size, total, ...}`、
+> 单对象裸展开、无内容 `{}`、错误 `{error:{code,reason,message,external}}`。分页是 offset
+> （`page`/`size`/`order_by`/`order`），不是游标。
+>
+> 本机直连（未配 `VEDA_PLATFORM_BASE`）时 authz 整体跳过，下面的命令才能不带 cookie 跑通；
+> 配了平台地址的节点上，写操作缺 cookie/user 会返 403。
 
 ```bash
-# POST：首次调用自动开通该 app_id 的账号（只建 account 行，不发 vk_），返回 201
-curl -s -o /dev/null -w "%{http_code}\n" -X POST "$BASE/v1/apps/sop-app/workspaces" \
+# POST：首次调用自动开通该租户的账号（只建 account 行，不发 vk_），返回 200
+curl -s -o /dev/null -w "%{http_code}\n" -X POST "$BASE/v1/workspace/sop-app/projects" \
   -H 'content-type: application/json' \
   -d '{"name":"plat-ws","kind":"db"}'
-# 期望: 201（注意与 vk_ 控制面 POST /v1/workspaces 的 200 不对称）
+# 期望: 200（与 vk_ 控制面 POST /v1/workspaces 一致，没有 201 不对称）
 
-# GET：列出该 app 下 active workspace；未知 app_id 返回空页【不】自动开通
-curl -s "$BASE/v1/apps/sop-app/workspaces" | jq '.data.items[] | {id, name, kind}'
-curl -s "$BASE/v1/apps/never-seen-app/workspaces" | jq '.data'
-# 期望: 第二条 items=[] 且 has_more=false（GET 无副作用）
+# GET：列出该租户下 active project；未知租户返回空页【不】自动开通
+curl -s "$BASE/v1/workspace/sop-app/projects" | jq '.data[] | {id, name, kind}'
+curl -s "$BASE/v1/workspace/never-seen-app/projects" | jq '{total, data}'
+# 期望: 第二条 data=[] 且 total=0（GET 无副作用）
 
-# DELETE：软删本 app 的 workspace；跨租户 / 不存在的 id 一律 404（防探测）
-APP_WS=$(curl -s "$BASE/v1/apps/sop-app/workspaces" | jq -r '.data.items[0].id')
-curl -s -o /dev/null -w "%{http_code}\n" -X DELETE "$BASE/v1/apps/sop-app/workspaces/$APP_WS"
-# 期望: 200；换别的 app_id 删同一个 id → 404
+# DELETE：软删本租户的 project；跨租户 / 不存在的 id 一律 404（防探测）
+APP_WS=$(curl -s "$BASE/v1/workspace/sop-app/projects" | jq -r '.data[0].id')
+curl -s -o /dev/null -w "%{http_code}\n" -X DELETE "$BASE/v1/workspace/sop-app/project/$APP_WS"
+# 期望: 200；换别的租户 code 删同一个 id → 404
 ```
 
-✅ 验证点：POST 201 自动开通；GET 不开通（空页）；DELETE 跨租户 404。
+✅ 验证点：POST 200 自动开通；GET 不开通（空页）；DELETE 跨租户 404；响应走公司信封而非 `{success,data}`。
 
 ## 10. 删 workspace 级联吊销 wk\_（🆕 6e6d4bf）
 

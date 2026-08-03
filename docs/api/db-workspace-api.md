@@ -90,7 +90,7 @@ SDK 生成类型时不要把这两类统一成一个时间类型。
 
 业务 app 通常**只拿到一把 `wk_`**（平台为某个 db workspace 签发）。建 workspace / dataset、签 `wk_` 都是平台侧用 `vk_` 完成的控制面动作，业务 app 不接触 `vk_`。
 
-> **平台接入**：公司 AI Platform 走另一套按 `app_id` 的控制面（`/v1/apps/{app_id}/...`，鉴权外移到平台网关），详见平台管理 API 文档。本文描述的 `vk_` 控制面是当前直连形态。
+> **平台接入**：公司 AI Platform 走另一套控制面 —— 路径前缀 `/v1/workspace/{workspace}/...`，鉴权外移到平台网关（**不存在 `/v1/apps/*` 路由**）。术语：`{workspace}` 是平台租户码（内部存为 `app_id`），其下的一个 veda workspace 在平台面叫 **project**。完整路由 / 响应信封 / 分页见 [§6.7](#67-平台面ai-platform-网关)。本文其余部分描述的 `vk_` 控制面是当前直连形态。
 
 ---
 
@@ -187,8 +187,10 @@ curl -sX POST $BASE/v1/vectors/upsert \
 | `score` | float | 相关性分数，**越大越相关**；含义由 `score_type` 决定 |
 | `score_type` | string | `cosine`（语义 ANN，~[0,1]）/ `bm25`（全文，~[0,30+]）/ `rrf`（hybrid 融合，~[0,0.033]）。**跨 type 不可比**，读分数前先看本字段 |
 
+> `dataset` / `category` / `tags` / `text` / `meta` / `created_at` / `updated_at` 是**可投影字段**：不传 `output_fields` 时全部返回，传了则只返回所列的（未选中的字段直接不出现在 JSON 里，不是 `null`）。`id` / `score` / `score_type` 永远返回。SDK 生成类型时这些字段应为 optional。
+
 ### VectorRecordHit（`/v1/vectors/query` 命中项）
-同 `VectorSearchHit`，但**没有 `score`**（直接按 id 查，非排序匹配）。
+同 `VectorSearchHit`，但**没有 `score`，也没有 `score_type`**（直接按 id 查，非排序匹配）。投影语义相同，`id` 永远返回。
 
 ### PaginatedResponse&lt;T&gt;（列表接口）
 | 字段 | 类型 | 说明 |
@@ -225,7 +227,7 @@ curl -sX POST $BASE/v1/vectors/upsert \
 | POST | `/admin/v1/tokens` | 🔑 | 铸账号级 scoped `vk_` 服务令牌 |
 | POST | `/admin/v1/tokens/{id}/disable` | 🔑 | 撤销令牌 |
 
-> 平台接入按 `app_id` 走 `/v1/apps/{app_id}/...`（鉴权外移，见平台管理 API 文档）；上表 `vk_` 控制面是当前直连形态。
+> 平台接入走 `/v1/workspace/{workspace}/...`（鉴权外移到平台网关，**无 `/v1/apps/*` 路由**），控制面与数据面均另有一套路径与响应信封，见 [§6.7](#67-平台面ai-platform-网关)；上表 `vk_` 控制面是当前直连形态。
 
 ---
 
@@ -353,7 +355,7 @@ curl -sX POST $BASE/v1/vectors/upsert \
 ```
   - `ids`：实际写入的 id，**按请求顺序、且已对同批重复 id 去重**（last-wins，见 §11），所以可能比 `records` 短。省略 `id` 的记录在这里**首次也是唯一一次**暴露服务端生成的 UUID，务必客户端留存。
   - `commit_ts`：服务端写完时刻（毫秒 epoch）。Milvus REST 不返回真 commit ts，此值用于同机 read-your-writes 足够。
-- 错误：`400 INVALID_INPUT`（字段校验，含 **text/meta/tags/category/id/dataset 等单字段长度或字符集超限**，`error` 形如 `<field>: <reason>`）、`403 PERMISSION_DENIED`（read-only `wk_`）、`413 PAYLOAD_TOO_LARGE`（**仅** `records` 条数 >500）、`500 EMBEDDING_FAILED`。
+- 错误：`400 INVALID_INPUT`（字段校验，含 **text/meta/tags/category/id/dataset 等单字段长度或字符集超限**，`error` 形如 `<field>: <reason>`）、`403 PERMISSION_DENIED`（read-only `wk_`）、`404 NOT_FOUND`（`dataset` 不存在或已归档）、`413 PAYLOAD_TOO_LARGE`（**仅** `records` 条数 >500）、`500 EMBEDDING_FAILED`。
 
 #### POST `/v1/vectors/search` 🟦
 检索目标 dataset，**隐式锁定**（v0 不支持跨 dataset）。`mode` 选择 ranker：
@@ -373,6 +375,7 @@ curl -sX POST $BASE/v1/vectors/upsert \
   "mode": "semantic",
   "top_k": 10,
   "min_score": 0.4,
+  "output_fields": ["text", "meta"],
   "filter": {
     "must": [
       { "field": "meta.price", "op": "lt", "value": 1500 },
@@ -382,22 +385,24 @@ curl -sX POST $BASE/v1/vectors/upsert \
 }
 ```
   `mode` 可选，默认 `hybrid`（可选 `semantic` / `fulltext`）；`top_k` 默认 10，最大 100；`filter` 可选，见 §7。
+  `output_fields` 可选，**投影白名单**：取值是 `{dataset, category, tags, text, meta, created_at, updated_at}` 的任意子集（空数组合法 = 只回 `id`/`score`/`score_type`）。**省略 = 全部返回**。`id` / `score` / `score_type` 永远返回，**不要列进来**——列它们、或列任何内部列（`pk` / `vector` / `sparse_vector` / `status` / `expire_at`）都是 `400 INVALID_INPUT`。校验在嵌入调用**之前**完成（非法投影不会先花掉一次 embedding）。
   `min_score` 可选，**相关度下限**：丢掉低于它的命中。**仅 `semantic`(cosine)/`fulltext`(bm25) 生效**；`hybrid`（含默认 mode）传入即 `400`——RRF 是排名不是相关度，要门槛请用 `top_k` 或显式 `mode=semantic`。在 `top_k` 之后裁剪，故结果可能 **少于 `top_k`**（要更多过线就调大 `top_k`）。需按模型校准：dense 下无关文本也 ~0.15–0.25，有效的 cosine 门槛要明显高于此（如 0.4–0.6），没有通用的"0.5"。
 - 响应 200：`{ "hits": VectorSearchHit[] }`（每个 hit 含 `score` + `score_type`）。
-- 错误：`400 INVALID_INPUT`（query 为空或 >65535 字节 / top_k=0 / filter 非法 / `min_score` 非有限值或与 `mode=hybrid` 同用）、`413 PAYLOAD_TOO_LARGE`（top_k>100）、`500 EMBEDDING_FAILED`（semantic/hybrid 嵌入失败）/ `500`（hybrid 后端失败，不降级）。
+- 错误：`400 INVALID_INPUT`（query 为空或 >65535 字节 / top_k=0 / filter 非法 / `output_fields` 含非可投影字段 / `min_score` 非有限值或与 `mode=hybrid` 同用）、`404 NOT_FOUND`（`dataset` 不存在或已归档）、`413 PAYLOAD_TOO_LARGE`（top_k>100）、`500 EMBEDDING_FAILED`（semantic/hybrid 嵌入失败）/ `500`（hybrid 后端失败，不降级）。
 
 #### POST `/v1/vectors/query` 🟦
 按 id 直查。**不保证顺序；不存在的 id 静默跳过（不报错）**。单次最多 **500** 个 id。
-- 请求：`{ "dataset": "products", "ids": ["sku-1","sku-2"] }`
+- 请求：`{ "dataset": "products", "ids": ["sku-1","sku-2"], "output_fields": ["text"] }`
+  `output_fields` 可选，白名单与语义同 search（省略 = 全返；`id` 永远返回，本端点无 `score` / `score_type` 可列；列非法字段 → `400`）。
 - 响应 200：`{ "hits": VectorRecordHit[] }`
-- 错误：`400 INVALID_INPUT`（ids 为空）、`413 PAYLOAD_TOO_LARGE`（>500）。
+- 错误：`400 INVALID_INPUT`（`ids` 为空 / 某个 id 字符集或长度非法 / `output_fields` 含非可投影字段）、`404 NOT_FOUND`（`dataset` 不存在或已归档）、`413 PAYLOAD_TOO_LARGE`（>500）。
 
 #### POST `/v1/vectors/delete` 🟦
 按 id 硬删。单次最多 **500** 个 id。
 - 请求：`{ "dataset": "products", "ids": ["sku-1","sku-2"] }`
 - 响应 200：`{ "delete_count": 2 }`
 - ⚠️ `delete_count` 是 Milvus 创建的 **tombstone 数 = `len(ids)`**，与「实际存在并被删的行数」**无关**。要区分请先 `query`。
-- 错误：`400 INVALID_INPUT`（ids 为空）、`403 PERMISSION_DENIED`（read-only `wk_`）、`413 PAYLOAD_TOO_LARGE`（>500）。
+- 错误：`400 INVALID_INPUT`（`ids` 为空 / 某个 id 字符集或长度非法）、`403 PERMISSION_DENIED`（read-only `wk_`）、`404 NOT_FOUND`（`dataset` 不存在或已归档）、`413 PAYLOAD_TOO_LARGE`（>500）。
 
 ---
 
@@ -422,6 +427,41 @@ curl -sX POST $BASE/v1/vectors/upsert \
 撤销令牌（先校验归属本账号）。
 - 响应 **204**：无响应体
 - 错误：`404 NOT_FOUND`（不存在 **或** 属于他账号——不泄露存在性）。
+
+---
+
+### 6.7 平台面（AI Platform 网关）
+
+公司 AI Platform 接入用的另一套表面，鉴权由平台网关外移完成（不用 `vk_`）。**服务端没有 `/v1/apps/*` 路由**，别按它写 SDK。
+
+术语：路径里的 `{workspace}` 是**平台租户码**（服务端内部存为 `app_id`），其下的一个 veda workspace 在平台面称为 **project**（`{id}` 即 workspace id）。
+
+**控制面**（`routes/apps.rs`）：
+
+| 方法 | 路径 | 用途 |
+|---|---|---|
+| GET | `/v1/my/projects` | 当前网关用户的 project（跨 workspace 拍平） |
+| POST / GET | `/v1/workspace/{workspace}/projects` | 建 / 列 project |
+| GET / PATCH / DELETE | `/v1/workspace/{workspace}/project/{id}` | 查 / 改 / 删 project |
+| POST / GET | `/v1/workspace/{workspace}/project/{id}/keys` | 签发 / 列数据面 `wk_` |
+| DELETE | `/v1/workspace/{workspace}/project/{id}/keys/{key_id}` | 撤销 key |
+| GET | `/v1/workspace/{workspace}/project/{id}/keys/{key_id}/token` | 取 key 明文 |
+| POST / GET | `/v1/workspace/{workspace}/project/{id}/datasets` | 建 / 列 dataset |
+
+**数据面**（`routes/project_data.rs`，向量部分与 §6.5 同源逻辑）：
+
+`POST /v1/workspace/{workspace}/project/{id}/vectors/{upsert|search|query|delete}`
+
+**响应信封不同** ⚠️ 平台面走公司信封，不是 §1 的 `{success,data}`：
+
+| 场景 | 响应体 |
+|---|---|
+| 列表 | `{ "data": [...], "page", "size", "order_by", "order", "total", "total_page", "has_next_page", "has_prev_page" }` |
+| 单对象（create / update / getToken） | **裸对象**，无 `data` 包装 |
+| 无内容（delete / revoke） | `{}` |
+| 错误 | `{ "error": { "code", "reason", "message", "external" } }`（HTTP 状态码不变） |
+
+**分页也不同** ⚠️ 平台面用 offset 分页（非 §12 的游标）：`page`（从 1 起）、`size`（默认 20，最大 200）、`order_by`（`created_at` \| `id`，默认 `created_at`）、`order`（`asc` \| `desc`，默认 `desc`）、`keyword`（**仅 `GET /v1/my/projects` 认这个参数**，其余列表端点解析后丢弃；按 project 的 `name` 或 `description` 大小写不敏感子串过滤，`%` / `_` 会当 LIKE 通配符，空串=不过滤）。
 
 ---
 

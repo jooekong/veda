@@ -92,7 +92,9 @@ brew install --cask macfuse
   veda init                       # 匿名零输入，立即可用
   veda init --email you@corp.com  # 具名账号
   ```
-  server URL 已内置默认 `https://veda.ddmc-inc.com`，无需手动配。
+  `install.sh` 会把 server URL 写进 `~/.config/veda/config.toml`（默认 `https://veda.ddmc-inc.com`），装完即可用。
+  注意二进制**自带**的默认是 `http://localhost:3000`——走[源码编译 fallback](#源码编译-fallback) 的要自己跑一次
+  `veda config set server_url https://veda.ddmc-inc.com`，或用 `export VEDA_SERVER=…` / 每条命令带 `--server`。
 
 ---
 
@@ -116,6 +118,7 @@ brew install --cask macfuse
 cargo build --release -p veda-cli --bin veda
 install -m 0755 target/release/veda ~/.local/bin/veda
 veda --version
+veda config set server_url https://veda.ddmc-inc.com   # 源码编译不经 install.sh，要自己配
 ```
 
 ---

@@ -11,7 +11,7 @@ Veda 有两种 workspace，先想清楚你要哪种，再跟对应那一节走�
 
 ### 1. 拿账号
 
-在 [首页](/) 点 **Get started anonymously**，页面会给你三样东西：
+在 [首页](/) 点 **匿名开始**（英文界面是 **Get started anonymously**），页面会给你三样东西：
 
 - `vk_xxx` —— **账号 key**，管理 workspace 用。
 - `wk_xxx` —— **workspace key**，文件 / 搜索操作用。
@@ -33,7 +33,9 @@ curl -fsSL https://veda.ddmc-inc.com/install.sh | sh
 veda init --server https://veda.ddmc-inc.com --import-key vk_xxx
 ```
 
-配置写到 `~/.config/veda/config.toml`（已有文件会先备份成 `config.toml.bak.<时间戳>`）。
+`--import-key` 两种 key 都收：`vk_`（账号 key，导入后自动为你签一把 workspace key）或 `wk_`（workspace key，只做文件 / 搜索操作，不能管理 workspace）。
+
+配置写到 `~/.config/veda/config.toml`（已有文件会先备份成 `config.toml.bak.<时间戳>`）。这台机器已经 onboard 过的话，不带参数的 `veda init` 会直接报错退出——这是刻意设计，防止静默覆盖已有身份；换身份用 `--import-key`（会自动备份），或者先删掉配置文件。
 
 ### 4. 上传、读、列
 

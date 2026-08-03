@@ -284,7 +284,7 @@ Full request / response fields, the apps platform plane, and ops endpoints: see 
 
 ## 12. Before going live
 
-- **Embedding throughput is hard-capped by the cloud vendor's QPM limit**, with no client-side concurrency gate: for bulk writes / high-concurrency search, throttle concurrency and batch with backoff, or use `mode=fulltext` for pure-keyword cases (no embedding involved).
+- **Embedding throughput is hard-capped by the cloud vendor's QPM limit.** The server runs a two-level priority gate (`[embedding].max_concurrency`, default 8 — interactive calls take permits ahead of background indexing), but the gate only prevents collapse, it does not raise the ceiling: for bulk writes / high-concurrency search still throttle concurrency and batch with backoff, or use `mode=fulltext` for pure-keyword cases (no embedding involved).
 - **Write throughput << read throughput**: for bulk writes prefer `write_mode=insert` (when ids are unique) + ≤ 500 records / call.
 - Soft-deleting a workspace / dataset does **not reclaim Milvus vectors**.
 - The Java SDK still implements the old `vk_` contract and is **not adapted to `wk_`**; for now, integrate over raw HTTP as described on this page.
