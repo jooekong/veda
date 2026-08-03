@@ -374,8 +374,8 @@ impl Client {
         Self::check(resp).await
     }
 
-    /// GET /v1/index-status — {pending, processing, dead} counts of
-    /// index-gating tasks for this workspace.
+    /// GET /v1/layout — top-level entries with per-area summaries and
+    /// counts, plus workspace totals.
     pub async fn workspace_layout(&self, ws_key: &str) -> Result<serde_json::Value> {
         let resp = self
             .http
@@ -386,6 +386,8 @@ impl Client {
         Self::check(resp).await
     }
 
+    /// GET /v1/index-status — {pending, processing, dead} counts of
+    /// index-gating tasks for this workspace.
     pub async fn index_status(&self, ws_key: &str) -> Result<serde_json::Value> {
         let resp = self
             .http

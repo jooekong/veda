@@ -1021,32 +1021,92 @@ mod cli_parse_tests {
 
 /// Byte counts for humans. Binary units, one decimal below 10 so `9.7 MB`
 /// stays readable while `512 KB` doesn't get a pointless `.0`.
+///
+/// The unit is chosen against the *rounded* value, not the raw one:
+/// picking it first lets 1048575 print as `1024 KB` instead of `1.0 MB`,
+/// because rounding happens after the unit is already locked in.
 fn human_bytes(n: i64) -> String {
     const UNITS: [&str; 5] = ["B", "KB", "MB", "GB", "TB"];
+    // Byte counts are COUNT/SUM results and cannot be negative; a negative
+    // here means a broken response, and 0 is a less confusing answer than
+    // `-9223372036854775808 B`.
+    let n = n.max(0);
     let mut v = n as f64;
     let mut u = 0;
-    while v >= 1024.0 && u < UNITS.len() - 1 {
+    while u < UNITS.len() - 1 && round_at_precision(v) >= 1024.0 {
         v /= 1024.0;
         u += 1;
     }
     if u == 0 {
-        format!("{n} B")
-    } else if v < 10.0 {
+        return format!("{n} B");
+    }
+    // Branch on the rounded value too, or 9.999 prints as "10.0 KB" —
+    // a decimal the >= 10 rule says it shouldn't have.
+    if round_at_precision(v) < 10.0 {
         format!("{v:.1} {}", UNITS[u])
     } else {
         format!("{v:.0} {}", UNITS[u])
     }
 }
 
+/// Widest abstract we will print, in terminal cells. Long enough for the
+/// one-sentence L0 this column is designed around, short enough that a
+/// pathological one can't wrap and destroy the table.
+const LAYOUT_ABSTRACT_CELLS: usize = 100;
+
+/// Make an LLM-written summary safe to drop into a table row.
+///
+/// A newline in an abstract forges what looks like a whole extra entry —
+/// the summariser is a language model, so a stray line break is a normal
+/// failure, not a hostile one. Control characters (ESC in particular) also
+/// get folded to spaces so a response can't drive the terminal.
+fn clean_cell(s: &str) -> String {
+    use unicode_width::UnicodeWidthChar;
+
+    let mut out = String::new();
+    let mut width = 0usize;
+    for ch in s.chars() {
+        let ch = if ch.is_control() { ' ' } else { ch };
+        let w = ch.width().unwrap_or(0);
+        if width + w > LAYOUT_ABSTRACT_CELLS {
+            out.push('…');
+            break;
+        }
+        out.push(ch);
+        width += w;
+    }
+    out.trim_end().to_string()
+}
+
+/// What `v` becomes once printed: one decimal below 10, whole above.
+fn round_at_precision(v: f64) -> f64 {
+    if v < 10.0 {
+        (v * 10.0).round() / 10.0
+    } else {
+        v.round()
+    }
+}
+
 /// Render `GET /v1/layout` for a terminal.
 ///
-/// The abstract goes last on purpose: it is the only column that can hold
-/// CJK, and trailing columns don't need width arithmetic to stay aligned.
+/// Column padding uses display width, not `chars().count()`: a CJK
+/// directory name like `文档中心/` is 5 chars but occupies 9 terminal
+/// columns, and veda's own workspaces are full of them.
 fn print_layout(data: &serde_json::Value) {
+    print!("{}", render_layout(data));
+}
+
+/// Split out from `print_layout` so column alignment is testable — the
+/// CJK-width bug this guards against is invisible unless you can assert on
+/// the rendered string.
+fn render_layout(data: &serde_json::Value) -> String {
+    use std::fmt::Write as _;
+    use unicode_width::UnicodeWidthStr;
+
+    let mut out = String::new();
     let entries = data["entries"].as_array().cloned().unwrap_or_default();
     if entries.is_empty() {
-        println!("(empty workspace — nothing uploaded yet)");
-        return;
+        return "(empty workspace — nothing uploaded yet)\n".to_string();
     }
 
     // Two left columns, padded to their own widest cell.
@@ -1058,30 +1118,42 @@ fn print_layout(data: &serde_json::Value) {
             let name = path.strip_prefix('/').unwrap_or(path);
             let name = if is_dir { format!("{name}/") } else { name.to_string() };
             let size = if is_dir {
-                match e["file_count"].as_i64() {
+                // A negative count is a broken response, not "minus one
+                // file" — drop it rather than render `-1 files`.
+                match e["file_count"].as_i64().filter(|n| *n >= 0) {
                     Some(1) => "1 file".to_string(),
                     Some(n) => format!("{n} files"),
                     None => String::new(),
                 }
             } else {
-                e["size_bytes"].as_i64().map(human_bytes).unwrap_or_default()
+                e["size_bytes"]
+                    .as_i64()
+                    .filter(|n| *n >= 0)
+                    .map(human_bytes)
+                    .unwrap_or_default()
             };
-            (name, size, e["abstract"].as_str().map(str::to_string))
+            (name, size, e["abstract"].as_str().map(clean_cell))
         })
         .collect();
-    let w_name = rows.iter().map(|r| r.0.chars().count()).max().unwrap_or(0);
-    let w_size = rows.iter().map(|r| r.1.chars().count()).max().unwrap_or(0);
+    let w_name = rows.iter().map(|r| r.0.width()).max().unwrap_or(0);
+    let w_size = rows.iter().map(|r| r.1.width()).max().unwrap_or(0);
     for (name, size, abs) in &rows {
-        let name_pad = " ".repeat(w_name - name.chars().count());
-        let size_pad = " ".repeat(w_size - size.chars().count());
-        match abs {
-            Some(a) => println!("{name}{name_pad}  {size_pad}{size}  {a}"),
-            None => println!("{name}{name_pad}  {size_pad}{size}"),
-        }
+        // saturating: width() can never exceed the max we just computed,
+        // but a panic here would be an absurd way to lose a listing.
+        let name_pad = " ".repeat(w_name.saturating_sub(name.width()));
+        let size_pad = " ".repeat(w_size.saturating_sub(size.width()));
+        let line = match abs {
+            Some(a) => format!("{name}{name_pad}  {size_pad}{size}  {a}"),
+            None => format!("{name}{name_pad}  {size_pad}{size}"),
+        };
+        // An entry with neither a count nor an abstract would otherwise
+        // ship a line of trailing spaces.
+        let _ = writeln!(out, "{}", line.trim_end());
     }
 
     let stats = &data["stats"];
-    println!(
+    let _ = writeln!(
+        out,
         "\n{} files, {} directories, {}",
         stats["total_files"].as_i64().unwrap_or(0),
         stats["total_directories"].as_i64().unwrap_or(0),
@@ -1090,17 +1162,24 @@ fn print_layout(data: &serde_json::Value) {
     // Only say something when the answer is incomplete — a fully-summarised
     // workspace needs no footnote.
     if data["truncated"].as_bool().unwrap_or(false) {
-        println!("(more top-level entries exist than shown — use `veda ls /` for the full list)");
+        let _ = writeln!(
+            out,
+            "(more top-level entries exist than shown — use `veda ls /` for the full list)"
+        );
     }
     match data["summary_state"].as_str() {
         Some("partial") => {
-            println!("(some summaries are still being generated, or never will be for empty dirs)")
+            let _ = writeln!(
+                out,
+                "(some summaries are still being generated, or never will be for empty dirs)"
+            );
         }
         Some("disabled") => {
-            println!("(summaries are disabled on this server — no LLM configured)")
+            let _ = writeln!(out, "(summaries are disabled on this server — no LLM configured)");
         }
         _ => {}
     }
+    out
 }
 
 async fn print_summary_layer(
@@ -1805,10 +1884,19 @@ async fn main() -> anyhow::Result<()> {
         }
         Commands::Layout => {
             let resp = c.workspace_layout(cfg.active_wk()?).await?;
+            // Without this check a response missing `data` renders as
+            // "empty workspace" — a broken server would look like an empty
+            // one, which is the worst way to be wrong here.
+            let data = &resp["data"];
+            if !data.is_object() || !data["entries"].is_array() {
+                anyhow::bail!(
+                    "unexpected /v1/layout response (no data.entries array): {resp}"
+                );
+            }
             if json_output {
-                println!("{}", resp["data"]);
+                println!("{data}");
             } else {
-                print_layout(&resp["data"]);
+                print_layout(data);
             }
         }
         Commands::Collection { action } => match action {
@@ -2213,21 +2301,207 @@ mod cp_bytes_tests {
 
 #[cfg(test)]
 mod layout_render_tests {
-    use super::human_bytes;
+    use super::{human_bytes, render_layout};
+    use serde_json::json;
+    use unicode_width::UnicodeWidthStr;
+
+    /// Terminal cells a rendered line occupies up to `needle`.
+    fn cells_before(line: &str, needle: &str) -> usize {
+        line[..line.find(needle).unwrap_or_else(|| panic!("{needle:?} not in {line:?}"))].width()
+    }
+
+    /// A CJK directory name is fewer chars than terminal cells, so padding
+    /// by `chars().count()` silently skews every following column. veda's
+    /// own workspaces are full of Chinese directory names.
+    #[test]
+    fn columns_align_when_a_directory_name_is_cjk() {
+        let out = render_layout(&json!({
+            "stats": {"total_files": 9, "total_directories": 2, "total_bytes": 1024},
+            "summary_state": "ready", "truncated": false,
+            "entries": [
+                {"path": "/文档中心", "is_dir": true, "file_count": 42, "abstract": "中文目录名"},
+                {"path": "/docs", "is_dir": true, "file_count": 7, "abstract": "英文目录名"},
+                {"path": "/README.md", "is_dir": false, "size_bytes": 4096, "abstract": "文件"}
+            ]
+        }));
+        // `文档中心/` is 5 chars but 9 cells — the same width as
+        // `README.md`, so it takes no padding while `docs/` takes four.
+        // Padding by chars would give it four spaces too and shove the rest
+        // of its row right.
+        let lines: Vec<&str> = out.lines().take(3).collect();
+        assert_eq!(
+            lines,
+            vec![
+                "文档中心/  42 files  中文目录名",
+                "docs/       7 files  英文目录名",
+                "README.md    4.0 KB  文件",
+            ],
+            "rendered:\n{out}"
+        );
+        // Belt and braces: the abstract column starts at the same cell.
+        let starts: Vec<usize> = [
+            cells_before(lines[0], "中文目录名"),
+            cells_before(lines[1], "英文目录名"),
+            cells_before(lines[2], "文件"),
+        ]
+        .into();
+        assert!(starts.iter().all(|s| *s == starts[0]), "{starts:?}\n{out}");
+    }
+
+    #[test]
+    fn entry_without_count_or_abstract_has_no_trailing_space() {
+        let out = render_layout(&json!({
+            "stats": {}, "summary_state": "ready", "truncated": false,
+            "entries": [{"path": "/a", "is_dir": true}]
+        }));
+        let first = out.lines().next().unwrap();
+        assert_eq!(first, first.trim_end(), "trailing whitespace in {first:?}");
+    }
+
+    /// Malformed / partial entries must degrade, never panic — this render
+    /// path sits between the user and a server response it does not control.
+    /// Non-object elements matter as much as missing fields: the renderer
+    /// indexes into every element as if it were a map.
+    #[test]
+    fn malformed_entries_do_not_panic() {
+        let out = render_layout(&json!({
+            "stats": {}, "summary_state": "ready", "truncated": false,
+            "entries": [
+                {"path": "/keep", "is_dir": true, "file_count": 1},
+                {"path": "/a"},
+                {"path": 123, "is_dir": true},
+                {"path": "/b", "is_dir": false, "abstract": null},
+                {},
+                null,
+                42,
+                "not-an-object",
+                []
+            ]
+        }));
+        // Every element still produces exactly one row, and the well-formed
+        // one is untouched by its malformed neighbours.
+        let rows = out.lines().take_while(|l| !l.is_empty()).count();
+        assert_eq!(rows, 9, "one row per element:\n{out}");
+        assert!(out.contains("keep/  1 file"), "{out}");
+    }
+
+    /// `entries` that isn't an array, or a `data` that isn't an object,
+    /// must not masquerade as an empty workspace. The renderer treats them
+    /// as empty; the caller is what has to reject them (see Commands::Layout).
+    #[test]
+    fn non_array_entries_render_as_empty_so_the_caller_must_validate() {
+        for bad in [json!(null), json!({"entries": "oops"}), json!(42)] {
+            let out = render_layout(&bad);
+            assert!(
+                out.contains("empty workspace"),
+                "renderer contract changed for {bad}: {out}"
+            );
+        }
+    }
+
+    #[test]
+    fn footnotes_only_appear_when_the_answer_is_incomplete() {
+        let complete = render_layout(&json!({
+            "stats": {}, "summary_state": "ready", "truncated": false,
+            "entries": [{"path": "/a", "is_dir": true, "file_count": 1, "abstract": "x"}]
+        }));
+        assert!(!complete.contains('('), "clean layout needs no footnote:\n{complete}");
+
+        let degraded = render_layout(&json!({
+            "stats": {}, "summary_state": "disabled", "truncated": true,
+            "entries": [{"path": "/a", "is_dir": true, "file_count": 1}]
+        }));
+        assert!(degraded.contains("more top-level entries"), "{degraded}");
+        assert!(degraded.contains("summaries are disabled"), "{degraded}");
+    }
+
+    #[test]
+    fn empty_workspace_says_so() {
+        let out = render_layout(&json!({
+            "stats": {}, "summary_state": "ready", "truncated": false, "entries": []
+        }));
+        assert!(out.contains("empty workspace"), "{out}");
+    }
 
     #[test]
     fn human_bytes_switches_units_and_drops_pointless_decimals() {
-        assert_eq!(human_bytes(0), "0 B");
-        assert_eq!(human_bytes(512), "512 B");
-        assert_eq!(human_bytes(1024), "1.0 KB");
-        assert_eq!(human_bytes(4096), "4.0 KB");
-        // >= 10 in a unit loses the decimal: "524 KB", not "524.3 KB".
-        assert_eq!(human_bytes(536_870), "524 KB");
-        assert_eq!(human_bytes(10 * 1024 * 1024), "10 MB");
-        assert_eq!(human_bytes(1024_i64.pow(4)), "1.0 TB");
-        // TB is the last unit: absurd inputs keep counting in TB rather
-        // than walking off the end of the table.
-        assert_eq!(human_bytes(i64::MAX), "8388608 TB");
+        for (n, want) in [
+            (0_i64, "0 B"),
+            (512, "512 B"),
+            (1023, "1023 B"),
+            (1024, "1.0 KB"),
+            (4096, "4.0 KB"),
+            // >= 10 in a unit loses the decimal: "524 KB", not "524.3 KB".
+            (536_870, "524 KB"),
+            (10 * 1024 * 1024, "10 MB"),
+            (1024_i64.pow(4), "1.0 TB"),
+            // Carry: rounding pushes this to 1024 KB, which must promote to
+            // MB rather than print a value the unit can't hold.
+            (1_048_575, "1.0 MB"),
+            (1_048_576, "1.0 MB"),
+            // Rounds to exactly 10 — the ">= 10 has no decimal" rule has to
+            // be applied to the rounded value, not the raw one.
+            (10_239, "10 KB"),
+            // Counts can't be negative; a broken response shows 0, not a
+            // 20-digit negative.
+            (-1, "0 B"),
+            (i64::MIN, "0 B"),
+            // TB is the last unit: absurd inputs keep counting in TB rather
+            // than walking off the end of the table.
+            (i64::MAX, "8388608 TB"),
+        ] {
+            assert_eq!(human_bytes(n), want, "human_bytes({n})");
+        }
+    }
+
+    /// A line break in an LLM-written abstract would otherwise render as a
+    /// whole extra table row — invented data that looks exactly like the
+    /// real thing.
+    #[test]
+    fn abstract_newline_cannot_forge_a_row() {
+        let out = render_layout(&json!({
+            "stats": {}, "summary_state": "ready", "truncated": false,
+            "entries": [
+                {"path": "/a", "is_dir": true, "file_count": 1,
+                 "abstract": "第一行\n伪造的第二行  99 files  假的"},
+                {"path": "/b", "is_dir": true, "file_count": 2, "abstract": "正常"}
+            ]
+        }));
+        let rows: Vec<&str> = out.lines().take_while(|l| !l.is_empty()).collect();
+        // The abstract's text is preserved — what must not survive is its
+        // *structure*: two entries, two rows, and the second row is the
+        // real /b entry rather than the forged one.
+        assert_eq!(rows.len(), 2, "one entry per row, got:\n{out}");
+        assert!(rows[0].starts_with("a/"), "{out}");
+        assert!(rows[1].starts_with("b/"), "forged row took slot 2:\n{out}");
+        assert!(rows[0].contains("第一行 伪造的第二行"), "newline should fold to a space:\n{out}");
+    }
+
+    #[test]
+    fn overlong_abstract_is_capped() {
+        let out = render_layout(&json!({
+            "stats": {}, "summary_state": "ready", "truncated": false,
+            "entries": [{"path": "/a", "is_dir": true, "file_count": 1,
+                         "abstract": "很长".repeat(200)}]
+        }));
+        let first = out.lines().next().unwrap();
+        assert!(first.width() < 140, "row is {} cells:\n{first}", first.width());
+        assert!(first.ends_with('…'), "{first}");
+    }
+
+    #[test]
+    fn negative_counts_are_treated_as_missing() {
+        let out = render_layout(&json!({
+            "stats": {"total_files": -3, "total_bytes": -5},
+            "summary_state": "ready", "truncated": false,
+            "entries": [
+                {"path": "/a", "is_dir": true, "file_count": -1},
+                {"path": "/f", "is_dir": false, "size_bytes": -9}
+            ]
+        }));
+        assert!(!out.contains("-1"), "{out}");
+        assert!(!out.contains("-9"), "{out}");
+        assert!(!out.contains("-5"), "{out}");
     }
 }
 
@@ -2685,6 +2959,9 @@ mod cp_dir_tests {
         assert!(err.to_string().contains("consecutive"), "got: {err}");
     }
 }
+
+
+
 
 
 

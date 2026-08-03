@@ -5332,6 +5332,7 @@ dependencies = [
  "toml",
  "tracing",
  "tracing-subscriber",
+ "unicode-width",
  "veda-types",
  "wiremock",
 ]

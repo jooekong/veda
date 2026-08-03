@@ -25,6 +25,7 @@ dirs = "6"
 toml = "0.8"
 rpassword = "7"
 ignore = "0.4.31"
+unicode-width = "0.2.2"
 
 [dev-dependencies]
 tempfile = "3"

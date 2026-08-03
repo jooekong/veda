@@ -27,6 +27,18 @@ that matters.
   first in the MCP `initialize` instructions.
 
 ### Fixed
+- **`veda layout` mangled its table for Chinese directory names, and an
+  abstract containing a line break forged a whole extra row.** Column
+  padding measured `chars().count()` while terminals lay out by display
+  width — `文档中心/` is 5 characters but 9 cells, so every following
+  column skewed. Abstracts are LLM-written, so a stray newline is a normal
+  failure rather than a hostile one, and it rendered as what looked like a
+  second entry with its own counts; control characters are now folded to
+  spaces and the column is capped. Byte sizes also picked their unit
+  before rounding, so 1048575 printed as `1024 KB` instead of `1.0 MB`,
+  and negative counts from a broken response rendered as `-1 files`. A
+  response missing `data.entries` reported "empty workspace" rather than
+  an error — the one failure mode where being wrong is invisible.
 - **`veda cp <dir>` ignored `.gitignore`, so uploading a repo flooded the
   knowledge base.** The skip list was four hard-coded directory names
   (`.git`, `__pycache__`, `.idea`, `node_modules`) — `target/`, `dist/`,
