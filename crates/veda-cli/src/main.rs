@@ -133,6 +133,11 @@ enum Commands {
         src: String,
         /// Remote path on server
         dst: String,
+        /// Upload everything, ignoring .gitignore / .vedaignore rules.
+        /// The built-in skip list (.git, node_modules, .DS_Store, ...)
+        /// still applies. Only meaningful when src is a directory.
+        #[arg(long)]
+        no_ignore: bool,
     },
     /// Read a file's text. PDF/Word documents print their extracted
     /// text; use --raw for the original bytes (or `veda cp` to download).
@@ -1423,7 +1428,11 @@ async fn main() -> anyhow::Result<()> {
                 );
             }
         },
-        Commands::Cp { src, dst } => {
+        Commands::Cp {
+            src,
+            dst,
+            no_ignore,
+        } => {
             // Non-destructive announcement: cp writes a new revision,
             // so a wrong workspace is recoverable. Skip the blocking
             // prompt but still print the workspace alias.
@@ -1438,7 +1447,8 @@ async fn main() -> anyhow::Result<()> {
             } else {
                 let src_path = std::path::Path::new(&src);
                 if src_path.is_dir() {
-                    let stats = cp_dir_recursive(&c, cfg.active_wk()?, src_path, &dst).await?;
+                    let stats =
+                        cp_dir_recursive(&c, cfg.active_wk()?, src_path, &dst, no_ignore).await?;
                     if stats.failed > 0 {
                         // Rerunning is cheap: already-uploaded files dedup
                         // server-side via If-None-Match, so only the failed
@@ -1888,16 +1898,21 @@ async fn cp_dir_recursive(
     ws_key: &str,
     src_root: &std::path::Path,
     dst_root: &str,
+    no_ignore: bool,
 ) -> anyhow::Result<CpStats> {
     let dst_root = dst_root.trim_end_matches('/');
     let mut files = Vec::new();
-    let mut ignored = 0usize;
-    collect_files(src_root, &mut files, &mut ignored)?;
-    if ignored > 0 {
-        eprintln!("  (skipped {ignored} ignored entr{}: {}, {})",
-            if ignored == 1 { "y" } else { "ies" },
-            IGNORED_DIRS.join("/"),
-            IGNORED_FILES.join("/"));
+    let found = collect_files(src_root, &mut files, no_ignore)?;
+    // We deliberately do NOT report a count of skipped entries: gitignored
+    // paths never reach the iterator, so any total we printed would be a
+    // number we cannot actually compute. Report what we do know instead.
+    if !no_ignore && found.rules_seen {
+        eprintln!(
+            "  ({} file{} to upload; .gitignore/.vedaignore rules applied — \
+             --no-ignore to upload everything)",
+            files.len(),
+            if files.len() == 1 { "" } else { "s" }
+        );
     }
     let mut stats = CpStats { uploaded: 0, failed: 0 };
     let mut consecutive = 0usize;
@@ -1944,39 +1959,117 @@ const IGNORED_DIRS: &[&str] = &[".git", "__pycache__", ".idea", "node_modules"];
 /// File names never worth uploading: macOS Finder droppings.
 const IGNORED_FILES: &[&str] = &[".DS_Store"];
 
+/// What `collect_files` found, beyond the file list itself.
+#[derive(Debug)]
+pub(crate) struct CollectOutcome {
+    /// An ignore file was actually present somewhere in the tree. Drives the
+    /// "rules applied" hint — checking only the source root would miss a
+    /// `sub/.gitignore`, which does take effect.
+    pub rules_seen: bool,
+}
+
+/// Collect every uploadable file under `root`.
+///
+/// Ignore semantics, deliberately narrow: only `.gitignore` and `.vedaignore`
+/// files *inside the source tree* apply, plus the built-in skip list. We do
+/// not read `.ignore` (a ripgrep convention that outranks `.gitignore`), the
+/// user's global gitignore, or `.git/info/exclude` — those would make the
+/// same directory upload different content on different machines, and the
+/// only thing they bought us (`.DS_Store`) is already in IGNORED_FILES.
 fn collect_files(
-    dir: &std::path::Path,
+    root: &std::path::Path,
     out: &mut Vec<std::path::PathBuf>,
-    ignored: &mut usize,
-) -> std::io::Result<()> {
-    for entry in std::fs::read_dir(dir)? {
+    no_ignore: bool,
+) -> anyhow::Result<CollectOutcome> {
+    let mut b = ignore::WalkBuilder::new(root);
+    b
+        // Dotfiles are real content in a knowledge base (.github/, .env.example,
+        // .cursor/rules). The crate skips them by default, which would silently
+        // drop them relative to the old hand-rolled walk.
+        .hidden(false)
+        // All four of these must be off or the walker still climbs to the
+        // filesystem root looking for ignore files (`Ignore::add_parents`
+        // only short-circuits when parents/git_ignore/git_exclude/git_global
+        // are ALL false). Ancestor rules never *match* once parents is off,
+        // but they are still parsed — so a malformed glob in some ~/.gitignore
+        // would surface as a walk error and abort an unrelated upload.
+        //
+        // `.gitignore` is therefore honoured as a *custom* ignore filename
+        // rather than through git_ignore. Same syntax, no ancestor probing,
+        // and no dependency on whether the source is a git repo at all.
+        // Registration order is precedence: the later name wins, so
+        // `.vedaignore` can override `.gitignore`.
+        .parents(false)
+        .ignore(false)
+        .git_global(false)
+        .git_exclude(false)
+        .git_ignore(false)
+        // Do NOT follow symlinks: avoids infinite recursion through directory
+        // symlinks and prevents silently uploading files outside the source
+        // root via a symlink escape.
+        .follow_links(false)
+        .sort_by_file_path(|a, b| a.cmp(b));
+    if !no_ignore {
+        b.add_custom_ignore_filename(".gitignore");
+        b.add_custom_ignore_filename(".vedaignore");
+    }
+    // Prune the built-in skip list BEFORE descending. Testing these names in
+    // the loop below instead would let the walker descend into .git and yield
+    // .git/config — whose file name is "config", not in IGNORED_DIRS — so the
+    // entire directory would be uploaded.
+    b.filter_entry(|e| {
+        // Depth 0 is the source root the user named explicitly: honour it even
+        // if it is called `node_modules`. (The crate happens to skip filtering
+        // at depth 0 today, but its filter_entry docs promise the predicate is
+        // applied to all entries, so don't rely on that.)
+        if e.depth() == 0 {
+            return true;
+        }
+        let name = e.file_name().to_string_lossy();
+        if e.file_type().is_some_and(|t| t.is_dir()) {
+            !IGNORED_DIRS.contains(&name.as_ref())
+        } else {
+            !IGNORED_FILES.contains(&name.as_ref())
+        }
+    });
+
+    let mut rules_seen = false;
+    for entry in b.build() {
         let entry = entry?;
-        // Use file_type() (does NOT follow symlinks) to avoid infinite recursion
-        // through directory symlinks, and to prevent silently uploading files
-        // outside the intended source root via a symlink escape.
-        let ft = entry.file_type()?;
+        // A malformed ignore file does NOT fail the walk — the crate attaches
+        // the parse error to the (successful) directory entry and carries on
+        // with fewer rules in effect. Swallowing that is how `veda cp` would
+        // quietly upload the whole of target/ after a typo in .gitignore, so
+        // treat it as fatal: the user must see it, and re-running after a fix
+        // is free (uploads dedup by content hash).
+        if let Some(err) = entry.error() {
+            anyhow::bail!(
+                "ignore rules under {} could not be parsed: {err}",
+                entry.path().display()
+            );
+        }
+        // file_type() reflects the symlink itself (follow_links is off).
+        let Some(ft) = entry.file_type() else {
+            continue; // stdin, not reachable for a directory walk
+        };
         if ft.is_symlink() {
-            eprintln!("skip symlink: {}", entry.path().display());
+            // Depth 0 is the source root. walkdir enters an explicitly named
+            // root symlink but still reports it as one, so announcing a skip
+            // here would contradict the files we then upload from inside it.
+            if entry.depth() > 0 {
+                eprintln!("skip symlink: {}", entry.path().display());
+            }
             continue;
         }
-        let name = entry.file_name();
-        let name = name.to_string_lossy();
-        let p = entry.path();
-        if ft.is_dir() {
-            if IGNORED_DIRS.contains(&name.as_ref()) {
-                *ignored += 1;
-                continue;
+        if ft.is_file() {
+            let name = entry.file_name();
+            if name == ".gitignore" || name == ".vedaignore" {
+                rules_seen = true;
             }
-            collect_files(&p, out, ignored)?;
-        } else if ft.is_file() {
-            if IGNORED_FILES.contains(&name.as_ref()) {
-                *ignored += 1;
-                continue;
-            }
-            out.push(p);
+            out.push(entry.into_path());
         }
     }
-    Ok(())
+    Ok(CollectOutcome { rules_seen })
 }
 
 #[cfg(test)]
@@ -2033,6 +2126,33 @@ mod cp_dir_tests {
             .set_body_json(serde_json::json!({"success": true, "data": {"revision": 1}}))
     }
 
+    /// Relative paths in walk order. Components are joined with "/" rather
+    /// than via a string replace, so a Unix file name that legitimately
+    /// contains a backslash stays one component.
+    fn walk_order(root: &std::path::Path, no_ignore: bool) -> Vec<String> {
+        let mut files = Vec::new();
+        collect_files(root, &mut files, no_ignore).unwrap();
+        files
+            .iter()
+            .map(|p| {
+                p.strip_prefix(root)
+                    .unwrap()
+                    .components()
+                    .map(|c| c.as_os_str().to_string_lossy().into_owned())
+                    .collect::<Vec<_>>()
+                    .join("/")
+            })
+            .collect()
+    }
+
+    /// Relative paths of everything `collect_files` would upload, sorted so
+    /// membership assertions do not depend on traversal order.
+    fn collected(root: &std::path::Path, no_ignore: bool) -> Vec<String> {
+        let mut names = walk_order(root, no_ignore);
+        names.sort();
+        names
+    }
+
     #[test]
     fn collect_files_skips_vcs_and_finder_junk() {
         let dir = tempfile::tempdir().unwrap();
@@ -2047,17 +2167,356 @@ mod cp_dir_tests {
         fs::write(root.join(".DS_Store"), "x").unwrap();
         fs::write(root.join("a.txt"), "x").unwrap();
 
+        assert_eq!(collected(root, false), vec!["a.txt", "sub/b.txt"]);
+    }
+
+    /// The built-in skip list must PRUNE, not name-match. If `.git` is only
+    /// tested per-entry, the walker descends into it and yields
+    /// `.git/objects/ab/cd` — whose file name is "cd", matching nothing — and
+    /// the whole repo internals get uploaded. Nested files are the only
+    /// assertion that can tell the two implementations apart.
+    #[test]
+    fn collect_files_prunes_ignored_dirs_rather_than_name_matching() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        fs::create_dir_all(root.join(".git/objects/ab")).unwrap();
+        fs::write(root.join(".git/objects/ab/cd"), "x").unwrap();
+        fs::write(root.join(".git/config"), "x").unwrap();
+        fs::create_dir_all(root.join("node_modules/pkg/lib")).unwrap();
+        fs::write(root.join("node_modules/pkg/lib/index.js"), "x").unwrap();
+        fs::write(root.join("keep.txt"), "x").unwrap();
+
+        assert_eq!(collected(root, false), vec!["keep.txt"]);
+    }
+
+    #[test]
+    fn collect_files_honours_gitignore() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        fs::write(root.join(".gitignore"), "target/\n").unwrap();
+        fs::create_dir_all(root.join("target/debug")).unwrap();
+        fs::write(root.join("target/debug/x"), "x").unwrap();
+        fs::write(root.join("keep.txt"), "x").unwrap();
+
+        assert_eq!(collected(root, false), vec![".gitignore", "keep.txt"]);
+    }
+
+    #[test]
+    fn collect_files_honours_vedaignore() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        fs::write(root.join(".vedaignore"), "*.log\n").unwrap();
+        fs::write(root.join("a.log"), "x").unwrap();
+        fs::write(root.join("keep.txt"), "x").unwrap();
+
+        assert_eq!(collected(root, false), vec![".vedaignore", "keep.txt"]);
+    }
+
+    /// The crate skips dotfiles by default. A knowledge base wants them:
+    /// .github/, .env.example and .cursor/rules are real content. Dropping
+    /// this would be a silent regression against the old hand-rolled walk.
+    #[test]
+    fn collect_files_keeps_dotfiles() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        fs::create_dir_all(root.join(".github/workflows")).unwrap();
+        fs::write(root.join(".github/workflows/ci.yml"), "x").unwrap();
+        fs::write(root.join(".env.example"), "x").unwrap();
+
+        assert_eq!(
+            collected(root, false),
+            vec![".env.example", ".github/workflows/ci.yml"]
+        );
+    }
+
+    /// The crate ignores .gitignore entirely outside a git repo unless
+    /// require_git(false) is set — and does so silently.
+    #[test]
+    fn collect_files_honours_gitignore_outside_a_git_repo() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        // No .git anywhere: a plain documentation directory.
+        fs::write(root.join(".gitignore"), "skip.txt\n").unwrap();
+        fs::write(root.join("skip.txt"), "x").unwrap();
+        fs::write(root.join("keep.txt"), "x").unwrap();
+
+        assert_eq!(collected(root, false), vec![".gitignore", "keep.txt"]);
+    }
+
+    #[test]
+    fn collect_files_no_ignore_keeps_gitignored_but_still_prunes_builtins() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        fs::write(root.join(".gitignore"), "target/\n").unwrap();
+        fs::create_dir_all(root.join("target/debug")).unwrap();
+        fs::write(root.join("target/debug/x"), "x").unwrap();
+        fs::create_dir(root.join(".git")).unwrap();
+        fs::write(root.join(".git/config"), "x").unwrap();
+        fs::write(root.join("keep.txt"), "x").unwrap();
+
+        assert_eq!(
+            collected(root, true),
+            vec![".gitignore", "keep.txt", "target/debug/x"]
+        );
+    }
+
+    /// Ignore files above the source root must not apply: with
+    /// require_git(false), parents(true) would read past the repo root and
+    /// let a stray ~/.gitignore change what gets uploaded.
+    #[test]
+    fn collect_files_does_not_read_ignore_files_above_the_source_root() {
+        let dir = tempfile::tempdir().unwrap();
+        let parent = dir.path();
+        fs::write(parent.join(".gitignore"), "keep.txt\n").unwrap();
+        let root = parent.join("src");
+        fs::create_dir(&root).unwrap();
+        fs::write(root.join("keep.txt"), "x").unwrap();
+
+        assert_eq!(collected(&root, false), vec!["keep.txt"]);
+    }
+
+    /// `.ignore` is a ripgrep convention that outranks .gitignore. Honouring
+    /// it would let a file the user wrote for a different tool silently
+    /// change knowledge-base content.
+    #[test]
+    fn collect_files_does_not_read_dot_ignore_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        fs::write(root.join(".ignore"), "x.txt\n").unwrap();
+        fs::write(root.join("x.txt"), "x").unwrap();
+
+        assert_eq!(collected(root, false), vec![".ignore", "x.txt"]);
+    }
+
+    #[test]
+    fn collect_files_honours_nested_gitignore() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        fs::create_dir(root.join("sub")).unwrap();
+        fs::write(root.join("sub/.gitignore"), "*.tmp\n").unwrap();
+        fs::write(root.join("sub/a.tmp"), "x").unwrap();
+        fs::write(root.join("sub/b.txt"), "x").unwrap();
+        fs::write(root.join("top.tmp"), "x").unwrap();
+
+        // sub/*.tmp is filtered; the rule does not leak up to the root.
+        assert_eq!(
+            collected(root, false),
+            vec!["sub/.gitignore", "sub/b.txt", "top.tmp"]
+        );
+    }
+
+    /// Both the link target and the source root live inside one TempDir, so
+    /// nothing outside the test's own scratch space is created or removed
+    /// and cleanup still happens when an assertion fails.
+    #[cfg(unix)]
+    #[test]
+    fn collect_files_skips_symlinks_without_following_them() {
+        let dir = tempfile::tempdir().unwrap();
+        let outside = dir.path().join("outside");
+        let root = dir.path().join("src");
+        fs::create_dir_all(outside.join("nested")).unwrap();
+        fs::write(outside.join("nested/secret.txt"), "x").unwrap();
+        fs::create_dir(&root).unwrap();
+        fs::write(root.join("keep.txt"), "x").unwrap();
+        std::os::unix::fs::symlink(&outside, root.join("link_dir")).unwrap();
+        std::os::unix::fs::symlink(outside.join("nested/secret.txt"), root.join("link_file"))
+            .unwrap();
+
+        // Neither the symlink itself nor anything behind it is uploaded.
+        assert_eq!(collected(&root, false), vec!["keep.txt"]);
+    }
+
+    /// A symlink pointing at its own ancestor must not spin forever.
+    #[cfg(unix)]
+    #[test]
+    fn collect_files_terminates_on_a_self_referential_symlink() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        fs::write(root.join("keep.txt"), "x").unwrap();
+        std::os::unix::fs::symlink(root, root.join("loop")).unwrap();
+
+        assert_eq!(collected(root, false), vec!["keep.txt"]);
+    }
+
+    /// Walk order is deterministic: without an explicit sorter the crate
+    /// yields directory entries in filesystem order, which varies.
+    #[test]
+    fn collect_files_walks_in_sorted_order() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        for n in ["m.txt", "a.txt", "z.txt", "b.txt"] {
+            fs::write(root.join(n), "x").unwrap();
+        }
+        fs::create_dir(root.join("adir")).unwrap();
+        fs::write(root.join("adir/inner.txt"), "x").unwrap();
+
+        assert_eq!(
+            walk_order(root, false),
+            vec!["a.txt", "adir/inner.txt", "b.txt", "m.txt", "z.txt"]
+        );
+    }
+
+    /// A typo in an ignore file must not degrade to "upload everything":
+    /// the crate keeps walking with fewer rules and reports the parse error
+    /// out-of-band, which is exactly the silent failure this feature exists
+    /// to prevent.
+    #[test]
+    fn collect_files_fails_loudly_on_a_malformed_ignore_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        // `[z-a]` is an inverted character range — one of the few things
+        // globset actually rejects (unbalanced brackets are tolerated).
+        fs::write(root.join(".gitignore"), "target/\n[z-a]\n").unwrap();
+        fs::create_dir_all(root.join("target")).unwrap();
+        fs::write(root.join("target/x"), "x").unwrap();
+
         let mut files = Vec::new();
-        let mut ignored = 0usize;
-        collect_files(root, &mut files, &mut ignored).unwrap();
-        let mut names: Vec<String> = files
-            .iter()
-            .map(|p| p.strip_prefix(root).unwrap().to_string_lossy().into_owned())
-            .collect();
-        names.sort();
-        assert_eq!(names, vec!["a.txt", "sub/b.txt"]);
-        // .git dir + __pycache__ dir count once each; both .DS_Store files count
-        assert_eq!(ignored, 4);
+        let err = collect_files(root, &mut files, false).unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(msg.contains("ignore rules"), "got: {msg}");
+    }
+
+    /// An ignore file above the source root must not even be *parsed*: with
+    /// git_ignore enabled the crate climbs to the filesystem root looking
+    /// for one, and a malformed glob up there would abort this upload.
+    #[test]
+    fn collect_files_ignores_a_malformed_ignore_file_above_the_source_root() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join(".gitignore"), "[z-a]\n").unwrap();
+        let root = dir.path().join("src");
+        fs::create_dir(&root).unwrap();
+        fs::write(root.join(".gitignore"), "target/\n").unwrap();
+        fs::create_dir_all(root.join("target")).unwrap();
+        fs::write(root.join("target/x"), "x").unwrap();
+        fs::write(root.join("keep.txt"), "x").unwrap();
+
+        assert_eq!(collected(&root, false), vec![".gitignore", "keep.txt"]);
+    }
+
+    /// `.vedaignore` is registered after `.gitignore`, so it wins.
+    #[test]
+    fn vedaignore_overrides_gitignore() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        fs::write(root.join(".gitignore"), "notes.txt\n").unwrap();
+        fs::write(root.join(".vedaignore"), "!notes.txt\n").unwrap();
+        fs::write(root.join("notes.txt"), "x").unwrap();
+
+        assert!(collected(root, false).contains(&"notes.txt".to_string()));
+    }
+
+    #[test]
+    fn collect_files_no_ignore_also_disables_vedaignore() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        fs::write(root.join(".vedaignore"), "skip.txt\n").unwrap();
+        fs::write(root.join("skip.txt"), "x").unwrap();
+
+        assert!(collected(root, true).contains(&"skip.txt".to_string()));
+    }
+
+    /// `.git/info/exclude` is repo-local and invisible to collaborators;
+    /// honouring it would make uploads depend on one machine's setup.
+    #[test]
+    fn collect_files_does_not_read_git_info_exclude() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        fs::create_dir_all(root.join(".git/info")).unwrap();
+        fs::write(root.join(".git/info/exclude"), "keep.txt\n").unwrap();
+        fs::write(root.join("keep.txt"), "x").unwrap();
+
+        assert_eq!(collected(root, false), vec!["keep.txt"]);
+    }
+
+    /// A directory rule prunes the whole subtree rather than skipping one
+    /// level, and its scope is the `.gitignore`'s own directory — not its
+    /// siblings, not its parent. This is where the feature's value actually
+    /// comes from: `target/` is never descended into, so its half-million
+    /// files are never even stat'd.
+    #[test]
+    fn nested_gitignore_directory_rules_prune_whole_subtrees() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        fs::write(root.join("root.md"), "x").unwrap();
+
+        // Rules live only in sub/, never at the root.
+        fs::create_dir_all(root.join("sub/build/deep/deeper")).unwrap();
+        fs::create_dir_all(root.join("sub/keep/inner/tmp")).unwrap();
+        fs::create_dir_all(root.join("sub/dist")).unwrap();
+        fs::write(root.join("sub/.gitignore"), "build/\n/only-here.txt\ndist\n").unwrap();
+        fs::write(root.join("sub/build/a.o"), "x").unwrap();
+        fs::write(root.join("sub/build/deep/deeper/b.o"), "x").unwrap();
+        fs::write(root.join("sub/dist/c.js"), "x").unwrap();
+        fs::write(root.join("sub/only-here.txt"), "x").unwrap();
+        fs::write(root.join("sub/keep/ok.md"), "x").unwrap();
+        // A second, deeper ignore file: nesting has no depth limit.
+        fs::write(root.join("sub/keep/inner/.gitignore"), "tmp/\n").unwrap();
+        fs::write(root.join("sub/keep/inner/tmp/e.txt"), "x").unwrap();
+        fs::write(root.join("sub/keep/inner/f.md"), "x").unwrap();
+
+        // Same names one level over: sub/'s rules must not reach them.
+        fs::create_dir_all(root.join("other/build")).unwrap();
+        fs::write(root.join("other/build/d.o"), "x").unwrap();
+        fs::write(root.join("other/only-here.txt"), "x").unwrap();
+
+        assert_eq!(
+            collected(root, false),
+            vec![
+                "other/build/d.o",
+                "other/only-here.txt",
+                "root.md",
+                "sub/.gitignore",
+                "sub/keep/inner/.gitignore",
+                "sub/keep/inner/f.md",
+                "sub/keep/ok.md",
+            ]
+        );
+    }
+
+    #[test]
+    fn collect_files_honours_nested_vedaignore() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        fs::create_dir(root.join("sub")).unwrap();
+        fs::write(root.join("sub/.vedaignore"), "*.tmp\n").unwrap();
+        fs::write(root.join("sub/a.tmp"), "x").unwrap();
+        fs::write(root.join("sub/b.txt"), "x").unwrap();
+
+        assert_eq!(
+            collected(root, false),
+            vec!["sub/.vedaignore", "sub/b.txt"]
+        );
+    }
+
+    #[test]
+    fn rules_seen_is_reported_for_a_nested_ignore_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        fs::create_dir(root.join("sub")).unwrap();
+        fs::write(root.join("sub/.gitignore"), "*.tmp\n").unwrap();
+        fs::write(root.join("sub/a.txt"), "x").unwrap();
+
+        let mut files = Vec::new();
+        // Only a subdirectory carries rules; checking the source root alone
+        // would report "no rules" while they are demonstrably in effect.
+        assert!(collect_files(root, &mut files, false).unwrap().rules_seen);
+
+        let dir2 = tempfile::tempdir().unwrap();
+        fs::write(dir2.path().join("a.txt"), "x").unwrap();
+        let mut f2 = Vec::new();
+        assert!(!collect_files(dir2.path(), &mut f2, false).unwrap().rules_seen);
+    }
+
+    /// The source root the user named explicitly is honoured even when its
+    /// own name is on the built-in skip list.
+    #[test]
+    fn collect_files_does_not_filter_the_source_root_itself() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("node_modules");
+        fs::create_dir(&root).unwrap();
+        fs::write(root.join("index.js"), "x").unwrap();
+
+        assert_eq!(collected(&root, false), vec!["index.js"]);
     }
 
     #[tokio::test]
@@ -2082,7 +2541,7 @@ mod cp_dir_tests {
         fs::write(dir.path().join("good2.txt"), "x").unwrap();
 
         let client = super::client::Client::new(&server.uri());
-        let stats = cp_dir_recursive(&client, "wk-test", dir.path(), "/dst")
+        let stats = cp_dir_recursive(&client, "wk-test", dir.path(), "/dst", false)
             .await
             .unwrap();
         assert_eq!(stats.uploaded, 2);
@@ -2103,9 +2562,14 @@ mod cp_dir_tests {
             fs::write(dir.path().join(format!("f{i:02}.txt")), "x").unwrap();
         }
         let client = super::client::Client::new(&server.uri());
-        let err = cp_dir_recursive(&client, "wk-test", dir.path(), "/dst")
+        let err = cp_dir_recursive(&client, "wk-test", dir.path(), "/dst", false)
             .await
             .unwrap_err();
         assert!(err.to_string().contains("consecutive"), "got: {err}");
     }
 }
+
+
+
+
+

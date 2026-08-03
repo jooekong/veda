@@ -61,6 +61,7 @@ veda search "..."               # 数据面命令直接可用，不写任何本�
 ```bash
 veda cp ./README.md /docs/readme.md          # 上传：本地 → 远端
 veda cp ./src /code                          # 目录递归上传（src 是目录时自动 recursive）
+veda cp ./repo /code --no-ignore             # 连 .gitignore 忽略的文件一起传
 veda cp - /notes/scratch < input.txt         # 从 stdin 上传（src 写 "-"）
 veda cat /docs/readme.md > ./readme.md       # 下载：远端 → 本地（用 cat 重定向，cp 只负责上传）
 veda mv /old.md /archive/old.md
@@ -80,6 +81,19 @@ veda cat /docs/design.pdf --raw > design.pdf # --raw 拿原始字节（PDF/Word 
 ```
 
 文本与二进制都能 `cp` / `cat`（需 server ≥0.1.15）。PDF / Word 会自动抽取文本入索引可搜，`cat` 默认输出提取文本、`--raw` 拿原始字节；图片 / jar 等其余二进制只存不索引，`cat` 输出原始字节（重定向到文件）。
+
+### 目录上传会跳过什么
+
+`veda cp <目录>` 遵守**源目录树内**的 `.gitignore` 和 `.vedaignore`（同 gitignore 语法），外加一份内置兜底列表：`.git`、`__pycache__`、`.idea`、`node_modules`、`.DS_Store`。
+
+这不是可有可无的过滤——**每个上传的文件都会消耗一次 embedding 调用和两次 LLM 摘要调用**。传一个 Rust 仓库而不跳 `target/`，几十万个构建产物会直接烧掉配额。
+
+几条刻意的取舍：
+
+- **dotfile 照传**。`.github/`、`.env.example`、`.cursor/rules` 都是真内容，不会因为以 `.` 开头就被丢掉。
+- **不是 git 仓库也认 ignore 文件**。纯文档目录里放一个 `.vedaignore` 一样生效。
+- **只看源目录树以内**。源目录**之上**的 `.gitignore`、你的全局 gitignore、`.git/info/exclude`、以及 `.ignore` 文件（ripgrep 约定）**都不读**——否则同一个目录在不同机器上会传出不同内容。
+- `--no-ignore` 关掉 `.gitignore` / `.vedaignore`，但内置兜底列表仍然生效（`.git/` 任何情况下都不传）。
 
 ## 搜索
 

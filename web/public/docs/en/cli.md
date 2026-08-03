@@ -61,6 +61,7 @@ Precedence: the `--server` flag > env (`VEDA_SERVER` / `VEDA_KEY`) > config.toml
 ```bash
 veda cp ./README.md /docs/readme.md          # upload: local → remote
 veda cp ./src /code                          # directory upload (recursion auto when src is a dir)
+veda cp ./repo /code --no-ignore             # include files your .gitignore excludes
 veda cp - /notes/scratch < input.txt         # upload from stdin (use "-" as src)
 veda cat /docs/readme.md > ./readme.md       # download: remote → local (redirect cat — cp is upload-only)
 veda mv /old.md /archive/old.md
@@ -80,6 +81,19 @@ veda cat /docs/design.pdf --raw > design.pdf # --raw = original bytes (without i
 ```
 
 Text and binary both `cp` / `cat` fine (server ≥0.1.15). PDF / Word files get their text extracted and indexed — `cat` prints the extracted text by default, `--raw` fetches the original bytes; other binaries (images / jars / …) are stored but not indexed, and `cat` emits raw bytes (redirect to a file).
+
+### What a directory upload skips
+
+`veda cp <dir>` honours `.gitignore` and `.vedaignore` (same syntax) found **inside the source tree**, plus a built-in list: `.git`, `__pycache__`, `.idea`, `node_modules`, `.DS_Store`.
+
+This filtering is not cosmetic — **every uploaded file costs one embedding call and two LLM summary calls**. Upload a Rust repository without skipping `target/` and hundreds of thousands of build artifacts burn straight through your quota.
+
+Deliberate choices worth knowing:
+
+- **Dotfiles are uploaded.** `.github/`, `.env.example` and `.cursor/rules` are real content; a leading `.` is not a reason to drop them.
+- **Ignore files work outside git repositories.** Drop a `.vedaignore` in a plain documentation directory and it applies.
+- **Only the source tree is consulted.** Ignore files *above* the source directory, your global gitignore, `.git/info/exclude`, and `.ignore` files (a ripgrep convention) are **not** read — otherwise the same directory would upload different content on different machines.
+- `--no-ignore` disables `.gitignore` / `.vedaignore` but keeps the built-in list (`.git/` is never uploaded).
 
 ## Search
 

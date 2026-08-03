@@ -10,6 +10,21 @@ that matters.
 ## [Unreleased]
 
 ### Fixed
+- **`veda cp <dir>` ignored `.gitignore`, so uploading a repo flooded the
+  knowledge base.** The skip list was four hard-coded directory names
+  (`.git`, `__pycache__`, `.idea`, `node_modules`) — `target/`, `dist/`,
+  `build/`, `.venv/` and everything else went up, and *every* uploaded file
+  costs one embedding call plus two LLM summary calls. On this repository
+  that was 512,370 files instead of 341. `veda cp` now honours `.gitignore`
+  and a new `.vedaignore` (same syntax) found **inside the source tree**,
+  on top of the built-in list. It deliberately does *not* read `.ignore`
+  (a ripgrep convention that outranks `.gitignore`), your global gitignore,
+  `.git/info/exclude`, or any ignore file *above* the source root — those
+  would make the same directory upload different content on different
+  machines. Dotfiles are still uploaded (`.github/`, `.env.example` and
+  `.cursor/rules` are real content), and ignore files are honoured even
+  when the directory is not a git repository. `--no-ignore` uploads
+  everything while still pruning the built-in list.
 - **`deploy/Dockerfile` could not build.** The dependency-cache stage copied
   manifests for 7 crates while the workspace declares 9, so cargo aborted at
   manifest resolution (`failed to load manifest for workspace member
