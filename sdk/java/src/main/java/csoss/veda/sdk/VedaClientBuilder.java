@@ -28,7 +28,12 @@ public final class VedaClientBuilder {
     VedaClientBuilder() {
     }
 
-    /** Server base URL, e.g. {@code http://10.79.51.161:9009}. Required. */
+    /**
+     * Server base URL. Required. Production is
+     * {@code https://veda.ddmc-inc.com}, test is
+     * {@code https://veda.dbpaas.dingdongxiaoqu.com}; a self-hosted server
+     * listens on {@code http://localhost:3000} by default.
+     */
     public VedaClientBuilder baseUrl(String baseUrl) {
         this.baseUrl = baseUrl;
         return this;

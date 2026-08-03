@@ -10,6 +10,19 @@ that matters.
 ## [Unreleased]
 
 ### Fixed
+- **`deploy/Dockerfile` could not build.** The dependency-cache stage copied
+  manifests for 7 crates while the workspace declares 9, so cargo aborted at
+  manifest resolution (`failed to load manifest for workspace member
+  .../veda-fuse`) before compiling anything — the documented
+  `docker compose up -d` path had been dead since `veda-fuse` and
+  `veda-tunnel` joined the workspace. Both manifests and their source stubs
+  are now copied; neither crate is ever compiled in this image (they are not
+  in `veda-server`'s dependency graph), so no libfuse3 is needed. The builder
+  image is also re-pinned from `rust:1.85` to `rust:1.90` to match CI.
+- **Java SDK javadoc pointed at a retired endpoint.** `VedaClient`,
+  `VedaClientBuilder` and `VedaClientIT` all showed
+  `http://10.79.51.161:9009` — a raw internal IP on the pre-0.1 CLI port;
+  the server listens on 3000. They now name the real entry points.
 - **Documentation accuracy sweep — the published reference described a
   control plane that does not exist.** The platform surface was renamed to
   `/v1/workspace/{workspace}/*` (tenant code + *project*) back in

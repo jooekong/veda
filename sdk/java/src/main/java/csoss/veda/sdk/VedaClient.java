@@ -27,7 +27,7 @@ import java.io.Closeable;
  *
  * <pre>{@code
  * try (VedaClient veda = VedaClient.builder()
- *         .baseUrl("http://10.79.51.161:9009")
+ *         .baseUrl("https://veda.ddmc-inc.com")
  *         .apiKey("vk_...")
  *         .workspaceId("ws-...")
  *         .build()) {

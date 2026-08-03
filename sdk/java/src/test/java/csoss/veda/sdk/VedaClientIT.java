@@ -35,7 +35,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * Veda + Milvus + embedding stack. Run manually before tagging an SDK release:
  *
  * <pre>
- *   VEDA_URL=http://10.79.51.161:9009 \
+ *   VEDA_URL=https://veda.dbpaas.dingdongxiaoqu.com \
  *   VEDA_API_KEY=vk_... \
  *   VEDA_WS_ID=ws-... \
  *   mvn -f sdk/java/pom.xml verify -P integration

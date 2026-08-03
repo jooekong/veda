@@ -3,7 +3,8 @@
 # ca-certificates for HTTPS to Milvus and the embedding API) into the
 # final layer. Total runtime image is well under 100MB.
 
-FROM rust:1.85-bookworm AS builder
+# Keep in lockstep with .gitlab-ci.yml's build image.
+FROM rust:1.90-bookworm AS builder
 
 WORKDIR /src
 
@@ -11,6 +12,14 @@ WORKDIR /src
 # source files doesn't bust the heavy dep build. This is a standard
 # Rust-on-Docker pattern; the dummy main.rs makes cargo happy enough to
 # resolve and compile the dep tree without a real source tree.
+#
+# EVERY workspace member in the root Cargo.toml must be listed here, even
+# the ones this image never builds: cargo resolves the whole workspace
+# before it builds anything, so a missing member manifest fails with
+# "failed to load manifest for workspace member". veda-fuse and
+# veda-tunnel are only ever resolved, never compiled (they aren't in
+# veda-server's dependency graph), so their system deps — libfuse3 for
+# fuser — are not needed in this image.
 COPY Cargo.toml Cargo.lock ./
 COPY crates/veda-types/Cargo.toml crates/veda-types/Cargo.toml
 COPY crates/veda-core/Cargo.toml crates/veda-core/Cargo.toml
@@ -19,6 +28,8 @@ COPY crates/veda-pipeline/Cargo.toml crates/veda-pipeline/Cargo.toml
 COPY crates/veda-sql/Cargo.toml crates/veda-sql/Cargo.toml
 COPY crates/veda-server/Cargo.toml crates/veda-server/Cargo.toml
 COPY crates/veda-cli/Cargo.toml crates/veda-cli/Cargo.toml
+COPY crates/veda-fuse/Cargo.toml crates/veda-fuse/Cargo.toml
+COPY crates/veda-tunnel/Cargo.toml crates/veda-tunnel/Cargo.toml
 RUN set -eux; \
     for c in veda-types veda-core veda-store veda-pipeline veda-sql; do \
         mkdir -p crates/$c/src && echo "" > crates/$c/src/lib.rs; \
@@ -32,6 +43,12 @@ RUN set -eux; \
     mkdir -p crates/veda-server/src; \
     echo "fn main() {}" > crates/veda-server/src/main.rs; \
     echo "" > crates/veda-server/src/lib.rs; \
+    # veda-fuse declares both [lib] and [[bin]]; veda-tunnel is bin-only.
+    mkdir -p crates/veda-fuse/src; \
+    echo "" > crates/veda-fuse/src/lib.rs; \
+    echo "fn main() {}" > crates/veda-fuse/src/main.rs; \
+    mkdir -p crates/veda-tunnel/src; \
+    echo "fn main() {}" > crates/veda-tunnel/src/main.rs; \
     cargo build --release --bin veda-server; \
     rm -rf crates
 
