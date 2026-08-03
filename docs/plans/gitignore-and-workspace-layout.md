@@ -5,6 +5,15 @@
 > 日期：2026-08-03
 > 来源：对标 `Graphify-Labs/graphify` 后拍板的两条改进
 >
+> **v5 改名（实施后）**：`map` → **`layout`**，三处统一（REST `GET /v1/layout`、MCP 工具
+> `layout`、CLI `veda layout`）。理由：① `map` 在存储语境里是动词=挂载（Windows "map network
+> drive"），而 veda 恰好有 FUSE 挂载，`veda map` 会被误读；② 本文档早期考虑过的 `outline` 与既有
+> 的 `abstract`/`overview` 是英语近义词，三者并列无法区分。`layout` 表达的是「作用域/形态」而非
+> 「摘要深度」，且**不承诺完整性**——这点很重要，本端点截断在 200 条且是 best-effort 非快照，
+> `inventory`/`catalog`/`manifest` 那类词会过度承诺。改名在上测试环境当天完成，彼时零外部消费者。
+> 同时补上 **CLI `veda layout`**（原 D14 决定不做，后被推翻：`skill.md` 明确 coding agent 经
+> `veda` 二进制交互，CLI 是没配 MCP 时的默认路径，token 经济学在该路径上完全成立）。
+>
 > **v4 实施记录**（需求二实现 + codex 代码评审后）：
 > - **发现一个既有的系统属性，不是本次引入，但影响 map 的正确设计**：`veda_dentries` 的
 >   bootstrap DDL **没有指定 `CHARACTER SET` / `COLLATE`**，`path` 继承建库默认值；测试库上
@@ -55,7 +64,7 @@
 | # | 需求 | 一句话 |
 | --- | --- | --- |
 | 一 | `veda cp` 尊重 `.gitignore` / `.vedaignore` | 传仓库不再把 `target/` 灌进知识库烧 embedding + LLM 配额 |
-| 二 | `GET /v1/map` + MCP `map` 工具 | 给"这个知识库整体是什么"一个入口，**零新增 LLM 调用** |
+| 二 | `GET /v1/layout` + MCP `layout` 工具 | 给"这个知识库整体是什么"一个入口，**零新增 LLM 调用** |
 
 ---
 
@@ -355,7 +364,7 @@ cargo build -p veda-cli
 ## 3.2 API 契约
 
 ```
-GET /v1/map
+GET /v1/layout
 Authorization: Bearer wk_...
 ```
 
@@ -476,17 +485,17 @@ INDEX idx_ws_path_prefix (workspace_id, path(255))
 同意原始判断，理由补充：
 
 - 平台面 `project_data.rs` 服务的是前端 UI，UI 已有目录浏览器，map 对它价值低
-- tunnel 的"你知道些什么"是真需求，但 **tunnel 是标准 `wk_` 消费者，它可以直接调 `/v1/map`**——server 侧零额外工作。要不要接是 tunnel 的独立决定，不属于本方案
+- tunnel 的"你知道些什么"是真需求，但 **tunnel 是标准 `wk_` 消费者，它可以直接调 `/v1/layout`**——server 侧零额外工作。要不要接是 tunnel 的独立决定，不属于本方案
 - 不做的代价：需要时在 `project_data.rs` 加一行路由，几分钟的事
 
-同理**不做 CLI 子命令**（`veda map`）。原始需求没提，且 CLI 用户有 `veda ls` + `veda overview`。等 MCP 侧验证价值后再说。
+同理**不做 CLI 子命令**（`veda layout`）。原始需求没提，且 CLI 用户有 `veda ls` + `veda overview`。等 MCP 侧验证价值后再说。
 
 ## 3.3 MCP 工具
 
 ### 工具 description（D15）
 
 ```
-Workspace map: the top-level layout of this knowledge base, with a one-line
+How this knowledge base is organised: its top-level areas, each with a one-line
 summary and file count per area. Call this FIRST when you don't yet know what
 the workspace contains — one call replaces a round of list_dir probing and tells
 you which subtree to search or read. Cheap: ~100 tokens per entry.
@@ -505,7 +514,7 @@ Start with `search` (detail_level='abstract' scans relevance at ~100 tokens/hit)
 改为：
 
 ```
-Start with `map` for the workspace layout, then `search`
+Call `layout` first to see how an unfamiliar workspace is organised, then `search`
 (detail_level='abstract' scans relevance at ~100 tokens/hit),
 then `read_file` the promising paths. ...
 ```
@@ -651,8 +660,8 @@ pub struct MapEntry {
 
 | 文件 | 改动 |
 | --- | --- |
-| `veda-server/src/routes/search.rs` | `routes()` 加 `.route("/v1/map", get(get_map))`；新增 `get_map` handler（`AuthWorkspace`，调 `workspace_map`，按 `state.summary_enabled` 覆写 `summary_state`） |
-| `veda-server/src/routes/mcp.rs` `tool_metric_label` | 加 `"map" => "tool:map"` |
+| `veda-server/src/routes/search.rs` | `routes()` 加 `.route("/v1/layout", get(get_map))`；新增 `get_map` handler（`AuthWorkspace`，调 `workspace_map`，按 `state.summary_enabled` 覆写 `summary_state`） |
+| `veda-server/src/routes/mcp.rs` `tool_metric_label` | 加 `"layout" => "tool:layout"` |
 | `veda-server/src/routes/mcp.rs` `tool_specs` | 加 map 的 spec（D15 文案），**放在数组第一位**——tools/list 顺序影响 LLM 的默认倾向 |
 | `veda-server/src/routes/mcp.rs` `run_tool` | 加 `"map" => tool_map(state, auth).await` |
 | `veda-server/src/routes/mcp.rs` `initialize_result` | instructions 改成 map-first（D15） |
@@ -664,9 +673,9 @@ pub struct MapEntry {
 
 | 文件 | 改动 |
 | --- | --- |
-| `ARCHITECTURE.md` | MCP 章节 6 个工具改 7 个；已实现能力里补 `/v1/map` |
+| `ARCHITECTURE.md` | MCP 章节 6 个工具改 7 个；已实现能力里补 `/v1/layout` |
 | `web/public/docs/{zh,en}/reference.md` | **对外权威契约写这里**（含 D10 的 `summary_state` 语义、`truncated`、非快照声明） |
-| `docs/api/db-workspace-api.md` | **只在 §9「不属于本 API 的端点」清单里加 `GET /v1/map`**——该文件自述"只覆盖 db workspace"，把 fs 端点契约写进去会把两条数据面混在一起（v1 写错了） |
+| `docs/api/db-workspace-api.md` | **只在 §9「不属于本 API 的端点」清单里加 `GET /v1/layout`**——该文件自述"只覆盖 db workspace"，把 fs 端点契约写进去会把两条数据面混在一起（v1 写错了） |
 | `CHANGELOG.md` | `[Unreleased]` 加两条（cp ignore + map） |
 
 ## 3.5 DoD（需求二）
@@ -705,7 +714,7 @@ MCP 侧单测（`mcp.rs` 内联，与现有 9 个协议单测同处）：
 | # | 场景 | 期望 |
 | --- | --- | --- |
 | 9 | `tools/list` | 含 `map`，且 `map` 在数组**第一位**，`readOnlyHint == true` |
-| 10 | `tool_metric_label("map")` | 返回 `"tool:map"`（防 metrics 基数逃逸） |
+| 10 | `tool_metric_label("layout")` | 返回 `"tool:layout"`（防 metrics 基数逃逸） |
 | 11 | `initialize` 的 `instructions` | 含 `map`（守 D15——工具存在但 instructions 不提，agent 不会调） |
 
 ### 集成测试（真实 MySQL / Milvus / embedding / LLM）
@@ -718,9 +727,9 @@ NO_PROXY='*' cargo test -p veda-server --test map_test -- --ignored --test-threa
 
 | # | 场景 | 期望 |
 | --- | --- | --- |
-| 12 | 建 fs workspace（`summary_enabled: true`）→ 写 `/docs/a.md`、`/docs/b.md`、`/wiki/c.md`、`/README.md` → 等 worker 出 summary → `GET /v1/map` | 200；`success == true`；entries 含 `/docs`（`file_count == 2`）、`/wiki`（`file_count == 1`）、`/README.md`（有 `size_bytes`、**无** `file_count`）；顺序目录先；`summary_state == ready`；`stats.total_files == 4` |
-| 13 | summary 还没生成完时立刻 `GET /v1/map` | 200（**不是** 202/501），`summary_state == partial` |
-| 14 | db kind 的 `wk_` 调 `GET /v1/map` | 400 且 `error_code == "WORKSPACE_KIND_MISMATCH"` |
+| 12 | 建 fs workspace（`summary_enabled: true`）→ 写 `/docs/a.md`、`/docs/b.md`、`/wiki/c.md`、`/README.md` → 等 worker 出 summary → `GET /v1/layout` | 200；`success == true`；entries 含 `/docs`（`file_count == 2`）、`/wiki`（`file_count == 1`）、`/README.md`（有 `size_bytes`、**无** `file_count`）；顺序目录先；`summary_state == ready`；`stats.total_files == 4` |
+| 13 | summary 还没生成完时立刻 `GET /v1/layout` | 200（**不是** 202/501），`summary_state == partial` |
+| 14 | db kind 的 `wk_` 调 `GET /v1/layout` | 400 且 `error_code == "WORKSPACE_KIND_MISMATCH"` |
 | 15 | 无 Authorization header | 401（**在** kind 检查之前，见 D13） |
 | 16 | MCP `tools/call` name=`map` | `isError == false`，`content[0].text` 解析出的 JSON 与 REST 响应的 **`data` 字段**同构 |
 | 17 | 根下写 250 个文件 | entries 长度 200，`truncated == true`，响应正常返回不 OOM |
@@ -770,7 +779,7 @@ NO_PROXY='*' cargo test -p veda-server --test map_test -- --ignored --test-threa
 - `?depth=` 参数（D9）
 - markdown 渲染的 map 输出（JSON 够用且更省 token）
 - 根目录 L1 summary 的 worker/store 支持（§1.1——map 就是为了不做这个）
-- `veda map` CLI 子命令（D14）
+- `veda layout` CLI 子命令（D14）
 - 平台网关面 / tunnel 的 map 接入（D14）
 - `--no-ignore-vcs` / `--unrestricted` 分级逃生舱（D6）
 - 跳过原因的分类计数（D7）

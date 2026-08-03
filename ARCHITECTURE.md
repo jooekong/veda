@@ -67,7 +67,7 @@ veda-tunnel     外部 IM 接入（企微长连接）             (已上生产 
   - **Linux CLI 改 musl 静态产物**：`x86_64-unknown-linux-musl`，任意 glibc 可跑；`veda-fuse` 仍 gnu（动态链 libfuse3）
   - **server 自带安装器**：`GET /install.sh` 返回构建时嵌入的安装脚本；`GET /capabilities` 无鉴权能力探针（FUSE 用它决定是否暴露 summary sidecar）
 
-## Workspace 地图 `GET /v1/map`（2026-08-03）
+## Workspace 布局 `GET /v1/layout`（2026-08-03）
 
 一次调用给出「这个知识库整体是什么」：顶层条目 + 每条 L0 摘要 + 文件数 + 全局统计。**零新增 LLM 调用**，纯组装既有摘要数据。目标读者是 MCP 接入的 coding agent（陌生 workspace 的第一次调用，替代反复 `list_dir` 摸索）与 tunnel 机器人的「你知道些什么」。
 
@@ -77,7 +77,7 @@ veda-tunnel     外部 IM 接入（企微长连接）             (已上生产 
 - **`count_files_by_top_level` 的成本要说实话**：`GROUP BY SUBSTRING_INDEX(SUBSTRING(path,2),'/',1)` 是表达式分组，`veda_dentries` 上**没有索引能服务它**（该表只有 `idx_ws_path`/`idx_parent`/`idx_ws_path_prefix`），只能靠复合索引左前缀限定 workspace 后全量扫描，即 `O(workspace dentry 数)`。与 map 同时调用的 `storage_stats` 本来就是同量级，故未引入新的复杂度量级——但**上线前需在生产量级 `EXPLAIN ANALYZE`**，不可接受时退路是砍掉 `file_count`。根下的文件（`/README.md`）会分组到 key `README.md`，组装时**只给 `is_dir` 的条目读这个 count**，不能按「map 里有没有这个 key」判断。
 - **`summary_state` 三态**（`ready`/`partial`/`disabled`）用 body 字段而非 HTTP 三态——map 是 N 条摘要的聚合，套不上 `/v1/abstract` 的 202/501。两处易错语义：`disabled` **不清空已缓存的 abstract**（`/v1/abstract` 在有 summary 时根本不看 `summary_enabled`，藏起来会自相矛盾）；`partial` 只是「覆盖率不完整」的事实陈述，**不承诺重试有用**（变空的目录其摘要会被 worker 主动删除且不再生成）。`summary_enabled` 是 server 层状态，core 只判 ready/partial，由 handler 覆写 `disabled`。
 - **规模上限 `MAP_ENTRY_CAP = 200`**（`routes/search.rs`），超出置 `truncated: true`；排序目录在前、文件在后，故截断优先保住信息密度高的目录。`stats` 始终描述整个 workspace，不受截断影响。该值是拍的，无生产数据支撑。
-- **暂不接**平台网关面与 tunnel：tunnel 是标准 `wk_` 消费者，要用直接调 `/v1/map` 即可，server 侧零工作。也没有 `veda map` CLI 子命令。
+- **暂不接**平台网关面与 tunnel：tunnel 是标准 `wk_` 消费者，要用直接调 `/v1/layout` 即可，server 侧零工作。CLI 侧提供 `veda layout`（人类可读表格，`--json` 供 agent）。
 - **测试**：8 条组装单测（mock 可注入摘要/计数，含「cap 必须下推到查询」的 `limit == 201` 断言——只看返回长度无法区分 load-all-then-truncate）+ `tests/map_test.rs` 真实 MySQL/Milvus 集成（SUBSTRING_INDEX 计数、目录优先序、250 条截断、鉴权 401/400、MCP↔REST 同构、disabled 仍返缓存摘要）。摘要用 `upsert_summary` 直接写入而非跑 LLM worker——要验的是 SQL，接 LLM 只会增加不确定性。
 
 ## MCP 端点 `POST /mcp`（2026-07-22）
@@ -85,7 +85,7 @@ veda-tunnel     外部 IM 接入（企微长连接）             (已上生产 
 Coding Agent（Claude Code/Cursor/Codex）原生接入面：**Streamable HTTP transport 的 stateless 模式**，手写 JSON-RPC（无 SDK 依赖），协议版本只宣称 `2025-06-18`（03-26 要求 batch，stateless 单消息服务器不实现故不宣称）。用户侧零安装——`.mcp.json` 配 `url` + `Authorization: Bearer wk_` 即接入。设计：`docs/archive/plans/coding-agent-kb-plan.md` §4。
 
 - **`veda-server/routes/mcp.rs`**：`POST /mcp`（`AuthWorkspace`，fs only，与 REST 同一道鉴权闸；GET/DELETE 由 axum 自动 405 = 无下行 SSE/无会话）。挂在 30s TimeoutLayer **之外**（`ask` 需 90s），每工具自带超时（普通 30s / ask 95s）。严格 JSON-RPC 2.0 校验（`jsonrpc`/id 类型/params object，非法一律 -32600+id:null；无 id=notification→202）；`MCP-Protocol-Version` header 校验（有且不支持→400，无→放行）。错误分层：协议错→JSON-RPC error，领域错→`isError:true`+可读文本（LLM 可自愈）。**不做 Origin 校验**（rebinding 页面带不上 Bearer，见模块注释）。
-- **7 个只读工具**（进程内直调 service 层，非 HTTP 回环）：**`map`**（workspace 顶层地图，无参数，等价 `GET /v1/map`；**在 `tools_specs()` 数组里排第一且 `initialize` 的 instructions 首句就引导它**——工具存在但 instructions 不提，agent 基本不会调）/ `search`（hybrid 固定+detail_level 三层，描述里引导「先 abstract 后 read_file」的 token 经济学）/ `grep`（字面量+行号，**每行截 500B**）/ `read_file`（PDF/Word 返提取文本，整读 64KB 截断+行分页，行读同样过 byte cap）/ `list_dir`（flat 截 10k+truncated；recursive 复用服务层 QuotaExceeded 语义，成功即完整）/ `overview`（L1，pending/disabled 双话术）/ `ask`（非流式 `/v1/answer` 语义，**与 REST 共享 per-workspace 并发闸与全部 answer 指标**）。
+- **7 个只读工具**（进程内直调 service 层，非 HTTP 回环）：**`layout`**（workspace 顶层布局，无参数，等价 `GET /v1/layout`；**在 `tools_specs()` 数组里排第一且 `initialize` 的 instructions 首句就引导它**——工具存在但 instructions 不提，agent 基本不会调）/ `search`（hybrid 固定+detail_level 三层，描述里引导「先 abstract 后 read_file」的 token 经济学）/ `grep`（字面量+行号，**每行截 500B**）/ `read_file`（PDF/Word 返提取文本，整读 64KB 截断+行分页，行读同样过 byte cap）/ `list_dir`（flat 截 10k+truncated；recursive 复用服务层 QuotaExceeded 语义，成功即完整）/ `overview`（L1，pending/disabled 双话术）/ `ask`（非流式 `/v1/answer` 语义，**与 REST 共享 per-workspace 并发闸与全部 answer 指标**）。
 - **指标**：`veda_mcp_request_seconds{method,outcome}`——method label 只用白名单工具名（防任意 client 字符串撑爆基数）。
 - **测试**：9+ 单元（协议校验/版本协商/截断/schema 形状）+ `tests/mcp_http_test.rs` 集成 mega-test（真实 MySQL/Milvus/embedding：协议边角、鉴权、read-only wk_ 全工具、grep 长行截断、worker 驱动的 hybrid 命中、path_prefix 过滤）。
 - 已知尾巴：answer 超时后 Engine 任务存活+permit 提前释放（REST/MCP 同款既有行为），见 `docs/todos.md`。

@@ -234,6 +234,11 @@ enum Commands {
         /// Remote path
         path: String,
     },
+    /// Show how the workspace is organised: its top-level areas, each with
+    /// a one-line summary and a file count, plus workspace totals. The
+    /// cheapest way to get oriented in a workspace you don't know — one
+    /// call instead of `ls` followed by an `abstract` per directory.
+    Layout,
     /// Collection management
     Collection {
         #[command(subcommand)]
@@ -1014,6 +1019,90 @@ mod cli_parse_tests {
     }
 }
 
+/// Byte counts for humans. Binary units, one decimal below 10 so `9.7 MB`
+/// stays readable while `512 KB` doesn't get a pointless `.0`.
+fn human_bytes(n: i64) -> String {
+    const UNITS: [&str; 5] = ["B", "KB", "MB", "GB", "TB"];
+    let mut v = n as f64;
+    let mut u = 0;
+    while v >= 1024.0 && u < UNITS.len() - 1 {
+        v /= 1024.0;
+        u += 1;
+    }
+    if u == 0 {
+        format!("{n} B")
+    } else if v < 10.0 {
+        format!("{v:.1} {}", UNITS[u])
+    } else {
+        format!("{v:.0} {}", UNITS[u])
+    }
+}
+
+/// Render `GET /v1/layout` for a terminal.
+///
+/// The abstract goes last on purpose: it is the only column that can hold
+/// CJK, and trailing columns don't need width arithmetic to stay aligned.
+fn print_layout(data: &serde_json::Value) {
+    let entries = data["entries"].as_array().cloned().unwrap_or_default();
+    if entries.is_empty() {
+        println!("(empty workspace — nothing uploaded yet)");
+        return;
+    }
+
+    // Two left columns, padded to their own widest cell.
+    let rows: Vec<(String, String, Option<String>)> = entries
+        .iter()
+        .map(|e| {
+            let is_dir = e["is_dir"].as_bool().unwrap_or(false);
+            let path = e["path"].as_str().unwrap_or("?");
+            let name = path.strip_prefix('/').unwrap_or(path);
+            let name = if is_dir { format!("{name}/") } else { name.to_string() };
+            let size = if is_dir {
+                match e["file_count"].as_i64() {
+                    Some(1) => "1 file".to_string(),
+                    Some(n) => format!("{n} files"),
+                    None => String::new(),
+                }
+            } else {
+                e["size_bytes"].as_i64().map(human_bytes).unwrap_or_default()
+            };
+            (name, size, e["abstract"].as_str().map(str::to_string))
+        })
+        .collect();
+    let w_name = rows.iter().map(|r| r.0.chars().count()).max().unwrap_or(0);
+    let w_size = rows.iter().map(|r| r.1.chars().count()).max().unwrap_or(0);
+    for (name, size, abs) in &rows {
+        let name_pad = " ".repeat(w_name - name.chars().count());
+        let size_pad = " ".repeat(w_size - size.chars().count());
+        match abs {
+            Some(a) => println!("{name}{name_pad}  {size_pad}{size}  {a}"),
+            None => println!("{name}{name_pad}  {size_pad}{size}"),
+        }
+    }
+
+    let stats = &data["stats"];
+    println!(
+        "\n{} files, {} directories, {}",
+        stats["total_files"].as_i64().unwrap_or(0),
+        stats["total_directories"].as_i64().unwrap_or(0),
+        human_bytes(stats["total_bytes"].as_i64().unwrap_or(0))
+    );
+    // Only say something when the answer is incomplete — a fully-summarised
+    // workspace needs no footnote.
+    if data["truncated"].as_bool().unwrap_or(false) {
+        println!("(more top-level entries exist than shown — use `veda ls /` for the full list)");
+    }
+    match data["summary_state"].as_str() {
+        Some("partial") => {
+            println!("(some summaries are still being generated, or never will be for empty dirs)")
+        }
+        Some("disabled") => {
+            println!("(summaries are disabled on this server — no LLM configured)")
+        }
+        _ => {}
+    }
+}
+
 async fn print_summary_layer(
     c: &client::Client,
     ws_key: &str,
@@ -1714,6 +1803,14 @@ async fn main() -> anyhow::Result<()> {
             print_summary_layer(&c, cfg.active_wk()?, &path, "overview", "L1 Overview", "l1_overview")
                 .await?;
         }
+        Commands::Layout => {
+            let resp = c.workspace_layout(cfg.active_wk()?).await?;
+            if json_output {
+                println!("{}", resp["data"]);
+            } else {
+                print_layout(&resp["data"]);
+            }
+        }
         Commands::Collection { action } => match action {
             CollectionCmd::Create {
                 name,
@@ -2111,6 +2208,26 @@ mod cp_bytes_tests {
         let err = read_file_bytes("/nonexistent/path/abc.txt").unwrap_err();
         let msg = err.to_string();
         assert!(msg.contains("read") && msg.contains("/nonexistent"), "msg: {msg}");
+    }
+}
+
+#[cfg(test)]
+mod layout_render_tests {
+    use super::human_bytes;
+
+    #[test]
+    fn human_bytes_switches_units_and_drops_pointless_decimals() {
+        assert_eq!(human_bytes(0), "0 B");
+        assert_eq!(human_bytes(512), "512 B");
+        assert_eq!(human_bytes(1024), "1.0 KB");
+        assert_eq!(human_bytes(4096), "4.0 KB");
+        // >= 10 in a unit loses the decimal: "524 KB", not "524.3 KB".
+        assert_eq!(human_bytes(536_870), "524 KB");
+        assert_eq!(human_bytes(10 * 1024 * 1024), "10 MB");
+        assert_eq!(human_bytes(1024_i64.pow(4)), "1.0 TB");
+        // TB is the last unit: absurd inputs keep counting in TB rather
+        // than walking off the end of the table.
+        assert_eq!(human_bytes(i64::MAX), "8388608 TB");
     }
 }
 
@@ -2568,6 +2685,7 @@ mod cp_dir_tests {
         assert!(err.to_string().contains("consecutive"), "got: {err}");
     }
 }
+
 
 
 

@@ -1,9 +1,9 @@
-//! HTTP roundtrip for `GET /v1/map` and the MCP `map` tool, against real
+//! HTTP roundtrip for `GET /v1/layout` and the MCP `layout` tool, against real
 //! MySQL + Milvus + embedding via `tower::ServiceExt::oneshot` (no TCP).
 //!
 //! Summaries are inserted directly with `upsert_summary` rather than driven
 //! through the LLM worker. What needs a real database here is the SQL the
-//! map introduces — the `SUBSTRING_INDEX` GROUP BY that has no serving
+//! layout introduces — the `SUBSTRING_INDEX` GROUP BY that has no serving
 //! index, the `ORDER BY is_dir DESC, path LIMIT ?` child listing, and the
 //! two batched summary lookups. Summary *generation* is covered by the
 //! worker's own tests; wiring an LLM in here would only add flakiness.
@@ -293,8 +293,8 @@ async fn cleanup(state: &AppState, mysql: &MysqlStore, setups: &[&WsSetup]) {
 
 // ── request helpers ─────────────────────────────────────
 
-async fn get_map(router: Router, token: Option<&str>) -> (StatusCode, Value) {
-    let mut b = Request::builder().method("GET").uri("/v1/map");
+async fn get_layout(router: Router, token: Option<&str>) -> (StatusCode, Value) {
+    let mut b = Request::builder().method("GET").uri("/v1/layout");
     if let Some(t) = token {
         b = b.header("authorization", format!("Bearer {t}"));
     }
@@ -371,35 +371,35 @@ async fn set_abstract(mysql: &MysqlStore, ws_id: &str, path: &str, l0: &str) {
     mysql.upsert_summary(&s).await.unwrap();
 }
 
-fn entry<'a>(map: &'a Value, path: &str) -> &'a Value {
-    map["entries"]
+fn entry<'a>(layout: &'a Value, path: &str) -> &'a Value {
+    layout["entries"]
         .as_array()
         .unwrap()
         .iter()
         .find(|e| e["path"] == path)
-        .unwrap_or_else(|| panic!("no entry {path} in {map}"))
+        .unwrap_or_else(|| panic!("no entry {path} in {layout}"))
 }
 
 // ── the suite ───────────────────────────────────────────
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore]
-async fn map_endpoint_against_real_mysql() {
+async fn layout_endpoint_against_real_mysql() {
     let app = build_app(true).await;
     let fs_ws = provision_workspace(&app.state, WorkspaceKind::Fs).await;
     let db_ws = provision_workspace(&app.state, WorkspaceKind::Db).await;
 
     // ── auth: no bearer is rejected before any kind check ──
-    let (status, _) = get_map(app.router.clone(), None).await;
+    let (status, _) = get_layout(app.router.clone(), None).await;
     assert_eq!(status, StatusCode::UNAUTHORIZED);
 
     // ── auth: a db-kind wk_ cannot reach an fs-only endpoint ──
-    let (status, body) = get_map(app.router.clone(), Some(&db_ws.wk)).await;
+    let (status, body) = get_layout(app.router.clone(), Some(&db_ws.wk)).await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
     assert_eq!(body["error_code"], "WORKSPACE_KIND_MISMATCH");
 
     // ── an empty workspace still answers ──
-    let (status, body) = get_map(app.router.clone(), Some(&fs_ws.wk)).await;
+    let (status, body) = get_layout(app.router.clone(), Some(&fs_ws.wk)).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body["success"], true);
     assert_eq!(body["data"]["entries"].as_array().unwrap().len(), 0);
@@ -421,16 +421,16 @@ async fn map_endpoint_against_real_mysql() {
     }
 
     // No summaries yet, but the layout is already useful.
-    let (status, body) = get_map(app.router.clone(), Some(&fs_ws.wk)).await;
+    let (status, body) = get_layout(app.router.clone(), Some(&fs_ws.wk)).await;
     assert_eq!(status, StatusCode::OK);
-    let map = &body["data"];
+    let layout = &body["data"];
     assert_eq!(
-        map["summary_state"], "partial",
-        "summaries pending must not be 202/501: {map}"
+        layout["summary_state"], "partial",
+        "summaries pending must not be 202/501: {layout}"
     );
 
     // Directories first, then files — the truncation order.
-    let paths: Vec<&str> = map["entries"]
+    let paths: Vec<&str> = layout["entries"]
         .as_array()
         .unwrap()
         .iter()
@@ -441,34 +441,34 @@ async fn map_endpoint_against_real_mysql() {
     // The SUBSTRING_INDEX GROUP BY: counts are per top-level area and
     // recursive, and a root-level file must not pick one up even though it
     // groups under its own name in that query.
-    assert_eq!(entry(map, "/docs")["file_count"], 2);
-    assert_eq!(entry(map, "/wiki")["file_count"], 1);
+    assert_eq!(entry(layout, "/docs")["file_count"], 2);
+    assert_eq!(entry(layout, "/wiki")["file_count"], 1);
     assert!(
-        entry(map, "/README.md").get("file_count").is_none(),
+        entry(layout, "/README.md").get("file_count").is_none(),
         "a file must not report file_count"
     );
-    assert_eq!(entry(map, "/README.md")["size_bytes"], 11);
-    assert!(entry(map, "/docs").get("size_bytes").is_none());
+    assert_eq!(entry(layout, "/README.md")["size_bytes"], 11);
+    assert!(entry(layout, "/docs").get("size_bytes").is_none());
 
-    assert_eq!(map["stats"]["total_files"], 4);
-    assert_eq!(map["stats"]["total_directories"], 2);
+    assert_eq!(layout["stats"]["total_files"], 4);
+    assert_eq!(layout["stats"]["total_directories"], 2);
 
     // ── with every abstract present the state flips to ready ──
     set_abstract(&app.mysql, &fs_ws.ws_id, "/docs", "project documentation").await;
     set_abstract(&app.mysql, &fs_ws.ws_id, "/wiki", "team wiki").await;
     set_abstract(&app.mysql, &fs_ws.ws_id, "/README.md", "the readme").await;
-    let (_, body) = get_map(app.router.clone(), Some(&fs_ws.wk)).await;
-    let map = &body["data"];
-    assert_eq!(map["summary_state"], "ready", "{map}");
-    assert_eq!(entry(map, "/docs")["abstract"], "project documentation");
-    assert_eq!(entry(map, "/README.md")["abstract"], "the readme");
+    let (_, body) = get_layout(app.router.clone(), Some(&fs_ws.wk)).await;
+    let layout = &body["data"];
+    assert_eq!(layout["summary_state"], "ready", "{layout}");
+    assert_eq!(entry(layout, "/docs")["abstract"], "project documentation");
+    assert_eq!(entry(layout, "/README.md")["abstract"], "the readme");
 
     // ── MCP returns the same payload as REST's `data` ──
-    let rpc = mcp_call(app.router.clone(), &fs_ws.wk, "map").await;
+    let rpc = mcp_call(app.router.clone(), &fs_ws.wk, "layout").await;
     assert_eq!(rpc["result"]["isError"], false, "{rpc}");
     let text = rpc["result"]["content"][0]["text"].as_str().unwrap();
     let via_mcp: Value = serde_json::from_str(text).unwrap();
-    assert_eq!(&via_mcp, map, "MCP and REST must agree");
+    assert_eq!(&via_mcp, layout, "MCP and REST must agree");
 
     // ── truncation is real, and reading it does not blow up ──
     for i in 0..250 {
@@ -477,16 +477,16 @@ async fn map_endpoint_against_real_mysql() {
             StatusCode::OK
         );
     }
-    let (status, body) = get_map(app.router.clone(), Some(&fs_ws.wk)).await;
+    let (status, body) = get_layout(app.router.clone(), Some(&fs_ws.wk)).await;
     assert_eq!(status, StatusCode::OK);
-    let map = &body["data"];
-    assert_eq!(map["entries"].as_array().unwrap().len(), 200);
-    assert_eq!(map["truncated"], true);
+    let layout = &body["data"];
+    assert_eq!(layout["entries"].as_array().unwrap().len(), 200);
+    assert_eq!(layout["truncated"], true);
     // Ordering is directories-then-path, so the cap keeps the first 200
     // directory names and /README.md — a file — falls off the end.
-    assert_eq!(map["entries"][0]["path"], "/bulk000");
+    assert_eq!(layout["entries"][0]["path"], "/bulk000");
     assert!(
-        map["entries"]
+        layout["entries"]
             .as_array()
             .unwrap()
             .iter()
@@ -494,8 +494,8 @@ async fn map_endpoint_against_real_mysql() {
         "files must be the first thing truncation drops"
     );
     // stats still describe the whole workspace, not the truncated page.
-    assert_eq!(map["stats"]["total_files"], 4);
-    assert_eq!(map["stats"]["total_directories"], 252);
+    assert_eq!(layout["stats"]["total_files"], 4);
+    assert_eq!(layout["stats"]["total_directories"], 252);
 
     cleanup(&app.state, &app.mysql, &[&fs_ws, &db_ws]).await;
 }
@@ -506,7 +506,7 @@ async fn map_endpoint_against_real_mysql() {
 /// ONE directory — the second spelling never gets its own dentry — and a
 /// listing of it returns files written under either. `file_count` has to
 /// agree with that: it must report the union, not a per-spelling split, or
-/// the map contradicts the `list_dir` of the very directory it describes.
+/// the layout contradicts the `list_dir` of the very directory it describes.
 ///
 /// (This also pins the Rust-side lookup. MySQL returns one arbitrary
 /// spelling per group, so matching it against the directory's `name`
@@ -532,18 +532,18 @@ async fn file_counts_follow_the_case_insensitive_path_semantics() {
         );
     }
 
-    let (status, body) = get_map(app.router.clone(), Some(&ws.wk)).await;
+    let (status, body) = get_layout(app.router.clone(), Some(&ws.wk)).await;
     assert_eq!(status, StatusCode::OK, "body: {body}");
-    let map = &body["data"];
+    let layout = &body["data"];
 
     // Only the first spelling of each becomes a directory dentry.
-    assert_eq!(map["stats"]["total_directories"], 2, "{map}");
-    assert_eq!(map["stats"]["total_files"], 5, "{map}");
-    assert_eq!(map["entries"].as_array().unwrap().len(), 2, "{map}");
+    assert_eq!(layout["stats"]["total_directories"], 2, "{layout}");
+    assert_eq!(layout["stats"]["total_files"], 5, "{layout}");
+    assert_eq!(layout["entries"].as_array().unwrap().len(), 2, "{layout}");
 
     // ...and it counts every file underneath, whichever spelling wrote it.
-    assert_eq!(entry(map, "/Docs")["file_count"], 3, "{map}");
-    assert_eq!(entry(map, "/café")["file_count"], 2, "{map}");
+    assert_eq!(entry(layout, "/Docs")["file_count"], 3, "{layout}");
+    assert_eq!(entry(layout, "/café")["file_count"], 2, "{layout}");
 
     cleanup(&app.state, &app.mysql, &[&ws]).await;
 }
@@ -563,13 +563,13 @@ async fn disabled_summaries_still_return_cached_abstracts() {
     );
     set_abstract(&app.mysql, &ws.ws_id, "/docs", "cached summary").await;
 
-    let (status, body) = get_map(app.router.clone(), Some(&ws.wk)).await;
+    let (status, body) = get_layout(app.router.clone(), Some(&ws.wk)).await;
     assert_eq!(status, StatusCode::OK);
-    let map = &body["data"];
-    assert_eq!(map["summary_state"], "disabled");
+    let layout = &body["data"];
+    assert_eq!(layout["summary_state"], "disabled");
     assert_eq!(
-        entry(map, "/docs")["abstract"], "cached summary",
-        "disabled must not hide an abstract /v1/abstract would serve: {map}"
+        entry(layout, "/docs")["abstract"], "cached summary",
+        "disabled must not hide an abstract /v1/abstract would serve: {layout}"
     );
 
     cleanup(&app.state, &app.mysql, &[&ws]).await;

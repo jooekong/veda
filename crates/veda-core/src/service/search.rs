@@ -11,7 +11,7 @@ use crate::store::{EmbeddingService, MetadataStore, VectorStore};
 ///
 /// Needed because path comparison in veda happens in the database — the
 /// `path` column carries that collation and `get_dentry` / `list_dentries`
-/// compare against it directly — while the workspace map has to line
+/// compare against it directly — while the workspace layout has to line
 /// database-side grouping results up with dentry names in Rust. Decompose to
 /// NFD and drop combining marks, which is what "accent-insensitive" means
 /// for the Latin range; then lowercase.
@@ -231,7 +231,7 @@ impl SearchService {
         }
     }
 
-    /// Assemble the workspace map: top-level layout plus a one-line summary
+    /// Assemble the workspace layout: top-level entries plus a one-line summary
     /// per area. Pure assembly of data that already exists — no LLM call.
     ///
     /// This *is* the root-level view. The workspace root has no dentry, so
@@ -243,7 +243,7 @@ impl SearchService {
     /// Returns `Ready` or `Partial`. Only the caller knows whether summary
     /// generation is configured at all, so promoting to `Disabled` is the
     /// HTTP layer's job.
-    pub async fn workspace_map(&self, workspace_id: &str, cap: usize) -> Result<api::WorkspaceMap> {
+    pub async fn workspace_layout(&self, workspace_id: &str, cap: usize) -> Result<api::WorkspaceLayout> {
         // Over-fetch by one so "is there more?" costs no extra query.
         let mut children = self
             .meta
@@ -277,7 +277,7 @@ impl SearchService {
             .collect();
         let stats = self.meta.storage_stats(workspace_id).await?;
 
-        let entries: Vec<api::MapEntry> = children
+        let entries: Vec<api::LayoutEntry> = children
             .into_iter()
             .map(|d| {
                 let summary = if d.is_dir {
@@ -285,8 +285,8 @@ impl SearchService {
                 } else {
                     d.file_id.as_deref().and_then(|fid| file_summaries.get(fid))
                 };
-                api::MapEntry {
-                    // Key the count off is_dir, never off "the map happens to
+                api::LayoutEntry {
+                    // Key the count off is_dir, never off "the counts map happens to
                     // have this name" — a root-level file groups under its own
                     // file name and would otherwise report a bogus count.
                     file_count: if d.is_dir {
@@ -308,12 +308,12 @@ impl SearchService {
         // Coverage is over what we return, not the whole workspace: entries
         // dropped by truncation must not drag the state down to Partial.
         let summary_state = if entries.iter().all(|e| e.l0_abstract.is_some()) {
-            api::MapSummaryState::Ready
+            api::LayoutSummaryState::Ready
         } else {
-            api::MapSummaryState::Partial
+            api::LayoutSummaryState::Partial
         };
 
-        Ok(api::WorkspaceMap {
+        Ok(api::WorkspaceLayout {
             stats,
             summary_state,
             truncated,

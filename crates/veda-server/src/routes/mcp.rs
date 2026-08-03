@@ -8,7 +8,7 @@
 //! tells clients "no downstream stream / no client-terminated sessions".
 //!
 //! Seven read-only tools, all thin wrappers over the in-process service
-//! layer (never the HTTP loopback): map / search / grep / read_file /
+//! layer (never the HTTP loopback): layout / search / grep / read_file /
 //! list_dir / overview / ask. `ask` shares the per-workspace concurrency gate and
 //! metrics histograms with `POST /v1/answer` (routes/answer.rs) so both
 //! surfaces draw from one LLM budget.
@@ -319,7 +319,7 @@ fn record_mcp(method: &'static str, outcome: &'static str, started: Instant) {
 /// Whitelisted metric label for a tools/call — never the raw client string.
 fn tool_metric_label(tool: &str) -> &'static str {
     match tool {
-        "map" => "tool:map",
+        "layout" => "tool:layout",
         "search" => "tool:search",
         "grep" => "tool:grep",
         "read_file" => "tool:read_file",
@@ -347,7 +347,7 @@ fn initialize_result(params: &Value) -> Value {
         "capabilities": { "tools": {} },
         "serverInfo": { "name": "veda", "version": env!("CARGO_PKG_VERSION") },
         "instructions": "Read-only access to a veda knowledge workspace. \
-            Call `map` first to see the layout of an unfamiliar workspace, then \
+            Call `layout` first to see how an unfamiliar workspace is organised, then \
             `search` (detail_level='abstract' scans relevance at ~100 tokens/hit), \
             then `read_file` the promising paths. `grep` finds exact strings with line numbers. \
             `ask` returns a complete answer with [n] citations for open questions."
@@ -362,12 +362,12 @@ fn tool_specs() -> Vec<Value> {
         // First in the list on purpose: an agent facing an unfamiliar
         // workspace should orient before it starts probing.
         json!({
-            "name": "map",
+            "name": "layout",
             "annotations": { "readOnlyHint": true },
-            "description": "Workspace map: the top-level layout of this knowledge base, with a \
-                one-line summary and file count per area. Call this FIRST when you do not yet \
-                know what the workspace contains — one call replaces a round of list_dir probing \
-                and tells you which subtree to search or read. Costs ~100 tokens per entry.",
+            "description": "How this knowledge base is organised: its top-level areas, each with \
+                a one-line summary and a file count. Call this FIRST when you do not yet know \
+                what the workspace contains — one call replaces a round of list_dir probing and \
+                tells you which subtree to search or read. Costs ~100 tokens per entry.",
             "inputSchema": { "type": "object", "properties": {} }
         }),
         json!({
@@ -508,7 +508,7 @@ async fn run_tool(
     args: &Value,
 ) -> Result<String, ToolError> {
     match name {
-        "map" => tool_map(state, auth).await,
+        "layout" => tool_layout(state, auth).await,
         "search" => tool_search(state, auth, args).await,
         "grep" => tool_grep(state, auth, args).await,
         "read_file" => tool_read_file(state, auth, args).await,
@@ -749,13 +749,13 @@ async fn tool_list_dir(
     }
 }
 
-/// Same payload the REST `GET /v1/map` puts in its `data` field, as JSON
+/// Same payload the REST `GET /v1/layout` puts in its `data` field, as JSON
 /// text. No markdown rendering: JSON is cheaper in tokens and unambiguous.
-async fn tool_map(state: &Arc<AppState>, auth: &AuthWorkspace) -> Result<String, ToolError> {
-    let map = super::search::build_workspace_map(state, &auth.workspace_id)
+async fn tool_layout(state: &Arc<AppState>, auth: &AuthWorkspace) -> Result<String, ToolError> {
+    let layout = super::search::build_workspace_layout(state, &auth.workspace_id)
         .await
         .map_err(domain)?;
-    to_json_text(&map)
+    to_json_text(&layout)
 }
 
 async fn tool_overview(
@@ -965,9 +965,9 @@ mod tests {
         let instructions = r["instructions"].as_str().unwrap();
         assert!(instructions.contains("search"));
         // A tool the instructions never mention is a tool the model does not
-        // reach for — `map` only pays off if orienting is the suggested
+        // reach for — `layout` only pays off if orienting is the suggested
         // first move.
-        assert!(instructions.contains("map"), "got: {instructions}");
+        assert!(instructions.contains("layout"), "got: {instructions}");
     }
 
     #[test]
@@ -994,11 +994,11 @@ mod tests {
             .iter()
             .map(|t| t["name"].as_str().unwrap())
             .collect();
-        // Order matters: `map` is first so an agent orienting in an unknown
+        // Order matters: `layout` is first so an agent orienting in an unknown
         // workspace reaches for it before it starts probing with list_dir.
         assert_eq!(
             names,
-            ["map", "search", "grep", "read_file", "list_dir", "overview", "ask"]
+            ["layout", "search", "grep", "read_file", "list_dir", "overview", "ask"]
         );
         for t in &specs {
             assert!(
@@ -1032,9 +1032,9 @@ mod tests {
         assert_eq!(spec("read_file")["inputSchema"]["required"][0], "path");
         assert_eq!(spec("overview")["inputSchema"]["required"][0], "path");
         assert_eq!(spec("ask")["inputSchema"]["required"][0], "question");
-        // `map` takes no arguments — an empty property bag, not a missing key.
-        assert!(spec("map")["inputSchema"]["required"].is_null());
-        assert!(spec("map")["inputSchema"]["properties"].is_object());
+        // `layout` takes no arguments — an empty property bag, not a missing key.
+        assert!(spec("layout")["inputSchema"]["required"].is_null());
+        assert!(spec("layout")["inputSchema"]["properties"].is_object());
     }
 
     #[test]

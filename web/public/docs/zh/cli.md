@@ -95,6 +95,15 @@ veda cat /docs/design.pdf --raw > design.pdf # --raw 拿原始字节（PDF/Word 
 - **只看源目录树以内**。源目录**之上**的 `.gitignore`、你的全局 gitignore、`.git/info/exclude`、以及 `.ignore` 文件（ripgrep 约定）**都不读**——否则同一个目录在不同机器上会传出不同内容。
 - `--no-ignore` 关掉 `.gitignore` / `.vedaignore`，但内置兜底列表仍然生效（`.git/` 任何情况下都不传）。
 
+## 工作区布局
+
+```bash
+veda layout          # 顶层区域 + 每个区域一句话摘要 + 文件数
+veda layout --json   # 结构化输出，脚本/agent 用
+```
+
+不认识一个 workspace 时的第一条命令：一次拿到全貌，省掉「`veda ls` 之后挨个 `veda abstract`」。只有顶层一层，想深入某个目录用 `veda overview <path>`。
+
 ## 搜索
 
 ```bash

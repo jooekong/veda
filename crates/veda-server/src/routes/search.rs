@@ -6,7 +6,7 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use veda_types::api::{
-    AbstractResponse, MapSummaryState, OverviewResponse, SearchApiRequest, WorkspaceMap,
+    AbstractResponse, LayoutSummaryState, OverviewResponse, SearchApiRequest, WorkspaceLayout,
 };
 use veda_types::{ApiResponse, DetailLevel, SearchHit};
 
@@ -24,44 +24,44 @@ pub fn routes() -> Router<Arc<AppState>> {
     // here.
     Router::new()
         .route("/v1/search", post(search))
-        .route("/v1/map", get(get_map))
+        .route("/v1/layout", get(get_layout))
         .route("/v1/abstract/{*path}", get(get_abstract))
         .route("/v1/overview/{*path}", get(get_overview))
 }
 
-/// Top-level entries a single map response will carry. Each costs ~100
+/// Top-level entries a single layout response will carry. Each costs ~100
 /// tokens of abstract, so 200 is already about as much as an agent can
 /// absorb in one call; past that the honest answer is `truncated: true`
 /// and "use search instead".
-pub(crate) const MAP_ENTRY_CAP: usize = 200;
+pub(crate) const LAYOUT_ENTRY_CAP: usize = 200;
 
-/// Shared by the REST route and the MCP `map` tool so the two surfaces
+/// Shared by the REST route and the MCP `layout` tool so the two surfaces
 /// cannot drift — in particular on the rule that `Disabled` relabels the
 /// state without stripping abstracts.
-pub(crate) async fn build_workspace_map(
+pub(crate) async fn build_workspace_layout(
     state: &Arc<AppState>,
     workspace_id: &str,
-) -> Result<WorkspaceMap, veda_types::VedaError> {
-    let mut map = state
+) -> Result<WorkspaceLayout, veda_types::VedaError> {
+    let mut layout = state
         .search_service
-        .workspace_map(workspace_id, MAP_ENTRY_CAP)
+        .workspace_layout(workspace_id, LAYOUT_ENTRY_CAP)
         .await?;
     // The service only knows about coverage; whether summaries can ever be
     // produced is server config. This rewrites the state label only —
     // cached abstracts stay in the response, matching what
     // `/v1/abstract/{path}` serves when [llm] is absent.
     if !state.summary_enabled {
-        map.summary_state = MapSummaryState::Disabled;
+        layout.summary_state = LayoutSummaryState::Disabled;
     }
-    Ok(map)
+    Ok(layout)
 }
 
-async fn get_map(
+async fn get_layout(
     State(state): State<Arc<AppState>>,
     auth: AuthWorkspace,
-) -> Result<Json<ApiResponse<WorkspaceMap>>, AppError> {
+) -> Result<Json<ApiResponse<WorkspaceLayout>>, AppError> {
     Ok(Json(ApiResponse::ok(
-        build_workspace_map(&state, &auth.workspace_id).await?,
+        build_workspace_layout(&state, &auth.workspace_id).await?,
     )))
 }
 

@@ -1019,7 +1019,7 @@ impl MetadataStore for MysqlStore {
         // against this column, so `/Docs` and `/docs` already resolve to one
         // directory and a listing of it returns files written under either
         // spelling. Forcing a binary collation here would split the count
-        // while `list_dir` kept showing the union — the map would then
+        // while `list_dir` kept showing the union — the layout would then
         // disagree with the directory it describes.
         let rows = sqlx::query(
             r#"SELECT SUBSTRING_INDEX(SUBSTRING(path, 2), '/', 1) AS top_seg, COUNT(*) AS n

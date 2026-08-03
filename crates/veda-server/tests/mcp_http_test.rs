@@ -438,7 +438,7 @@ async fn mcp_http_suite() {
     let names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
     assert_eq!(
         names,
-        ["map", "search", "grep", "read_file", "list_dir", "overview", "ask"],
+        ["layout", "search", "grep", "read_file", "list_dir", "overview", "ask"],
         "tool catalogue"
     );
 

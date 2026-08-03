@@ -14,7 +14,7 @@ There are two workspace kinds, chosen at creation and immutable afterwards; the 
 |---|---|---|
 | `kind` | `fs` (default) | `db` |
 | Data model | files / directories | vector records (text + meta) |
-| Data plane | `/v1/fs/*`, `/v1/search`, `/v1/grep`, `/v1/sql`, `/v1/map`, `/v1/abstract`, `/v1/overview`, `/v1/answer`, `/v1/collections/*`, `/v1/events`, `/mcp`, FUSE | `/v1/vectors/{upsert,search,query,delete}` |
+| Data plane | `/v1/fs/*`, `/v1/search`, `/v1/grep`, `/v1/sql`, `/v1/layout`, `/v1/abstract`, `/v1/overview`, `/v1/answer`, `/v1/collections/*`, `/v1/events`, `/mcp`, FUSE | `/v1/vectors/{upsert,search,query,delete}` |
 | Access | CLI / FUSE / HTTP | REST API / SDK |
 | Typical use | personal knowledge base, agent memory, code search | managed vector retrieval for applications |
 
@@ -288,9 +288,9 @@ Every file / directory gets auto-generated layered summaries — fetch on demand
 | **L1 Overview** | `GET /v1/overview/{path}` or `detail_level=overview` | ~2k tokens | structured overview |
 | **L2 Full** | `GET /v1/fs/{path}` or search `detail_level=full` (default) | full text | raw content chunks |
 
-`/v1/abstract` and `/v1/overview` are **tri-state**: `200` (ready) / `202 + Retry-After:5` (generating) / `501 + Cache-Control:no-store` (server has no `[llm]` configured; summaries disabled). Summaries depend on the optional LLM config and are automatically disabled without it. The root `/` has no summary (no root dentry) — for a whole-workspace view use `/v1/map` below.
+`/v1/abstract` and `/v1/overview` are **tri-state**: `200` (ready) / `202 + Retry-After:5` (generating) / `501 + Cache-Control:no-store` (server has no `[llm]` configured; summaries disabled). Summaries depend on the optional LLM config and are automatically disabled without it. The root `/` has no summary (no root dentry) — for a whole-workspace view use `/v1/layout` below.
 
-### Workspace map (`GET /v1/map`)
+### Workspace layout (`GET /v1/layout`)
 
 One call for "what is this knowledge base": the top-level directories and files, each with a one-line summary and file count, plus workspace-wide stats. **Makes no LLM call** — it is pure assembly of summaries that already exist. Meant as the first call against an unfamiliar workspace, replacing a round of `ls` probing.
 
@@ -342,7 +342,7 @@ Native tool surface for coding agents (Claude Code / Cursor / Codex) — [MCP](h
 
 - **Auth**: the same gate as the REST data plane — `Authorization: Bearer wk_…` (fs workspace; db kind → 400). A read-only `wk_` runs every tool (all seven are read-only) and is the recommended key to hand to consumers.
 - **Protocol behavior**: one JSON-RPC message per POST, one JSON response; notifications (no `id` member) → `202`; batches unsupported; `GET /mcp` → `405` (no server-initiated SSE stream); an `MCP-Protocol-Version` header with an unsupported value → `400`. Each tool call has a 30s wall clock (`ask`: 95s); on elapse the tool returns `isError: true` with `tool '<name>' timed out`.
-- **Tools (7, all read-only)**: `map` (workspace map, equivalent to `GET /v1/map`, no arguments; listed first in `tools/list` and named first in the `initialize` instructions — the opening call against an unfamiliar workspace) / `search` (hybrid, tiered `detail_level`; `limit` default 10, cap 100) / `grep` (literal, line numbers, matched lines clipped at 500B; `limit` default 100, cap 1000; note its path argument is `path`, not REST's `path_prefix`) / `read_file` (PDF/Word return extracted text; whole-file reads capped at 64KB, page with `start_line`/`end_line`) / `list_dir` (a flat listing over 10000 entries is clipped and reports `truncated: true`; a recursive listing over 10000 entries **errors instead of clipping** — so a successful recursive call is always the complete subtree and `truncated` is always `false`) / `overview` (L1 summary; pending/disabled return readable notices) / `ask` (server-side RAG over the same retrieval path as `POST /v1/answer`; returns `{answer, citations, hit_count}` and takes only `question` / `path_prefix` — `limit` is fixed at 12, `prompt` is not exposed, and `estimated_context_tokens` is not returned; shares the per-workspace concurrency cap with REST — excess returns a "too many concurrent" notice; 10–90s).
+- **Tools (7, all read-only)**: `layout` (workspace layout, equivalent to `GET /v1/layout`, no arguments; listed first in `tools/list` and named first in the `initialize` instructions — the opening call against an unfamiliar workspace) / `search` (hybrid, tiered `detail_level`; `limit` default 10, cap 100) / `grep` (literal, line numbers, matched lines clipped at 500B; `limit` default 100, cap 1000; note its path argument is `path`, not REST's `path_prefix`) / `read_file` (PDF/Word return extracted text; whole-file reads capped at 64KB, page with `start_line`/`end_line`) / `list_dir` (a flat listing over 10000 entries is clipped and reports `truncated: true`; a recursive listing over 10000 entries **errors instead of clipping** — so a successful recursive call is always the complete subtree and `truncated` is always `false`) / `overview` (L1 summary; pending/disabled return readable notices) / `ask` (server-side RAG over the same retrieval path as `POST /v1/answer`; returns `{answer, citations, hit_count}` and takes only `question` / `path_prefix` — `limit` is fixed at 12, `prompt` is not exposed, and `estimated_context_tokens` is not returned; shares the per-workspace concurrency cap with REST — excess returns a "too many concurrent" notice; 10–90s).
 - **Error split**: protocol errors (bad JSON, unknown method/tool, invalid params) → JSON-RPC `error`; domain errors (missing file, feature disabled, throttled, timeout) → `result.isError=true` with readable text the calling LLM can react to.
 - Smoke test:
 

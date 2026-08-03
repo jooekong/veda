@@ -376,6 +376,16 @@ impl Client {
 
     /// GET /v1/index-status — {pending, processing, dead} counts of
     /// index-gating tasks for this workspace.
+    pub async fn workspace_layout(&self, ws_key: &str) -> Result<serde_json::Value> {
+        let resp = self
+            .http
+            .get(format!("{}/v1/layout", self.base))
+            .bearer_auth(ws_key)
+            .send()
+            .await?;
+        Self::check(resp).await
+    }
+
     pub async fn index_status(&self, ws_key: &str) -> Result<serde_json::Value> {
         let resp = self
             .http

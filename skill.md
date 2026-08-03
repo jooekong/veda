@@ -13,10 +13,17 @@ Veda is a multi-tenant knowledge store: files + vector search + SQL, all through
 one CLI. Interact via the `veda` binary; never construct HTTP requests directly.
 
 > **If a veda MCP server is configured in this session** (tools like
-> `search`/`grep`/`read_file`/`ask` from an MCP server named `veda-*`), prefer
-> those MCP tools for all read-only retrieval — they are faster to call and
-> need no CLI setup. Use this CLI for what MCP does not cover: uploads and
-> file maintenance (`cp`/`rm`/`mv`/`mkdir`), SQL, collections, and FUSE.
+> `layout`/`search`/`grep`/`read_file`/`list_dir`/`overview`/`ask` from an MCP
+> server named `veda-*`), prefer those MCP tools for all read-only retrieval —
+> they are faster to call and need no CLI setup. Use this CLI for what MCP does
+> not cover: uploads and file maintenance (`cp`/`rm`/`mv`/`mkdir`), SQL,
+> collections, and FUSE.
+
+**Getting oriented in a workspace you don't know: run `veda layout` first.**
+It returns the top-level areas with a one-line summary and file count each, in
+one call — the alternative is `veda ls /` followed by a `veda abstract` per
+directory, which costs a round trip and a tool call apiece. Use `--json` when
+you want to parse it.
 
 ## Quick start
 
@@ -91,6 +98,16 @@ prints the target workspace alias to stderr for audit.
 Remote paths are plain absolute paths starting with `/`, scoped to the
 active workspace. The CLI **does not accept** `:/path` syntax — `:` is
 rejected as an invalid character.
+
+## Workspace layout
+
+```sh
+veda layout                               # top-level areas + one-line summary + file count
+veda layout --json                        # structured, for parsing
+```
+
+Top level only. To go deeper on one area use `veda overview <path>` (L1) or
+`veda abstract <path>` (L0).
 
 ## File operations
 

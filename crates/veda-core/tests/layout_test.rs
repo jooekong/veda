@@ -1,6 +1,6 @@
-//! `SearchService::workspace_map` assembly.
+//! `SearchService::workspace_layout` assembly.
 //!
-//! The map is the workspace's root-level view. The root has no dentry and
+//! The layout is the workspace's root-level view. The root has no dentry and
 //! therefore no summary row of its own, so the view is built from the
 //! top-level children — these tests pin the assembly rules that makes
 //! usable: ordering, the read cap, per-entry field selection, and what
@@ -14,7 +14,7 @@ use async_trait::async_trait;
 use chrono::Utc;
 use veda_core::service::search::SearchService;
 use veda_core::store::{EmbeddingService, VectorStore};
-use veda_types::api::MapSummaryState;
+use veda_types::api::LayoutSummaryState;
 use veda_types::*;
 
 const CAP: usize = 200;
@@ -135,10 +135,10 @@ async fn entries_list_directories_before_files() {
         ];
         st.files = vec![file("fa", 1), file("fb", 2)];
     }
-    let map = service(meta).workspace_map("ws1", CAP).await.unwrap();
-    let paths: Vec<&str> = map.entries.iter().map(|e| e.path.as_str()).collect();
+    let layout = service(meta).workspace_layout("ws1", CAP).await.unwrap();
+    let paths: Vec<&str> = layout.entries.iter().map(|e| e.path.as_str()).collect();
     assert_eq!(paths, vec!["/alpha", "/zebra", "/a.md", "/b.md"]);
-    assert!(!map.truncated);
+    assert!(!layout.truncated);
 }
 
 /// The cap must reach the query. Asserting only on the returned length
@@ -154,10 +154,10 @@ async fn read_cap_is_pushed_into_the_query() {
             .map(|i| dentry(&format!("d{i}"), &format!("dir{i:03}"), true, None))
             .collect();
     }
-    let map = service(Arc::clone(&meta)).workspace_map("ws1", CAP).await.unwrap();
+    let layout = service(Arc::clone(&meta)).workspace_layout("ws1", CAP).await.unwrap();
 
-    assert_eq!(map.entries.len(), CAP);
-    assert!(map.truncated);
+    assert_eq!(layout.entries.len(), CAP);
+    assert!(layout.truncated);
     // CAP + 1: one extra row is how "is there more?" is answered without a
     // second COUNT query.
     assert_eq!(meta.state.lock().unwrap().children_capped_limits, vec![CAP + 1]);
@@ -187,9 +187,9 @@ async fn batch_lookups_are_bounded_by_the_cap() {
             st.files.push(file(&fid, 1));
         }
     }
-    let map = service(Arc::clone(&meta)).workspace_map("ws1", CAP).await.unwrap();
-    assert_eq!(map.entries.len(), CAP);
-    assert!(map.truncated);
+    let layout = service(Arc::clone(&meta)).workspace_layout("ws1", CAP).await.unwrap();
+    assert_eq!(layout.entries.len(), CAP);
+    assert!(layout.truncated);
 
     for (label, n) in &meta.state.lock().unwrap().batch_id_counts {
         assert!(
@@ -217,10 +217,10 @@ async fn summary_state_is_ready_when_every_entry_has_an_abstract() {
         st.dir_summaries.insert("d1".into(), summary("the docs"));
         st.file_summaries.insert("fa".into(), summary("a file"));
     }
-    let map = service(meta).workspace_map("ws1", CAP).await.unwrap();
-    assert_eq!(map.summary_state, MapSummaryState::Ready);
-    assert_eq!(map.entries[0].l0_abstract.as_deref(), Some("the docs"));
-    assert_eq!(map.entries[1].l0_abstract.as_deref(), Some("a file"));
+    let layout = service(meta).workspace_layout("ws1", CAP).await.unwrap();
+    assert_eq!(layout.summary_state, LayoutSummaryState::Ready);
+    assert_eq!(layout.entries[0].l0_abstract.as_deref(), Some("the docs"));
+    assert_eq!(layout.entries[1].l0_abstract.as_deref(), Some("a file"));
 }
 
 #[tokio::test]
@@ -234,12 +234,12 @@ async fn missing_abstracts_yield_partial_and_are_omitted_from_json() {
         ];
         st.dir_summaries.insert("d1".into(), summary("the docs"));
     }
-    let map = service(meta).workspace_map("ws1", CAP).await.unwrap();
-    assert_eq!(map.summary_state, MapSummaryState::Partial);
+    let layout = service(meta).workspace_layout("ws1", CAP).await.unwrap();
+    assert_eq!(layout.summary_state, LayoutSummaryState::Partial);
 
     // Absent, not null: a client checking `"abstract" in entry` must not
     // see a key it then has to null-check.
-    let v = serde_json::to_value(&map).unwrap();
+    let v = serde_json::to_value(&layout).unwrap();
     assert!(v["entries"][0].get("abstract").is_some());
     assert!(v["entries"][1].get("abstract").is_none());
 }
@@ -260,10 +260,10 @@ async fn summary_state_covers_returned_entries_only() {
                 .insert(format!("d{i}"), summary("covered"));
         }
     }
-    let map = service(meta).workspace_map("ws1", CAP).await.unwrap();
-    assert_eq!(map.entries.len(), CAP);
-    assert!(map.truncated);
-    assert_eq!(map.summary_state, MapSummaryState::Ready);
+    let layout = service(meta).workspace_layout("ws1", CAP).await.unwrap();
+    assert_eq!(layout.entries.len(), CAP);
+    assert!(layout.truncated);
+    assert_eq!(layout.summary_state, LayoutSummaryState::Ready);
 }
 
 /// `file_count` is keyed off is_dir, never off "the counts map happens to
@@ -284,13 +284,13 @@ async fn file_count_is_for_directories_and_size_for_files() {
         // its own name — the entry must still not carry a file_count.
         st.top_level_counts.insert("README.md".into(), 1);
     }
-    let map = service(meta).workspace_map("ws1", CAP).await.unwrap();
+    let layout = service(meta).workspace_layout("ws1", CAP).await.unwrap();
 
-    let dir = &map.entries[0];
+    let dir = &layout.entries[0];
     assert_eq!(dir.file_count, Some(42));
     assert_eq!(dir.size_bytes, None);
 
-    let f = &map.entries[1];
+    let f = &layout.entries[1];
     assert_eq!(f.file_count, None, "a file must never report a file_count");
     assert_eq!(f.size_bytes, Some(4096));
 }
@@ -305,16 +305,16 @@ async fn directory_with_no_files_reports_zero_not_absent() {
         let mut st = meta.state.lock().unwrap();
         st.dentries = vec![dentry("d1", "empty", true, None)];
     }
-    let map = service(meta).workspace_map("ws1", CAP).await.unwrap();
-    assert_eq!(map.entries[0].file_count, Some(0));
+    let layout = service(meta).workspace_layout("ws1", CAP).await.unwrap();
+    assert_eq!(layout.entries[0].file_count, Some(0));
 }
 
 #[tokio::test]
-async fn empty_workspace_returns_an_empty_map_not_an_error() {
-    let map = service(store()).workspace_map("ws1", CAP).await.unwrap();
-    assert!(map.entries.is_empty());
-    assert!(!map.truncated);
-    assert_eq!(map.stats.total_files, 0);
+async fn empty_workspace_returns_an_empty_layout_not_an_error() {
+    let layout = service(store()).workspace_layout("ws1", CAP).await.unwrap();
+    assert!(layout.entries.is_empty());
+    assert!(!layout.truncated);
+    assert_eq!(layout.stats.total_files, 0);
     // Vacuously complete: no entry is missing an abstract.
-    assert_eq!(map.summary_state, MapSummaryState::Ready);
+    assert_eq!(layout.summary_state, LayoutSummaryState::Ready);
 }

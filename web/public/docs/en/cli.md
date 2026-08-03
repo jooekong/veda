@@ -95,6 +95,17 @@ Deliberate choices worth knowing:
 - **Only the source tree is consulted.** Ignore files *above* the source directory, your global gitignore, `.git/info/exclude`, and `.ignore` files (a ripgrep convention) are **not** read — otherwise the same directory would upload different content on different machines.
 - `--no-ignore` disables `.gitignore` / `.vedaignore` but keeps the built-in list (`.git/` is never uploaded).
 
+## Workspace layout
+
+```bash
+veda layout          # top-level areas, each with a one-line summary and file count
+veda layout --json   # structured output for scripts and agents
+```
+
+The first command to run against a workspace you don't know: one call for the
+whole shape, instead of `veda ls` followed by a `veda abstract` per directory.
+Top level only — to go deeper use `veda overview <path>`.
+
 ## Search
 
 ```bash
