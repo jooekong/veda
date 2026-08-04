@@ -795,3 +795,16 @@ NO_PROXY='*' cargo test -p veda-server --test map_test -- --ignored --test-threa
 | "ignore crate 版本 UNVERIFIED，不应把默认值写成已验证事实" | **部分采纳** | 已独立核验 0.4.31 源码 `dir.rs::IgnoreBuilder::new()` 的 `IgnoreOptions` 字面量（`hidden: true` / `require_git: true`），`cargo add --dry-run` 也解析到 0.4.31，不是无依据推断。**采纳的部分**：实施第一步按 lockfile 锁定版本再复核一次，已写进 §2.4 和 §5 |
 | "DirEntry 文档没有 `ignore()` 方法" | **不采纳** | 查错了类型。`ignore()` 是 `WalkBuilder` 的方法（控制是否读 `.ignore` 文件），方案从未提议 `DirEntry::ignore()` |
 | D4 "要么接受所有祖先规则并写进帮助和测试，要么实现边界到 repo root" | **不采纳，换更简单解法** | 两个选项都比 `parents(false)` 复杂。只读源目录树内的 ignore 文件，行为一句话讲得清、测试简单，且顺带消灭了跨机器不可复现的问题 |
+
+## 8. 上线后演进（2026-08-04，偏离本方案的记录）
+
+首个真实使用日 Joe 拍板两条，推翻了本方案的两个渲染/内容决策：
+
+| 原方案决策 | 演进后 | 原因 |
+| --- | --- | --- |
+| CLI 表格式渲染，摘要列 100 格截断（bb7792e） | 块状布局：`名字  元信息` 头行 + 缩进全文，TTY 按终端宽折行（含中文禁则），管道单行不折 | 真实 L0 普遍 200–500 字符，100 格上限让**每一条**都被截——截断从兜底变成了常态；Joe 要求展示全部信息 |
+| 目录 L0 沿用「one concise sentence (max ~100 tokens)」 | 目录 L0 改简短介绍：1–2 句、≤40 词/60 汉字、禁止逐个罗列 children | 模型把 ~100 token 塞成点名式长句，作为定位介绍不可读；文件 L0/L1 与目录 L1 不动 |
+
+实现在 c9f0f7d / c880e95 / 52f3468 / 187a2e5（0.1.25）。存量目录摘要靠批量补插
+`dir_summary_sync` outbox 事件重刷（`available_at` 阶梯限速，深度倒序保自底向上），
+详见发布记录。
