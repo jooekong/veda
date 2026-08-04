@@ -93,12 +93,12 @@ ssh -o ServerAliveInterval=20 10.79.55.89 '
   tail -2 /tmp/vb.log                                          # ②a 须见 Finished release profile(没有 = cargo 根本没编成)
   echo "old $(cat /tmp/vb-oldsha)"                             # ②b 两者须**不同** = 产物路径上的 binary 确实换了新的
   echo "new $(sha256sum $B | cut -d" " -f1)"
-  $B --help >/dev/null && echo "③ smoke ok"
+  $B --version                                                 # ③ 须精确打印 `veda-server <TAG>`(能跑 + 产物自报版本)
 '
 ```
 
 > **② 为什么不读 `Cargo.toml`**:那读的是 rsync 过去的**源码**,不是**产物**。2026-08-04 发 0.1.25 时执行者漏了 `cd /root/veda-build`,cargo 在错误目录直接跑挂、旧 binary 原样留在产物路径,而读 `Cargo.toml` 的老 ② 照样打印 `0.1.25` 放行。**校验必须落在产物上。**
-> **别拿「grep 版本号」当内容锚点**:实测依赖 crate 的 panic 路径会误命中——依赖树里的 `unicode-normalization-0.1.25` 让 `grep '0\.1\.25'` 稳定假阳性(实测一个**真实版本是 0.1.14** 的 binary 照样"验出" 0.1.25);而 veda 自己的版本串只以 `rust-0.1.14`、`serverInfoversion0.1.23` 这类 rodata 合并块出现,没有干净的可 grep 形态。**版本的权威校验放在阶段 3——让跑起来的 binary 自报**(`veda-server` 没有 `--version`,②只回答"产物换新了没",不回答"是哪个版本")。
+> **别拿「grep 版本号」当内容锚点**:实测依赖 crate 的 panic 路径会误命中——依赖树里的 `unicode-normalization-0.1.25` 让 `grep '0\.1\.25'` 稳定假阳性(实测一个**真实版本是 0.1.14** 的 binary 照样"验出" 0.1.25);而 veda 自己的版本串只以 `rust-0.1.14`、`serverInfoversion0.1.23` 这类 rodata 合并块出现,没有干净的可 grep 形态。**版本的权威校验放在阶段 3——让跑起来的 binary 自报**。② 只回答"产物换新了没";③ 的 `--version`(0.1.25 之后新增,老 binary 上会 `unknown flag` + exit 1——这本身就说明产物没换)回答"build 节点上这个产物是哪个版本"——但它报的是 `CARGO_PKG_VERSION`,跑未发版 commit 时照样打上一个 tag,**且证明不了各目标节点 swap 后跑的是它**,所以每节点的版本判据仍看阶段 3。
 
 > **复用 invariant(发布前自检)**:复用同一 binary 安全的前提是 **binary 里没有 per-环境的值**。binary = 代码 + `include_str!` embed 的 `install.sh`(内容固定、非 per-环境)+ `CARGO_PKG_VERSION`;**per-环境的后端地址/密码/token 都在各节点 `config.toml`、不在 binary**。自检:`rg 'env!|option_env!' crates/veda-server/src crates/veda-core/src`(只看这两处 src,test 里的 `CARGO_BIN_EXE` 可忽略)应只命中 `CARGO_PKG_VERSION` 类编译期常量。当前满足(Codex 2026-06 核实)。**谁要往 server 加 `env!`/`option_env!` 读环境,必须先废掉本复用方案。**
 

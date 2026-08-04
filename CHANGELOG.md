@@ -10,6 +10,14 @@ that matters.
 ## [Unreleased]
 
 ### Added
+- **`veda-server --version`.** Prints `veda-server <crate version>` to stdout
+  and exits 0; `--help` is still the only other flag and an unknown flag is
+  still a hard error. The deploy runbook's post-build smoke asserted on
+  `--help >/dev/null`, which proved the binary runs but said nothing about
+  *which* binary. Note what it can and cannot do: it reports the crate
+  version, not the build, so a node running an unreleased commit still
+  prints the previous tag. It falsifies a bad swap; only the binary's
+  sha256 identifies a build.
 - **`GET /v1/layout`, an MCP `layout` tool and `veda layout` — one call for "what is this
   knowledge base".** Returns the workspace's top-level entries with a
   one-line summary and file count each, plus workspace-wide stats. It makes
@@ -27,6 +35,23 @@ that matters.
   first in the MCP `initialize` instructions.
 
 ### Changed
+- **Summary generation can now tell the gateway to skip thinking —
+  `[llm] summary_disable_thinking`.** Measured against the company airouter
+  with deepseek-v4-flash: a summary-shaped call reasons by default and the
+  thinking consumes ~87% of the completion tokens, which also roughly
+  doubles latency. Worse, thinking shares the `max_tokens` budget with the
+  answer, so a long-tailed reasoning run could exhaust it and return HTTP
+  200 with an empty `content` — the mechanism behind the 2026-07 empty
+  abstracts. With the switch on, reasoning disappears from the response and
+  that failure mode is gone at the source. It is off by default and
+  TOML-only: the parameter is non-standard (the OpenAI API rejects unknown
+  top-level params with a 400), so only enable it on a gateway known to
+  accept it. Scope is summaries only — `/v1/answer` keeps its reasoning
+  under every setting. The existing guards stay in place for backends where
+  the switch is off, for config drift, and for plain upstream flakiness:
+  the generous `max_summary_tokens` budget and the retry on empty content,
+  whose error message now carries `finish_reason` so "budget exhausted"
+  (`length`) reads apart from "upstream said nothing" at a glance.
 - **`veda layout` prints each entry as a block and shows the whole
   summary.** The table capped abstracts at 100 terminal cells while a real
   L0 runs 200-500 characters, so in practice *every* line was truncated.
