@@ -23,10 +23,20 @@
 --     ASC), so parents aggregate already-refreshed children in one pass.
 --   * NOT EXISTS guard replicates enqueue_dedup: veda_outbox has no unique
 --     index; raw SQL bypasses the Rust-side dedup check.
---   * UTC_TIMESTAMP() everywhere — the claim predicate compares against it;
---     NOW() misfires in a non-UTC session. The inverse trap: veda_summaries
---     `updated_at` is LOCAL time, so don't filter it with UTC_TIMESTAMP()
---     when sampling refreshed rows (bit an operator on 2026-08-04).
+--   * The SET time_zone below is what makes the staircase real, not a
+--     nicety. available_at is a TIMESTAMP column: MySQL interprets written
+--     values in the SESSION time zone. Both company MySQL instances default
+--     to Asia/Shanghai, so writing UTC_TIMESTAMP() from a default session
+--     stores UTC-8h — and the worker (UTC session, `available_at <=
+--     UTC_TIMESTAMP()`) sees every row as already due. Discovered
+--     2026-08-04: every earlier "throttled" run was actually a full burst
+--     (22 rows at once survived; a 69-dir burst drew 467×429 + 22 dead).
+--   * UTC_TIMESTAMP() everywhere — NOW() misfires in a non-UTC session.
+--     The inverse trap: veda_summaries `updated_at` is LOCAL time, so don't
+--     filter it with UTC_TIMESTAMP() when sampling refreshed rows (bit an
+--     operator on 2026-08-04).
+
+SET time_zone = '+00:00';
 --
 -- Scope to one workspace by adding `AND d.workspace_id = '<id>'` to the two
 -- WHERE clauses below.
@@ -41,10 +51,13 @@ WHERE d.is_dir = 1
 -- ── 2. enqueue with global staircase ──────────────────────────────────
 -- 8/min, NOT higher: with summary_disable_thinking the worker sustains
 -- ~29 dirs/min and the ceiling moved from LLM latency to the upstream TPM
--- quota — a 2026-08-04 probe at effectively unthrottled pace drew 467
--- HTTP 429 ("insufficient_quota", token-limit) and 22 dead letters in
--- minutes. Before thinking-off the worker only reached 9-13/min, so 20
--- never bit; now it would. Raise only with quota headroom evidence.
+-- quota — a 2026-08-04 burst of 69 dirs drew 467 HTTP 429
+-- ("insufficient_quota", token-limit) and 22 dead letters in minutes,
+-- while a 22-dir burst survived. Honest history: the timezone bug above
+-- meant no staircase run before 2026-08-04 was actually rate-limited, so
+-- 8/min is chosen as comfortably below the worker's own ~29/min ceiling
+-- rather than as a measured safe rate. Raise only with quota headroom
+-- evidence.
 SET @per_min := 8;
 
 INSERT INTO veda_outbox

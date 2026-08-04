@@ -27,12 +27,14 @@
 --     staircase and become claimable immediately. That is precisely why
 --     @per_min carries the amplification factor instead of just
 --     budget / 2.
---   * Derivation: refresh-dir-summaries.sql sustains 8 dirs/min = 16 LLM
---     calls/min, measured 2026-08-04 as sitting under the upstream TPM
---     wall (an effectively unthrottled probe drew 467 HTTP 429s and 22
---     dead letters within minutes). Same 16 LLM/min budget here, at ~4 LLM
---     per file => 4 files/min. Conservative on purpose: unlike the dir
---     refresh, part of this load arrives off-staircase.
+--   * Derivation: the worker's own ceiling is ~29 items/min with thinking
+--     off, and a 69-dir full burst at that pace drew 467 HTTP 429s and 22
+--     dead letters (2026-08-04) while a 22-row burst survived. Budgeting
+--     16 LLM/min (well under the burst that failed), at ~4 LLM per file
+--     => 4 files/min. Conservative on purpose: unlike the dir refresh,
+--     part of this load arrives off-staircase, and no truly rate-limited
+--     run has been measured yet (the staircase was inert before the
+--     time_zone fix above).
 --   * Raise only with quota headroom evidence, and watch the dead-letter
 --     count in section 3 while it drains.
 --
@@ -58,6 +60,12 @@
 --     text and enqueue the SummarySync itself.
 --   * SummarySync payload is JSON_OBJECT('file_id', f.id), dedup key
 --     `file_id` (see make_outbox in veda-core/src/service/fs.rs).
+--   * The SET time_zone below is what makes the staircase real, not a
+--     nicety. available_at is a TIMESTAMP column interpreted in the SESSION
+--     time zone; company MySQL defaults to Asia/Shanghai, so a default
+--     session writing UTC_TIMESTAMP() stores UTC-8h and the worker (UTC
+--     session) claims everything immediately (2026-08-04 discovery — all
+--     earlier "throttled" runs were actually full bursts).
 --   * UTC_TIMESTAMP() everywhere — the claim predicate compares against
 --     it; NOW() misfires in a non-UTC session. The inverse trap:
 --     veda_summaries `updated_at` is LOCAL time, so don't filter it with
@@ -65,6 +73,8 @@
 --
 -- Scope to one workspace by adding `AND f.workspace_id = '<id>'` to the two
 -- WHERE clauses below.
+
+SET time_zone = '+00:00';
 
 -- ── 1. dry-run: how many files, how many LLM calls ────────────────────
 -- Multiply by ~4, not 2, for the parent-directory cascade.
