@@ -11,6 +11,11 @@ use veda_types::Result;
 // Single-file prompts (L0/L1) and directory prompts (L1 from children, L0
 // from L1) live in this file; the worker selects between them based on
 // whether the dentry is a file or a directory.
+//
+// L0 is the one-liner shown per entry in `veda layout`; L1 is the long
+// structured overview. For directories L0 is deliberately a *short
+// introduction* rather than a compressed table of contents — see
+// DIR_L0_PROMPT.
 
 const L0_PROMPT: &str = r#"Output language: {language}.
 
@@ -91,17 +96,31 @@ Children (numbered):
 
 Overview:"#;
 
+// Directory L0 is the line a human reads in `veda layout` to decide which
+// area to open. "One concise sentence (max ~100 tokens)" produced 400+
+// character sentences that stuffed in every child by name — technically one
+// sentence, useless as an introduction. Ask for a short *introduction*
+// instead, and forbid the enumeration explicitly.
 const DIR_L0_PROMPT: &str = r#"Output language: {language}.
 
-Summarize the following directory overview in ONE concise sentence
-(max ~100 tokens). Focus on what the directory contains as a whole.
+Write a SHORT introduction to this directory, based on the overview below.
+1-2 sentences, at most 40 English words or 60 Chinese characters.
+
+Say first what this area IS, then what it mainly contains — described in
+general terms (themes, kinds of material), not as a list.
+
+Rules:
+- Do NOT enumerate the children one by one, and do not name them.
+- Do NOT add meta-commentary or hedging ("this overview describes...",
+  "it appears that...").
+- Plain prose only: no Markdown, no bullets, no headings.
 
 Overview:
 ---
 {overview}
 ---
 
-One-sentence summary:"#;
+Short introduction:"#;
 
 /// Skip a leading YAML frontmatter block (`---` line ... `---` line) so
 /// language detection samples the document body, not metadata. Company doc
