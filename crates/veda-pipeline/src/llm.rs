@@ -126,6 +126,12 @@ struct ChatResponse {
 #[derive(Debug, Deserialize)]
 struct ChatChoice {
     message: ChatMessageResp,
+    /// Why generation stopped — "stop", "length", … Only read when the
+    /// content came back empty, where it separates "hit the token ceiling"
+    /// from "upstream returned nothing for another reason". Some gateways
+    /// omit it, hence Option.
+    #[serde(default)]
+    finish_reason: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -264,33 +270,41 @@ struct LlmError {
 ///
 /// Empty content (after trim) is an error, and a retryable one: summarize()
 /// prompts always demand text, so an empty completion means upstream
-/// misbehavior — e.g. a reasoning model whose thinking exhausted max_tokens
-/// (the 2026-07 empty-abstract incident, where HTTP 200 + content="" was
-/// silently persisted). Retrying may land on a healthy backend; if all
-/// retries return empty the task fails loudly instead of storing "".
+/// misbehavior. The known mechanism is a reasoning model whose thinking
+/// exhausted max_tokens (the 2026-07 empty-abstract incident, where an
+/// HTTP 200 carrying content="" was silently persisted); `[llm]
+/// summary_disable_thinking` now removes that mechanism on gateways that
+/// support the switch, but this guard stays for the backends that don't,
+/// for config drift, and for plain upstream flakiness. Retrying may land on
+/// a healthy backend; if all retries return empty the task fails loudly
+/// instead of storing "".
+///
+/// `finish_reason` rides along in the message because it tells the two
+/// apart at a glance in the logs: `length` = budget exhausted (raise
+/// max_summary_tokens, or turn thinking off), anything else = upstream
+/// returned nothing despite room to speak.
 fn parse_chat_response(bytes: &[u8]) -> std::result::Result<String, LlmError> {
     let parsed: ChatResponse = serde_json::from_slice(bytes).map_err(|e| LlmError {
         inner: VedaError::Internal(format!("LLM invalid JSON: {e}")),
         retryable: false,
     })?;
 
-    let content = parsed
-        .choices
-        .into_iter()
-        .next()
-        .map(|c| c.message.content.trim().to_string())
-        .ok_or_else(|| LlmError {
-            inner: VedaError::Internal("LLM returned empty choices".to_string()),
-            retryable: false,
-        })?;
+    let choice = parsed.choices.into_iter().next().ok_or_else(|| LlmError {
+        inner: VedaError::Internal("LLM returned empty choices".to_string()),
+        retryable: false,
+    })?;
 
+    let content = choice.message.content.trim();
     if content.is_empty() {
+        let reason = choice.finish_reason.as_deref().unwrap_or("unknown");
         return Err(LlmError {
-            inner: VedaError::Internal("LLM returned empty content".to_string()),
+            inner: VedaError::Internal(format!(
+                "LLM returned empty content (finish_reason={reason})"
+            )),
             retryable: true,
         });
     }
-    Ok(content)
+    Ok(content.to_string())
 }
 
 // ── OpenAI-compatible SSE stream parsing ────────────────
@@ -616,16 +630,33 @@ mod tests {
     }
 
     #[test]
-    fn parse_response_empty_content_is_retryable_error() {
-        // The 2026-07 incident shape: HTTP 200, choices present, content "".
-        let body = br#"{"choices":[{"message":{"content":""}}]}"#;
+    fn parse_response_empty_content_reports_finish_reason() {
+        // The 2026-07 incident shape: HTTP 200, choices present, content "",
+        // finish_reason "length" — thinking burned the whole token budget.
+        let body = br#"{"choices":[{"message":{"content":""},"finish_reason":"length"}]}"#;
         let err = parse_chat_response(body).unwrap_err();
         assert!(err.retryable, "empty content must be retryable");
-        assert!(err.inner.to_string().contains("empty content"));
+        assert_eq!(
+            err.inner.to_string(),
+            "internal error: LLM returned empty content (finish_reason=length)"
+        );
 
         // Whitespace-only content is the same failure after trim.
-        let body = br#"{"choices":[{"message":{"content":"  \n "}}]}"#;
+        let body = br#"{"choices":[{"message":{"content":"  \n "},"finish_reason":"length"}]}"#;
         assert!(parse_chat_response(body).unwrap_err().retryable);
+    }
+
+    #[test]
+    fn parse_response_empty_content_without_finish_reason_says_unknown() {
+        // Gateways that omit the field must not lose the error itself.
+        let body = br#"{"choices":[{"message":{"content":""}}]}"#;
+        let err = parse_chat_response(body).unwrap_err();
+        assert!(err.retryable, "empty content must stay retryable");
+        assert!(
+            err.inner.to_string().contains("finish_reason=unknown"),
+            "missing finish_reason should read as unknown: {}",
+            err.inner
+        );
     }
 
     #[test]
