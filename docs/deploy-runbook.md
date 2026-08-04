@@ -79,16 +79,26 @@ rm -rf "$TMP"
 ssh -o ServerAliveInterval=20 10.79.55.89 'find /root/veda-build \( -type d \( -name target -o -name .git \) \) -prune -o -type f -print0 | xargs -0 touch'
 
 # detached build(铁律 1),后台等完成(新依赖首次约 9min,纯增量更快)
-ssh -o ServerAliveInterval=20 10.79.55.89 'cd /root/veda-build && nohup ~/.cargo/bin/cargo build --release -p veda-server > /tmp/vb.log 2>&1 </dev/null & echo started'
+# 同一条 SSH 里先记下产物**旧 sha**(不存在则记 none)——②b 拿它当基线
+ssh -o ServerAliveInterval=20 10.79.55.89 '
+  B=/root/veda-build/target/release/veda-server
+  if [ -f $B ]; then sha256sum $B | cut -d" " -f1 > /tmp/vb-oldsha; else echo none > /tmp/vb-oldsha; fi
+  cat /tmp/vb-oldsha
+  cd /root/veda-build && nohup ~/.cargo/bin/cargo build --release -p veda-server > /tmp/vb.log 2>&1 </dev/null & echo started'
 
 # 等 Finished 后【三项校验】——这个 binary 要上生产,务必校准
 ssh -o ServerAliveInterval=20 10.79.55.89 '
   B=/root/veda-build/target/release/veda-server
   objdump -T $B | grep -oE GLIBC_[0-9.]+ | sort -V | tail -1   # ① 须 <= 2.34
-  grep -m1 "^version" /root/veda-build/Cargo.toml              # ② 须 = TAG(确认编的是发版源码,非残留)
+  tail -2 /tmp/vb.log                                          # ②a 须见 Finished release profile(没有 = cargo 根本没编成)
+  echo "old $(cat /tmp/vb-oldsha)"                             # ②b 两者须**不同** = 产物路径上的 binary 确实换了新的
+  echo "new $(sha256sum $B | cut -d" " -f1)"
   $B --help >/dev/null && echo "③ smoke ok"
 '
 ```
+
+> **② 为什么不读 `Cargo.toml`**:那读的是 rsync 过去的**源码**,不是**产物**。2026-08-04 发 0.1.25 时执行者漏了 `cd /root/veda-build`,cargo 在错误目录直接跑挂、旧 binary 原样留在产物路径,而读 `Cargo.toml` 的老 ② 照样打印 `0.1.25` 放行。**校验必须落在产物上。**
+> **别拿「grep 版本号」当内容锚点**:实测依赖 crate 的 panic 路径会误命中——依赖树里的 `unicode-normalization-0.1.25` 让 `grep '0\.1\.25'` 稳定假阳性(实测一个**真实版本是 0.1.14** 的 binary 照样"验出" 0.1.25);而 veda 自己的版本串只以 `rust-0.1.14`、`serverInfoversion0.1.23` 这类 rodata 合并块出现,没有干净的可 grep 形态。**版本的权威校验放在阶段 3——让跑起来的 binary 自报**(`veda-server` 没有 `--version`,②只回答"产物换新了没",不回答"是哪个版本")。
 
 > **复用 invariant(发布前自检)**:复用同一 binary 安全的前提是 **binary 里没有 per-环境的值**。binary = 代码 + `include_str!` embed 的 `install.sh`(内容固定、非 per-环境)+ `CARGO_PKG_VERSION`;**per-环境的后端地址/密码/token 都在各节点 `config.toml`、不在 binary**。自检:`rg 'env!|option_env!' crates/veda-server/src crates/veda-core/src`(只看这两处 src,test 里的 `CARGO_BIN_EXE` 可忽略)应只命中 `CARGO_PKG_VERSION` 类编译期常量。当前满足(Codex 2026-06 核实)。**谁要往 server 加 `env!`/`option_env!` 读环境,必须先废掉本复用方案。**
 
@@ -131,8 +141,12 @@ ssh -o ServerAliveInterval=20 <node> '
 ssh <node> '
   curl -s localhost:3000/healthz                       # → ok
   curl -s localhost:3000/v1/ready                       # → mysql ok + milvus ok
-  # blob 行为探活(确认是新代码:旧码 PUT 二进制返回 400)
   WK=$(curl -s -X POST localhost:3000/v1/accounts/anonymous | grep -oE "wk_[A-Za-z0-9_]+" | head -1)
+  # 版本校验(唯一权威):跑着的 binary 自报 CARGO_PKG_VERSION —— 须 = 本次 TAG
+  curl -s -X POST -H "Authorization: Bearer $WK" -H "Content-Type: application/json" \
+    -d "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{}}" \
+    localhost:3000/mcp | grep -oE "\"version\":\"[0-9.]+\""
+  # blob 行为探活(确认是新代码:旧码 PUT 二进制返回 400)
   printf "%%PDF-1.4\x00\xff\xc0probe" > /tmp/p.bin
   curl -s -o /dev/null -w "PUT %{http_code}\n" -X PUT -H "Authorization: Bearer $WK" --data-binary @/tmp/p.bin localhost:3000/v1/fs/p.bin   # → 200
   curl -s -H "Authorization: Bearer $WK" localhost:3000/v1/fs/p.bin | cmp - /tmp/p.bin && echo "roundtrip ok"
@@ -146,6 +160,7 @@ ssh <node> '
 **验证清单(每节点逐项打勾)**:
 - [ ] healthz = ok
 - [ ] ready:mysql + milvus 都 ok
+- [ ] 版本:`/mcp` initialize 自报 `"version"` = 本次 TAG(**唯一权威的版本判据**)
 - [ ] blob 探活:PUT 二进制 200 + roundtrip 无损 + 探活文件已清
 - [ ] 生产额外:无新 dead-letter(`SELECT status,COUNT(*) FROM veda_outbox GROUP BY status`)、RSS/连接数正常
 
@@ -228,9 +243,15 @@ ssh -o ServerAliveInterval=20 10.79.55.85 'journalctl -u veda-server --since "10
 
 ---
 
-## 附录:2026-06-24 0.1.15 发布踩坑实录(为什么有上面的铁律)
+## 附录:发布踩坑实录(为什么有上面的铁律)
+
+**2026-06-24 / 0.1.15**
 
 1. **孤儿 build 拖垮 `.161`**:首次用 `ssh '.161' 'cargo build'` 前台跑,Mac 端 SSH 超时断开,但 `.161` 服务端没察觉,cargo 继续编、一堆 rustc 吃满 4 核 → sshd banner-exchange timeout(连不上)+ 公网入口 502。Joe `pkill rustc` 后即恢复。→ **铁律 1**。
 2. **rate-limit**:短时间多次串行 SSH `.161`,sshd 限速。→ **铁律 2**。
 3. **remote_e2e 误判**:`.161` 被孤儿 build 拖垮期间,remote_e2e 打公网入口全 502(24 failed);`.161` 恢复后重跑 33 passed 全绿——失败是基础设施不是代码。→ 验证要分清「测代码」vs「测部署 endpoint」。
 4. **glibc 兼容**:`.89`/`.85` 是 2.34,binary 可复用且向后兼容 `.161` 的 2.38;反之不行。→ **铁律 3**(统一在 2.34 build)。
+
+**2026-08-04 / 0.1.25**
+
+5. **漏 `cd` → 校验假放行**:build 那条 SSH 少了 `cd /root/veda-build`,cargo 在 home 目录找不到 `Cargo.toml` 直接跑挂,产物路径上的**旧 binary 原样没动**;而当时的 ② 读的是同步过去的 `Cargo.toml`,照样打印 `0.1.25` 说"版本对",三项校验全绿放行。真正抓住的是临时加的产物核对(sha 与上一版一致 + 本次改动的新字符串 0 处)。→ **校验对象必须是产物,不是源码**,已改成 ②a build log `Finished` + ②b 产物 sha 变化,版本本身移到阶段 3 由运行进程自报。
