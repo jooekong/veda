@@ -1,8 +1,17 @@
 # PDF / Word 文件没有摘要（L0/L1）— 缺陷分析与修复方案
 
-> 状态：**待修**（2026-08-04 发现，代码层未改动）
+> 状态：**已实现**（2026-08-04 发现并修复，分支 `fix/pdf-word-summary`）
 > 影响版本：0.1.20（引入 PDF/Word 文本提取）起至今 0.1.25，全部节点
 > 定性：功能缺失（摘要链路从未接上），非偶发故障、非数据损坏
+>
+> 实现 commit：
+> - `792b504` P0-1/2/3 三道闸（`worker.rs`）+ 5 条闸门单测
+> - `c731f5c` 集成测试（真实 MySQL/Milvus + 真 LLM 两条腿）
+> - `6723cbf` P1 图片/二进制回 415（可单独摘除，连同其文档 commit）
+> - `2f5a14a` §6 存量重刷脚本 `scripts/backfill-blob-summaries.sql`
+>
+> **尚未执行**：三节点部署 + §7 的 live DoD + §6 存量重刷。
+> 实现与本方案的偏差见文末「9. 实现偏差」。
 
 ---
 
@@ -265,3 +274,47 @@ WHERE f.source_type IN ('pdf', 'word')
   描述也要更新。
 - 相关历史：`docs/postmortem-2026-07-empty-abstracts.md`（闸 3 的由来）、
   `scripts/backfill-word-extracts.sql`（同类存量重刷的先例）。
+
+---
+
+## 9. 实现偏差
+
+§5 的三处改动语义上照方案实现，闸 1（`fs.rs`）按方案建议**没有**动。
+以下几处写法与方案正文不同：
+
+**① 新鲜度判定抽成了一个函数。** 方案在 §5 的三段代码里各自内联写
+`is_some_and(|ex| ex.source_sha256 == file.checksum_sha256)`，并要求
+「与 `extract_fresh` 是同一套语义，保持一致」。实现把它提成
+`worker.rs::fresh_extract(Option<FileExtract>, &str) -> Option<FileExtract>`，
+三处调用共用。理由有两条：一是三份拷贝靠人盯着才能不漂移，一份则不会；
+二是这个 crate 没有 `MetadataStore` 的 fake（trait ~100 个方法，veda-core
+那份 mock 有 748 行且跨 crate 不可复用），把纯判定拿出来是**唯一**能给闸 3
+三态 / 闸 4 两态写单测的办法，否则这两张真值表只能靠集成测试间接覆盖。
+行为与方案完全一致。
+
+**② P1 的文案是英文，不是方案里的「此文件类型不生成摘要」。**
+同一个函数里相邻的两条消息（`summary pending`、`summary generation is
+disabled …`）都是英文，混语言更糟。机器可读的部分是 code
+`UNSUPPORTED_FILE_TYPE`，方案要求的可区分性由它承担。状态码选 415：不用
+404（文件在，能下载），不用 400（请求没毛病）。
+
+**③ P1 顺带改了 CLI 一行。** 方案只点名 `routes/search.rs`。但 CLI 的
+`print_summary_layer` 只认 200/202/501/404，新状态会落进
+`_ => "unexpected HTTP 415: {json}"`——第一方客户端把新错误渲染成「意外」，
+等于只做了一半。加了一条 415 分支（退出码 4，与 pending=2 / disabled=3
+可区分）。这一行随 P1 一起摘除。
+
+**④ 重刷脚本按目录给文件排序。** 方案 §6 只规定了筛选条件与全局
+ROW_NUMBER。实现额外用 `MIN(path)` 子查询把同目录的文件排在一起——父目录
+`DirSummarySync` 的 dedup + 30s debounce 因此能把 N 个文件合成一次聚合，
+这是压 §6 那个 3-4 倍放大最直接的杠杆。用子查询不用 JOIN，避免一个 file
+万一有多个 dentry 时扇出成重复的 outbox 行。
+`@per_min := 4` 的推导：目录重刷实测 8 dirs/min = 16 次 LLM/min 不撞 TPM
+墙，这里每文件按 4 次 LLM 算（2 次自身 + 级联父目录），16 / 4 = 4。比目录
+重刷保守，因为级联出的 `dir_summary_sync` 由 worker 用 `UTC_TIMESTAMP()`
+入队，**不在阶梯上**，会立刻可 claim。
+
+**⑤ 没有覆盖到的：MCP 的 `overview` 工具。** `routes/mcp.rs::tool_overview`
+自己走 `get_summary`，有 pending / disabled 两种话术，没有「此类型不生成
+摘要」这一种——对着一张 PNG 调 MCP `overview` 仍然会被告知「retry in a few
+seconds」。P1 只按方案改了 REST 面。要不要对齐留给 Joe 定。

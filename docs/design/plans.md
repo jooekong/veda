@@ -26,7 +26,7 @@
 | [`db-workspace-followups.md`](../plans/db-workspace-followups.md) | 接业务方前待办：H1 Milvus GC / M1 维度校验 / A1 内存天花板（硬门槛）+ backlog 并入尾巴 |
 | [`embedding-throughput-plan.md`](../plans/embedding-throughput-plan.md) | **阶段 1 已实现**（07-29 最终形态：两级优先闸——交互插队/空闲时后台占满；攒批器经交叉 review 后按简化原则整体撤回，重启触发条件在 plan 内）；阶段 2 等生产数据再启 |
 | [`outbox-dedup-refactor.md`](../plans/outbox-dedup-refactor.md) | **搁置**（07-29 简化审计：无性能证据不动稳定写路径；更简的中间路线备忘在 plan 头部） |
-| [`pdf-word-summary-gap.md`](../plans/pdf-word-summary-gap.md) | **待修**（08-04 发现）：PDF/Word 从不入队 SummarySync ⇒ `abstract`/`overview` 永远 202；四道闸 + 修复方案 + 存量重刷都在文内 |
+| [`pdf-word-summary-gap.md`](../plans/pdf-word-summary-gap.md) | **代码已实现待上线**（08-04 发现当天修完，`fix/pdf-word-summary`）：PDF/Word 从不入队 SummarySync ⇒ `abstract`/`overview` 永远 202；三道闸已改 + 集成测试真 LLM 验证过。**欠三节点部署 + live DoD + 存量重刷**（`scripts/backfill-blob-summaries.sql`），跑完再归档 |
 
 ## 方向池
 

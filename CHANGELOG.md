@@ -71,6 +71,17 @@ that matters.
   the database keep their old wording until they are regenerated.
 
 ### Fixed
+- **PDF and Word files never got a summary.** Since 0.1.20 they have been
+  text-extracted and searchable, but `veda abstract` / `veda overview`
+  answered "summary pending" forever: the summary task was never created,
+  so there was nothing to wait for. Text extraction now hands off to
+  summary generation, and a PDF or `.docx` uploaded from here on gets its
+  L0/L1 like any text file — which also means a directory containing them
+  stops summarising as if they weren't there. Files uploaded *before* this
+  release stay unsummarised until an operator re-runs them
+  (`scripts/backfill-blob-summaries.sql`). Images and other opaque
+  binaries still get no summary, by design — but they now say so
+  (`415 UNSUPPORTED_FILE_TYPE`) instead of claiming one is on the way.
 - **`veda cp` uploaded the `.git` pointer file of git worktrees and
   submodule checkouts.** There `.git` is a one-line `gitdir:` file rather
   than a directory, and the built-in skip list only matched the directory
