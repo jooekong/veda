@@ -16,7 +16,7 @@ members = [
 # Bump this in lockstep with the next git tag. Captured into binaries via
 # clap's #[command(version)] (CARGO_PKG_VERSION). Mismatch causes `veda
 # --version` to lie. scripts/release.sh automates the bump.
-version = "0.1.23"
+version = "0.1.24"
 edition = "2021"
 license = "MIT"
 
