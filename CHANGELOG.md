@@ -18,21 +18,6 @@ that matters.
   version, not the build, so a node running an unreleased commit still
   prints the previous tag. It falsifies a bad swap; only the binary's
   sha256 identifies a build.
-- **`GET /v1/layout`, an MCP `layout` tool and `veda layout` — one call for "what is this
-  knowledge base".** Returns the workspace's top-level entries with a
-  one-line summary and file count each, plus workspace-wide stats. It makes
-  no LLM call: everything is assembled from summaries that already exist.
-  The workspace root has no dentry and therefore no summary of its own, so
-  this *is* the root-level view — previously an agent facing an unfamiliar
-  workspace had nothing to orient with and had to probe with repeated
-  `list_dir` calls. Directories sort ahead of files so the 200-entry cap
-  keeps the areas worth naming (`truncated: true` beyond that), and
-  `summary_state` reports `ready` / `partial` / `disabled` in the body
-  rather than as an HTTP status — it aggregates many summaries, so the
-  202/501 tri-state of `/v1/abstract` does not apply. A server with no
-  `[llm]` still returns the abstracts it already has, matching what
-  `/v1/abstract` serves. `layout` is listed first in `tools/list` and named
-  first in the MCP `initialize` instructions.
 
 ### Changed
 - **Summaries now back off in seconds on HTTP 429 and can fall back to a
@@ -76,6 +61,23 @@ that matters.
   the generous `max_summary_tokens` budget and the retry on empty content,
   whose error message now carries `finish_reason` so "budget exhausted"
   (`length`) reads apart from "upstream said nothing" at a glance.
+
+### Fixed
+- **PDF and Word files never got a summary.** Since 0.1.20 they have been
+  text-extracted and searchable, but `veda abstract` / `veda overview`
+  answered "summary pending" forever: the summary task was never created,
+  so there was nothing to wait for. Text extraction now hands off to
+  summary generation, and a PDF or `.docx` uploaded from here on gets its
+  L0/L1 like any text file — which also means a directory containing them
+  stops summarising as if they weren't there. Files uploaded *before* this
+  release stay unsummarised until an operator re-runs them
+  (`scripts/backfill-blob-summaries.sql`). Images and other opaque
+  binaries still get no summary, by design — but they now say so
+  (`415 UNSUPPORTED_FILE_TYPE`) instead of claiming one is on the way.
+
+## [0.1.25] — 2026-08-04
+
+### Changed
 - **`veda layout` prints each entry as a block and shows the whole
   summary.** The table capped abstracts at 100 terminal cells while a real
   L0 runs 200-500 characters, so in practice *every* line was truncated.
@@ -94,18 +96,9 @@ that matters.
   forbidden. File summaries are unchanged. Directory summaries already in
   the database keep their old wording until they are regenerated.
 
+## [0.1.24] — 2026-08-04
+
 ### Fixed
-- **PDF and Word files never got a summary.** Since 0.1.20 they have been
-  text-extracted and searchable, but `veda abstract` / `veda overview`
-  answered "summary pending" forever: the summary task was never created,
-  so there was nothing to wait for. Text extraction now hands off to
-  summary generation, and a PDF or `.docx` uploaded from here on gets its
-  L0/L1 like any text file — which also means a directory containing them
-  stops summarising as if they weren't there. Files uploaded *before* this
-  release stay unsummarised until an operator re-runs them
-  (`scripts/backfill-blob-summaries.sql`). Images and other opaque
-  binaries still get no summary, by design — but they now say so
-  (`415 UNSUPPORTED_FILE_TYPE`) instead of claiming one is on the way.
 - **`veda cp` uploaded the `.git` pointer file of git worktrees and
   submodule checkouts.** There `.git` is a one-line `gitdir:` file rather
   than a directory, and the built-in skip list only matched the directory
@@ -119,6 +112,66 @@ that matters.
   and negative counts from a broken response rendered as `-1 files`. A
   response missing `data.entries` reported "empty workspace" rather than
   an error — the one failure mode where being wrong is invisible.
+
+## [0.1.23] — 2026-08-03
+
+### Added
+- **`GET /v1/layout`, an MCP `layout` tool and `veda layout` — one call for "what is this
+  knowledge base".** Returns the workspace's top-level entries with a
+  one-line summary and file count each, plus workspace-wide stats. It makes
+  no LLM call: everything is assembled from summaries that already exist.
+  The workspace root has no dentry and therefore no summary of its own, so
+  this *is* the root-level view — previously an agent facing an unfamiliar
+  workspace had nothing to orient with and had to probe with repeated
+  `list_dir` calls. Directories sort ahead of files so the 200-entry cap
+  keeps the areas worth naming (`truncated: true` beyond that), and
+  `summary_state` reports `ready` / `partial` / `disabled` in the body
+  rather than as an HTTP status — it aggregates many summaries, so the
+  202/501 tri-state of `/v1/abstract` does not apply. A server with no
+  `[llm]` still returns the abstracts it already has, matching what
+  `/v1/abstract` serves. `layout` is listed first in `tools/list` and named
+  first in the MCP `initialize` instructions.
+
+## [0.1.22] — 2026-08-03
+
+### Added
+- **Workspace map (`GET /v1/map`, MCP `map` tool).** Landed here and was
+  renamed to `layout` half a day later in 0.1.23, before any external
+  consumer existed — see the 0.1.23 entry for the full description; the
+  `map` spelling no longer exists.
+- **`config/server.toml.example`** — the server had no config template. Every
+  key, its default, and its `VEDA_*` override in one file, with the
+  production-only settings (`metrics_token`, `admin_token`,
+  `allowed_origins`, `[otlp]`, `[retention]`, pool sizing) called out.
+  Both READMEs pointed at `config/test.toml.example`, which omits all of
+  them.
+
+### Changed
+- **WeCom bot: upstream AI outages are no longer blamed on the knowledge
+  base.** When the LLM gateway or embedding upstream fails
+  (`LLM_UNAVAILABLE` / `EMBEDDING_FAILED`), the bot now replies "上游 AI
+  模型服务暂时不可用（外部依赖故障，非知识库问题）…" instead of the
+  generic "知识库暂时不可用", across the one-shot, streaming and raw-search
+  paths. These land in the QA log as a distinct `upstream_error` outcome
+  (admin console shows a "上游故障" badge and filter; the platform QA API
+  accepts it), so dependency outages and veda's own errors are separable in
+  stats. Timeouts (`ANSWER_TIMEOUT`) keep the generic wording — their
+  deadline spans retrieval too, so pinning them on the upstream could
+  misattribute.
+- **Embedding throughput, stage 1 (server-side).** Every upstream embedding
+  call now passes a global **two-priority** concurrency gate
+  (`[embedding].max_concurrency`, default 8): interactive callers (search /
+  ask / synchronous vector writes) always receive the next freed permit
+  ahead of background indexing, while an idle system lets the worker
+  saturate every permit — bulk imports no longer add seconds to search
+  latency, and off-peak backfills still run at full speed. A request waiting out
+  a 429 backoff no longer pins a slot, large calls embed their chunks
+  concurrently (bounded fan-out) instead of serially, and a caller that
+  gives up abandons its queue slot safely. New metrics:
+  `veda_embed_inflight`, `veda_embed_permit_wait_seconds{priority}`,
+  `veda_embed_429_total`, `veda_embed_batch_texts`.
+
+### Fixed
 - **`veda cp <dir>` ignored `.gitignore`, so uploading a repo flooded the
   knowledge base.** The skip list was four hard-coded directory names
   (`.git`, `__pycache__`, `.idea`, `node_modules`) — `target/`, `dist/`,
@@ -169,39 +222,6 @@ that matters.
   is actually sub-second. `/v1/answer`, `/mcp`, `?view=text`,
   `GET /v1/fs?list`, `output_fields`, and `GET /v1/whoami` were implemented
   but undocumented; they are documented now.
-
-### Added
-- **`config/server.toml.example`** — the server had no config template. Every
-  key, its default, and its `VEDA_*` override in one file, with the
-  production-only settings (`metrics_token`, `admin_token`,
-  `allowed_origins`, `[otlp]`, `[retention]`, pool sizing) called out.
-  Both READMEs pointed at `config/test.toml.example`, which omits all of
-  them.
-
-### Changed
-- **WeCom bot: upstream AI outages are no longer blamed on the knowledge
-  base.** When the LLM gateway or embedding upstream fails
-  (`LLM_UNAVAILABLE` / `EMBEDDING_FAILED`), the bot now replies "上游 AI
-  模型服务暂时不可用（外部依赖故障，非知识库问题）…" instead of the
-  generic "知识库暂时不可用", across the one-shot, streaming and raw-search
-  paths. These land in the QA log as a distinct `upstream_error` outcome
-  (admin console shows a "上游故障" badge and filter; the platform QA API
-  accepts it), so dependency outages and veda's own errors are separable in
-  stats. Timeouts (`ANSWER_TIMEOUT`) keep the generic wording — their
-  deadline spans retrieval too, so pinning them on the upstream could
-  misattribute.
-- **Embedding throughput, stage 1 (server-side).** Every upstream embedding
-  call now passes a global **two-priority** concurrency gate
-  (`[embedding].max_concurrency`, default 8): interactive callers (search /
-  ask / synchronous vector writes) always receive the next freed permit
-  ahead of background indexing, while an idle system lets the worker
-  saturate every permit — bulk imports no longer add seconds to search
-  latency, and off-peak backfills still run at full speed. A request waiting out
-  a 429 backoff no longer pins a slot, large calls embed their chunks
-  concurrently (bounded fan-out) instead of serially, and a caller that
-  gives up abandons its queue slot safely. New metrics:
-  `veda_embed_inflight`, `veda_embed_permit_wait_seconds{priority}`,
-  `veda_embed_429_total`, `veda_embed_batch_texts`.
 
 ### Removed
 - **Reconciler grace-pass machinery.** Production has always run with
