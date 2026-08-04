@@ -270,9 +270,24 @@ impl Worker {
                 }
                 Ok(buf)
             }
-            StorageType::Blob => Err(VedaError::InvalidInput(
-                "binary blob has no text content".into(),
-            )),
+            // A blob's text lives in `veda_file_extracts`, not in the file
+            // rows — pdf/word are stored byte-for-byte and only their
+            // extracted layer is indexable. Reading it here is what lets
+            // summary_sync summarize them; before this the worker errored
+            // while `cat` (fs.rs, same freshness rule) happily served text.
+            // Image/jar and stale-extract blobs still error, which is what
+            // the callers' skip guards expect.
+            StorageType::Blob => {
+                match fresh_extract(
+                    self.meta.get_file_extract(&file.id).await?,
+                    &file.checksum_sha256,
+                ) {
+                    Some(ex) => Ok(ex.content),
+                    None => Err(VedaError::InvalidInput(
+                        "binary blob has no text content".into(),
+                    )),
+                }
+            }
         }
     }
 
@@ -438,11 +453,11 @@ impl Worker {
         // (pre-extract-table files, a crash between upsert and watermark), so
         // it is checked independently: a watermark hit with a stale/missing
         // extract still re-extracts below — it only skips the embed.
-        let extract_fresh = self
-            .meta
-            .get_file_extract(file_id)
-            .await?
-            .is_some_and(|ex| ex.source_sha256 == file.checksum_sha256);
+        let extract_fresh = fresh_extract(
+            self.meta.get_file_extract(file_id).await?,
+            &file.checksum_sha256,
+        )
+        .is_some();
         let embed_current = !force_reembed
             && file.last_embedded_content_hash.as_deref() == Some(file.checksum_sha256.as_str());
         if embed_current && extract_fresh {
@@ -497,6 +512,32 @@ impl Worker {
         };
         self.meta.upsert_file_extract(&extract).await?;
 
+        // Pdf/Word acquire a text layer only here, so this is where their
+        // SummarySync is born — `enqueue_index_outbox` cannot do it at write
+        // time (no extract exists yet, and a SummarySync claimed before this
+        // handler would find nothing to summarize). Without this hop
+        // pdf/word files never got an L0/L1 at all, and their parent
+        // directories aggregated without them.
+        //
+        // Placement is load-bearing: after the upsert, so the task is
+        // guaranteed to find fresh text, and *before* the `embed_current`
+        // early return below so the refresh-only path enqueues too.
+        // enqueue_dedup collapses repeats against a pending row, so a
+        // re-extracted file does not queue a second summary.
+        let inserted = enqueue_dedup(
+            &*self.task_queue,
+            workspace_id,
+            OutboxEventType::SummarySync,
+            "file_id",
+            file_id,
+            serde_json::json!({ "file_id": file_id }),
+            Utc::now(),
+        )
+        .await?;
+        if !inserted {
+            info!(file_id, "summary_sync already pending, skipping enqueue");
+        }
+
         if embed_current {
             debug!(file_id, "extract_sync: refreshed stored extract; embeddings already current");
             return Ok(());
@@ -522,13 +563,25 @@ impl Worker {
             return Ok(());
         };
 
-        // Blob files (images/binaries) have no text layer to summarize. A
-        // stale SummarySync can still point at one: a file first written as
-        // text (enqueuing the task) then overwritten as binary before the
-        // worker ran. Erroring here sent 315 such orphans to dead-letter in
-        // prod (2026-07-13) — skip instead; the blob stays downloadable.
-        if file.storage_type == StorageType::Blob {
-            warn!(workspace_id, file_id, "summary_sync skipped: blob file has no text layer");
+        // Blobs are summarizable only through their extracted text layer
+        // (pdf/word). Two kinds reach here without one and must be skipped,
+        // not errored: true binaries (images, jars) that never get extracted,
+        // and stale SummarySyncs pointing at a file that was text when the
+        // task was enqueued and binary by the time the worker ran. Erroring
+        // sent 315 such orphans to dead-letter in prod (2026-07-13) — skip
+        // instead; the blob stays downloadable either way.
+        //
+        // Freshness is not optional: a stale extract is the *previous*
+        // revision's text, so summarizing it would publish an L0/L1 that
+        // describes content the file no longer has.
+        if file.storage_type == StorageType::Blob
+            && fresh_extract(
+                self.meta.get_file_extract(file_id).await?,
+                &file.checksum_sha256,
+            )
+            .is_none()
+        {
+            warn!(workspace_id, file_id, "summary_sync skipped: blob has no extracted text");
             return Ok(());
         }
 
@@ -740,6 +793,22 @@ fn parent_path_of(path: &str) -> String {
     veda_core::path::parent(path).to_string()
 }
 
+/// The stored text layer of a blob, but only when it still describes the
+/// blob's current bytes. `source_sha256` is stamped at extraction time, so a
+/// row left over from a previous revision must be treated as *absent*: it
+/// would otherwise be embedded, summarized, or served as if it were the
+/// current content.
+///
+/// Every blob text-layer decision in this worker funnels through here —
+/// extract_sync's "already fresh" check, summary_sync's blob gate, and
+/// load_full_content — so the three cannot drift into disagreeing about what
+/// "has extracted text" means. Mirrors the read path in
+/// `veda-core/service/fs.rs`, which applies the same comparison before
+/// serving extracted text to `cat`.
+fn fresh_extract(extract: Option<FileExtract>, checksum: &str) -> Option<FileExtract> {
+    extract.filter(|ex| ex.source_sha256 == checksum)
+}
+
 /// Static label string for `OutboxEventType`, used as a Prometheus label.
 /// Must be `&'static str` because `metrics` labels need it.
 fn outbox_event_label(event: OutboxEventType) -> &'static str {
@@ -797,5 +866,65 @@ mod tests {
         // string keeps the worker from crashing on exotic payloads.
         let msg = extract(|| std::panic::panic_any(123_i32)).await;
         assert_eq!(msg, "(non-string panic payload)");
+    }
+
+    // ── blob text-layer freshness ──────────────────────────────────────
+    //
+    // `fresh_extract` is the whole decision behind two guards that a mocked
+    // store cannot reach cheaply (MetadataStore has ~100 methods and this
+    // crate has no fake for it): summary_sync's blob gate skips exactly when
+    // this returns None, and load_full_content errors exactly when it returns
+    // None. The tables below are those guards' truth tables; that the guards
+    // are wired to them is covered by
+    // `tests/blob_summary_test.rs` against real MySQL.
+
+    const CURRENT: &str = "sha-current";
+    const PREVIOUS: &str = "sha-previous";
+
+    fn extract_row(sha: &str) -> FileExtract {
+        FileExtract {
+            file_id: "f1".into(),
+            content: "extracted body".into(),
+            source_sha256: sha.into(),
+        }
+    }
+
+    /// Gate 3 state 1/3 — pdf/word: extract matches the blob's current bytes,
+    /// so summary_sync must NOT skip. This is the case the fix exists for.
+    #[test]
+    fn gate3_blob_with_fresh_extract_is_summarizable() {
+        assert!(fresh_extract(Some(extract_row(CURRENT)), CURRENT).is_some());
+    }
+
+    /// Gate 3 state 2/3 — blob rewritten since extraction. Summarizing the
+    /// leftover row would describe the *previous* revision, so it must skip
+    /// and wait for extract_sync to refresh the text.
+    #[test]
+    fn gate3_blob_with_stale_extract_is_skipped() {
+        assert!(fresh_extract(Some(extract_row(PREVIOUS)), CURRENT).is_none());
+    }
+
+    /// Gate 3 state 3/3 — image / jar: never extracted, nothing to summarize.
+    /// Preserves the 2026-07-13 hardening (skip, don't error) that cleared
+    /// 315 dead letters in prod.
+    #[test]
+    fn gate3_blob_without_extract_is_skipped() {
+        assert!(fresh_extract(None, CURRENT).is_none());
+    }
+
+    /// Gate 4 state 1/2 — load_full_content serves the extracted text for a
+    /// fresh blob rather than erroring, matching what `cat` already returns.
+    #[test]
+    fn gate4_fresh_extract_yields_content() {
+        let got = fresh_extract(Some(extract_row(CURRENT)), CURRENT).map(|ex| ex.content);
+        assert_eq!(got.as_deref(), Some("extracted body"));
+    }
+
+    /// Gate 4 state 2/2 — a stale row yields nothing, so the caller raises
+    /// "binary blob has no text content" instead of embedding old text.
+    #[test]
+    fn gate4_stale_extract_yields_nothing() {
+        let got = fresh_extract(Some(extract_row(PREVIOUS)), CURRENT).map(|ex| ex.content);
+        assert_eq!(got, None);
     }
 }
