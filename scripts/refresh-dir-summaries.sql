@@ -24,7 +24,9 @@
 --   * NOT EXISTS guard replicates enqueue_dedup: veda_outbox has no unique
 --     index; raw SQL bypasses the Rust-side dedup check.
 --   * UTC_TIMESTAMP() everywhere — the claim predicate compares against it;
---     NOW() misfires in a non-UTC session.
+--     NOW() misfires in a non-UTC session. The inverse trap: veda_summaries
+--     `updated_at` is LOCAL time, so don't filter it with UTC_TIMESTAMP()
+--     when sampling refreshed rows (bit an operator on 2026-08-04).
 --
 -- Scope to one workspace by adding `AND d.workspace_id = '<id>'` to the two
 -- WHERE clauses below.
@@ -37,7 +39,13 @@ WHERE d.is_dir = 1
               WHERE s.dentry_id = d.id AND s.status = 'ready');
 
 -- ── 2. enqueue with global staircase ──────────────────────────────────
-SET @per_min := 20;
+-- 8/min, NOT higher: with summary_disable_thinking the worker sustains
+-- ~29 dirs/min and the ceiling moved from LLM latency to the upstream TPM
+-- quota — a 2026-08-04 probe at effectively unthrottled pace drew 467
+-- HTTP 429 ("insufficient_quota", token-limit) and 22 dead letters in
+-- minutes. Before thinking-off the worker only reached 9-13/min, so 20
+-- never bit; now it would. Raise only with quota headroom evidence.
+SET @per_min := 8;
 
 INSERT INTO veda_outbox
     (workspace_id, event_type, payload, status, retry_count, max_retries,
@@ -70,8 +78,9 @@ ORDER BY rn;
 
 -- ── 3. progress / verification ────────────────────────────────────────
 -- Status counts; pending+processing reaching 0 = converged. Observed
--- effective throughput 2026-08-04: 9-13 dirs/min (worker batch_size +
--- LLM latency bound it below the staircase rate).
+-- effective worker ceilings 2026-08-04: 9-13 dirs/min with thinking on,
+-- ~29 dirs/min with summary_disable_thinking — which is why the staircase
+-- rate above is now the binding limit and must stay under the TPM quota.
 SELECT status, COUNT(*) FROM veda_outbox
 WHERE event_type = 'dir_summary_sync' GROUP BY status;
 
@@ -87,3 +96,16 @@ SELECT COUNT(*) AS dead FROM veda_outbox
 WHERE event_type = 'dir_summary_sync' AND status = 'dead';
 SELECT COUNT(*) AS empty_l0 FROM veda_summaries
 WHERE dentry_id IS NOT NULL AND l0_abstract = '';
+
+-- ── 4. requeue dead letters (after a 429 storm) ───────────────────────
+-- Re-staircase them instead of releasing all at once — releasing 22 rows
+-- immediately is exactly the burst that killed them the first time.
+SET @per_min := 8;
+UPDATE veda_outbox o
+JOIN (
+    SELECT id, ROW_NUMBER() OVER (ORDER BY id) AS rn
+    FROM veda_outbox
+    WHERE event_type = 'dir_summary_sync' AND status = 'dead'
+) t ON t.id = o.id
+SET o.status = 'pending', o.retry_count = 0, o.lease_until = NULL,
+    o.available_at = DATE_ADD(UTC_TIMESTAMP(), INTERVAL ((t.rn - 1) DIV @per_min) MINUTE);
