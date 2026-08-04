@@ -242,6 +242,13 @@ pub struct LlmConfig {
     /// matching `max_summary_tokens`).
     #[serde(default)]
     pub summary_disable_thinking: bool,
+    /// Model to spend one extra summary attempt on when the primary model's
+    /// retries were exhausted by HTTP 429s. Absent (the default) = today's
+    /// behaviour, the failure goes straight to the outbox. Only quota
+    /// triggers it; a 5xx or an empty completion never does. No env override
+    /// (LLM sub-fields are TOML-only).
+    #[serde(default)]
+    pub summary_fallback_model: Option<String>,
     /// `/v1/answer` tool round-trip cap for the agentic loop. 0 degrades to
     /// pre-search + one forced answer (closest to the old one-shot mode) —
     /// the emergency knob if the loop misbehaves in production.
@@ -350,6 +357,7 @@ impl ServerConfig {
                     model: String::new(),
                     max_summary_tokens: default_max_summary_tokens(),
                     summary_disable_thinking: false,
+                    summary_fallback_model: None,
                     answer_max_tool_rounds: default_answer_max_tool_rounds(),
                     answer_max_output_tokens: default_answer_max_output_tokens(),
                     answer_concurrency: default_answer_concurrency(),
@@ -510,6 +518,25 @@ dimension = 768
         raw.push_str("summary_disable_thinking = true\n");
         let cfg = ServerConfig::from_toml(&raw).unwrap();
         assert!(cfg.llm.as_ref().unwrap().summary_disable_thinking);
+    }
+
+    #[test]
+    fn summary_fallback_model_defaults_none_and_parses_when_set() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
+
+        // Absent → None, i.e. a quota-exhausted summary fails to the outbox
+        // exactly as it did before the fallback existed.
+        let mut raw = MINIMAL_TOML.to_string();
+        raw.push_str("\n[llm]\napi_url = \"u\"\napi_key = \"k\"\nmodel = \"m\"\n");
+        let cfg = ServerConfig::from_toml(&raw).unwrap();
+        assert!(cfg.llm.as_ref().unwrap().summary_fallback_model.is_none());
+
+        raw.push_str("summary_fallback_model = \"qwen-flash\"\n");
+        let cfg = ServerConfig::from_toml(&raw).unwrap();
+        assert_eq!(
+            cfg.llm.as_ref().unwrap().summary_fallback_model.as_deref(),
+            Some("qwen-flash")
+        );
     }
 
     #[test]

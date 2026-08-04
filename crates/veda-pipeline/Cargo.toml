@@ -16,6 +16,9 @@ reqwest.workspace = true
 futures-util = { version = "0.3", default-features = false }
 tracing.workspace = true
 metrics = "0.24"
+# Jitter on the LLM quota backoff. Already in this crate's tree via
+# pdf-extract → lopdf, so making it direct costs no extra compilation.
+rand = "0.9"
 moka.workspace = true
 unicode-normalization.workspace = true
 pdf-extract = "0.10.0"

@@ -35,6 +35,30 @@ that matters.
   first in the MCP `initialize` instructions.
 
 ### Changed
+- **Summaries now back off in seconds on HTTP 429 and can fall back to a
+  second model — `[llm] summary_fallback_model`.** Probing the company
+  airouter under real quota rejections (2026-08-04) showed the retry
+  schedule was aimed at the wrong failure: 429s carry no `Retry-After` and
+  no rate-limit headers, and the limiter turns out to be instantaneous
+  concurrency rather than a minute-long window — 429s and 200s interleave
+  inside the same second, a rejection returns in 0.13s, and throughput
+  recovers as soon as pressure drops. Quota retries now wait 1s/3s/9s with
+  a ±50% jitter (several workers hit the ceiling at once, so a fixed
+  schedule marches them back in lockstep); every other retryable failure
+  keeps the original 0.5/1/2s. The same probe established that quota is
+  metered *per model* — one key, one 429 window, and qwen-flash /
+  deepseek-v3.1 / v4-pro all answered — which makes a second model real
+  capacity rather than a gamble. So when, and only when, a summary's
+  retries have been exhausted by 429s, a configured fallback model gets one
+  more attempt with a byte-identical request body. A 5xx or an empty
+  completion never triggers it: that is a sick backend, and a second model
+  would just add load to it. Unset by default and TOML-only, in which case
+  behaviour is exactly as before — the failure goes to the outbox's 60/120s
+  schedule, which also stays the backstop when the fallback itself fails.
+  Each trigger logs `LLM quota exhausted, falling back` and increments
+  `veda_llm_fallback_total`; a counter that keeps climbing means the primary
+  model is chronically saturated rather than briefly busy. `/v1/answer` is
+  untouched.
 - **Summary generation can now tell the gateway to skip thinking —
   `[llm] summary_disable_thinking`.** Measured against the company airouter
   with deepseek-v4-flash: a summary-shaped call reasons by default and the

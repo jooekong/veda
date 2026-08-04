@@ -127,10 +127,12 @@ async fn main() -> anyhow::Result<()> {
                 &llm_cfg.api_key,
                 &llm_cfg.model,
                 llm_cfg.summary_disable_thinking,
-            )?;
+            )?
+            .with_summary_fallback(llm_cfg.summary_fallback_model.clone());
             info!(
                 model = %llm_cfg.model,
                 summary_disable_thinking = llm_cfg.summary_disable_thinking,
+                summary_fallback_model = llm_cfg.summary_fallback_model.as_deref().unwrap_or("-"),
                 "LLM summary service enabled"
             );
             Some(Arc::new(provider))

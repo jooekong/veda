@@ -105,6 +105,21 @@ max_concurrency = 8                      # VEDA_EMBEDDING_MAX_CONCURRENCY
 # known to accept it. `/v1/answer` is NOT affected: answers keep reasoning
 # under every setting.
 # summary_disable_thinking = false
+# Second model for SUMMARY calls only, tried once after the primary model's
+# retries (1s/3s/9s ± jitter) have all come back HTTP 429. Nothing else
+# triggers it — a 5xx or an empty completion means the backend is unwell, and
+# a second model would only add load. Unset = a quota-exhausted summary goes
+# straight to the outbox (60/120s), which is exactly the pre-fallback
+# behaviour. Watch `veda_llm_fallback_total`: a counter that keeps climbing
+# means the primary model is chronically saturated, not that a burst passed.
+# Recommended on the company airouter: qwen-flash (measured 2026-08-04 —
+# 0.6s latency, no thinking by default, accepts enable_thinking, and its DIR_L0
+# summaries hold up against the primary model's). The premise that makes any
+# fallback work is that airouter meters quota PER MODEL: same key, same 429
+# window, qwen-flash / deepseek-v3.1 / v4-pro all answered (same-day probe).
+# Two traps from that probe: the gpt-4o family 502s on this gateway, and the
+# `qwen2.5-72b-instruct` alias actually routes to qwen3.6-plus.
+# summary_fallback_model = "qwen-flash"
 # `/v1/answer` agentic loop: tool round-trip cap. 0 degrades to pre-search +
 # one forced answer (the emergency knob if the loop misbehaves).
 # answer_max_tool_rounds = 4

@@ -24,3 +24,6 @@ max_summary_tokens = 8192
 # Only for a gateway known to accept the param (company airouter does; the
 # OpenAI API 400s on it). Summaries only — /v1/answer keeps its reasoning.
 # summary_disable_thinking = false
+# Tried once when the primary model's retries are exhausted by 429s (quota
+# only, never a 5xx). See config/server.toml.example for the full rationale.
+# summary_fallback_model = "qwen-flash"

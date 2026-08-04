@@ -8,6 +8,18 @@ use veda_types::{Result, VedaError};
 
 const MAX_RETRIES: u32 = 3;
 const BASE_BACKOFF_MS: u64 = 500;
+/// First quota (HTTP 429) backoff, tripling per attempt: 1s / 3s / 9s.
+///
+/// Deliberately seconds and not minutes. Probing the company airouter under
+/// real 429s (2026-08-04, 73 calls) showed the limiter is *instantaneous
+/// concurrency*, not a minute-long lockout: 429s and 200s interleave inside
+/// the same second, a rejection comes back in 0.13s from the gateway itself,
+/// and throughput recovers the moment pressure drops. Minute-scale sleeps
+/// would idle the worker through a window that has already reopened. The
+/// responses carry no `Retry-After` and no rate-limit headers (the backend is
+/// Aliyun Bailian), so there is nothing to obey — the schedule is ours.
+const QUOTA_BACKOFF_BASE_MS: u64 = 1000;
+const QUOTA_BACKOFF_FACTOR: u64 = 3;
 
 /// Wire mirror of one chat message (OpenAI chat/completions shape).
 #[derive(Debug, Serialize)]
@@ -147,6 +159,9 @@ pub struct LlmProvider {
     /// Send `enable_thinking: false` on the summarize path. Off unless the
     /// deployment's gateway is known to accept it (see `ChatRequest`).
     summary_disable_thinking: bool,
+    /// Second model to try once the primary has burned its retries on quota
+    /// 429s. `None` (the default) keeps the old behaviour exactly.
+    summary_fallback_model: Option<String>,
 }
 
 impl LlmProvider {
@@ -167,15 +182,33 @@ impl LlmProvider {
             api_key: api_key.into(),
             model: model.into(),
             summary_disable_thinking,
+            summary_fallback_model: None,
         })
+    }
+
+    /// Opt into summary fallback (see `chat`). A builder step rather than a
+    /// `new` parameter so the four existing call sites stay untouched — and
+    /// so "not configured" remains the shape you get by default.
+    ///
+    /// Blank/whitespace names normalize to `None`: an empty TOML value means
+    /// "off", never a request with `model: ""`.
+    pub fn with_summary_fallback(mut self, model: Option<String>) -> Self {
+        self.summary_fallback_model = model
+            .map(|m| m.trim().to_string())
+            .filter(|m| !m.is_empty());
+        self
     }
 
     /// Body for the non-streaming summarize path. Split out from
     /// `chat_once` so the wire shape — above all whether `enable_thinking`
     /// is present — is unit testable without a network.
-    fn summary_request(&self, prompt: &str, max_tokens: usize) -> ChatRequest {
+    ///
+    /// `model` is a parameter rather than `self.model` because the fallback
+    /// path sends the *same body* under a different model name; keeping one
+    /// builder is what makes that guarantee testable.
+    fn summary_request(&self, model: &str, prompt: &str, max_tokens: usize) -> ChatRequest {
         ChatRequest {
-            model: self.model.clone(),
+            model: model.to_string(),
             messages: vec![ChatMessage::user(prompt)],
             tools: Vec::new(),
             max_tokens: Some(max_tokens),
@@ -209,61 +242,186 @@ impl LlmProvider {
         }
     }
 
-    async fn chat_once(&self, prompt: &str, max_tokens: usize) -> std::result::Result<String, LlmError> {
-        let body = self.summary_request(prompt, max_tokens);
+    async fn chat_once(
+        &self,
+        model: &str,
+        prompt: &str,
+        max_tokens: usize,
+    ) -> std::result::Result<String, LlmError> {
+        let body = self.summary_request(model, prompt, max_tokens);
 
         let mut req = self.client.post(&self.api_url).json(&body);
         if !self.api_key.is_empty() {
             req = req.bearer_auth(&self.api_key);
         }
 
-        let response = req.send().await.map_err(|e| LlmError {
-            inner: VedaError::Internal(format!("LLM request failed: {e}")),
-            retryable: true,
+        let response = req.send().await.map_err(|e| {
+            LlmError::new(LlmErrorKind::Transient, format!("LLM request failed: {e}"))
         })?;
 
         let status = response.status();
-        let bytes = response.bytes().await.map_err(|e| LlmError {
-            inner: VedaError::Internal(format!("LLM read body failed: {e}")),
-            retryable: true,
+        let bytes = response.bytes().await.map_err(|e| {
+            LlmError::new(LlmErrorKind::Transient, format!("LLM read body failed: {e}"))
         })?;
 
-        let retryable = status == reqwest::StatusCode::TOO_MANY_REQUESTS || status.is_server_error();
         if !status.is_success() {
             let msg = String::from_utf8_lossy(&bytes).into_owned();
-            return Err(LlmError {
-                inner: VedaError::Internal(format!("LLM HTTP {status}: {msg}")),
-                retryable,
-            });
+            return Err(LlmError::new(
+                classify_status(status),
+                format!("LLM HTTP {status}: {msg}"),
+            ));
         }
 
         parse_chat_response(&bytes)
     }
 
-    async fn chat(&self, prompt: &str, max_tokens: usize) -> Result<String> {
+    /// One model, `MAX_RETRIES` attempts, backoff keyed on the failure kind.
+    /// Returns the *last* error whole so the caller can see what exhausted
+    /// the run — that verdict is what decides whether a fallback is warranted.
+    async fn chat_with_retries(
+        &self,
+        model: &str,
+        prompt: &str,
+        max_tokens: usize,
+    ) -> std::result::Result<String, LlmError> {
         let mut last_err = None;
         for attempt in 0..=MAX_RETRIES {
-            match self.chat_once(prompt, max_tokens).await {
+            match self.chat_once(model, prompt, max_tokens).await {
                 Ok(v) => return Ok(v),
                 Err(e) => {
-                    if !e.retryable || attempt == MAX_RETRIES {
-                        return Err(e.inner);
+                    if !e.retryable() || attempt == MAX_RETRIES {
+                        return Err(e);
                     }
-                    let backoff_ms = BASE_BACKOFF_MS * 2u64.pow(attempt);
+                    let backoff = retry_backoff(e.kind, attempt, jitter());
+                    let backoff_ms = backoff.as_millis();
                     warn!(attempt, backoff_ms, err = %e.inner, "LLM call failed, retrying");
-                    tokio::time::sleep(Duration::from_millis(backoff_ms)).await;
-                    last_err = Some(e.inner);
+                    tokio::time::sleep(backoff).await;
+                    last_err = Some(e);
                 }
             }
         }
-        Err(last_err.unwrap())
+        Err(last_err.expect("loop returns directly on the final attempt"))
     }
+
+    /// Summarize call: retry the primary model, then — only if quota is what
+    /// finished it off — spend one attempt on the fallback model.
+    ///
+    /// The split matters. A 429 is the one failure another model can actually
+    /// fix: airouter meters quota *per model*, so a key being rejected on the
+    /// primary was serving qwen-flash and deepseek-v3.1 in the same window
+    /// (2026-08-04 probe). A 5xx or an empty completion says the backend is
+    /// unwell, and shopping around would only double the load it is failing
+    /// under — those never fall back.
+    async fn chat(&self, prompt: &str, max_tokens: usize) -> Result<String> {
+        let err = match self.chat_with_retries(&self.model, prompt, max_tokens).await {
+            Ok(v) => return Ok(v),
+            Err(e) => e,
+        };
+        let Some(fallback) = fallback_target(err.kind, self.summary_fallback_model.as_deref())
+        else {
+            return Err(err.inner);
+        };
+
+        warn!(
+            primary = %self.model,
+            fallback = %fallback,
+            err = %err.inner,
+            "LLM quota exhausted, falling back"
+        );
+        ::metrics::counter!("veda_llm_fallback_total").increment(1);
+
+        // One shot, no second retry ladder: the primary already spent ~13s of
+        // backoff, and the outbox's own 60/120s schedule is the next line of
+        // defence. Two ladders would just hold the worker slot longer.
+        match self.chat_once(fallback, prompt, max_tokens).await {
+            Ok(v) => Ok(v),
+            Err(e) => {
+                warn!(fallback = %fallback, err = %e.inner, "LLM fallback model also failed");
+                // Surface the primary's error, not the fallback's: "the
+                // summary model is out of quota" is the actionable half, and
+                // reusing the exact message the no-fallback path stores keeps
+                // failed-summary rows comparable across deployments.
+                Err(err.inner)
+            }
+        }
+    }
+}
+
+/// What kind of failure this is — the axis that decides retry pacing and
+/// whether another model could help.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LlmErrorKind {
+    /// HTTP 429: the key has no capacity *for this model* right now.
+    Quota,
+    /// 5xx, transport failure, empty completion — retry the same model.
+    Transient,
+    /// 4xx (bad request, auth), unparsable body — retrying changes nothing.
+    Terminal,
 }
 
 #[derive(Debug)]
 struct LlmError {
     inner: VedaError,
-    retryable: bool,
+    kind: LlmErrorKind,
+}
+
+impl LlmError {
+    fn new(kind: LlmErrorKind, msg: String) -> Self {
+        Self {
+            inner: VedaError::Internal(msg),
+            kind,
+        }
+    }
+
+    fn retryable(&self) -> bool {
+        !matches!(self.kind, LlmErrorKind::Terminal)
+    }
+}
+
+/// Classify a non-2xx status. Every 429 counts as quota, without reading the
+/// body: airouter's carries `type: insufficient_quota`, but a gateway that
+/// means "too fast" instead wants the same treatment — back off in seconds,
+/// then try a model metered separately.
+fn classify_status(status: reqwest::StatusCode) -> LlmErrorKind {
+    if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
+        LlmErrorKind::Quota
+    } else if status.is_server_error() {
+        LlmErrorKind::Transient
+    } else {
+        LlmErrorKind::Terminal
+    }
+}
+
+/// Backoff before retrying attempt `attempt` (0-based).
+///
+/// Quota gets the longer seconds-scale ladder *with* jitter, because a 429
+/// means several workers hit the same ceiling at once and a fixed schedule
+/// would march them back in lockstep. Transient failures keep the original
+/// 0.5/1/2s and ignore the jitter argument: nothing there is contended.
+fn retry_backoff(kind: LlmErrorKind, attempt: u32, jitter: f64) -> Duration {
+    match kind {
+        LlmErrorKind::Quota => {
+            let base = QUOTA_BACKOFF_BASE_MS * QUOTA_BACKOFF_FACTOR.pow(attempt);
+            Duration::from_millis((base as f64 * jitter) as u64)
+        }
+        _ => Duration::from_millis(BASE_BACKOFF_MS * 2u64.pow(attempt)),
+    }
+}
+
+/// Uniform multiplier in [0.5, 1.5) applied to the quota backoff.
+fn jitter() -> f64 {
+    use rand::Rng;
+    rand::rng().random_range(0.5..1.5)
+}
+
+/// The model to try after a primary run gave up — `Some` only when quota is
+/// what exhausted it *and* a fallback is configured. Pure so the trigger
+/// condition is tested directly rather than inferred from the call site.
+fn fallback_target(kind: LlmErrorKind, configured: Option<&str>) -> Option<&str> {
+    match kind {
+        LlmErrorKind::Quota => configured,
+        _ => None,
+    }
 }
 
 /// Parse a non-streaming chat completion body into the message content.
@@ -284,25 +442,26 @@ struct LlmError {
 /// max_summary_tokens, or turn thinking off), anything else = upstream
 /// returned nothing despite room to speak.
 fn parse_chat_response(bytes: &[u8]) -> std::result::Result<String, LlmError> {
-    let parsed: ChatResponse = serde_json::from_slice(bytes).map_err(|e| LlmError {
-        inner: VedaError::Internal(format!("LLM invalid JSON: {e}")),
-        retryable: false,
-    })?;
+    let parsed: ChatResponse = serde_json::from_slice(bytes)
+        .map_err(|e| LlmError::new(LlmErrorKind::Terminal, format!("LLM invalid JSON: {e}")))?;
 
-    let choice = parsed.choices.into_iter().next().ok_or_else(|| LlmError {
-        inner: VedaError::Internal("LLM returned empty choices".to_string()),
-        retryable: false,
+    let choice = parsed.choices.into_iter().next().ok_or_else(|| {
+        LlmError::new(
+            LlmErrorKind::Terminal,
+            "LLM returned empty choices".to_string(),
+        )
     })?;
 
     let content = choice.message.content.trim();
     if content.is_empty() {
         let reason = choice.finish_reason.as_deref().unwrap_or("unknown");
-        return Err(LlmError {
-            inner: VedaError::Internal(format!(
-                "LLM returned empty content (finish_reason={reason})"
-            )),
-            retryable: true,
-        });
+        // Transient, never Quota: an empty completion is the backend
+        // misbehaving on a request it accepted, so retrying the same model is
+        // the remedy and a fallback would be treating the wrong illness.
+        return Err(LlmError::new(
+            LlmErrorKind::Transient,
+            format!("LLM returned empty content (finish_reason={reason})"),
+        ));
     }
     Ok(content.to_string())
 }
@@ -593,7 +752,7 @@ mod tests {
     fn summary_request_omits_enable_thinking_by_default() {
         // The default must stay wire-compatible with the OpenAI API, which
         // 400s on unknown top-level params: the key is absent, not `null`.
-        let v = body(&provider(false).summary_request("hi", 8192));
+        let v = body(&provider(false).summary_request("m", "hi", 8192));
         assert!(
             v.get("enable_thinking").is_none(),
             "enable_thinking must not be sent unless configured: {v}"
@@ -603,7 +762,7 @@ mod tests {
 
     #[test]
     fn summary_request_disables_thinking_when_configured() {
-        let v = body(&provider(true).summary_request("hi", 8192));
+        let v = body(&provider(true).summary_request("m", "hi", 8192));
         assert_eq!(v["enable_thinking"], serde_json::json!(false));
     }
 
@@ -635,7 +794,13 @@ mod tests {
         // finish_reason "length" — thinking burned the whole token budget.
         let body = br#"{"choices":[{"message":{"content":""},"finish_reason":"length"}]}"#;
         let err = parse_chat_response(body).unwrap_err();
-        assert!(err.retryable, "empty content must be retryable");
+        assert!(err.retryable(), "empty content must be retryable");
+        assert_eq!(
+            err.kind,
+            LlmErrorKind::Transient,
+            "empty content is the backend misbehaving, not a quota wall — it \
+             must not reach for the fallback model"
+        );
         assert_eq!(
             err.inner.to_string(),
             "internal error: LLM returned empty content (finish_reason=length)"
@@ -643,7 +808,7 @@ mod tests {
 
         // Whitespace-only content is the same failure after trim.
         let body = br#"{"choices":[{"message":{"content":"  \n "},"finish_reason":"length"}]}"#;
-        assert!(parse_chat_response(body).unwrap_err().retryable);
+        assert!(parse_chat_response(body).unwrap_err().retryable());
     }
 
     #[test]
@@ -651,7 +816,7 @@ mod tests {
         // Gateways that omit the field must not lose the error itself.
         let body = br#"{"choices":[{"message":{"content":""}}]}"#;
         let err = parse_chat_response(body).unwrap_err();
-        assert!(err.retryable, "empty content must stay retryable");
+        assert!(err.retryable(), "empty content must stay retryable");
         assert!(
             err.inner.to_string().contains("finish_reason=unknown"),
             "missing finish_reason should read as unknown: {}",
@@ -663,13 +828,165 @@ mod tests {
     fn parse_response_empty_choices_is_terminal_error() {
         let body = br#"{"choices":[]}"#;
         let err = parse_chat_response(body).unwrap_err();
-        assert!(!err.retryable);
+        assert!(!err.retryable());
+        assert_eq!(err.kind, LlmErrorKind::Terminal);
     }
 
     #[test]
     fn parse_response_invalid_json_is_terminal_error() {
         let err = parse_chat_response(b"{broken").unwrap_err();
-        assert!(!err.retryable);
+        assert!(!err.retryable());
+        assert_eq!(err.kind, LlmErrorKind::Terminal);
+    }
+
+    // ── error classification ─────────────────────────────
+
+    #[test]
+    fn classifies_429_as_quota() {
+        let kind = classify_status(reqwest::StatusCode::from_u16(429).unwrap());
+        assert_eq!(kind, LlmErrorKind::Quota);
+        assert!(LlmError::new(kind, "x".into()).retryable());
+    }
+
+    #[test]
+    fn classifies_5xx_as_transient() {
+        for code in [500u16, 502, 503, 504] {
+            let kind = classify_status(reqwest::StatusCode::from_u16(code).unwrap());
+            assert_eq!(kind, LlmErrorKind::Transient, "HTTP {code}");
+            assert!(LlmError::new(kind, "x".into()).retryable(), "HTTP {code}");
+        }
+    }
+
+    #[test]
+    fn classifies_4xx_as_terminal() {
+        // 400 (malformed request) and 401 (bad key) do not improve with
+        // repetition — and must not consume the fallback model's quota either.
+        for code in [400u16, 401, 403, 404, 422] {
+            let kind = classify_status(reqwest::StatusCode::from_u16(code).unwrap());
+            assert_eq!(kind, LlmErrorKind::Terminal, "HTTP {code}");
+            assert!(!LlmError::new(kind, "x".into()).retryable(), "HTTP {code}");
+        }
+    }
+
+    // ── backoff ──────────────────────────────────────────
+
+    #[test]
+    fn quota_backoff_is_seconds_scaled_by_jitter() {
+        // 1s / 3s / 9s base — seconds because the gateway's limiter is
+        // instantaneous concurrency, with no Retry-After to obey.
+        for (attempt, base) in [(0u32, 1000u128), (1, 3000), (2, 9000)] {
+            assert_eq!(retry_backoff(LlmErrorKind::Quota, attempt, 1.0).as_millis(), base);
+            assert_eq!(
+                retry_backoff(LlmErrorKind::Quota, attempt, 0.5).as_millis(),
+                base / 2,
+                "jitter floor at attempt {attempt}"
+            );
+            assert_eq!(
+                retry_backoff(LlmErrorKind::Quota, attempt, 1.5).as_millis(),
+                base * 3 / 2,
+                "jitter ceiling at attempt {attempt}"
+            );
+        }
+    }
+
+    #[test]
+    fn non_quota_backoff_keeps_the_old_schedule() {
+        // 0.5/1/2s, unchanged and deliberately un-jittered: nothing here is
+        // contended, so spreading retries buys nothing.
+        for (attempt, ms) in [(0u32, 500u128), (1, 1000), (2, 2000)] {
+            for jitter in [0.5, 1.0, 1.5] {
+                for kind in [LlmErrorKind::Transient, LlmErrorKind::Terminal] {
+                    assert_eq!(
+                        retry_backoff(kind, attempt, jitter).as_millis(),
+                        ms,
+                        "{kind:?} attempt {attempt} jitter {jitter}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn jitter_stays_in_band_and_actually_varies() {
+        let samples: Vec<f64> = (0..1000).map(|_| jitter()).collect();
+        for j in &samples {
+            assert!((0.5..1.5).contains(j), "jitter out of band: {j}");
+        }
+        // A constant would silently defeat the whole point of jittering.
+        assert!(
+            samples.iter().any(|j| (j - samples[0]).abs() > f64::EPSILON),
+            "jitter never changed across 1000 draws"
+        );
+    }
+
+    // ── fallback ─────────────────────────────────────────
+
+    #[test]
+    fn fallback_fires_only_on_quota_and_only_when_configured() {
+        assert_eq!(
+            fallback_target(LlmErrorKind::Quota, Some("qwen-flash")),
+            Some("qwen-flash")
+        );
+        // Another model is capacity, not a cure: a sick backend or a rejected
+        // request stays with the primary and goes to the outbox.
+        assert_eq!(fallback_target(LlmErrorKind::Transient, Some("qwen-flash")), None);
+        assert_eq!(fallback_target(LlmErrorKind::Terminal, Some("qwen-flash")), None);
+        // Unconfigured = today's behaviour, under every kind.
+        for kind in [LlmErrorKind::Quota, LlmErrorKind::Transient, LlmErrorKind::Terminal] {
+            assert_eq!(fallback_target(kind, None), None, "{kind:?}");
+        }
+    }
+
+    #[test]
+    fn with_summary_fallback_normalizes_blank_names() {
+        assert_eq!(provider(false).summary_fallback_model, None, "off by default");
+        for blank in ["", "   ", "\t\n"] {
+            assert_eq!(
+                provider(false)
+                    .with_summary_fallback(Some(blank.to_string()))
+                    .summary_fallback_model,
+                None,
+                "blank {blank:?} must mean off, never a request with model=\"\""
+            );
+        }
+        assert_eq!(
+            provider(false)
+                .with_summary_fallback(Some("  qwen-flash \n".to_string()))
+                .summary_fallback_model
+                .as_deref(),
+            Some("qwen-flash")
+        );
+    }
+
+    #[test]
+    fn fallback_request_swaps_the_model_and_nothing_else() {
+        // The fallback re-sends the *same* body under another name — probing
+        // confirmed qwen-flash accepts enable_thinking, so the shape does not
+        // need to change per model, and a drifting shape would make a fallback
+        // failure impossible to reason about.
+        let p = provider(true).with_summary_fallback(Some("qwen-flash".to_string()));
+        let fallback = p.summary_fallback_model.clone().unwrap();
+        let primary = body(&p.summary_request(&p.model, "hi", 8192));
+        let secondary = body(&p.summary_request(&fallback, "hi", 8192));
+
+        assert_eq!(secondary["model"], serde_json::json!("qwen-flash"));
+        assert_eq!(secondary["enable_thinking"], serde_json::json!(false));
+        let mut expected = primary;
+        expected["model"] = serde_json::json!("qwen-flash");
+        assert_eq!(secondary, expected, "only the model name may differ");
+    }
+
+    #[test]
+    fn fallback_request_follows_the_thinking_switch() {
+        // enable_thinking tracks summary_disable_thinking on the fallback too,
+        // exactly as on the primary — including staying off the wire when the
+        // deployment never opted in.
+        let p = provider(false).with_summary_fallback(Some("qwen-flash".to_string()));
+        let v = body(&p.summary_request("qwen-flash", "hi", 8192));
+        assert!(
+            v.get("enable_thinking").is_none(),
+            "unconfigured deployments must not gain the param via fallback: {v}"
+        );
     }
 
     #[test]
