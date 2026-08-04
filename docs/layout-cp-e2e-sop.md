@@ -111,35 +111,53 @@ veda status --index --wait     # 等 pending/processing 清零
 
 L0 摘要由 LLM worker 异步生成，比索引慢一拍（通常 1 分钟内，最长 3 分钟）。期间 `veda layout` 显示 partial 脚注属正常，消失即就绪。
 
-## 7. `veda layout` 人类可读输出（新能力② + 渲染修复实景）
+## 7. `veda layout` 人类可读输出（新能力② + 块状布局）
 
 ```bash
 veda layout
 ```
 
-**预期**（形状示意：摘要文案每次不同，第二列**右对齐**，列宽随最宽单元格浮动，以「同列起始格一致」为准，不逐字符比对）：
+**预期**（形状示意：摘要文案每次不同，只核对结构，不逐字符比对）：
 
 ```
-.github/     1 file   <L0 摘要>
-sub/         2 files  <L0 摘要>
-worktree/    1 file   <L0 摘要>
-文档中心/     2 files  <L0 摘要>
-.gitignore     <N> B  <L0 摘要>
-.vedaignore    <N> B  <L0 摘要>
-README.md      <N> B  <L0 摘要>
-keep.log       <N> B  <L0 摘要>
+.github/  1 file
+    <L0 简短介绍，完整显示，按终端宽度折行>
+
+sub/  2 files
+    <L0 简短介绍>
+
+worktree/  1 file
+    <L0 简短介绍>
+
+文档中心/  2 files
+    <L0 简短介绍>
+
+.gitignore  <N> B
+    <L0 简短介绍>
+
+.vedaignore  <N> B
+    <L0 简短介绍>
+
+README.md  <N> B
+    <L0 简短介绍>
+
+keep.log  <N> B
+    <L0 简短介绍>
 
 10 files, 5 directories, <N> KB
 ```
 
 逐项核对：
 - **目录在前、组内按字节序**（`文档中心/` 排目录组末尾属正常：CJK 字节序在 ASCII 后）；
-- **CJK 对齐**（bb7792e 修复点）：`文档中心/` 行的第二、三列与其他行**同列起始**，肉眼平齐；
+- **每个条目一个块**：`名字  元信息` 头行 + 4 空格缩进的介绍，块之间有空行；没有摘要的条目只剩头行，且相邻的无摘要条目之间**不插空行**（不能变成稀疏 `ls`）；
+- **摘要不截断**：行尾不应出现 `…`；一条 200–500 字符的 L0 要完整可见；
+- **折行不超终端宽度**：把窗口拉窄到 ~40 列重跑，缩进行不应溢出、不应被终端二次折行；中文行首不应出现孤立的 `，` `。`；
+- **管道不折行**：`veda layout | cat` 每条摘要是一整行（保证 `grep` 能命中）；
 - `文档中心/` 计数为 **2 files**（递归计数；旧 `ls | wc -l` 拿不到这个数）；
 - 表尾 `10 files, 5 directories`（5 = `.github`、`.github/workflows`、`sub`、`worktree`、`文档中心`——嵌套目录也计入，workspace 根没有 dentry 不算）；
 - 摘要全部就位后**没有任何括号脚注**；还在生成时允许出现 `(some summaries are still being generated...)`。
 
-> 渲染的边角（换行伪造行、负数、超长截断、字节进位）由 CLI 单测守护（159 条），SOP 只做实景 CJK 对齐与整体形状目检。
+> 渲染的边角（换行/ESC 伪造条目、负数、全文不截断、折行宽度与中文禁则、字节进位）由 CLI 单测守护（`layout_render_tests` 18 条，另有 11 项变异验证），SOP 只做实景目检。
 
 ## 8. `veda layout --json`（agent 走的那条路）
 

@@ -98,11 +98,27 @@ veda cat /docs/design.pdf --raw > design.pdf # --raw 拿原始字节（PDF/Word 
 ## 工作区布局
 
 ```bash
-veda layout          # 顶层区域 + 每个区域一句话摘要 + 文件数
+veda layout          # 顶层区域 + 每个区域的简短介绍 + 文件数
 veda layout --json   # 结构化输出，脚本/agent 用
 ```
 
 不认识一个 workspace 时的第一条命令：一次拿到全貌，省掉「`veda ls` 之后挨个 `veda abstract`」。只有顶层一层，想深入某个目录用 `veda overview <path>`。
+
+每个条目是「一行标题 + 缩进的完整介绍」：
+
+```
+docs/  87 files
+    veda 的项目文档区，收录架构说明、部署运维手册与设计方案。内容覆盖服务端与
+    CLI 两侧，供开发和值班同学查阅。
+
+tmp/  1 file
+README.md  4.0 KB
+    仓库入口说明，介绍 veda 是什么、怎么装、以及从哪里开始读文档。
+
+213 files, 6 directories, 18 MB
+```
+
+介绍**不截断**，按终端宽度折行；输出重定向到管道时不折行，每条介绍保持一整行，方便 `grep`。没有摘要的条目只有标题行。
 
 ## 搜索
 

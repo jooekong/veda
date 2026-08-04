@@ -77,7 +77,7 @@ veda-tunnel     外部 IM 接入（企微长连接）             (已上生产 
 - **`count_files_by_top_level` 的成本要说实话**：`GROUP BY SUBSTRING_INDEX(SUBSTRING(path,2),'/',1)` 是表达式分组，`veda_dentries` 上**没有索引能服务它**（该表只有 `idx_ws_path`/`idx_parent`/`idx_ws_path_prefix`），只能靠复合索引左前缀限定 workspace 后全量扫描，即 `O(workspace dentry 数)`。与 map 同时调用的 `storage_stats` 本来就是同量级，故未引入新的复杂度量级——但**上线前需在生产量级 `EXPLAIN ANALYZE`**，不可接受时退路是砍掉 `file_count`。根下的文件（`/README.md`）会分组到 key `README.md`，组装时**只给 `is_dir` 的条目读这个 count**，不能按「map 里有没有这个 key」判断。
 - **`summary_state` 三态**（`ready`/`partial`/`disabled`）用 body 字段而非 HTTP 三态——map 是 N 条摘要的聚合，套不上 `/v1/abstract` 的 202/501。两处易错语义：`disabled` **不清空已缓存的 abstract**（`/v1/abstract` 在有 summary 时根本不看 `summary_enabled`，藏起来会自相矛盾）；`partial` 只是「覆盖率不完整」的事实陈述，**不承诺重试有用**（变空的目录其摘要会被 worker 主动删除且不再生成）。`summary_enabled` 是 server 层状态，core 只判 ready/partial，由 handler 覆写 `disabled`。
 - **规模上限 `MAP_ENTRY_CAP = 200`**（`routes/search.rs`），超出置 `truncated: true`；排序目录在前、文件在后，故截断优先保住信息密度高的目录。`stats` 始终描述整个 workspace，不受截断影响。该值是拍的，无生产数据支撑。
-- **暂不接**平台网关面与 tunnel：tunnel 是标准 `wk_` 消费者，要用直接调 `/v1/layout` 即可，server 侧零工作。CLI 侧提供 `veda layout`（人类可读表格，`--json` 供 agent）。
+- **暂不接**平台网关面与 tunnel：tunnel 是标准 `wk_` 消费者，要用直接调 `/v1/layout` 即可，server 侧零工作。CLI 侧提供 `veda layout`（人类可读块状布局：头行 + 缩进的完整 L0，TTY 按终端宽度折行、管道不折行；`--json` 供 agent）。
 - **测试**：8 条组装单测（mock 可注入摘要/计数，含「cap 必须下推到查询」的 `limit == 201` 断言——只看返回长度无法区分 load-all-then-truncate）+ `tests/map_test.rs` 真实 MySQL/Milvus 集成（SUBSTRING_INDEX 计数、目录优先序、250 条截断、鉴权 401/400、MCP↔REST 同构、disabled 仍返缓存摘要）。摘要用 `upsert_summary` 直接写入而非跑 LLM worker——要验的是 SQL，接 LLM 只会增加不确定性。
 
 ## MCP 端点 `POST /mcp`（2026-07-22）

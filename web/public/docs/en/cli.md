@@ -98,13 +98,32 @@ Deliberate choices worth knowing:
 ## Workspace layout
 
 ```bash
-veda layout          # top-level areas, each with a one-line summary and file count
+veda layout          # top-level areas, each with a short introduction and file count
 veda layout --json   # structured output for scripts and agents
 ```
 
 The first command to run against a workspace you don't know: one call for the
 whole shape, instead of `veda ls` followed by a `veda abstract` per directory.
 Top level only — to go deeper use `veda overview <path>`.
+
+Each entry is a header line plus its introduction, indented beneath:
+
+```
+docs/  87 files
+    The project documentation area for veda: architecture notes, deployment
+    and operations runbooks, and design proposals.
+
+tmp/  1 file
+README.md  4.0 KB
+    Repository entry point — what veda is, how to install it, and where to
+    start reading.
+
+213 files, 6 directories, 18 MB
+```
+
+Introductions are **never truncated**; they wrap to the terminal width. When
+output is piped, nothing is wrapped — each introduction stays on one line so
+`grep` still matches it. Entries without a summary are just the header line.
 
 ## Search
 

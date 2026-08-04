@@ -26,19 +26,35 @@ that matters.
   `/v1/abstract` serves. `layout` is listed first in `tools/list` and named
   first in the MCP `initialize` instructions.
 
+### Changed
+- **`veda layout` prints each entry as a block and shows the whole
+  summary.** The table capped abstracts at 100 terminal cells while a real
+  L0 runs 200-500 characters, so in practice *every* line was truncated.
+  Each entry is now a `name  meta` header with the full summary indented
+  beneath it, wrapped to the terminal width. Wrapping measures display
+  cells rather than characters (CJK is two cells wide), breaks English
+  between words, and keeps closing punctuation off the start of a line.
+  Down a pipe nothing is wrapped — each summary stays on a single line so
+  `grep` still matches it. `--json` is unchanged.
+- **Directory summaries are now a short introduction instead of a packed
+  sentence.** The prompt asked for "one concise sentence" and got 400+
+  character sentences that named every child in turn — one sentence
+  technically, useless as an introduction. A directory now gets 1-2
+  sentences (at most 40 English words / 60 Chinese characters) saying what
+  the area *is* and what it broadly contains, with enumeration explicitly
+  forbidden. File summaries are unchanged. Directory summaries already in
+  the database keep their old wording until they are regenerated.
+
 ### Fixed
 - **`veda cp` uploaded the `.git` pointer file of git worktrees and
   submodule checkouts.** There `.git` is a one-line `gitdir:` file rather
   than a directory, and the built-in skip list only matched the directory
   form.
-- **`veda layout` mangled its table for Chinese directory names, and an
-  abstract containing a line break forged a whole extra row.** Column
-  padding measured `chars().count()` while terminals lay out by display
-  width — `文档中心/` is 5 characters but 9 cells, so every following
-  column skewed. Abstracts are LLM-written, so a stray newline is a normal
+- **An abstract containing a line break forged a whole extra `veda layout`
+  entry.** Abstracts are LLM-written, so a stray newline is a normal
   failure rather than a hostile one, and it rendered as what looked like a
   second entry with its own counts; control characters are now folded to
-  spaces and the column is capped. Byte sizes also picked their unit
+  spaces. Byte sizes also picked their unit
   before rounding, so 1048575 printed as `1024 KB` instead of `1.0 MB`,
   and negative counts from a broken response rendered as `-1 files`. A
   response missing `data.entries` reported "empty workspace" rather than
