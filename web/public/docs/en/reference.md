@@ -288,7 +288,7 @@ Every file / directory gets auto-generated layered summaries — fetch on demand
 | **L1 Overview** | `GET /v1/overview/{path}` or `detail_level=overview` | ~2k tokens | structured overview |
 | **L2 Full** | `GET /v1/fs/{path}` or search `detail_level=full` (default) | full text | raw content chunks |
 
-`/v1/abstract` and `/v1/overview` are **tri-state**: `200` (ready) / `202 + Retry-After:5` (generating) / `501 + Cache-Control:no-store` (server has no `[llm]` configured; summaries disabled). Summaries depend on the optional LLM config and are automatically disabled without it. The root `/` has no summary (no root dentry) — for a whole-workspace view use `/v1/layout` below.
+`/v1/abstract` and `/v1/overview` are **four-state**: `200` (ready) / `202 + Retry-After:5` (generating) / `415 UNSUPPORTED_FILE_TYPE` (images, jars and other binaries with no text layer — a summary is **never** coming, so stop retrying) / `501 + Cache-Control:no-store` (server has no `[llm]` configured; summaries disabled). `202` versus `415` is exactly the difference between "worth waiting for" and "not" — PDF / Word are the former. Summaries depend on the optional LLM config and are automatically disabled without it. The root `/` has no summary (no root dentry) — for a whole-workspace view use `/v1/layout` below.
 
 ### Workspace layout (`GET /v1/layout`)
 
@@ -373,6 +373,7 @@ Failure responses are always `{ "success": false, "error_code": "...", "error": 
 | `ALREADY_EXISTS` | 409 | Duplicate name (case-insensitive) / email already registered |
 | `PRECONDITION_FAILED` | 412 | CAS precondition not met (`If-Match` revision mismatch) |
 | `PAYLOAD_TOO_LARGE` | 413 | **Only** batch-count overruns (`records`/`ids` >500, `top_k` >100); single-field overruns are `INVALID_INPUT` |
+| `UNSUPPORTED_FILE_TYPE` | 415 | This file type never gets a summary (images, jars and other binaries with no text layer). **Terminal — retrying is pointless**, as opposed to `202` "generating" |
 | `QUOTA_EXCEEDED` | 429 | Reserved (currently only triggered by SQL / fs listing scan caps) |
 | `THROTTLED` | 429 | The workspace's answer concurrency is full (`/v1/answer`, MCP `ask`); rejected immediately, never queued |
 | `EMBEDDING_FAILED` | 500 | Upstream embedding error on the server. Note: the code is kept, but the `error` message is scrubbed to `internal server error` |

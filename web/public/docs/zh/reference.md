@@ -288,7 +288,7 @@
 | **L1 Overview** | `GET /v1/overview/{path}` 或 `detail_level=overview` | ~2k token | 结构化概览 |
 | **L2 Full** | `GET /v1/fs/{path}` 或 search `detail_level=full`（默认） | 全文 | 原文 chunk |
 
-`/v1/abstract`、`/v1/overview` 是**三态响应**：`200`（已就绪）/ `202 + Retry-After:5`（生成中）/ `501 + Cache-Control:no-store`（server 未配 `[llm]`，摘要功能禁用）。摘要依赖可选的 LLM 配置，未配置时自动禁用。根 `/` 没有摘要（无根 dentry）——要看整个 workspace 的全貌用下面的 `/v1/layout`。
+`/v1/abstract`、`/v1/overview` 是**四态响应**：`200`（已就绪）/ `202 + Retry-After:5`（生成中）/ `415 UNSUPPORTED_FILE_TYPE`（图片、jar 等没有文本层的二进制，**永远不会有摘要**，别重试）/ `501 + Cache-Control:no-store`（server 未配 `[llm]`，摘要功能禁用）。`202` 和 `415` 的区别就是「等得到」和「等不到」——PDF / Word 属于前者。摘要依赖可选的 LLM 配置，未配置时自动禁用。根 `/` 没有摘要（无根 dentry）——要看整个 workspace 的全貌用下面的 `/v1/layout`。
 
 ### 工作区布局（`GET /v1/layout`）
 
@@ -373,6 +373,7 @@ curl -s -H "Authorization: Bearer wk_..." -H 'Content-Type: application/json' \
 | `ALREADY_EXISTS` | 409 | 同名冲突（大小写不敏感）/ 邮箱已注册 |
 | `PRECONDITION_FAILED` | 412 | CAS 前置条件不满足（`If-Match` revision 不符） |
 | `PAYLOAD_TOO_LARGE` | 413 | **仅**批量条数超限（`records`/`ids` >500、`top_k` >100）；单字段超限走 `INVALID_INPUT` |
+| `UNSUPPORTED_FILE_TYPE` | 415 | 该文件类型不生成摘要（图片 / jar 等无文本层的二进制）。**终态，重试无意义**——与 `202`「生成中」相对 |
 | `QUOTA_EXCEEDED` | 429 | 保留（当前仅 SQL / fs 列举的扫描上限会触发） |
 | `THROTTLED` | 429 | 该 workspace 并发问答已满（`/v1/answer`、MCP `ask`），立即拒绝不排队 |
 | `EMBEDDING_FAILED` | 500 | 服务端嵌入上游错误。注意：保留此 code，但 `error` 文案被抹成 `internal server error` |
