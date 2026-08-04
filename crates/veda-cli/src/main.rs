@@ -1070,6 +1070,18 @@ fn clean_abstract(s: &str) -> String {
         .to_string()
 }
 
+/// Punctuation that may not open a line. Chinese typesetting calls this
+/// 禁则; without it a wrapped abstract strands a lone `，` at the start of
+/// a line, which reads as broken text rather than as a wrap.
+fn forbidden_at_line_start(c: char) -> bool {
+    matches!(
+        c,
+        '。' | '，' | '、' | '．' | '；' | '：' | '！' | '？' | '…' | '·'
+            | '）' | '】' | '》' | '」' | '』' | '〉' | '”' | '’'
+            | ',' | '.' | ';' | ':' | '!' | '?' | ')' | ']' | '}' | '%'
+    )
+}
+
 /// Greedily wrap `text` to `limit` terminal cells.
 ///
 /// Breaks are measured in display width, not chars — the abstracts are
@@ -1093,7 +1105,11 @@ fn wrap_display(text: &str, limit: usize) -> Vec<String> {
         let cw = ch.width().unwrap_or(0);
         if let Some(p) = prev {
             let wide = |c: char| c.width().unwrap_or(0) > 1;
-            if ch != ' ' && !buf.is_empty() && (p == ' ' || wide(p) || wide(ch)) {
+            if ch != ' '
+                && !buf.is_empty()
+                && !forbidden_at_line_start(ch)
+                && (p == ' ' || wide(p) || wide(ch))
+            {
                 brk = Some(buf.len());
             }
         }
@@ -2749,6 +2765,28 @@ mod layout_render_tests {
             text.split_whitespace().collect::<Vec<_>>(),
             "words were split or lost: {lines:?}"
         );
+    }
+
+    /// Chinese typesetting forbids opening a line with closing punctuation
+    /// (禁则). Plain greedy width-based wrapping strands a lone `，` at
+    /// column zero, which reads as damaged text rather than as a wrap.
+    /// The expected set is spelled out here rather than borrowed from the
+    /// renderer, so emptying the renderer's set cannot silence this test.
+    #[test]
+    fn wrapped_lines_never_open_with_closing_punctuation() {
+        const FORBIDDEN: [char; 7] = ['，', '。', '、', '；', '：', '）', '？'];
+        let text = "公司业务线的接口与流程文档，按域划分，主要面向接入方查阅字段口径和调用约定。\
+                    内容覆盖服务端与 CLI 两侧，供开发和值班同学查阅（含运维手册）。";
+        for limit in 12..48usize {
+            for line in wrap_display(text, limit) {
+                if let Some(first) = line.chars().next() {
+                    assert!(
+                        !FORBIDDEN.contains(&first),
+                        "line opens with {first:?} at limit {limit}: {line:?}"
+                    );
+                }
+            }
+        }
     }
 
     /// A token with no break opportunity at all — a long URL or a hash —
