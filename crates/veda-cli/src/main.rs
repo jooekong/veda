@@ -41,7 +41,7 @@ struct Cli {
     workspace: Option<String>,
 
     /// Emit machine-readable JSON instead of the human-friendly
-    /// default. Currently affects `ls`, `search`, `grep`,
+    /// default. Currently affects `ls`, `search`, `grep`, `layout`,
     /// `collection search`, and `sql`. Other commands either
     /// already emit JSON (`sql` payload rows) or only print
     /// status messages — they ignore the flag.
