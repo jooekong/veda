@@ -18,7 +18,11 @@ use crate::store::{EmbeddingService, MetadataStore, VectorStore};
 ///
 /// This is deliberately an approximation of a full collation table. A
 /// segment it folds differently from MySQL loses its `file_count` (reported
-/// as 0) — it never produces a wrong count for another directory.
+/// as 0). Not airtight the other way either: this strips ALL combining
+/// marks while MySQL keeps primary-weight ones (Thai/Indic vowel signs)
+/// distinct, so two MySQL-distinct directories can collide on one folded
+/// key and one shows the other's count. Accepted as-is: the CJK/Latin
+/// names this deployment actually has cannot hit that case.
 fn fold_path_segment(segment: &str) -> String {
     segment
         .nfd()

@@ -27,6 +27,10 @@ that matters.
   first in the MCP `initialize` instructions.
 
 ### Fixed
+- **`veda cp` uploaded the `.git` pointer file of git worktrees and
+  submodule checkouts.** There `.git` is a one-line `gitdir:` file rather
+  than a directory, and the built-in skip list only matched the directory
+  form.
 - **`veda layout` mangled its table for Chinese directory names, and an
   abstract containing a line break forged a whole extra row.** Column
   padding measured `chars().count()` while terminals lay out by display

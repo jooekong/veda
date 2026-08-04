@@ -2141,8 +2141,10 @@ async fn cp_dir_recursive(
 /// Directory names never worth uploading to a knowledge workspace:
 /// VCS internals and tool/editor caches add thousands of junk files.
 const IGNORED_DIRS: &[&str] = &[".git", "__pycache__", ".idea", "node_modules"];
-/// File names never worth uploading: macOS Finder droppings.
-const IGNORED_FILES: &[&str] = &[".DS_Store"];
+/// File names never worth uploading: macOS Finder droppings, plus the
+/// `gitdir:` pointer file that takes `.git`'s place in worktrees and
+/// submodule checkouts (IGNORED_DIRS only matches the directory form).
+const IGNORED_FILES: &[&str] = &[".DS_Store", ".git"];
 
 /// What `collect_files` found, beyond the file list itself.
 #[derive(Debug)]
@@ -2575,6 +2577,19 @@ mod cp_dir_tests {
         fs::write(root.join(".git/config"), "x").unwrap();
         fs::create_dir_all(root.join("node_modules/pkg/lib")).unwrap();
         fs::write(root.join("node_modules/pkg/lib/index.js"), "x").unwrap();
+        fs::write(root.join("keep.txt"), "x").unwrap();
+
+        assert_eq!(collected(root, false), vec!["keep.txt"]);
+    }
+
+    /// In a git worktree or submodule checkout `.git` is a plain file (a
+    /// one-line `gitdir:` pointer), not a directory — the skip list must
+    /// catch that spelling too, or the pointer file gets uploaded.
+    #[test]
+    fn collect_files_skips_a_worktree_gitdir_pointer_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        fs::write(root.join(".git"), "gitdir: /repo/.git/worktrees/x\n").unwrap();
         fs::write(root.join("keep.txt"), "x").unwrap();
 
         assert_eq!(collected(root, false), vec!["keep.txt"]);
