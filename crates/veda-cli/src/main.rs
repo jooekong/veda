@@ -1049,33 +1049,89 @@ fn human_bytes(n: i64) -> String {
     }
 }
 
-/// Widest abstract we will print, in terminal cells. Long enough for the
-/// one-sentence L0 this column is designed around, short enough that a
-/// pathological one can't wrap and destroy the table.
-const LAYOUT_ABSTRACT_CELLS: usize = 100;
+/// Cells an abstract is indented by under its entry's header line.
+const LAYOUT_INDENT: usize = 4;
 
-/// Make an LLM-written summary safe to drop into a table row.
+/// Make an LLM-written summary safe to print.
 ///
 /// A newline in an abstract forges what looks like a whole extra entry —
 /// the summariser is a language model, so a stray line break is a normal
 /// failure, not a hostile one. Control characters (ESC in particular) also
 /// get folded to spaces so a response can't drive the terminal.
-fn clean_cell(s: &str) -> String {
-    use unicode_width::UnicodeWidthChar;
+///
+/// Length is *not* capped: an L0 runs 200-500 characters and the point of
+/// this listing is to read them. Fitting them on screen is the wrapper's
+/// job, not a truncator's.
+fn clean_abstract(s: &str) -> String {
+    s.chars()
+        .map(|ch| if ch.is_control() { ' ' } else { ch })
+        .collect::<String>()
+        .trim()
+        .to_string()
+}
 
-    let mut out = String::new();
-    let mut width = 0usize;
-    for ch in s.chars() {
-        let ch = if ch.is_control() { ' ' } else { ch };
-        let w = ch.width().unwrap_or(0);
-        if width + w > LAYOUT_ABSTRACT_CELLS {
-            out.push('…');
-            break;
+/// Greedily wrap `text` to `limit` terminal cells.
+///
+/// Breaks are measured in display width, not chars — the abstracts are
+/// full of CJK, where one char is two cells. Break opportunities sit
+/// before a word (so English never splits mid-word) and on either side of
+/// a wide char (so a Chinese sentence, which contains no spaces at all,
+/// still breaks anywhere). A single word longer than `limit` is cut by
+/// character, because the alternative is overflowing the terminal.
+fn wrap_display(text: &str, limit: usize) -> Vec<String> {
+    use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
+
+    let limit = limit.max(1);
+    let mut lines: Vec<String> = Vec::new();
+    let mut buf = String::new();
+    let mut buf_w = 0usize;
+    // Byte offset in `buf` of the latest place we are allowed to break.
+    let mut brk: Option<usize> = None;
+    let mut prev: Option<char> = None;
+
+    for ch in text.chars() {
+        let cw = ch.width().unwrap_or(0);
+        if let Some(p) = prev {
+            let wide = |c: char| c.width().unwrap_or(0) > 1;
+            if ch != ' ' && !buf.is_empty() && (p == ' ' || wide(p) || wide(ch)) {
+                brk = Some(buf.len());
+            }
         }
-        out.push(ch);
-        width += w;
+        if buf_w + cw > limit && !buf.is_empty() {
+            match brk.filter(|b| *b > 0) {
+                // Break at the last word / wide-char boundary and carry
+                // everything after it down to the next line.
+                Some(b) => {
+                    let rest = buf.split_off(b);
+                    lines.push(buf.trim_end().to_string());
+                    buf = rest;
+                }
+                // One unbreakable run wider than the line: hard-cut here.
+                None => {
+                    lines.push(buf.trim_end().to_string());
+                    buf = String::new();
+                }
+            }
+            buf_w = buf.width();
+            brk = None;
+        }
+        prev = Some(ch);
+        // A space that lands at a line break is consumed by it rather than
+        // indenting the next line.
+        if buf.is_empty() && ch == ' ' {
+            continue;
+        }
+        buf.push(ch);
+        buf_w += cw;
     }
-    out.trim_end().to_string()
+    let tail = buf.trim_end();
+    if !tail.is_empty() {
+        lines.push(tail.to_string());
+    }
+    if lines.is_empty() {
+        lines.push(String::new());
+    }
+    lines
 }
 
 /// What `v` becomes once printed: one decimal below 10, whole above.
@@ -1089,19 +1145,33 @@ fn round_at_precision(v: f64) -> f64 {
 
 /// Render `GET /v1/layout` for a terminal.
 ///
-/// Column padding uses display width, not `chars().count()`: a CJK
-/// directory name like `文档中心/` is 5 chars but occupies 9 terminal
-/// columns, and veda's own workspaces are full of them.
+/// Wraps to the terminal width when stdout is a TTY. Down a pipe there is
+/// no width to respect and wrapping would only break `grep`, so each
+/// abstract goes out as one long line instead.
 fn print_layout(data: &serde_json::Value) {
-    print!("{}", render_layout(data));
+    use std::io::IsTerminal;
+
+    let wrap = std::io::stdout().is_terminal().then(|| {
+        terminal_size::terminal_size()
+            .map(|(terminal_size::Width(w), _)| usize::from(w))
+            .unwrap_or(80)
+            // Below this the indent eats the text; wrap as if 40 and let
+            // the terminal do whatever it does.
+            .max(40)
+    });
+    print!("{}", render_layout(data, wrap));
 }
 
-/// Split out from `print_layout` so column alignment is testable — the
-/// CJK-width bug this guards against is invisible unless you can assert on
+/// Split out from `print_layout` so the layout is testable — wrapping and
+/// the control-character defences are invisible unless you can assert on
 /// the rendered string.
-fn render_layout(data: &serde_json::Value) -> String {
+///
+/// One block per entry: a `name  meta` header, then the full abstract
+/// indented beneath it. The abstract is never truncated; `wrap_width` is
+/// `None` when nothing is watching (a pipe) and the whole abstract goes on
+/// one line.
+fn render_layout(data: &serde_json::Value, wrap_width: Option<usize>) -> String {
     use std::fmt::Write as _;
-    use unicode_width::UnicodeWidthStr;
 
     let mut out = String::new();
     let entries = data["entries"].as_array().cloned().unwrap_or_default();
@@ -1109,7 +1179,6 @@ fn render_layout(data: &serde_json::Value) -> String {
         return "(empty workspace — nothing uploaded yet)\n".to_string();
     }
 
-    // Two left columns, padded to their own widest cell.
     let rows: Vec<(String, String, Option<String>)> = entries
         .iter()
         .map(|e| {
@@ -1117,7 +1186,7 @@ fn render_layout(data: &serde_json::Value) -> String {
             let path = e["path"].as_str().unwrap_or("?");
             let name = path.strip_prefix('/').unwrap_or(path);
             let name = if is_dir { format!("{name}/") } else { name.to_string() };
-            let size = if is_dir {
+            let meta = if is_dir {
                 // A negative count is a broken response, not "minus one
                 // file" — drop it rather than render `-1 files`.
                 match e["file_count"].as_i64().filter(|n| *n >= 0) {
@@ -1132,23 +1201,41 @@ fn render_layout(data: &serde_json::Value) -> String {
                     .map(human_bytes)
                     .unwrap_or_default()
             };
-            (name, size, e["abstract"].as_str().map(clean_cell))
+            // An abstract that is nothing but control characters cleans up
+            // to "" — that is no abstract, not an empty indented line.
+            let abs = e["abstract"]
+                .as_str()
+                .map(clean_abstract)
+                .filter(|a| !a.is_empty());
+            (name, meta, abs)
         })
         .collect();
-    let w_name = rows.iter().map(|r| r.0.width()).max().unwrap_or(0);
-    let w_size = rows.iter().map(|r| r.1.width()).max().unwrap_or(0);
-    for (name, size, abs) in &rows {
-        // saturating: width() can never exceed the max we just computed,
-        // but a panic here would be an absurd way to lose a listing.
-        let name_pad = " ".repeat(w_name.saturating_sub(name.width()));
-        let size_pad = " ".repeat(w_size.saturating_sub(size.width()));
-        let line = match abs {
-            Some(a) => format!("{name}{name_pad}  {size_pad}{size}  {a}"),
-            None => format!("{name}{name_pad}  {size_pad}{size}"),
-        };
+
+    let indent = " ".repeat(LAYOUT_INDENT);
+    let mut prev_was_block = false;
+    for (name, meta, abs) in &rows {
+        // Blank line whenever either neighbour is a multi-line block, so
+        // the indented text always reads as belonging to the header above
+        // it. A run of bare headers stays packed like `ls`.
+        if (prev_was_block || abs.is_some()) && !out.is_empty() {
+            out.push('\n');
+        }
         // An entry with neither a count nor an abstract would otherwise
         // ship a line of trailing spaces.
-        let _ = writeln!(out, "{}", line.trim_end());
+        let _ = writeln!(out, "{}", format!("{name}  {meta}").trim_end());
+        if let Some(a) = abs {
+            match wrap_width {
+                Some(w) => {
+                    for line in wrap_display(a, w.saturating_sub(LAYOUT_INDENT)) {
+                        let _ = writeln!(out, "{indent}{line}");
+                    }
+                }
+                None => {
+                    let _ = writeln!(out, "{indent}{a}");
+                }
+            }
+        }
+        prev_was_block = abs.is_some();
     }
 
     let stats = &data["stats"];
@@ -2303,59 +2390,103 @@ mod cp_bytes_tests {
 
 #[cfg(test)]
 mod layout_render_tests {
-    use super::{human_bytes, render_layout};
+    use super::{human_bytes, render_layout, wrap_display};
     use serde_json::json;
     use unicode_width::UnicodeWidthStr;
 
-    /// Terminal cells a rendered line occupies up to `needle`.
-    fn cells_before(line: &str, needle: &str) -> usize {
-        line[..line.find(needle).unwrap_or_else(|| panic!("{needle:?} not in {line:?}"))].width()
+    /// Lines that start an entry, i.e. everything the reader will take as a
+    /// path. Abstracts are indented, so anything unindented is either a
+    /// header or the trailing stats.
+    fn unindented(out: &str) -> Vec<&str> {
+        out.lines().filter(|l| !l.is_empty() && !l.starts_with("    ")).collect()
     }
 
-    /// A CJK directory name is fewer chars than terminal cells, so padding
-    /// by `chars().count()` silently skews every following column. veda's
-    /// own workspaces are full of Chinese directory names.
+    /// The abstract lines of the rendered output, indent stripped.
+    fn indented(out: &str) -> Vec<&str> {
+        out.lines().filter_map(|l| l.strip_prefix("    ")).collect()
+    }
+
+    /// The block shape: `name  meta` on the header, abstract indented
+    /// underneath. A CJK name needs no padding to line anything up any
+    /// more, but it still has to survive intact with its `/` suffix.
     #[test]
-    fn columns_align_when_a_directory_name_is_cjk() {
-        let out = render_layout(&json!({
-            "stats": {"total_files": 9, "total_directories": 2, "total_bytes": 1024},
-            "summary_state": "ready", "truncated": false,
-            "entries": [
-                {"path": "/文档中心", "is_dir": true, "file_count": 42, "abstract": "中文目录名"},
-                {"path": "/docs", "is_dir": true, "file_count": 7, "abstract": "英文目录名"},
-                {"path": "/README.md", "is_dir": false, "size_bytes": 4096, "abstract": "文件"}
-            ]
-        }));
-        // `文档中心/` is 5 chars but 9 cells — the same width as
-        // `README.md`, so it takes no padding while `docs/` takes four.
-        // Padding by chars would give it four spaces too and shove the rest
-        // of its row right.
-        let lines: Vec<&str> = out.lines().take(3).collect();
+    fn each_entry_is_a_header_line_plus_an_indented_abstract() {
+        let out = render_layout(
+            &json!({
+                "stats": {"total_files": 9, "total_directories": 2, "total_bytes": 1024},
+                "summary_state": "ready", "truncated": false,
+                "entries": [
+                    {"path": "/文档中心", "is_dir": true, "file_count": 42, "abstract": "中文目录名"},
+                    {"path": "/docs", "is_dir": true, "file_count": 7, "abstract": "英文目录名"},
+                    {"path": "/README.md", "is_dir": false, "size_bytes": 4096, "abstract": "文件"}
+                ]
+            }),
+            Some(80),
+        );
         assert_eq!(
-            lines,
+            out.lines().collect::<Vec<_>>(),
             vec![
-                "文档中心/  42 files  中文目录名",
-                "docs/       7 files  英文目录名",
-                "README.md    4.0 KB  文件",
+                "文档中心/  42 files",
+                "    中文目录名",
+                "",
+                "docs/  7 files",
+                "    英文目录名",
+                "",
+                "README.md  4.0 KB",
+                "    文件",
+                "",
+                "9 files, 2 directories, 1.0 KB",
             ],
             "rendered:\n{out}"
         );
-        // Belt and braces: the abstract column starts at the same cell.
-        let starts: Vec<usize> = [
-            cells_before(lines[0], "中文目录名"),
-            cells_before(lines[1], "英文目录名"),
-            cells_before(lines[2], "文件"),
-        ]
-        .into();
-        assert!(starts.iter().all(|s| *s == starts[0]), "{starts:?}\n{out}");
+    }
+
+    /// A blank line has to separate anything multi-line, or an indented
+    /// abstract reads as belonging to the wrong header. A listing with no
+    /// abstracts at all must *not* get them — that would turn `ls` into a
+    /// double-spaced page for no gain.
+    #[test]
+    fn blank_lines_separate_blocks_but_not_bare_headers() {
+        let out = render_layout(
+            &json!({
+                "stats": {}, "summary_state": "ready", "truncated": false,
+                "entries": [
+                    {"path": "/a", "is_dir": true, "file_count": 1},
+                    {"path": "/b", "is_dir": true, "file_count": 2},
+                    {"path": "/c", "is_dir": true, "file_count": 3, "abstract": "有摘要"},
+                    {"path": "/d", "is_dir": true, "file_count": 4},
+                    {"path": "/e", "is_dir": true, "file_count": 5}
+                ]
+            }),
+            Some(80),
+        );
+        assert_eq!(
+            out.lines().collect::<Vec<_>>(),
+            vec![
+                "a/  1 file",
+                "b/  2 files",
+                "",
+                "c/  3 files",
+                "    有摘要",
+                "",
+                "d/  4 files",
+                "e/  5 files",
+                "",
+                "0 files, 0 directories, 0 B",
+            ],
+            "rendered:\n{out}"
+        );
     }
 
     #[test]
     fn entry_without_count_or_abstract_has_no_trailing_space() {
-        let out = render_layout(&json!({
-            "stats": {}, "summary_state": "ready", "truncated": false,
-            "entries": [{"path": "/a", "is_dir": true}]
-        }));
+        let out = render_layout(
+            &json!({
+                "stats": {}, "summary_state": "ready", "truncated": false,
+                "entries": [{"path": "/a", "is_dir": true}]
+            }),
+            Some(80),
+        );
         let first = out.lines().next().unwrap();
         assert_eq!(first, first.trim_end(), "trailing whitespace in {first:?}");
     }
@@ -2366,22 +2497,26 @@ mod layout_render_tests {
     /// indexes into every element as if it were a map.
     #[test]
     fn malformed_entries_do_not_panic() {
-        let out = render_layout(&json!({
-            "stats": {}, "summary_state": "ready", "truncated": false,
-            "entries": [
-                {"path": "/keep", "is_dir": true, "file_count": 1},
-                {"path": "/a"},
-                {"path": 123, "is_dir": true},
-                {"path": "/b", "is_dir": false, "abstract": null},
-                {},
-                null,
-                42,
-                "not-an-object",
-                []
-            ]
-        }));
-        // Every element still produces exactly one row, and the well-formed
-        // one is untouched by its malformed neighbours.
+        let out = render_layout(
+            &json!({
+                "stats": {}, "summary_state": "ready", "truncated": false,
+                "entries": [
+                    {"path": "/keep", "is_dir": true, "file_count": 1},
+                    {"path": "/a"},
+                    {"path": 123, "is_dir": true},
+                    {"path": "/b", "is_dir": false, "abstract": null},
+                    {},
+                    null,
+                    42,
+                    "not-an-object",
+                    []
+                ]
+            }),
+            Some(80),
+        );
+        // Every element still produces exactly one header, and the
+        // well-formed one is untouched by its malformed neighbours. None of
+        // them has an abstract, so they pack with no blank lines.
         let rows = out.lines().take_while(|l| !l.is_empty()).count();
         assert_eq!(rows, 9, "one row per element:\n{out}");
         assert!(out.contains("keep/  1 file"), "{out}");
@@ -2393,7 +2528,7 @@ mod layout_render_tests {
     #[test]
     fn non_array_entries_render_as_empty_so_the_caller_must_validate() {
         for bad in [json!(null), json!({"entries": "oops"}), json!(42)] {
-            let out = render_layout(&bad);
+            let out = render_layout(&bad, Some(80));
             assert!(
                 out.contains("empty workspace"),
                 "renderer contract changed for {bad}: {out}"
@@ -2403,25 +2538,34 @@ mod layout_render_tests {
 
     #[test]
     fn footnotes_only_appear_when_the_answer_is_incomplete() {
-        let complete = render_layout(&json!({
-            "stats": {}, "summary_state": "ready", "truncated": false,
-            "entries": [{"path": "/a", "is_dir": true, "file_count": 1, "abstract": "x"}]
-        }));
+        let complete = render_layout(
+            &json!({
+                "stats": {}, "summary_state": "ready", "truncated": false,
+                "entries": [{"path": "/a", "is_dir": true, "file_count": 1, "abstract": "x"}]
+            }),
+            Some(80),
+        );
         assert!(!complete.contains('('), "clean layout needs no footnote:\n{complete}");
 
-        let degraded = render_layout(&json!({
-            "stats": {}, "summary_state": "disabled", "truncated": true,
-            "entries": [{"path": "/a", "is_dir": true, "file_count": 1}]
-        }));
+        let degraded = render_layout(
+            &json!({
+                "stats": {}, "summary_state": "disabled", "truncated": true,
+                "entries": [{"path": "/a", "is_dir": true, "file_count": 1}]
+            }),
+            Some(80),
+        );
         assert!(degraded.contains("more top-level entries"), "{degraded}");
         assert!(degraded.contains("summaries are disabled"), "{degraded}");
     }
 
     #[test]
     fn empty_workspace_says_so() {
-        let out = render_layout(&json!({
-            "stats": {}, "summary_state": "ready", "truncated": false, "entries": []
-        }));
+        let out = render_layout(
+            &json!({
+                "stats": {}, "summary_state": "ready", "truncated": false, "entries": []
+            }),
+            Some(80),
+        );
         assert!(out.contains("empty workspace"), "{out}");
     }
 
@@ -2457,50 +2601,180 @@ mod layout_render_tests {
     }
 
     /// A line break in an LLM-written abstract would otherwise render as a
-    /// whole extra table row — invented data that looks exactly like the
-    /// real thing.
+    /// whole extra entry — invented data that looks exactly like the real
+    /// thing. Indentation is what tells them apart now, so the forged text
+    /// must never reach column zero.
     #[test]
-    fn abstract_newline_cannot_forge_a_row() {
-        let out = render_layout(&json!({
-            "stats": {}, "summary_state": "ready", "truncated": false,
-            "entries": [
-                {"path": "/a", "is_dir": true, "file_count": 1,
-                 "abstract": "第一行\n伪造的第二行  99 files  假的"},
-                {"path": "/b", "is_dir": true, "file_count": 2, "abstract": "正常"}
-            ]
-        }));
-        let rows: Vec<&str> = out.lines().take_while(|l| !l.is_empty()).collect();
+    fn abstract_newline_cannot_forge_an_entry() {
+        let out = render_layout(
+            &json!({
+                "stats": {}, "summary_state": "ready", "truncated": false,
+                "entries": [
+                    {"path": "/a", "is_dir": true, "file_count": 1,
+                     "abstract": "第一行\n伪造的第二行  99 files  假的"},
+                    {"path": "/b", "is_dir": true, "file_count": 2, "abstract": "正常"}
+                ]
+            }),
+            None,
+        );
         // The abstract's text is preserved — what must not survive is its
-        // *structure*: two entries, two rows, and the second row is the
-        // real /b entry rather than the forged one.
-        assert_eq!(rows.len(), 2, "one entry per row, got:\n{out}");
-        assert!(rows[0].starts_with("a/"), "{out}");
-        assert!(rows[1].starts_with("b/"), "forged row took slot 2:\n{out}");
-        assert!(rows[0].contains("第一行 伪造的第二行"), "newline should fold to a space:\n{out}");
+        // *structure*: two entries, and the second one is the real /b
+        // rather than the forged row.
+        assert_eq!(
+            unindented(&out),
+            vec!["a/  1 file", "b/  2 files", "0 files, 0 directories, 0 B"],
+            "forged entry reached column zero:\n{out}"
+        );
+        assert!(
+            out.contains("    第一行 伪造的第二行  99 files  假的"),
+            "newline should fold to a space and stay indented:\n{out}"
+        );
     }
 
+    /// ESC in an abstract can repaint the screen, move the cursor, or hide
+    /// the rest of the listing. It is folded like any other control char.
     #[test]
-    fn overlong_abstract_is_capped() {
-        let out = render_layout(&json!({
-            "stats": {}, "summary_state": "ready", "truncated": false,
-            "entries": [{"path": "/a", "is_dir": true, "file_count": 1,
-                         "abstract": "很长".repeat(200)}]
-        }));
-        let first = out.lines().next().unwrap();
-        assert!(first.width() < 140, "row is {} cells:\n{first}", first.width());
-        assert!(first.ends_with('…'), "{first}");
+    fn escape_sequences_are_folded_to_spaces() {
+        let out = render_layout(
+            &json!({
+                "stats": {}, "summary_state": "ready", "truncated": false,
+                "entries": [{"path": "/a", "is_dir": true, "file_count": 1,
+                             "abstract": "before\u{1b}[2Jafter\u{7}\u{d}tail"}]
+            }),
+            None,
+        );
+        assert!(!out.contains('\u{1b}'), "ESC survived:\n{out:?}");
+        assert!(!out.contains('\u{7}'), "BEL survived:\n{out:?}");
+        assert!(!out.contains('\r'), "CR survived:\n{out:?}");
+        assert!(out.contains("before [2Jafter  tail"), "{out:?}");
+    }
+
+    /// An abstract that is nothing but whitespace and control characters
+    /// cleans up to the empty string. That is *no* abstract — printing it
+    /// would leave a stray indented blank line under the header.
+    #[test]
+    fn blank_abstract_is_treated_as_absent() {
+        let out = render_layout(
+            &json!({
+                "stats": {}, "summary_state": "ready", "truncated": false,
+                "entries": [
+                    {"path": "/a", "is_dir": true, "file_count": 1, "abstract": "  \u{1b}\n "},
+                    {"path": "/b", "is_dir": true, "file_count": 2}
+                ]
+            }),
+            Some(80),
+        );
+        assert_eq!(
+            out.lines().collect::<Vec<_>>(),
+            vec!["a/  1 file", "b/  2 files", "", "0 files, 0 directories, 0 B"],
+            "rendered:\n{out:?}"
+        );
+    }
+
+    /// The whole point of the block layout: a real 300+ character L0 is
+    /// shown in full. Nothing is capped, nothing is elided.
+    #[test]
+    fn long_abstract_is_shown_in_full() {
+        let long = "这个目录收录了公司内部的技术文档与运维手册涵盖部署流程监控告警与故障排查".repeat(10);
+        assert!(long.chars().count() > 300, "fixture too short");
+
+        let wrapped = render_layout(
+            &json!({
+                "stats": {}, "summary_state": "ready", "truncated": false,
+                "entries": [{"path": "/a", "is_dir": true, "file_count": 1, "abstract": long}]
+            }),
+            Some(80),
+        );
+        assert!(!wrapped.contains('…'), "abstract was elided:\n{wrapped}");
+        // Pure CJK has no spaces, so the wrapped lines rejoin to exactly
+        // the original text — nothing dropped at the break points.
+        assert_eq!(indented(&wrapped).concat(), long, "text lost in wrapping:\n{wrapped}");
+        assert!(indented(&wrapped).len() > 4, "expected several wrapped lines:\n{wrapped}");
+    }
+
+    /// Down a pipe there is no width to respect, and wrapping would split
+    /// the abstract across lines that `grep` then can't match.
+    #[test]
+    fn no_wrap_width_keeps_the_abstract_on_one_line() {
+        let long = "这个目录收录了公司内部的技术文档与运维手册".repeat(20);
+        let out = render_layout(
+            &json!({
+                "stats": {}, "summary_state": "ready", "truncated": false,
+                "entries": [{"path": "/a", "is_dir": true, "file_count": 1, "abstract": long}]
+            }),
+            None,
+        );
+        assert_eq!(indented(&out), vec![long.as_str()], "rendered:\n{out}");
+    }
+
+    /// Every wrapped line has to fit the terminal, indent included, or the
+    /// terminal re-wraps it and the hanging indent falls apart. Measured in
+    /// display cells: CJK is two cells per char.
+    #[test]
+    fn wrapped_lines_fit_the_terminal_width() {
+        let mixed = "veda 的 layout 命令 renders a workspace 顶层地图 with per-directory \
+                     摘要，每个条目包含名称、文件数和一段简短介绍 so that an agent can \
+                     orient itself 而不需要逐个目录 ls 下去。"
+            .repeat(4);
+        for w in [40usize, 55, 80, 120] {
+            let out = render_layout(
+                &json!({
+                    "stats": {}, "summary_state": "ready", "truncated": false,
+                    "entries": [{"path": "/文档中心", "is_dir": true, "file_count": 3,
+                                 "abstract": mixed}]
+                }),
+                Some(w),
+            );
+            for line in indented(&out) {
+                assert!(
+                    line.width() + 4 <= w,
+                    "line is {} cells at width {w}: {line:?}",
+                    line.width() + 4
+                );
+            }
+        }
+    }
+
+    /// English breaks between words, never inside one — a wrapper that cuts
+    /// at a byte or cell count would mangle every identifier in a summary.
+    #[test]
+    fn english_wraps_between_words() {
+        let text = "alpha beta gamma delta epsilon zeta eta theta iota kappa lambda mu";
+        let lines = wrap_display(text, 20);
+        assert!(lines.len() > 2, "expected wrapping: {lines:?}");
+        assert!(lines.iter().all(|l| l.width() <= 20), "{lines:?}");
+        // Same words, same order, no fragments.
+        assert_eq!(
+            lines.join(" ").split_whitespace().collect::<Vec<_>>(),
+            text.split_whitespace().collect::<Vec<_>>(),
+            "words were split or lost: {lines:?}"
+        );
+    }
+
+    /// A token with no break opportunity at all — a long URL or a hash —
+    /// is cut by character. Overflowing the terminal is the worse option.
+    #[test]
+    fn unbreakable_run_is_hard_cut() {
+        let blob = "a".repeat(200);
+        let lines = wrap_display(&blob, 36);
+        assert_eq!(lines.len(), 6, "{lines:?}");
+        assert!(lines[..5].iter().all(|l| l.width() == 36), "{lines:?}");
+        assert_eq!(lines.concat(), blob, "characters lost in the hard cut");
     }
 
     #[test]
     fn negative_counts_are_treated_as_missing() {
-        let out = render_layout(&json!({
-            "stats": {"total_files": -3, "total_bytes": -5},
-            "summary_state": "ready", "truncated": false,
-            "entries": [
-                {"path": "/a", "is_dir": true, "file_count": -1},
-                {"path": "/f", "is_dir": false, "size_bytes": -9}
-            ]
-        }));
+        let out = render_layout(
+            &json!({
+                "stats": {"total_files": -3, "total_bytes": -5},
+                "summary_state": "ready", "truncated": false,
+                "entries": [
+                    {"path": "/a", "is_dir": true, "file_count": -1},
+                    {"path": "/f", "is_dir": false, "size_bytes": -9}
+                ]
+            }),
+            Some(80),
+        );
         assert!(!out.contains("-1"), "{out}");
         assert!(!out.contains("-9"), "{out}");
         assert!(!out.contains("-5"), "{out}");
