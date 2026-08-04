@@ -35,19 +35,19 @@ async fn main() -> anyhow::Result<()> {
     // must happen exactly once and early.
     let metrics = obs::install();
 
-    // Minimal CLI parsing without bringing in clap for the binary.
-    // Single positional config path; demo phase, no flags.
-    let mut config_path = "config/server.toml".to_string();
-    for arg in std::env::args().skip(1) {
-        match arg.as_str() {
-            "--help" | "-h" => {
-                eprintln!("Usage: veda-server [config.toml]");
-                return Ok(());
-            }
-            other if !other.starts_with("--") => config_path = other.to_string(),
-            other => anyhow::bail!("unknown flag: {other}"),
+    let config_path = match parse_args(std::env::args().skip(1))? {
+        Cli::Help => {
+            eprintln!("Usage: veda-server [config.toml]");
+            return Ok(());
         }
-    }
+        Cli::Version => {
+            // stdout, exact `veda-server <version>`: the deploy runbook
+            // asserts on this string to prove which build it just swapped in.
+            println!("veda-server {}", env!("CARGO_PKG_VERSION"));
+            return Ok(());
+        }
+        Cli::Run { config_path } => config_path,
+    };
     let cfg = ServerConfig::load(&config_path)?;
     info!(listen = %cfg.listen, "starting veda-server");
 
@@ -441,5 +441,64 @@ async fn main() -> anyhow::Result<()> {
     }
 
     Ok(())
+}
+
+/// What the CLI resolved to. Minimal parsing without pulling clap into the
+/// binary: one positional config path, plus `--help` and `--version`.
+#[derive(Debug, PartialEq)]
+enum Cli {
+    Run { config_path: String },
+    Help,
+    Version,
+}
+
+/// Pure so the contract is unit testable — an unknown flag MUST stay a hard
+/// error (a typo'd flag silently taken as the config path would start the
+/// server against the wrong backends).
+fn parse_args(args: impl IntoIterator<Item = String>) -> anyhow::Result<Cli> {
+    let mut config_path = "config/server.toml".to_string();
+    for arg in args {
+        match arg.as_str() {
+            "--help" | "-h" => return Ok(Cli::Help),
+            "--version" | "-V" => return Ok(Cli::Version),
+            other if !other.starts_with("--") => config_path = other.to_string(),
+            other => anyhow::bail!("unknown flag: {other}"),
+        }
+    }
+    Ok(Cli::Run { config_path })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn parse(args: &[&str]) -> anyhow::Result<Cli> {
+        parse_args(args.iter().map(|s| s.to_string()))
+    }
+
+    #[test]
+    fn version_flag_is_recognized() {
+        assert_eq!(parse(&["--version"]).unwrap(), Cli::Version);
+        assert_eq!(parse(&["-V"]).unwrap(), Cli::Version);
+    }
+
+    #[test]
+    fn unknown_flag_is_still_an_error() {
+        let err = parse(&["--versionn"]).unwrap_err();
+        assert!(err.to_string().contains("unknown flag"), "{err}");
+    }
+
+    #[test]
+    fn positional_is_the_config_path() {
+        assert_eq!(
+            parse(&["/etc/veda/server.toml"]).unwrap(),
+            Cli::Run { config_path: "/etc/veda/server.toml".to_string() }
+        );
+        assert_eq!(
+            parse(&[]).unwrap(),
+            Cli::Run { config_path: "config/server.toml".to_string() }
+        );
+        assert_eq!(parse(&["--help"]).unwrap(), Cli::Help);
+    }
 }
 

@@ -81,10 +81,12 @@ veda-server [config.toml]
 
 - **一个位置参数** = 配置路径;省略 → `config/server.toml`
 - `--help` / `-h`:往 stderr 打 `Usage: veda-server [config.toml]`,退出码 0
-- **没有 `--version`**——其他任何 `--flag` 是硬错误(`unknown flag: {other}`),
-  进程直接退出。**线上也没有任何版本端点**:`GET /capabilities` 只返回
-  `{"summary_enabled": bool}`,全链路唯一带版本的地方是 MCP `initialize` 响应的
-  `serverInfo.version`——要 `wk_` 才能拿,且报的是 crate 版本、不是 build。
+- `--version` / `-V`:往 stdout 打 `veda-server <crate 版本>`,退出码 0。**只此
+  两个 flag**,其他任何 `--flag` 是硬错误(`unknown flag: {other}`),进程直接退出
+- **`--version` 报的是 crate 版本,不等于 build**:节点上跑未发版 commit 时它照样
+  显示上一个 tag。它能证伪(输出对不上发版号 = 换错了),不能证明。**线上也没有
+  任何版本端点**:`GET /capabilities` 只返回 `{"summary_enabled": bool}`,MCP
+  `initialize` 响应的 `serverInfo.version` 同样是 crate 版本、且要 `wk_` 才能拿。
   想确认线上跑的是哪个 build,**核对二进制 sha256**(runbook 的 swap 流程本来
   就在做,见 [`docs/deploy-runbook.md`](deploy-runbook.md) 的「同一个 binary
   复用到所有节点 swap」一节)

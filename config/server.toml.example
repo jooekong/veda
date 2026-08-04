@@ -4,11 +4,11 @@
 #   ./veda-server config/server.toml
 #
 # The binary takes a single positional config path and defaults to
-# `config/server.toml` when omitted. It accepts no flags other than `--help`
-# (there is no `--version`, and no version endpoint either: `/capabilities`
-# reports only `summary_enabled`, and the MCP `initialize` `serverInfo.version`
-# is the crate version, which does not track an unreleased build. Identify a
-# deployed binary by its sha256 — see docs/deploy-runbook.md).
+# `config/server.toml` when omitted. Its only flags are `--help` and
+# `--version` (which prints the crate version — that does NOT track an
+# unreleased build, and there is still no version endpoint: `/capabilities`
+# reports only `summary_enabled`. Identify a deployed binary by its sha256 —
+# see docs/deploy-runbook.md).
 #
 # Every key below is shown with its built-in default. Only `[mysql]`,
 # `[milvus]` and `[embedding]` are mandatory — the rest can be deleted.

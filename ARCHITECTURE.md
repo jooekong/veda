@@ -163,7 +163,7 @@ Vector dataset 是 db workspace 内的逻辑分组（内部物理 pk = `{dataset
 - **`drain_secs`**：SIGTERM 后继续服务的秒数，期间 `/v1/ready` 返 503 "draining" 让 LB 先摘节点。默认 0；**单节点必须留 0**（没有接管者，drain 窗口纯粹是停机时间），扩容到多节点时才配。
 - **`TimeoutStopSec` 要盖住最慢的一次 embedding 批**（生产用 120s），否则优雅关闭会被 SIGKILL 打断。
 - **配置模板**：`config/server.toml.example` 列全部键、默认值与 `VEDA_*` 覆盖；必填只有 `[mysql] [milvus] [embedding]`，生产另需 `metrics_token`（未配 `/v1/metrics` 与 `/admin/v1/reconcile/*` 均 404）、`admin_token`（未配则 `/admin/v1/workspaces*` 只读 dashboard 404，console 看板失效；**不覆盖** `/admin/v1/tokens`（走 `vk_`）与 reconcile（走 `metrics_token`），tunnel 管控用的是 tunnel 自己配置里的 `admin_token`）、`allowed_origins`、`[otlp]`。
-- **二进制 argv**：`veda-server [config.toml]`——单个位置参数，省略则默认 `config/server.toml`；只认 `--help`，**没有 `--version`**（传其他 `--flag` 直接报错退出）。**没有版本端点**：`GET /capabilities` 只报 `summary_enabled`；`POST /mcp` 的 `initialize` 里有 `serverInfo.version`，但那是 **crate 版本号，不等于 build**——节点上跑未发版 commit 时它照样显示上一个 tag（.85 就出现过）。核对线上到底是哪个 build 要比二进制 sha256，见 `docs/deploy-runbook.md`。
+- **二进制 argv**：`veda-server [config.toml]`——单个位置参数，省略则默认 `config/server.toml`；只认 `--help` 和 `--version`（后者往 stdout 打 `veda-server <crate 版本>`，退出码 0；传其他 `--flag` 直接报错退出）。**没有版本端点**：`GET /capabilities` 只报 `summary_enabled`；`POST /mcp` 的 `initialize` 里有 `serverInfo.version`，但那是 **crate 版本号，不等于 build**——节点上跑未发版 commit 时它照样显示上一个 tag（.85 就出现过）。核对线上到底是哪个 build 要比二进制 sha256，见 `docs/deploy-runbook.md`。
 
 ## 可观测性
 
