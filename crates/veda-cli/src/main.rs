@@ -1313,6 +1313,14 @@ async fn print_summary_layer(
             println!("(Ask Joe to add an [llm] section to the server config.)");
             std::process::exit(3);
         }
+        // Terminal, unlike 202: this file type has no text layer, so no
+        // amount of retrying will produce a summary. Exit 4 keeps it
+        // distinguishable from pending (2) and disabled (3) in scripts.
+        415 => {
+            let msg = resp["error"].as_str().unwrap_or("unsupported file type");
+            println!("No summary for this file: {msg}");
+            std::process::exit(4);
+        }
         404 => {
             let msg = resp["error"].as_str().unwrap_or("not found");
             anyhow::bail!("HTTP 404: {msg}");

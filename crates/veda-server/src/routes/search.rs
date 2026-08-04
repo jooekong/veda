@@ -8,7 +8,7 @@ use axum::{Json, Router};
 use veda_types::api::{
     AbstractResponse, LayoutSummaryState, OverviewResponse, SearchApiRequest, WorkspaceLayout,
 };
-use veda_types::{ApiResponse, DetailLevel, SearchHit};
+use veda_types::{ApiResponse, DetailLevel, SearchHit, SourceType};
 
 use crate::auth::AuthWorkspace;
 use crate::error::AppError;
@@ -121,8 +121,45 @@ async fn serve_abstract(
             l0_abstract: s.l0_abstract,
         }))
         .into_response()),
+        None if never_summarized(&state, &auth.workspace_id, &path).await? => {
+            Ok(unsupported_file_type_response())
+        }
         None => Ok(summary_pending_response(state.summary_enabled)),
     }
+}
+
+/// Whether the file at `path` belongs to a type that will never produce a
+/// summary. Images and opaque binaries have no text layer and are not
+/// extracted, so no SummarySync is ever enqueued for them — answering 202
+/// "retry in a few seconds" strings the caller along forever.
+///
+/// Only consulted when the summary row is missing, i.e. off the hot path, so
+/// the extra dentry+file lookup costs nothing on a normal hit. Everything
+/// else (dirs, text, pdf/word) answers false: those either have a summary
+/// already or are genuinely still generating one.
+async fn never_summarized(
+    state: &AppState,
+    workspace_id: &str,
+    path: &str,
+) -> Result<bool, AppError> {
+    let Some(dentry) = state.meta_store.get_dentry(workspace_id, path).await? else {
+        return Ok(false);
+    };
+    let Some(file_id) = dentry.file_id.as_deref() else {
+        return Ok(false);
+    };
+    let Some(file) = state.meta_store.get_file(file_id).await? else {
+        return Ok(false);
+    };
+    Ok(is_unsummarizable(file.source_type))
+}
+
+/// Pdf/Word are deliberately absent: they acquire a text layer via
+/// ExtractSync and then do get L0/L1, so for them "pending" is the honest
+/// answer. Keep this in sync with the worker's extract routing — if a type
+/// ever becomes extractable, it must drop off this list.
+fn is_unsummarizable(source_type: SourceType) -> bool {
+    matches!(source_type, SourceType::Image | SourceType::Binary)
 }
 
 async fn serve_overview(
@@ -140,8 +177,24 @@ async fn serve_overview(
             l1_overview: s.l1_overview,
         }))
         .into_response()),
+        None if never_summarized(&state, &auth.workspace_id, &path).await? => {
+            Ok(unsupported_file_type_response())
+        }
         None => Ok(summary_pending_response(state.summary_enabled)),
     }
+}
+
+/// The path exists but its type has no text to summarize — a terminal answer,
+/// unlike 202. 415 rather than 404 (the file is there and downloadable) or
+/// 400 (nothing wrong with the request); the `UNSUPPORTED_FILE_TYPE` code is
+/// the part clients should branch on.
+fn unsupported_file_type_response() -> Response {
+    let body = Json(ApiResponse::<()>::err(
+        "UNSUPPORTED_FILE_TYPE",
+        "this file type never gets a summary (images and opaque binaries \
+         have no text layer); download it or use search instead",
+    ));
+    (StatusCode::UNSUPPORTED_MEDIA_TYPE, body).into_response()
 }
 
 /// Path exists but the summary row is missing. Two distinct cases:
@@ -174,6 +227,26 @@ fn summary_pending_response(summary_enabled: bool) -> Response {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
+    /// Images and opaque binaries are never extracted, so their summary is
+    /// not "pending" — it is never coming, and the route must say so.
+    #[test]
+    fn image_and_binary_never_get_a_summary() {
+        assert!(is_unsummarizable(SourceType::Image));
+        assert!(is_unsummarizable(SourceType::Binary));
+    }
+
+    /// The regression this whole change exists to prevent: pdf/word DO get
+    /// summaries now, so they must keep answering 202 "pending" while the
+    /// extract → summary handoff is in flight, never a terminal 415.
+    #[test]
+    fn extractable_and_text_types_stay_pending() {
+        assert!(!is_unsummarizable(SourceType::Pdf));
+        assert!(!is_unsummarizable(SourceType::Word));
+        assert!(!is_unsummarizable(SourceType::Text));
+    }
+
     #[test]
     fn search_limit_capped_at_100() {
         let raw: Option<usize> = Some(500);
