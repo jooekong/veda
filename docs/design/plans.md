@@ -26,7 +26,6 @@
 | [`db-workspace-followups.md`](../plans/db-workspace-followups.md) | 接业务方前待办：H1 Milvus GC / M1 维度校验 / A1 内存天花板（硬门槛）+ backlog 并入尾巴 |
 | [`embedding-throughput-plan.md`](../plans/embedding-throughput-plan.md) | **阶段 1 已实现**（07-29 最终形态：两级优先闸——交互插队/空闲时后台占满；攒批器经交叉 review 后按简化原则整体撤回，重启触发条件在 plan 内）；阶段 2 等生产数据再启 |
 | [`outbox-dedup-refactor.md`](../plans/outbox-dedup-refactor.md) | **搁置**（07-29 简化审计：无性能证据不动稳定写路径；更简的中间路线备忘在 plan 头部） |
-| [`pdf-word-summary-gap.md`](../plans/pdf-word-summary-gap.md) | **代码已实现待上线**（08-04 发现当天修完，`fix/pdf-word-summary`）：PDF/Word 从不入队 SummarySync ⇒ `abstract`/`overview` 永远 202；三道闸已改 + 集成测试真 LLM 验证过。**欠三节点部署 + live DoD + 存量重刷**（`scripts/backfill-blob-summaries.sql`），跑完再归档 |
 
 ## 方向池
 
@@ -50,7 +49,7 @@
 
 ## 归档索引
 
-- 完成或被取代的 plan：[`docs/archive/plans/`](../archive/plans/)（alpha 6 周计划、sparse/score/write_mode、平台管理面、OTLP 两篇、Java SDK、coding-agent-kb——`/mcp` P0 + P1 三件套已全量，HTML/sync 等 P2 背包的触发条件在 plan 内；FUSE 三篇 fuse-plan / fuse-writeback-plan / 2026-04-24-fuse-top4-fixes；fs9-plan）
+- 完成或被取代的 plan：[`docs/archive/plans/`](../archive/plans/)（alpha 6 周计划、sparse/score/write_mode、平台管理面、OTLP 两篇、Java SDK、coding-agent-kb——`/mcp` P0 + P1 三件套已全量，HTML/sync 等 P2 背包的触发条件在 plan 内；FUSE 三篇 fuse-plan / fuse-writeback-plan / 2026-04-24-fuse-top4-fixes；fs9-plan；pdf-word-summary-gap——08-04 当天发现修复上线+存量重刷闭环）
 - 旧 review 报告：[`docs/archive/reviews/`](../archive/reviews/)。留在 `docs/reviews/` 的有 8 篇：2026-04-30（C/S/W open 项锚点）、2026-06-10（上线前 review）、2026-06-15（全员开放加固，BLOCKED，未落地）、2026-06-18 五篇（原始 + cursor + final + final-claude + final-codex，NOT launch-ready，未落地）
 - 历史设计 / 研究稿：[`docs/archive/design/`](../archive/design/)（原始 design.md、simplify-v0、cli-skill 等，凭证/reconciler 等细节已被演进甩开，**勿当现状读**——现状见 `ARCHITECTURE.md`）
 - 一次性快照：`docs/archive/` 根（alpha-tryout、production-audit、vectors-merge-backlog、handoff-*）
