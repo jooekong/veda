@@ -21,3 +21,6 @@ api_url = "https://api.openai.com/v1/chat/completions"
 api_key = "sk-xxx"
 model = "gpt-4o-mini"
 max_summary_tokens = 8192
+# Only for a gateway known to accept the param (company airouter does; the
+# OpenAI API 400s on it). Summaries only — /v1/answer keeps its reasoning.
+# summary_disable_thinking = false

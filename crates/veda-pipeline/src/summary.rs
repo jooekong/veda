@@ -191,10 +191,14 @@ pub fn detect_output_language(sample: &str) -> &'static str {
 }
 
 // max_tokens is a safety fuse, not an output-length control: the prompts
-// already bound the answer (~100 tokens for L0). Reasoning models spend
+// already bound the answer (~100 tokens for L0). A reasoning model spends
 // thinking tokens from the same budget on some gateways, so a tight cap
 // (the old 150) can exhaust the budget mid-thought and yield an empty
-// content string. All summary calls therefore share one generous budget.
+// content string. Summary calls can now ask the gateway to skip thinking
+// altogether (`[llm] summary_disable_thinking`, verified on airouter
+// 2026-08-04), but that is per-deployment and the budget must still cover
+// backends where it is off — so all summary calls keep sharing one generous
+// budget.
 pub async fn generate_l0(
     llm: &dyn LlmService,
     content: &str,

@@ -122,8 +122,17 @@ async fn main() -> anyhow::Result<()> {
 
     let llm: Option<Arc<dyn LlmService>> = match &cfg.llm {
         Some(llm_cfg) => {
-            let provider = LlmProvider::new(&llm_cfg.api_url, &llm_cfg.api_key, &llm_cfg.model)?;
-            info!(model = %llm_cfg.model, "LLM summary service enabled");
+            let provider = LlmProvider::new(
+                &llm_cfg.api_url,
+                &llm_cfg.api_key,
+                &llm_cfg.model,
+                llm_cfg.summary_disable_thinking,
+            )?;
+            info!(
+                model = %llm_cfg.model,
+                summary_disable_thinking = llm_cfg.summary_disable_thinking,
+                "LLM summary service enabled"
+            );
             Some(Arc::new(provider))
         }
         None => {

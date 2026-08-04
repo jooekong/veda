@@ -142,7 +142,9 @@ async fn build_test_app() -> App {
         fs_service.clone(),
     );
     let llm: Arc<dyn LlmService> = Arc::new(
-        LlmProvider::new(&cfg.llm.api_url, &cfg.llm.api_key, &cfg.llm.model).expect("llm"),
+        // false: this test drives the answer/stream path, which never sends
+        // `enable_thinking` anyway — keep it at the wire-standard default.
+        LlmProvider::new(&cfg.llm.api_url, &cfg.llm.api_key, &cfg.llm.model, false).expect("llm"),
     );
     let tools = Arc::new(veda_core::service::answer::LiveTools::new(
         search_service.clone(),

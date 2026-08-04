@@ -85,14 +85,26 @@ max_concurrency = 8                      # VEDA_EMBEDDING_MAX_CONCURRENCY
 # not a protocol error).
 # Note: VEDA_LLM_API_URL alone is enough to enable the section at runtime, and
 # api_key/model have env overrides that apply once the section exists. Only
-# max_summary_tokens and the answer_* fields are TOML-only.
+# max_summary_tokens, summary_disable_thinking and the answer_* fields are
+# TOML-only.
 # [llm]
 # api_url = "https://api.openai.com/v1/chat/completions"   # VEDA_LLM_API_URL
 # api_key = "sk-xxx"                                       # VEDA_LLM_API_KEY
 # model = "gpt-4o-mini"                                    # VEDA_LLM_MODEL
-# Generous on purpose: reasoning models may count thinking tokens against
-# this budget, which produced empty abstracts in production at 150/2048.
+# Safety fuse against truncation, not an output-length control — the prompts
+# already bound the answer. Kept generous because a backend that still thinks
+# (see summary_disable_thinking below) spends that budget on thinking too,
+# which produced empty abstracts in production at 150/2048.
 # max_summary_tokens = 8192
+# Sends `enable_thinking: false` on SUMMARY calls only. Non-standard param:
+# the company airouter accepts it (verified 2026-08-04 on deepseek-v4-flash —
+# reasoning disappears from the response, completion tokens drop ~87%, latency
+# roughly halves, and thinking can no longer exhaust max_tokens into an empty
+# content string). The OpenAI API and other strict backends reject unknown
+# top-level params with HTTP 400, so leave this false unless your gateway is
+# known to accept it. `/v1/answer` is NOT affected: answers keep reasoning
+# under every setting.
+# summary_disable_thinking = false
 # `/v1/answer` agentic loop: tool round-trip cap. 0 degrades to pre-search +
 # one forced answer (the emergency knob if the loop misbehaves).
 # answer_max_tool_rounds = 4

@@ -109,6 +109,13 @@ struct ChatRequest {
     /// OpenAI-compatible streaming switch; false is the wire default but we
     /// always send it explicitly to keep both code paths symmetrical.
     stream: bool,
+    /// Non-standard gateway switch (company airouter): turns a reasoning
+    /// model's thinking off for this call. MUST stay absent unless a
+    /// deployment opts in — the OpenAI API itself rejects unknown top-level
+    /// params with a 400, so an unconditional field would break every
+    /// standards-compliant backend.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    enable_thinking: Option<bool>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -131,6 +138,9 @@ pub struct LlmProvider {
     api_url: String,
     api_key: String,
     model: String,
+    /// Send `enable_thinking: false` on the summarize path. Off unless the
+    /// deployment's gateway is known to accept it (see `ChatRequest`).
+    summary_disable_thinking: bool,
 }
 
 impl LlmProvider {
@@ -138,6 +148,7 @@ impl LlmProvider {
         api_url: impl Into<String>,
         api_key: impl Into<String>,
         model: impl Into<String>,
+        summary_disable_thinking: bool,
     ) -> Result<Self> {
         let client = reqwest::Client::builder()
             .connect_timeout(Duration::from_secs(10))
@@ -149,18 +160,51 @@ impl LlmProvider {
             api_url: api_url.into(),
             api_key: api_key.into(),
             model: model.into(),
+            summary_disable_thinking,
         })
     }
 
-    async fn chat_once(&self, prompt: &str, max_tokens: usize) -> std::result::Result<String, LlmError> {
-        let body = ChatRequest {
+    /// Body for the non-streaming summarize path. Split out from
+    /// `chat_once` so the wire shape — above all whether `enable_thinking`
+    /// is present — is unit testable without a network.
+    fn summary_request(&self, prompt: &str, max_tokens: usize) -> ChatRequest {
+        ChatRequest {
             model: self.model.clone(),
             messages: vec![ChatMessage::user(prompt)],
             tools: Vec::new(),
             max_tokens: Some(max_tokens),
             temperature: 0.0,
             stream: false,
-        };
+            // Summaries want text, not reasoning: on airouter the thinking
+            // ate ~87% of the completion tokens and shared the max_tokens
+            // budget with the answer. `false` only when configured; `None`
+            // keeps the field off the wire entirely.
+            enable_thinking: self.summary_disable_thinking.then_some(false),
+        }
+    }
+
+    /// Body for the streaming `/v1/answer` path. `enable_thinking` is
+    /// deliberately never set here: answers benefit from the model
+    /// reasoning, and this path is not the one that starved on tokens.
+    fn stream_request(
+        &self,
+        messages: &[ChatMsg],
+        tools: &[ToolSpec],
+        max_tokens: usize,
+    ) -> ChatRequest {
+        ChatRequest {
+            model: self.model.clone(),
+            messages: messages.iter().map(ChatMessage::from).collect(),
+            tools: tools.iter().map(ToolSpecWire::from).collect(),
+            max_tokens: Some(max_tokens),
+            temperature: 0.0,
+            stream: true,
+            enable_thinking: None,
+        }
+    }
+
+    async fn chat_once(&self, prompt: &str, max_tokens: usize) -> std::result::Result<String, LlmError> {
+        let body = self.summary_request(prompt, max_tokens);
 
         let mut req = self.client.post(&self.api_url).json(&body);
         if !self.api_key.is_empty() {
@@ -424,14 +468,7 @@ impl LlmService for LlmProvider {
     ) -> Result<tokio::sync::mpsc::Receiver<Result<ChatStreamItem>>> {
         use futures_util::StreamExt;
 
-        let body = ChatRequest {
-            model: self.model.clone(),
-            messages: messages.iter().map(ChatMessage::from).collect(),
-            tools: tools.iter().map(ToolSpecWire::from).collect(),
-            max_tokens: Some(max_tokens),
-            temperature: 0.0,
-            stream: true,
-        };
+        let body = self.stream_request(messages, tools, max_tokens);
         let mut req = self.client.post(&self.api_url).json(&body);
         if !self.api_key.is_empty() {
             req = req.bearer_auth(&self.api_key);
@@ -524,6 +561,50 @@ mod tests {
             content: Some(s.to_string()),
             tool_calls: Vec::new(),
         })
+    }
+
+    // ── request shape ────────────────────────────────────
+
+    fn provider(summary_disable_thinking: bool) -> LlmProvider {
+        // No request is ever sent — only the serialized body is inspected.
+        LlmProvider::new("http://127.0.0.1:1/v1/chat/completions", "", "m", summary_disable_thinking)
+            .expect("build provider")
+    }
+
+    fn body(req: &ChatRequest) -> serde_json::Value {
+        serde_json::to_value(req).expect("serialize request")
+    }
+
+    #[test]
+    fn summary_request_omits_enable_thinking_by_default() {
+        // The default must stay wire-compatible with the OpenAI API, which
+        // 400s on unknown top-level params: the key is absent, not `null`.
+        let v = body(&provider(false).summary_request("hi", 8192));
+        assert!(
+            v.get("enable_thinking").is_none(),
+            "enable_thinking must not be sent unless configured: {v}"
+        );
+        assert_eq!(v["stream"], serde_json::json!(false));
+    }
+
+    #[test]
+    fn summary_request_disables_thinking_when_configured() {
+        let v = body(&provider(true).summary_request("hi", 8192));
+        assert_eq!(v["enable_thinking"], serde_json::json!(false));
+    }
+
+    #[test]
+    fn stream_request_never_disables_thinking() {
+        // Answers keep their reasoning under every configuration — the
+        // switch is scoped to summaries on purpose.
+        for disable in [false, true] {
+            let v = body(&provider(disable).stream_request(&[ChatMsg::user("q")], &[], 4096));
+            assert!(
+                v.get("enable_thinking").is_none(),
+                "stream path must never send enable_thinking (disable={disable}): {v}"
+            );
+            assert_eq!(v["stream"], serde_json::json!(true));
+        }
     }
 
     // ── parse_chat_response ──────────────────────────────
@@ -695,7 +776,7 @@ mod tests {
         let url = std::env::var("VEDA_LLM_API_URL").expect("set VEDA_LLM_API_URL");
         let key = std::env::var("VEDA_LLM_API_KEY").unwrap_or_default();
         let model = std::env::var("VEDA_LLM_MODEL").expect("set VEDA_LLM_MODEL");
-        let provider = LlmProvider::new(url, key, model).unwrap();
+        let provider = LlmProvider::new(url, key, model, false).unwrap();
 
         let tools = [ToolSpec {
             name: "search",

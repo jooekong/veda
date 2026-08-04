@@ -235,6 +235,13 @@ pub struct LlmConfig {
     pub model: String,
     #[serde(default = "default_max_summary_tokens")]
     pub max_summary_tokens: usize,
+    /// Send `enable_thinking: false` on summary calls. Gateway-specific
+    /// (company airouter accepts it; the OpenAI API 400s on unknown params),
+    /// so it is opt-in per deployment. Summaries only — `/v1/answer` keeps
+    /// its reasoning. No env override (LLM sub-fields are TOML-only,
+    /// matching `max_summary_tokens`).
+    #[serde(default)]
+    pub summary_disable_thinking: bool,
     /// `/v1/answer` tool round-trip cap for the agentic loop. 0 degrades to
     /// pre-search + one forced answer (closest to the old one-shot mode) —
     /// the emergency knob if the loop misbehaves in production.
@@ -252,13 +259,15 @@ pub struct LlmConfig {
 }
 
 fn default_max_summary_tokens() -> usize {
-    // Generous on purpose: reasoning models (prod: deepseek-v4-flash) may
-    // count thinking tokens against max_tokens depending on the gateway
-    // backend. 2048 left L1 close to the line and the old hardcoded 150
+    // Generous on purpose: a backend that still thinks (i.e. anything
+    // without `summary_disable_thinking`) counts thinking tokens against
+    // max_tokens. 2048 left L1 close to the line and the old hardcoded 150
     // for L0 produced empty abstracts whenever thinking overran the budget
-    // (2026-07-08..13 prod incident). 8192 is safe on effectively all
-    // OpenAI-compatible backends; actual output length is bounded by the
-    // prompts, not this fuse.
+    // (2026-07-08..13 prod incident). Turning thinking off removes that
+    // pressure where the gateway supports it, but the fuse stays generous
+    // for every backend that does not — and for config drift. 8192 is safe
+    // on effectively all OpenAI-compatible backends; actual output length is
+    // bounded by the prompts, not this fuse.
     8192
 }
 
@@ -340,6 +349,7 @@ impl ServerConfig {
                     api_key: String::new(),
                     model: String::new(),
                     max_summary_tokens: default_max_summary_tokens(),
+                    summary_disable_thinking: false,
                     answer_max_tool_rounds: default_answer_max_tool_rounds(),
                     answer_max_output_tokens: default_answer_max_output_tokens(),
                     answer_concurrency: default_answer_concurrency(),
@@ -484,6 +494,22 @@ dimension = 768
 
         assert!(cfg.llm.is_some());
         assert_eq!(cfg.llm.as_ref().unwrap().api_url, "http://llm:8080/v1/chat");
+    }
+
+    #[test]
+    fn summary_disable_thinking_defaults_off_and_parses_when_set() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
+
+        // Absent from [llm] → off. The switch is gateway-specific, so a
+        // config that never mentions it must not send the param.
+        let mut raw = MINIMAL_TOML.to_string();
+        raw.push_str("\n[llm]\napi_url = \"u\"\napi_key = \"k\"\nmodel = \"m\"\n");
+        let cfg = ServerConfig::from_toml(&raw).unwrap();
+        assert!(!cfg.llm.as_ref().unwrap().summary_disable_thinking);
+
+        raw.push_str("summary_disable_thinking = true\n");
+        let cfg = ServerConfig::from_toml(&raw).unwrap();
+        assert!(cfg.llm.as_ref().unwrap().summary_disable_thinking);
     }
 
     #[test]
