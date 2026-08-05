@@ -37,12 +37,12 @@
 
 低优先级，写代码时顺手回灌：
 
-- `docs/vectors-merge-plan.md` §1.1 SQL：`ENUM('fs','db')` → `VARCHAR(16) NOT NULL DEFAULT 'fs'`（Veda 风格）
-- `docs/vectors-merge-plan.md` §1.1 SQL：`expires_at TIMESTAMP` → `DATETIME`（2038 + timezone）
-- `docs/vectors-merge-plan.md` §4 EmbeddingCache：`try_get_with` → "manual batch-preserving moka lookup"（实际实现）
-- `docs/vectors-merge-plan.md` §10 dataset DELETE 行：标注"implemented in Stage 4"
-- `docs/vectors-merge-plan.md` Stage 1 表格："admin token endpoint 占位" 删除（已挪 Stage 4）
-- `docs/vectors-merge-plan.md` §6.1 structured collections 归属：补注"通过 AuthWorkspace fs-only 隐式 enforce"
+- `docs/archive/vectors-merge-plan.md` §1.1 SQL：`ENUM('fs','db')` → `VARCHAR(16) NOT NULL DEFAULT 'fs'`（Veda 风格）
+- `docs/archive/vectors-merge-plan.md` §1.1 SQL：`expires_at TIMESTAMP` → `DATETIME`（2038 + timezone）
+- `docs/archive/vectors-merge-plan.md` §4 EmbeddingCache：`try_get_with` → "manual batch-preserving moka lookup"（实际实现）
+- `docs/archive/vectors-merge-plan.md` §10 dataset DELETE 行：标注"implemented in Stage 4"
+- `docs/archive/vectors-merge-plan.md` Stage 1 表格："admin token endpoint 占位" 删除（已挪 Stage 4）
+- `docs/archive/vectors-merge-plan.md` §6.1 structured collections 归属：补注"通过 AuthWorkspace fs-only 隐式 enforce"
 
 ## Subagent 提的 Minor（接受不修）
 

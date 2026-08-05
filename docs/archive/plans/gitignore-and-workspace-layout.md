@@ -1,6 +1,9 @@
 # `veda cp` ignore 规则 + workspace 级 map
 
-> 状态：待实施（已过 codex 方案评审，v2）
+> 状态：**已实施并归档（2026-08-05）**——ignore 规则与 `GET /v1/layout`（含 MCP `layout` 工具、
+> CLI `veda layout`）随 0.1.22–0.1.25 全部上线三节点；现状以 `ARCHITECTURE.md` 为准。
+> 尾巴：v4 记录里发现的 `veda_dentries` collation 未固定问题移交 `docs/todos.md` 跟踪。
+> （原状态：待实施，已过 codex 方案评审，v2）
 > 作者：Claude (Opus 5)
 > 日期：2026-08-03
 > 来源：对标 `Graphify-Labs/graphify` 后拍板的两条改进

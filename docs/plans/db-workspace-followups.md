@@ -25,7 +25,7 @@
 - **现状**：每个 db workspace 一个 Milvus collection，provision 时即 `load_collection`，**永不 unload**（文档 §决策4）。
 - **问题**：plan 目标 1500 workspace = 1500 个常驻内存 collection。Milvus loaded collection 数受 querynode 内存 + 元数据限制，到量级后 `load` 失败 → 新 workspace provision 失败（并触发 H2 回滚）。这是这套架构最硬的扩展性天花板。
 - **待办（接公司业务方前硬门槛）**：① spike 验证目标 Milvus 部署的 loaded collection 上限 + 单 collection 内存占用；② 设计 lazy load + LRU unload（文档 §决策4 已列为 v1）。
-- 风险已记在 `vectors-merge-plan.md` §7。
+- 风险已记在 `docs/archive/vectors-merge-plan.md` §7。
 
 ## D1. 对外 SDK（Java/Python）——走 OpenAPI 生成，不上 gRPC
 
@@ -77,4 +77,4 @@ Milvus 2.6 REST 是否接受"从未实测。补一个 500-pk delete 集成测试
 backlog 列的 plan 文档 drift 一条都没回写：§1.1 `ENUM('fs','db')`→`VARCHAR(16)`、
 `expires_at TIMESTAMP`→`DATETIME`、§4 `try_get_with`→manual batch-preserving lookup、
 §10 dataset DELETE 标已实现、Stage 1 表格删 admin token 占位、§6.1 补 AuthWorkspace 隐式
-enforce 注记。改 `docs/vectors-merge-plan.md` 时顺手清掉。
+enforce 注记。改 `docs/archive/vectors-merge-plan.md` 时顺手清掉。

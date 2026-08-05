@@ -38,7 +38,7 @@ pub struct HandlerCtx {
     /// Global answer switch (`[answer] enabled`): true → route through
     /// `/v1/answer`, false → raw search. Process-wide, not per-bot.
     pub answer_enabled: bool,
-    /// QA telemetry sink (docs/plans/veda-tunnel-qa-log.md). Writes are
+    /// QA telemetry sink (docs/archive/plans/veda-tunnel-qa-log.md). Writes are
     /// best-effort; a failure warns and never blocks the reply.
     pub qa_log: Arc<QaLogStore>,
 }

@@ -1,9 +1,14 @@
 # 公司级上线前加固审查最终稿（2026-06-18）
 
+> 📌 **2026-08-05 状态核对**（逐条对照代码实况）：必修 11 条 **7 修 4 欠**。
+> 已修（**2026-06-18 当天即随 `5d755b0` 落地并部署三台**，「基本未落地」的旧表述指的是 06-15 时点）：#1 SQL 规划器硬闸（`engine.rs` SQLOptions 无条件禁 DDL/DML/statements）、#2 内存池+超时（GreedyMemoryPool + SQL_QUERY_TIMEOUT）、#4 key revoke 带 workspace scope、#5 delete/revoke 补平台 authz、#6 platform reqwest 3s 超时、#10 全局 TimeoutLayer + CatchPanicLayer（另 systemd 加固 unit 三台已装）。
+> 仍欠，分两类——**真欠账**：#3 CI 不跑任何测试（两套 CI 均 tag-only release，且干净环境 `cargo test` 依赖 gitignored 的 test.toml 会崩）。**Joe 拍板暂不做**（2026-06-18「初期不删数据」）：#7 db workspace 全局配额、#8 删 project drop Milvus collection、#9 insert_rows 行数上限——重启这三条前先向 Joe 确认拍板是否仍有效。#11 install.sh 只读 deploy token 未轮换（repo 已 private，降级接受）。批次 C（审计日志/request-id、list_dir 单层 LIMIT、collection upsert/saga、outbox pending 上限）未动。
+> 原始材料稿已归档 `../archive/reviews/`。
+
 - **HEAD**：`469f0c7`
 - **来源**：
-  - [`review-2026-06-18.md`](review-2026-06-18.md)：多智能体安全/健壮性复审，重点补充 apps / platform 新面。
-  - [`review-2026-06-18-cursor.md`](review-2026-06-18-cursor.md)：Cursor 三维度复审，覆盖健壮性、数据正确性、测试/CI、可观测性与部署。
+  - [`review-2026-06-18.md`](../archive/reviews/review-2026-06-18.md)：多智能体安全/健壮性复审，重点补充 apps / platform 新面。
+  - [`review-2026-06-18-cursor.md`](../archive/reviews/review-2026-06-18-cursor.md)：Cursor 三维度复审，覆盖健壮性、数据正确性、测试/CI、可观测性与部署。
   - [`review-2026-06-15.md`](review-2026-06-15.md)：上一轮全员开放安全基线。
 - **最终定级原则**：这是公司内部项目，**token / 鉴权机制从简**；缺 in-code auth 不单独作为 blocker。但会导致**宿主机写入、节点 OOM、单人拖垮全员、跨租户破坏、凭证泄露、上线后无法回归**的问题仍按上线风险处理。
 

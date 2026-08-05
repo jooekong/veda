@@ -5,7 +5,7 @@
 > **追加（2026-06-03）platform 账号模型**：`account` 加 `app_id`（唯一索引），`POST /v1/accounts {name, app_id}` 无 email 建账号、返回并由 platform 保管 `vk_`；email 路径保留给 console/CLI；v0 公开建账号、无 `vk_` 补发。SOP 主线已改为 app_id 路径。lib 单测 259 全绿、全 target 编译过。
 > **codex review app_id 增量（2026-06-03）**：修 F1 claim 拒绝 app_id 账号 / F3 混合请求(app_id+email/password)拒绝 / F4 既有 `translate_account_email_conflict` 的 1062 失效 bug（抽 `is_mysql_duplicate` 统一 `number()` 检测，顺带修 claim 并发冲突误返 500）/ F5 app_id 存前 trim。**F2 squatting 不改代码**：`POST /v1/accounts` v0 公开，任意方可抢占 app_id——仅限可信内网，platform 接入文档须明示；上公网前须加 platform 凭据。
 > 起因：把 veda console 的管理能力搬上公司 AI platform。
-> 关联：`web/src/main.ts`（现有 console）、`docs/vectors-merge-plan.md`（db 设计）、`docs/plans/java-sdk-db-plan.md`（受影响 SDK）。
+> 关联：`web/src/main.ts`（现有 console）、`docs/archive/vectors-merge-plan.md`（db 设计）、`docs/plans/java-sdk-db-plan.md`（受影响 SDK）。
 
 ---
 

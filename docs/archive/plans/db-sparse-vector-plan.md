@@ -2,7 +2,7 @@
 
 > 状态：✅ 已实现（`1f6ac0b`，2026-06-02，fulltext/hybrid + score_type 全落地，证伪测试齐）。2026-06-10 归档。
 > 关联：`docs/plans/db-sparse-vector-handoff.md`（前人交接，已逐条核实，结论见 §1）、
-> `docs/vectors-merge-plan.md`（v2 设计，hybrid/fulltext 原列为 v1）。
+> `docs/archive/vectors-merge-plan.md`（v2 设计，hybrid/fulltext 原列为 v1）。
 > 核实基准：HEAD `98fecdc`，`crates/veda-store/src/milvus.rs`（1494 行）。
 
 ---

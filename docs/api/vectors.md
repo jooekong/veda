@@ -6,7 +6,7 @@
 > web version wins.
 
 Pinecone-style data plane for company apps. v0 contract — designs locked
-in [`docs/vectors-merge-plan.md`](../vectors-merge-plan.md); open items live in
+in [`docs/archive/vectors-merge-plan.md`](../archive/vectors-merge-plan.md); open items live in
 [`docs/plans/db-workspace-followups.md`](../plans/db-workspace-followups.md)
 (the original backlog is archived at
 [`../archive/vectors-merge-backlog.md`](../archive/vectors-merge-backlog.md)).
@@ -95,7 +95,7 @@ same server.
 |---|---|---|---|
 | `upsert` (default) | supplied | insert-or-replace by `(workspace,dataset,id)` — replaced in place; `created_at`/`updated_at` reset, meta/tags/text fully overwritten | ✅ |
 | `upsert` (default) | omitted | server UUID → internally takes the **insert** fast path (a UUID can't collide) | ❌ (new UUID each retry) |
-| `insert` | supplied | direct insert, **dedup skipped** — ~3× faster (Milvus upsert pays a ~400ms dedup+delete cost; see `docs/loadtest-2026-06-05.md`). **Caller guarantees `id` uniqueness.** | ❌ |
+| `insert` | supplied | direct insert, **dedup skipped** — ~3× faster (Milvus upsert pays a ~400ms dedup+delete cost; see `docs/archive/loadtest-2026-06-05.md`). **Caller guarantees `id` uniqueness.** | ❌ |
 | `insert` | omitted | server UUID → insert | ❌ |
 
 **`write_mode=insert` trades safety for speed.** Milvus does NOT check pk

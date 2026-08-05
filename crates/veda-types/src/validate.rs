@@ -1,7 +1,7 @@
 //! v0 contract validators for the vector data plane (Stage 4).
 //!
 //! These are the only places the Pinecone-style schema constraints
-//! (`docs/vectors-merge-plan.md` §2.3) are enforced. Stage 4 handlers call
+//! (`docs/archive/vectors-merge-plan.md` §2.3) are enforced. Stage 4 handlers call
 //! these BEFORE any Milvus write so that bad input rejects with a stable
 //! `VedaError::InvalidInput` instead of a downstream Milvus error.
 //!

@@ -748,7 +748,7 @@ function connBadge(s?: string): string {
   return `<span class="text-xs px-1.5 py-0.5 rounded font-medium ${cls}">${label}</span>`;
 }
 
-// ── 问答统计（qa_log，docs/plans/veda-tunnel-qa-log.md）──
+// ── 问答统计（qa_log，docs/archive/plans/veda-tunnel-qa-log.md）──
 
 type QaStats = {
   days: number;

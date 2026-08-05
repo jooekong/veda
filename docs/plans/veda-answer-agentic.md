@@ -3,7 +3,7 @@
 > **状态:Stage 1(server 核心)已实现,e2e 全绿(2026-07-14);Stage 2(bot prompt 贯通)进行中。**
 > 源起:one-shot RAG(检索→固定组装→单次 LLM)对「一次检索不命中」「片段缺上下文」的问题束手无策;
 > 且 bot 无 prompt 配置能力,所有 bot 一个腔调。本文是 agentic 多次召回 + prompt 分层 + per-bot prompt 的设计与实现记录。
-> 关联:`veda-answer-plan.md`(one-shot 前身,组装管线已退役)、`veda-answer-stream.md`(流式契约,本改造扩展了 `reset` 事件)。
+> 关联:`veda-answer-plan.md`(one-shot 前身,组装管线已退役)、`../archive/plans/veda-answer-stream.md`(流式契约,本改造扩展了 `reset` 事件)。
 
 ---
 

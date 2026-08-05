@@ -1,10 +1,10 @@
 # wiki 知识库 × Coding Agent 接入方案（MCP + 入库体验）
 
-> 状态：**已完成，归档（2026-07-23）**——P0 `/mcp` 端点 07-22 全量上线三节点（手测 SOP 22 项全过，`docs/mcp-manual-test-sop.md`）；P1 三件套（env 鉴权 / index-status / `veda ask`）已随 0.1.21 实现（fdc8b6a，server 侧生产 .85/.95 待部署窗口）；Word 已随 0.1.20 上线。HTML 提取、`veda sync` 留 P2 背包（触发条件见各节状态框，设计存档可直接用）。
+> 状态：**已完成，归档（2026-07-23）**——P0 `/mcp` 端点 07-22 全量上线三节点（手测 SOP 22 项全过，`docs/testing/mcp-manual-test-sop.md`）；P1 三件套（env 鉴权 / index-status / `veda ask`）已随 0.1.21 实现（fdc8b6a，server 侧生产 .85/.95 待部署窗口）；Word 已随 0.1.20 上线。HTML 提取、`veda sync` 留 P2 背包（触发条件见各节状态框，设计存档可直接用）。
 > 历史：三轮 Joe review（07-22）定 MCP 形态为 veda-server 原生 `/mcp`（Streamable HTTP，stateless；stdio 被否决）
 > 来源：2026-07-22 需求 —— 公司同事想把 wiki 文件传进 veda fs 知识库，在 Coding Agent（Claude Code / Cursor / Codex）里让 AI 检索知识库获取更准确的上下文
 > 现状论断均经代码核实（2026-07-22），关键论断带 `文件:行号`
-> 关联：[`okf-knowledge-base.md`](../../plans/okf-knowledge-base.md)（知识**格式/生态**战略，未开工）与本方案互补不冲突——本方案解决眼前的**接入与体验**工程，OKF 是格式层演进；两者共享「L0/L1/L2 分层喂 agent」的核心思路
+> 关联：[`okf-knowledge-base.md`](okf-knowledge-base.md)（知识**格式/生态**战略，未开工）与本方案互补不冲突——本方案解决眼前的**接入与体验**工程，OKF 是格式层演进；两者共享「L0/L1/L2 分层喂 agent」的核心思路
 
 ## 0. TL;DR
 
@@ -36,7 +36,7 @@
 | 重跑幂等 | 客户端带 `If-None-Match: "<sha256>"`，服务端 content_unchanged 短路，不重复 embed | `veda-cli/src/client.rs:185-194` |
 | 格式：Markdown | 一等公民——chunking 按 `#`..`######` 标题切段 + CJK 按 1 token/字换算防超限 | `veda-pipeline/src/chunking.rs:32-75,24-30` |
 | 格式：PDF | `pdf-extract` 抽文本层进 Milvus，原件可下载（无 OCR，扫描件搜不到） | `veda-pipeline/src/extraction.rs:29-32` |
-| 格式：Word | **已上线（0.1.20，2026-07-22 三节点 + 存量 backfill）**：.docx（zip+quick-xml）/.doc（自写宽松 CFB），`SourceType::Word` → ExtractSync，提取文本存 `veda_file_extracts`（sha 防陈旧），cat/preview 返提取文本 | `veda-pipeline/src/word.rs`；SOP `docs/word-e2e-sop.md` |
+| 格式：Word | **已上线（0.1.20，2026-07-22 三节点 + 存量 backfill）**：.docx（zip+quick-xml）/.doc（自写宽松 CFB），`SourceType::Word` → ExtractSync，提取文本存 `veda_file_extracts`（sha 防陈旧），cat/preview 返提取文本 | `veda-pipeline/src/word.rs`；SOP `docs/archive/word-e2e-sop.md` |
 | 格式：HTML | **能入库能搜**（合法 UTF-8 走文本路径，正文词 BM25/语义均可命中），只是标签一并入库——是质量优化空间，不是功能缺口（07-22 review 定性） | `routes/fs.rs` UTF-8 sniff 分流 |
 | 检索 | `/v1/search`：hybrid=dense+BM25 RRF（Milvus 2.5 原生）、jieba 中文、`path_prefix` 子树过滤、`detail_level` 三层、`deny_unknown_fields` 参数错直接 400 | `veda-server/src/routes/search.rs`、`veda-types/src/api.rs:161-169` |
 | 分层省 token | L0 abstract（~100 tok）/ L1 overview（~2k tok）/ L2 原文，`GET /v1/abstract|overview/{path}` | `ARCHITECTURE.md` 三层信息模型 |
@@ -156,7 +156,7 @@
 
 ## 5. Word 提取（✅ 已完成，出方案）
 
-**已随 0.1.20 上线（2026-07-22）**：双端发版、三节点部署、存量文件 backfill 完成。链路 = `word.rs` 提取（.docx zip+quick-xml / .doc 自写宽松 CFB）、`SourceType::Word` → ExtractSync、`veda_file_extracts` 存提取文本（`source_sha256` 防陈旧）、cat/preview 返提取文本。e2e SOP 见 `docs/word-e2e-sop.md`。本节仅存档，不再是本方案工作项。
+**已随 0.1.20 上线（2026-07-22）**：双端发版、三节点部署、存量文件 backfill 完成。链路 = `word.rs` 提取（.docx zip+quick-xml / .doc 自写宽松 CFB）、`SourceType::Word` → ExtractSync、`veda_file_extracts` 存提取文本（`source_sha256` 防陈旧）、cat/preview 返提取文本。e2e SOP 见 `docs/archive/word-e2e-sop.md`。本节仅存档，不再是本方案工作项。
 
 ## 6. HTML 提取（⬇ P2，07-22 review 降级：先实验后开发）
 
@@ -197,7 +197,7 @@
 
 1. 单测：真实 Confluence 导出页 fixture → 提取结果无 `<` 标签残留、标题映射为 `#`、脚本/样式内容不出现。
 2. 集成（真实依赖）：上传 html → search 命中正文关键词且 top hit 的 content 无标签；cat/read_file 返回 markdown；`GET` raw 下载 byte-for-byte 等于原件。
-3. 覆盖写 html→image：旧向量被清（复用 Word e2e 同一测试模式，SOP 见 `docs/word-e2e-sop.md`）。
+3. 覆盖写 html→image：旧向量被清（复用 Word e2e 同一测试模式，SOP 见 `docs/archive/word-e2e-sop.md`）。
 4. 一个 20+ 页的真实 wiki 导出目录 `cp -r` 全量入库，抽 5 页人工检查检索质量。
 
 ## 7. P1-1 CLI 认 `$VEDA_SERVER` / `$VEDA_KEY`（✅ 已随 0.1.21 实现）

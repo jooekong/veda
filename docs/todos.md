@@ -33,4 +33,4 @@
 3. 想清楚要哪种语义 —— 改成敏感会让现在互相覆盖的路径突然分裂
 
 未排期。发现于 workspace layout 的 `file_count` 实现（见
-`docs/plans/gitignore-and-workspace-layout.md` v4 记录）。
+`docs/archive/plans/gitignore-and-workspace-layout.md` v4 记录）。

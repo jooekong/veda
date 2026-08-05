@@ -459,7 +459,7 @@ that matters.
   concurrency permit spans the whole stream. veda-tunnel consumes it with
   ≥1s-throttled WeCom bubble refreshes (first token visible in ~1-2s instead
   of a 7-11s blank wait) and falls back to the one-shot endpoint on older
-  servers. Plan: `docs/plans/veda-answer-stream.md`.
+  servers. Plan: `docs/archive/plans/veda-answer-stream.md`.
 - **veda-tunnel QA telemetry (qa_log).** Every WeCom Q&A lands a row in
   `veda_tunnel_qa_log` (query, full answer text, outcome, latency, citation
   count; best-effort — never blocks the reply), and each reply's first stream
@@ -470,7 +470,7 @@ that matters.
   it) — that list doubles as the knowledge base's missing-docs backlog. New
   admin endpoints `/admin/stats` + `/admin/qa-log`; the console tunnel page
   gains stat cards and a filterable Q&A/bad-case table. Admin bot writes now
-  leave audit log lines. Plan: `docs/plans/veda-tunnel-qa-log.md`.
+  leave audit log lines. Plan: `docs/archive/plans/veda-tunnel-qa-log.md`.
 - **Platform fs file upload/download.** The AI Workbench data plane gains
   `PUT /v1/workspace/{ws}/project/{id}/file?path=` (raw-byte body, same
   UTF-8-vs-blob content sniff as the `wk_` plane, parents auto-created,

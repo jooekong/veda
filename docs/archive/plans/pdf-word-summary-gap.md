@@ -272,7 +272,7 @@ WHERE f.source_type IN ('pdf', 'word')
   而非修复承诺违约。修完记得同步这两处文案。
 - 用户可见变更记 `CHANGELOG.md`；`ARCHITECTURE.md` 里 PDF/Word 的能力
   描述也要更新。
-- 相关历史：`docs/postmortem-2026-07-empty-abstracts.md`（闸 3 的由来）、
+- 相关历史：`docs/archive/postmortem-2026-07-empty-abstracts.md`（闸 3 的由来）、
   `scripts/backfill-word-extracts.sql`（同类存量重刷的先例）。
 
 ---

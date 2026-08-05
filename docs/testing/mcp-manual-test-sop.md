@@ -45,7 +45,7 @@ curl -s --noproxy '*' -o /dev/null -w '%{http_code}\n' -H "Authorization: Bearer
 
 ## 2. 准备测试语料
 
-现成语料在 **`docs/sop-fixtures/mcp/`**(五种格式,每个文件一个主题 + 一个 grep 用哨兵词):
+现成语料在 **`docs/testing/sop-fixtures/mcp/`**(五种格式,每个文件一个主题 + 一个 grep 用哨兵词):
 
 | 文件 | 主题 | 哨兵(grep 用) | ask 可问 |
 |---|---|---|---|
@@ -58,7 +58,7 @@ curl -s --noproxy '*' -o /dev/null -w '%{http_code}\n' -H "Authorization: Bearer
 
 ```bash
 # 上传(在 repo 根目录):
-veda cp docs/sop-fixtures/mcp /mcp-test           # 目录自动递归,没有 -r;或逐个 curl PUT /v1/fs/mcp-test/...
+veda cp docs/testing/sop-fixtures/mcp /mcp-test           # 目录自动递归,没有 -r;或逐个 curl PUT /v1/fs/mcp-test/...
 # 约 30-60s 后(异步 embedding;pdf/word 多一道提取)用 §1 的 curl 或 REST search
 # 搜任一哨兵词确认已可检索,再进 §3
 ```

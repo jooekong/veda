@@ -225,7 +225,7 @@ async fn reload(_: AdminAuth, State(st): State<AdminState>) -> Response {
     }
 }
 
-// ── QA telemetry (docs/plans/veda-tunnel-qa-log.md) ─────
+// ── QA telemetry (docs/archive/plans/veda-tunnel-qa-log.md) ─────
 
 #[derive(serde::Deserialize)]
 struct StatsQuery {

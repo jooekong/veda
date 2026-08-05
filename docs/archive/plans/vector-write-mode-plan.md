@@ -2,7 +2,7 @@
 
 > 状态：✅ 已实现（`fdc42a9`，2026-06-08，方案与实现同 commit）。2026-06-10 归档。
 > 未兑现尾巴：Java SDK / Python 示例的 write_mode 说明（已记 todos.md）。
-> 背景数据：`docs/loadtest-2026-06-05.md`。
+> 背景数据：`docs/archive/loadtest-2026-06-05.md`。
 
 ## 背景
 

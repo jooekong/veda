@@ -1,4 +1,4 @@
-//! QA telemetry (plan: docs/plans/veda-tunnel-qa-log.md).
+//! QA telemetry (plan: docs/archive/plans/veda-tunnel-qa-log.md).
 //!
 //! Every answered question lands one row in `veda_tunnel_qa_log` (query,
 //! answer text, outcome, latency); WeCom thumb-up/down callbacks land in

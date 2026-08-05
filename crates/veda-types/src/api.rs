@@ -343,7 +343,7 @@ pub struct UpsertRequest {
 }
 
 /// Per-record user input. `text` is the only required field; everything
-/// else has a default (see docs/vectors-merge-plan.md §2.4):
+/// else has a default (see docs/archive/vectors-merge-plan.md §2.4):
 ///   id        → server-generated UUID (insert semantics; no upsert dedup)
 ///   category  → "default"
 ///   tags      → []
