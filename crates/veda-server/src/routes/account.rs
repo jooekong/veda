@@ -8,7 +8,6 @@ use axum::http::StatusCode;
 use axum::routing::{delete, post};
 use axum::{Json, Router};
 use chrono::Utc;
-use tracing::warn;
 use uuid::Uuid;
 use veda_core::checksum::sha256_hex;
 use veda_types::api::{
@@ -17,7 +16,7 @@ use veda_types::api::{
     PaginationQuery,
 };
 use veda_types::{
-    Account, AccountStatus, ApiKeyRecord, ApiResponse, Dataset, DatasetStatus, KeyPermission,
+    Account, AccountStatus, ApiKeyRecord, ApiResponse, KeyPermission,
     KeyStatus, VedaError, Workspace, WorkspaceKey, WorkspaceKind, WorkspaceStatus,
 };
 
@@ -347,109 +346,11 @@ async fn create_workspace(
     auth: AuthAccount,
     Json(req): Json<CreateWorkspaceRequest>,
 ) -> Result<Json<ApiResponse<Workspace>>, AppError> {
-    let ws = create_workspace_under(&state, auth.account_id, req).await?;
+    let ws = state
+        .workspace_service
+        .create_workspace(auth.account_id, req)
+        .await?;
     Ok(Json(ApiResponse::ok(ws)))
-}
-
-/// Build a workspace (fs or db) under an already-resolved `account_id`. Shared
-/// by the `vk_` control plane (`POST /v1/workspaces`, account from the bearer)
-/// and the workspace-scoped control plane (`POST /v1/workspace/{workspace}/projects`,
-/// account auto-provisioned from the path). For `kind=db`, commits the workspace +
-/// bootstrap `default` dataset in one tx, then provisions the Milvus collection
-/// with rollback on failure. `req.app_id` is the workspace's governance label;
-/// the workspace-plane handler sets it to the path workspace code.
-pub(crate) async fn create_workspace_under(
-    state: &AppState,
-    account_id: String,
-    req: CreateWorkspaceRequest,
-) -> Result<Workspace, AppError> {
-    let now = Utc::now();
-    let ws = Workspace {
-        id: Uuid::new_v4().to_string(),
-        account_id,
-        name: req.name,
-        status: WorkspaceStatus::Active,
-        kind: req.kind,
-        app_id: req.app_id,
-        description: req.description,
-        created_at: now,
-        updated_at: now,
-    };
-    if ws.kind == WorkspaceKind::Db {
-        // workspace + bootstrap dataset commit together in one tx (no
-        // orphan-workspace window), then provision the Milvus collection
-        // with rollback on failure.
-        let default_dataset = Dataset {
-            id: Uuid::new_v4().to_string(),
-            workspace_id: ws.id.clone(),
-            name: veda_types::validate::DEFAULT_DATASET.to_string(),
-            status: DatasetStatus::Active,
-            description: None,
-            created_at: ws.created_at,
-            updated_at: ws.updated_at,
-        };
-        state
-            .auth_store
-            .create_db_workspace(&ws, &default_dataset)
-            .await?;
-        provision_db_collection(state, &ws).await?;
-    } else {
-        state.auth_store.create_workspace(&ws).await?;
-    }
-
-    Ok(ws)
-}
-
-/// Create the Milvus collection for an already-persisted db workspace (its
-/// workspace + default dataset rows were committed together by
-/// `create_db_workspace`). On failure, roll back the DB metadata FIRST, then
-/// drop the partial collection. Order matters: if we crash mid-rollback,
-/// dropping the control-plane rows first means the user sees a clean "no such
-/// workspace" rather than a zombie workspace they can list but can't use
-/// (collection gone); the leftover orphan collection is pure storage waste
-/// that the archived-resource GC (todo H1) reclaims. All steps are idempotent
-/// (drop swallows not-exists), so partial rollback failures don't compound.
-async fn provision_db_collection(state: &AppState, ws: &Workspace) -> Result<(), AppError> {
-    if let Err(e) = state
-        .vector_workspace_store
-        .create_vector_collection(&ws.id, state.embedding_dim)
-        .await
-    {
-        if let Err(rb) = state
-            .auth_store
-            .hard_delete_datasets_for_workspace(&ws.id)
-            .await
-        {
-            warn!(
-                workspace_id = %ws.id,
-                provision_err = %e,
-                rollback_err = %rb,
-                "rollback hard_delete_datasets failed",
-            );
-        }
-        if let Err(rb) = state.auth_store.hard_delete_workspace(&ws.id).await {
-            warn!(
-                workspace_id = %ws.id,
-                provision_err = %e,
-                rollback_err = %rb,
-                "rollback hard_delete_workspace failed",
-            );
-        }
-        let collection_name = veda_store::vector_collection_name(&ws.id);
-        if let Err(rb) = state.vector_workspace_store.drop_collection(&collection_name).await {
-            warn!(
-                workspace_id = %ws.id,
-                collection_name = %collection_name,
-                provision_err = %e,
-                rollback_err = %rb,
-                "rollback drop_collection failed after milvus create error; \
-                 orphan collection may remain (reclaimed by archived-resource GC)",
-            );
-        }
-        return Err(e.into());
-    }
-
-    Ok(())
 }
 
 /// Default page size when caller omits `?limit=`. 100 fits in a single

@@ -2,6 +2,8 @@ pub mod answer;
 pub mod collection;
 pub mod fs;
 pub mod search;
+pub mod vector;
+pub mod workspace;
 
 use veda_types::{Result, VedaError};
 

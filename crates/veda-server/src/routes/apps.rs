@@ -27,13 +27,12 @@ use veda_types::api::CreateWorkspaceRequest;
 use veda_core::checksum::sha256_hex;
 use veda_types::validate;
 use veda_types::{
-    Account, AccountStatus, ApiResponse, Dataset, DatasetStatus, KeyPermission, KeyStatus,
+    ApiResponse, Dataset, DatasetStatus, KeyPermission, KeyStatus,
     VedaError, Workspace, WorkspaceKey,
 };
 
 use crate::error::AppError;
 use crate::platform::{resolve_workspace_name, GatewayUser};
-use crate::routes::account::create_workspace_under;
 use crate::state::AppState;
 
 /// Offset-pagination query for apps list endpoints (company spec): `page` (from
@@ -193,54 +192,6 @@ fn require_workspace(workspace: &str) -> Result<&str, AppError> {
     Ok(trimmed)
 }
 
-/// Look up the account for a platform `workspace` code, treating a **suspended**
-/// account as unavailable — mirrors the `vk_` / `wk_` auth paths, which only
-/// match active accounts (so ops can lock a tenant out of the control plane
-/// too). Returns `Ok(None)` when the workspace code is simply unknown.
-async fn lookup_active_account(
-    state: &AppState,
-    app_id: &str,
-) -> Result<Option<Account>, AppError> {
-    match state.auth_store.get_account_by_app_id(app_id).await? {
-        Some(acc) if acc.status == AccountStatus::Active => Ok(Some(acc)),
-        Some(_) => Err(VedaError::Unauthorized("account suspended".into()).into()),
-        None => Ok(None),
-    }
-}
-
-/// Resolve the account for a platform `workspace` code, creating it
-/// (auto-provisioning the tenant) when absent. Race-safe: a concurrent create
-/// that loses the UNIQUE(app_id) race surfaces as `AlreadyExists`, which we
-/// resolve by re-reading the winner. Only the account row is created — no `vk_`
-/// is minted (A drops account keys).
-async fn ensure_account(state: &AppState, app_id: &str) -> Result<Account, AppError> {
-    if let Some(acc) = lookup_active_account(state, app_id).await? {
-        return Ok(acc);
-    }
-    let now = Utc::now();
-    let account = Account {
-        id: Uuid::new_v4().to_string(),
-        name: format!("app-{app_id}"),
-        email: None,
-        password_hash: None,
-        app_id: Some(app_id.to_string()),
-        status: AccountStatus::Active,
-        created_at: now,
-        updated_at: now,
-    };
-    match state.auth_store.create_account(&account).await {
-        Ok(()) => Ok(account),
-        // Lost the race against a concurrent first-touch of the same workspace;
-        // the winner's row now exists — read it back.
-        Err(VedaError::AlreadyExists(_)) => lookup_active_account(state, app_id)
-            .await?
-            .ok_or_else(|| {
-                VedaError::Internal("app_id account vanished after duplicate".into()).into()
-            }),
-        Err(e) => Err(e.into()),
-    }
-}
-
 /// POST /v1/workspace/{workspace}/projects — auto-provision the tenant (if new)
 /// and create a project under it. The path `{workspace}` is authoritative and
 /// stamped onto the project; any `app_id` in the body is ignored.
@@ -254,9 +205,9 @@ async fn create_app_project(
     // External authz (item 4): caller must be allowed to create in this
     // workspace. Skipped when the platform isn't configured (VEDA_PLATFORM_BASE).
     crate::platform::authorize(gw.cookie(), "workspace-create", &workspace, gw.user_name()).await?;
-    let account = ensure_account(&state, &workspace).await?;
+    let account = state.workspace_service.ensure_account(&workspace).await?;
     req.app_id = Some(workspace.clone());
-    let ws = create_workspace_under(&state, account.id, req).await?;
+    let ws = state.workspace_service.create_workspace(account.id, req).await?;
     // Stamp creator from the gateway identity (NULL on direct access).
     let creator = gw.creator();
     let creator_name = gw.creator_name();
@@ -287,7 +238,7 @@ async fn list_app_projects(
 ) -> Result<Json<CompanyPage<AppProject>>, AppError> {
     let workspace = require_workspace(&workspace)?;
     let (page, size, order_by, order) = q.resolved();
-    let account = match lookup_active_account(&state, workspace).await? {
+    let account = match state.workspace_service.lookup_active_account(workspace).await? {
         Some(acc) => acc,
         None => return Ok(Json(CompanyPage::new(Vec::new(), page, size, order_by, order, 0))),
     };
@@ -333,7 +284,7 @@ async fn list_my_projects(
     // Resolve each accessible workspace to its veda account (skip un-provisioned).
     let mut account_ids = Vec::with_capacity(workspaces.len());
     for (code, _) in &workspaces {
-        if let Some(acc) = lookup_active_account(&state, code).await? {
+        if let Some(acc) = state.workspace_service.lookup_active_account(code).await? {
             account_ids.push(acc.id);
         }
     }
@@ -432,7 +383,7 @@ async fn delete_app_project(
     // Same external authz as the other mutating handlers: deleting a project
     // archives the workspace + revokes its keys, so gate it like create.
     crate::platform::authorize(gw.cookie(), "workspace-create", workspace, gw.user_name()).await?;
-    let account = lookup_active_account(&state, workspace)
+    let account = state.workspace_service.lookup_active_account(workspace)
         .await?
         .ok_or_else(|| VedaError::NotFound(format!("project {ws_id}")))?;
     let ws = state
@@ -497,7 +448,7 @@ pub(crate) async fn load_app_project(
     ws_id: &str,
 ) -> Result<Workspace, AppError> {
     let workspace = require_workspace(workspace)?;
-    let account = lookup_active_account(state, workspace)
+    let account = state.workspace_service.lookup_active_account(workspace)
         .await?
         .ok_or_else(|| VedaError::NotFound(format!("project {ws_id}")))?;
     let ws = state

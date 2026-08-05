@@ -6,7 +6,7 @@
 //! as the project/dataset/key management API (apps.rs). The AI Workbench
 //! frontend calls these **without holding a `wk_`** — the gateway proves
 //! identity, we resolve the project from the path and reuse the data-plane
-//! core (`vectors::do_*`, fs services).
+//! core (`VectorService`, fs services).
 //!
 //! Mounted under the same `company_envelope` layer as apps.rs, so handlers
 //! return veda's `ApiResponse<T>` and the middleware rewrites it to the
@@ -37,7 +37,6 @@ use veda_types::{
 use crate::error::AppError;
 use crate::platform::{authorize, GatewayUser};
 use crate::routes::apps::{company_envelope, load_app_project};
-use crate::routes::vectors;
 use crate::state::AppState;
 
 /// Max bytes for the file preview (mirrors the admin surface). Larger files are
@@ -132,7 +131,7 @@ async fn vectors_upsert(
     Json(req): Json<UpsertRequest>,
 ) -> Result<Json<ApiResponse<UpsertResponse>>, AppError> {
     let ws = authz_and_load(&state, &gw, &workspace, &id, WorkspaceKind::Db).await?;
-    let resp = vectors::do_upsert(&state, &ws.id, req).await?;
+    let resp = state.vector_service.upsert(&ws.id, req).await?;
     Ok(Json(ApiResponse::ok(resp)))
 }
 
@@ -143,7 +142,7 @@ async fn vectors_search(
     Json(req): Json<VectorSearchRequest>,
 ) -> Result<Json<ApiResponse<Vec<VectorSearchHit>>>, AppError> {
     let ws = authz_and_load(&state, &gw, &workspace, &id, WorkspaceKind::Db).await?;
-    let resp = vectors::do_search(&state, &ws.id, req).await?;
+    let resp = state.vector_service.search(&ws.id, req).await?;
     Ok(Json(ApiResponse::ok(resp.hits)))
 }
 
@@ -154,7 +153,7 @@ async fn vectors_query(
     Json(req): Json<VectorQueryRequest>,
 ) -> Result<Json<ApiResponse<Vec<VectorRecordHit>>>, AppError> {
     let ws = authz_and_load(&state, &gw, &workspace, &id, WorkspaceKind::Db).await?;
-    let resp = vectors::do_query(&state, &ws.id, req).await?;
+    let resp = state.vector_service.query(&ws.id, req).await?;
     Ok(Json(ApiResponse::ok(resp.hits)))
 }
 
@@ -165,7 +164,7 @@ async fn vectors_delete(
     Json(req): Json<VectorDeleteRequest>,
 ) -> Result<Json<ApiResponse<VectorDeleteResponse>>, AppError> {
     let ws = authz_and_load(&state, &gw, &workspace, &id, WorkspaceKind::Db).await?;
-    let resp = vectors::do_delete(&state, &ws.id, req).await?;
+    let resp = state.vector_service.delete(&ws.id, req).await?;
     Ok(Json(ApiResponse::ok(resp)))
 }
 

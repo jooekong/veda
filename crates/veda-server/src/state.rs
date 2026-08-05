@@ -2,6 +2,8 @@ use std::sync::Arc;
 use veda_core::service::collection::CollectionService;
 use veda_core::service::fs::FsService;
 use veda_core::service::search::SearchService;
+use veda_core::service::vector::VectorService;
+use veda_core::service::workspace::WorkspaceService;
 use veda_core::store::{AuthStore, EmbeddingService, MetadataStore, VectorStore, VectorWorkspaceStore};
 use veda_sql::VedaSqlEngine;
 
@@ -11,6 +13,12 @@ pub struct AppState {
     pub fs_service: Arc<FsService>,
     pub search_service: SearchService,
     pub collection_service: CollectionService,
+    /// db-kind vectors data plane (upsert/search/query/delete). Shared by the
+    /// native `wk_` surface and the platform gateway surface.
+    pub vector_service: VectorService,
+    /// Workspace / tenant provisioning (incl. the db-kind Milvus collection
+    /// saga). Shared by the `vk_` control plane and the platform surface.
+    pub workspace_service: WorkspaceService,
     pub auth_store: Arc<dyn AuthStore>,
     pub meta_store: Arc<dyn MetadataStore>,
     pub vector_store: Arc<dyn VectorStore>,

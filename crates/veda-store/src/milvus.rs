@@ -21,25 +21,10 @@ fn storage_err(e: impl ToString) -> VedaError {
     VedaError::Storage(e.to_string())
 }
 
-/// Compute the per-workspace default Milvus collection name for db-kind workspaces.
-/// Format: `ws_<16-hex-chars-of-sha256(workspace_id)>_default`.
-/// 16 hex = 64-bit hash space → collision probability is negligible even at
-/// the plan's 1500-workspace target. 8 hex (32-bit) was the v1 of this code;
-/// at 1500 ws the birthday-paradox probability was ~3e-4 and the "DB check
-/// uniq" the plan mentioned was never actually wired.
-/// The `_default` suffix distinguishes from v1 dedicated collections
-/// (named `ws_<ws>_<dataset>_dim<DIM>_v<VER>` per docs/vectors-merge-plan.md §2.6).
-/// Hash is over workspace.id (UUID), not workspace.name — workspace
-/// rename is safe and never affects the underlying Milvus collection.
-pub fn vector_collection_name(workspace_id: &str) -> String {
-    let hash = veda_core::checksum::sha256_hex(workspace_id.as_bytes());
-    format!("ws_{}_default", &hash[..16])
-}
-
-/// Milvus boolean expressions use double-quoted string literals (see Milvus docs).
-fn milvus_quote(s: &str) -> String {
-    format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\""))
-}
+// Naming + escaping conventions live in `veda_core::milvus` (the service
+// layer needs them too, and core can't depend on this crate); re-exported
+// here so store-side callers keep their `veda_store::` paths.
+pub use veda_core::milvus::{milvus_quote, vector_collection_name};
 
 /// Milvus may return `data` as a flat array of hits or as an array of per-query hit arrays.
 fn flatten_entity_rows(data: Option<&Value>) -> Vec<Value> {
@@ -402,7 +387,7 @@ impl MilvusStore {
     }
 
     /// Create a Pinecone-style vector collection for a db-kind workspace.
-    /// Schema follows docs/vectors-merge-plan.md §2.2:
+    /// Schema follows docs/archive/vectors-merge-plan.md §2.2:
     ///   - composite PK `{dataset}:{id}` (Milvus PK enforces upsert dedup)
     ///   - 3-tier classification: dataset / category / tags (all default-friendly)
     ///   - row-level status, created_at/updated_at, optional expire_at

@@ -1,7 +1,12 @@
-//! Stage 4.4 — Filter DSL → Milvus expression string.
+//! Milvus conventions shared across crates: collection naming, expression
+//! string escaping, and the public Filter DSL → boolean-expression compiler.
 //!
-//! v0 contract (`docs/vectors-merge-plan.md` §3.3): only `must`, only
-//! `meta.<top_level>` paths, ops {eq, in, gt, gte, lt, lte}.
+//! Lives in veda-core (not veda-store) because both the HTTP service layer
+//! and the store implementation need these, and core must not depend on
+//! store. veda-store re-exports the two pure helpers for its own callers.
+//!
+//! Filter DSL v0 contract (`docs/archive/vectors-merge-plan.md` §3.3): only `must`,
+//! only `meta.<top_level>` paths, ops {eq, in, gt, gte, lt, lte}.
 //!
 //! `in` is implemented as an `OR` expansion (`(meta["x"] == a || meta["x"]
 //! == b)`) rather than relying on Milvus 2.6's TermExpr on JSON paths,
@@ -11,16 +16,39 @@
 
 use serde_json::Value;
 use veda_types::api::{FilterClause, FilterOp, VectorFilter};
-use veda_types::VedaError;
+use veda_types::{Result, VedaError};
 
-use crate::error::AppError;
+/// Physical Milvus collection for a db-kind workspace.
+/// Format: `ws_<16-hex-chars-of-sha256(workspace_id)>_default`.
+///
+/// The `_default` suffix distinguishes from v1 dedicated collections
+/// (named `ws_<ws>_<dataset>_dim<DIM>_v<VER>` per docs/archive/vectors-merge-plan.md §2.6).
+/// Hash is over workspace.id (UUID), not workspace.name — workspace
+/// rename is safe and never affects the underlying Milvus collection.
+/// 16 hex = 64-bit hash space → collision probability is negligible even at
+/// the plan's 1500-workspace target. 8 hex (32-bit) was the v1 of this code;
+/// at 1500 ws the birthday-paradox probability was ~3e-4 and the "DB check
+/// uniq" the plan mentioned was never actually wired.
+pub fn vector_collection_name(workspace_id: &str) -> String {
+    let hash = crate::checksum::sha256_hex(workspace_id.as_bytes());
+    format!("ws_{}_default", &hash[..16])
+}
+
+/// Milvus boolean expressions use double-quoted string literals (see Milvus docs).
+///
+/// This is the single escaping point for interpolating strings into Milvus
+/// expressions across the whole workspace — injection safety depends on every
+/// caller going through here rather than keeping a local copy.
+pub fn milvus_quote(s: &str) -> String {
+    format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\""))
+}
 
 const META_PREFIX: &str = "meta.";
 
 /// Parse and validate a v0 `VectorFilter` into a Milvus filter expression.
 /// Returns `None` if the filter has no clauses — caller's responsibility
 /// to skip AND-merge in that case.
-pub fn to_milvus_expr(filter: &VectorFilter) -> Result<Option<String>, AppError> {
+pub fn to_milvus_expr(filter: &VectorFilter) -> Result<Option<String>> {
     if filter.must.is_empty() {
         return Ok(None);
     }
@@ -31,9 +59,9 @@ pub fn to_milvus_expr(filter: &VectorFilter) -> Result<Option<String>, AppError>
     Ok(Some(parts.join(" && ")))
 }
 
-fn clause_to_expr(clause: &FilterClause) -> Result<String, AppError> {
+fn clause_to_expr(clause: &FilterClause) -> Result<String> {
     let key = parse_meta_field(&clause.field)?;
-    let path = format!("meta[{}]", quote_string(&key));
+    let path = format!("meta[{}]", milvus_quote(&key));
     match clause.op {
         FilterOp::Eq => Ok(format!("{path} == {}", scalar_to_expr(&clause.value)?)),
         FilterOp::Gt => Ok(format!("{path} > {}", numeric_or_string(&clause.value)?)),
@@ -51,7 +79,7 @@ fn clause_to_expr(clause: &FilterClause) -> Result<String, AppError> {
 ///   - nested paths like `meta.a.b`
 ///   - keys containing characters that would need escaping beyond `"`
 ///     (keep v0 simple; only ASCII alphanumeric, `_`, `-` allowed)
-fn parse_meta_field(field: &str) -> Result<String, AppError> {
+fn parse_meta_field(field: &str) -> Result<String> {
     let key = field.strip_prefix(META_PREFIX).ok_or_else(|| {
         invalid(format!(
             "field {field:?}: only meta.<key> paths are allowed in v0 (no platform fields, no nesting)"
@@ -79,9 +107,9 @@ fn parse_meta_field(field: &str) -> Result<String, AppError> {
 /// `Eq` accepts any JSON scalar (string, number, bool). Arrays and objects
 /// are rejected — Milvus equality on composite JSON values isn't part of
 /// the v0 contract.
-fn scalar_to_expr(value: &Value) -> Result<String, AppError> {
+fn scalar_to_expr(value: &Value) -> Result<String> {
     match value {
-        Value::String(s) => Ok(quote_string(s)),
+        Value::String(s) => Ok(milvus_quote(s)),
         Value::Number(n) => Ok(n.to_string()),
         Value::Bool(b) => Ok(b.to_string()),
         Value::Null | Value::Array(_) | Value::Object(_) => Err(invalid(
@@ -92,9 +120,9 @@ fn scalar_to_expr(value: &Value) -> Result<String, AppError> {
 
 /// Range ops require a numeric or string value. Null / bool / array / object
 /// rejected — Milvus comparison semantics on bool / null are undefined.
-fn numeric_or_string(value: &Value) -> Result<String, AppError> {
+fn numeric_or_string(value: &Value) -> Result<String> {
     match value {
-        Value::String(s) => Ok(quote_string(s)),
+        Value::String(s) => Ok(milvus_quote(s)),
         Value::Number(n) => Ok(n.to_string()),
         Value::Bool(_) | Value::Null | Value::Array(_) | Value::Object(_) => Err(invalid(
             "range op value must be a number or string".into(),
@@ -105,10 +133,10 @@ fn numeric_or_string(value: &Value) -> Result<String, AppError> {
 /// `In` expands to `(p == v1 || p == v2 || …)`. Empty array → 400 (an
 /// `in [] ` filter would match nothing and is almost certainly a caller
 /// bug rather than intent).
-fn expand_in(path: &str, value: &Value) -> Result<String, AppError> {
-    let arr = value.as_array().ok_or_else(|| {
-        invalid("in value must be an array of scalars".into())
-    })?;
+fn expand_in(path: &str, value: &Value) -> Result<String> {
+    let arr = value
+        .as_array()
+        .ok_or_else(|| invalid("in value must be an array of scalars".into()))?;
     if arr.is_empty() {
         return Err(invalid("in value must not be empty".into()));
     }
@@ -129,15 +157,8 @@ fn expand_in(path: &str, value: &Value) -> Result<String, AppError> {
     Ok(format!("({})", alts.join(" || ")))
 }
 
-/// Milvus uses double-quoted string literals; backslash + double-quote
-/// escape per the existing `milvus_quote` helper in veda-store. Kept
-/// inline here to avoid a cross-crate dep.
-fn quote_string(s: &str) -> String {
-    format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\""))
-}
-
-fn invalid(msg: String) -> AppError {
-    VedaError::InvalidInput(msg).into()
+fn invalid(msg: String) -> VedaError {
+    VedaError::InvalidInput(msg)
 }
 
 #[cfg(test)]

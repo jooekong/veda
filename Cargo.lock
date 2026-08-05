@@ -5355,6 +5355,7 @@ dependencies = [
  "async-trait",
  "chrono",
  "infer",
+ "metrics",
  "serde",
  "serde_json",
  "sha2",

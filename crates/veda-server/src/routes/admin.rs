@@ -25,6 +25,7 @@ use chrono::{DateTime, Utc};
 use serde::Deserialize;
 use serde_json::json;
 use uuid::Uuid;
+use veda_store::milvus_quote;
 use veda_types::{
     validate, ApiResponse, KeyPermission, KeyStatus, SearchMode, UpsertRecord, VectorSearchQuery,
     VedaError, Workspace, WorkspaceKind,
@@ -453,12 +454,6 @@ async fn search_vectors(
         )
         .await?;
     Ok(Json(ApiResponse::ok(hits)))
-}
-
-/// Quote a string for a Milvus boolean expression (double-quoted, `\` and `"`
-/// escaped). Mirrors veda-store's internal `milvus_quote`.
-fn milvus_quote(s: &str) -> String {
-    format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\""))
 }
 
 /// Build a Milvus filter from optional category + tags, AND-merged. `None` when

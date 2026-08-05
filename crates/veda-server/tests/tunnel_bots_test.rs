@@ -139,6 +139,16 @@ async fn build_test_app() -> (Arc<AppState>, axum::Router) {
             mysql.clone(),
         )),
         vector_workspace_store: milvus.clone(),
+        vector_service: veda_core::service::vector::VectorService::new(
+            milvus.clone(),
+            vector_embedding.clone(),
+            mysql.clone(),
+        ),
+        workspace_service: veda_core::service::workspace::WorkspaceService::new(
+            mysql.clone(),
+            milvus.clone(),
+            cfg.embedding.dimension,
+        ),
         vector_embedding,
         embedding_dim: cfg.embedding.dimension,
         sql_engine,
@@ -214,7 +224,7 @@ async fn provision(state: &AppState) -> Setup {
 }
 
 async fn send(router: &axum::Router, method: &str, path: &str, body: Option<Value>) -> (StatusCode, Value) {
-    let mut b = Request::builder().method(method).uri(path);
+    let b = Request::builder().method(method).uri(path);
     let req = match body {
         Some(v) => b
             .header("content-type", "application/json")

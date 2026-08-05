@@ -99,6 +99,16 @@ async fn main() -> anyhow::Result<()> {
     let search_service = SearchService::new(mysql.clone(), milvus.clone(), embedding.clone());
     let collection_service =
         CollectionService::new(mysql.clone(), milvus.clone(), embedding.clone());
+    let vector_service = veda_core::service::vector::VectorService::new(
+        milvus.clone(),
+        vector_embedding.clone(),
+        mysql.clone(),
+    );
+    let workspace_service = veda_core::service::workspace::WorkspaceService::new(
+        mysql.clone(),
+        milvus.clone(),
+        cfg.embedding.dimension,
+    );
 
     let sql_engine = veda_sql::VedaSqlEngine::new(
         mysql.clone(),
@@ -173,6 +183,8 @@ async fn main() -> anyhow::Result<()> {
         fs_service,
         search_service,
         collection_service,
+        vector_service,
+        workspace_service,
         auth_store: mysql.clone(),
         meta_store: mysql.clone(),
         vector_store: milvus.clone(),

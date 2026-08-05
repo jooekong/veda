@@ -6,7 +6,6 @@
 pub mod auth;
 pub mod config;
 pub mod error;
-pub mod filter;
 pub mod obs;
 pub mod outbox;
 pub mod platform;

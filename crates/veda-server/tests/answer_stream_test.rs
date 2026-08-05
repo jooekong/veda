@@ -184,6 +184,16 @@ async fn build_test_app() -> App {
             mysql.clone(),
         )),
         vector_workspace_store: milvus.clone(),
+        vector_service: veda_core::service::vector::VectorService::new(
+            milvus.clone(),
+            vector_embedding.clone(),
+            mysql.clone(),
+        ),
+        workspace_service: veda_core::service::workspace::WorkspaceService::new(
+            mysql.clone(),
+            milvus.clone(),
+            cfg.embedding.dimension,
+        ),
         vector_embedding,
         embedding_dim: cfg.embedding.dimension,
         sql_engine,
