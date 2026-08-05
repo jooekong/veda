@@ -116,7 +116,7 @@ v0.1 把所有消费方假设为**不可修改的第三方二进制**(claude/cod
 
 ## 6. 交付物 B:`agentpass` 最小凭证工具
 
-单二进制(Rust)。服务于 adb 及一切没有第一方 CLI 的服务;veda 的 token **不**迁入。
+单二进制(Rust,落于 veda workspace 新 crate,拍板见 §11)。服务于 adb 及一切没有第一方 CLI 的服务;veda 的 token **不**迁入。
 
 ### 6.1 存储
 
@@ -245,7 +245,7 @@ PATH shim 及 `init` 装 shim/`doctor` 查 shim;OS Keychain 默认存储;SQLite;
 
 ---
 
-## 11. 风险与开放问题
+## 11. 风险与拍板记录
 
 | 风险 | 应对 |
 | --- | --- |
@@ -254,11 +254,11 @@ PATH shim 及 `init` 装 shim/`doctor` 查 shim;OS Keychain 默认存储;SQLite;
 | 遗忘的全局 env export 遮蔽绑定 | env 仍优先(保 CI/显式意图),但 `status/which/代理 stderr` 主动提醒 |
 | binding 文件跨机器同步 | 路径本身 machine-specific,此文件**不设计为可同步**,文档写明 |
 
-**开放问题(需 Joe 拍板)**:
-1. agentpass 落地位置:veda workspace 新增 crate(推荐:与 `veda mcp` 共享解析 crate,复用发布链)vs 独立 repo。
-2. 命令名:`agentpass` 沿用 vs 更短(`ap`)。
-3. `veda mcp` 进 P0 还是 P1(推荐 P1:现有 http 全局 key 接法可用,不阻塞)。
-4. adb 是否允许 `--global` 默认绑定(推荐允许——本机开发 token、读优先场景,少一次挫败;`which` 标注 source=global)。
+**拍板记录(2026-08-05,Joe:四项均按推荐)**:
+1. agentpass 落地位置:**veda workspace 新增 crate**——与 `veda mcp` 共享目录绑定解析 crate,复用 veda 的 CI/install.sh/发版链;将来若长大再迁出。
+2. 命令名:**沿用 `agentpass`**。
+3. `veda mcp`:**进 P1**——现有 http + 用户级全局 `wk_` 接法可用,不阻塞;P0 专注 veda 目录绑定 + agentpass 核心 + adb 代理。
+4. adb `--global` 默认绑定:**允许**——覆盖"大部分项目同一 token、个别特殊"用法;`which/status` 标注 source=global 保证可诊断。
 
 ---
 
