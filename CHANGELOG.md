@@ -10,6 +10,13 @@ that matters.
 ## [Unreleased]
 
 ### Added
+- **Platform QA-log detail now serializes `tool_trace` as a structured
+  array.** `GET .../tunnel/qa/logs` rows carried the retrieval trace as a
+  raw JSON string (double-decode for consumers) and the platform contract
+  never mentioned it; the AI-workbench detail page needs the "how did the
+  bot find this" steps. The field now serializes as the parsed array
+  (`[{tool, detail}]`, execution order; unparseable → null) and is
+  documented in APIDoc.
 - **Admin console heat board.** The admin dashboard's fs-workspace detail
   page now has a "文档热度" section: per-document search_hits / reads over
   a 7/30/90-day window, sortable by either metric, with the metric

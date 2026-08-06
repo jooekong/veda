@@ -110,12 +110,31 @@ pub struct QaLogRow {
     pub citation_count: i32,
     pub latency_ms: i32,
     pub answer_text: Option<String>,
-    /// JSON array of the tool calls behind the answer (search queries /
-    /// file reads, in order); null for pre-trace rows and non-streamed
-    /// replies.
+    /// The retrieval steps behind the answer (search queries / file reads,
+    /// in execution order); null for pre-trace rows and non-streamed
+    /// replies. Stored as a JSON string but SERIALIZED as the parsed array
+    /// (`[{"tool":"search","detail":"…"}]`) so the AI-workbench frontend
+    /// renders steps without a second parse. Unparseable text degrades to
+    /// null — the trace is best-effort telemetry, never worth a 500.
+    #[serde(serialize_with = "trace_as_json")]
     pub tool_trace: Option<String>,
     pub up_count: i64,
     pub down_count: i64,
+}
+
+/// Serialize the stored JSON-string trace as its parsed value (array), so
+/// API consumers get structure, not a string needing a second decode.
+fn trace_as_json<S: serde::Serializer>(
+    v: &Option<String>,
+    s: S,
+) -> Result<S::Ok, S::Error> {
+    match v
+        .as_deref()
+        .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok())
+    {
+        Some(parsed) => serde::Serialize::serialize(&parsed, s),
+        None => s.serialize_none(),
+    }
 }
 
 impl TunnelBotStore {

@@ -333,6 +333,14 @@ async fn tunnel_qa_stats_and_logs() {
     seed_log(&pool, &bot_a, "answered", "q-a-1", "answer one", Some(&fa1)).await;
     seed_log(&pool, &bot_a, "no_context", "q-a-2", "no ctx", None).await;
     let last_a = seed_log(&pool, &bot_a, "answered", "q-a-3", "answer three", Some(&fa2)).await;
+    // Give the newest row a retrieval trace — the API must serialize it as
+    // a parsed ARRAY (workbench renders steps directly), not a JSON string.
+    sqlx::query("UPDATE veda_tunnel_qa_log SET tool_trace = ? WHERE id = ?")
+        .bind(r#"[{"tool":"search","detail":"DAL 接入"},{"tool":"read_file","detail":"/index.md"}]"#)
+        .bind(last_a)
+        .execute(&pool)
+        .await
+        .unwrap();
     seed_vote(&pool, &fa1, "voter-1", 1).await; // up
     seed_vote(&pool, &fa2, "voter-2", 2).await; // down
 
@@ -377,6 +385,15 @@ async fn tunnel_qa_stats_and_logs() {
     assert_eq!(rows[0]["answer_text"], "answer three");
     assert_eq!(rows[0]["down_count"], 1);
     assert_eq!(rows[0]["bot_id"], bot_a.as_str());
+    // tool_trace comes back as a STRUCTURED array (not a string needing a
+    // second parse); rows without a trace serialize as null.
+    let trace = rows[0]["tool_trace"]
+        .as_array()
+        .expect("tool_trace must be a parsed array");
+    assert_eq!(trace.len(), 2);
+    assert_eq!(trace[0]["tool"], "search");
+    assert_eq!(trace[1]["detail"], "/index.md");
+    assert!(rows[1]["tool_trace"].is_null(), "traceless rows → null");
     for r in rows {
         assert_eq!(r["bot_id"], bot_a.as_str(), "no B rows in A's list");
     }
