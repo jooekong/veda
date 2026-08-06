@@ -4,7 +4,10 @@ use async_trait::async_trait;
 use chrono::Utc;
 use sqlx::types::Json;
 use sqlx::{MySqlPool, Row, Transaction};
-use veda_core::store::{AuthStore, CollectionMetaStore, MetadataStore, MetadataTx, TaskQueue};
+use veda_core::store::{
+    AuthStore, CollectionMetaStore, DentryPathRef, DocAccessOrder, DocAccessRow, MetadataStore,
+    MetadataTx, TaskQueue,
+};
 use veda_types::{
     Account, ApiKeyRecord, CollectionSchema, Dataset, Dentry, FileChunk, FileExtract, FileRecord,
     FileSummary, FsEvent, OutboxEvent, OutboxEventType, OutboxStatus, Result, SourceType,

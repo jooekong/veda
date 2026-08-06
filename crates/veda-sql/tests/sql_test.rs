@@ -133,6 +133,28 @@ impl MetadataStore for MockMetaFull {
     async fn get_dentry_path_by_file_id(&self, _ws: &str, _fid: &str) -> Result<Option<String>> {
         Ok(None)
     }
+    async fn get_dentry_paths_by_file_ids(
+        &self,
+        _ws: &str,
+        _fids: &[String],
+    ) -> Result<std::collections::HashMap<String, DentryPathRef>> {
+        Ok(std::collections::HashMap::new())
+    }
+    async fn upsert_doc_access_daily(&self, _rows: &[DocAccessRow]) -> Result<()> {
+        Ok(())
+    }
+    async fn query_doc_access(
+        &self,
+        _ws: &str,
+        _since: chrono::NaiveDate,
+        _order: DocAccessOrder,
+        _limit: usize,
+    ) -> Result<Vec<api::DocAccessEntry>> {
+        Ok(vec![])
+    }
+    async fn sweep_doc_access(&self, _cutoff: chrono::NaiveDate) -> Result<u64> {
+        Ok(0)
+    }
     async fn query_fs_events(
         &self,
         ws: &str,
@@ -616,6 +638,28 @@ impl MetadataStore for MockMeta {
     }
     async fn get_dentry_path_by_file_id(&self, _ws: &str, _fid: &str) -> Result<Option<String>> {
         Ok(None)
+    }
+    async fn get_dentry_paths_by_file_ids(
+        &self,
+        _ws: &str,
+        _fids: &[String],
+    ) -> Result<std::collections::HashMap<String, DentryPathRef>> {
+        Ok(std::collections::HashMap::new())
+    }
+    async fn upsert_doc_access_daily(&self, _rows: &[DocAccessRow]) -> Result<()> {
+        Ok(())
+    }
+    async fn query_doc_access(
+        &self,
+        _ws: &str,
+        _since: chrono::NaiveDate,
+        _order: DocAccessOrder,
+        _limit: usize,
+    ) -> Result<Vec<api::DocAccessEntry>> {
+        Ok(vec![])
+    }
+    async fn sweep_doc_access(&self, _cutoff: chrono::NaiveDate) -> Result<u64> {
+        Ok(0)
     }
     async fn query_fs_events(
         &self,
@@ -2073,6 +2117,7 @@ async fn search_returns_results() {
     let hits = vec![
         SearchHit {
             file_id: "f1".into(),
+            dentry_id: None,
             chunk_index: Some(0),
             content: "chunk about deployment".into(),
             score: 0.95,
@@ -2083,6 +2128,7 @@ async fn search_returns_results() {
         },
         SearchHit {
             file_id: "f2".into(),
+            dentry_id: None,
             chunk_index: Some(1),
             content: "another chunk".into(),
             score: 0.80,
@@ -2127,6 +2173,7 @@ async fn search_returns_results() {
 async fn search_with_mode_and_limit() {
     let hits = vec![SearchHit {
         file_id: "f1".into(),
+        dentry_id: None,
         chunk_index: Some(0),
         content: "result".into(),
         score: 0.9,
@@ -2182,6 +2229,7 @@ async fn search_with_where_filter() {
     let hits = vec![
         SearchHit {
             file_id: "f1".into(),
+            dentry_id: None,
             chunk_index: Some(0),
             content: "high".into(),
             score: 0.95,
@@ -2192,6 +2240,7 @@ async fn search_with_where_filter() {
         },
         SearchHit {
             file_id: "f2".into(),
+            dentry_id: None,
             chunk_index: Some(0),
             content: "low".into(),
             score: 0.30,

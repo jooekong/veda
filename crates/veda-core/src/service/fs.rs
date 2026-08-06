@@ -7,6 +7,7 @@ use uuid::Uuid;
 use veda_types::*;
 
 use crate::path;
+use crate::service::access_stats::AccessRecorder;
 use crate::service::retry_on_deadlock;
 use crate::store::{MetadataStore, MetadataTx};
 
@@ -284,11 +285,38 @@ fn compute_append_meta_blocking(
 
 pub struct FsService {
     meta: Arc<dyn MetadataStore>,
+    /// Heat counters for the read surfaces. `new()` wires a disabled
+    /// recorder so tests and exempt surfaces (SQL engine) stay silent;
+    /// production wiring opts in via [`FsService::with_stats`].
+    stats: Arc<AccessRecorder>,
+}
+
+/// What `resolve_file` hands back: the dentry (identity — access stats
+/// aggregate on `dentry.id`) plus the file record (content metadata).
+struct ResolvedFile {
+    dentry: Dentry,
+    file: FileRecord,
+}
+
+impl ResolvedFile {
+    fn file_id(&self) -> &str {
+        &self.file.id
+    }
 }
 
 impl FsService {
     pub fn new(meta: Arc<dyn MetadataStore>) -> Self {
-        Self { meta }
+        let stats = Arc::new(AccessRecorder::disabled(meta.clone()));
+        Self { meta, stats }
+    }
+
+    /// Production constructor: reads through this service bump heat
+    /// counters on `recorder`.
+    pub fn with_stats(meta: Arc<dyn MetadataStore>, recorder: Arc<AccessRecorder>) -> Self {
+        Self {
+            meta,
+            stats: recorder,
+        }
     }
 
     pub async fn get_file(&self, file_id: &str) -> Result<Option<FileRecord>> {
@@ -487,11 +515,7 @@ impl FsService {
         })
     }
 
-    async fn resolve_file(
-        &self,
-        workspace_id: &str,
-        raw_path: &str,
-    ) -> Result<(String, FileRecord)> {
+    async fn resolve_file(&self, workspace_id: &str, raw_path: &str) -> Result<ResolvedFile> {
         let norm = path::normalize(raw_path)?;
         let dentry = self
             .meta
@@ -503,37 +527,56 @@ impl FsService {
         }
         let file_id = dentry
             .file_id
+            .clone()
             .ok_or_else(|| VedaError::NotFound(norm.clone()))?;
         let file = self
             .meta
             .get_file(&file_id)
             .await?
             .ok_or(VedaError::NotFound(norm))?;
-        Ok((file_id, file))
+        Ok(ResolvedFile { dentry, file })
     }
 
     pub async fn read_file(&self, workspace_id: &str, raw_path: &str) -> Result<String> {
-        let (file_id, file) = self.resolve_file(workspace_id, raw_path).await?;
-        match file.storage_type {
+        let (resolved, content) = self.read_file_inner(workspace_id, raw_path).await?;
+        self.stats.record_read(workspace_id, &resolved.dentry.id);
+        Ok(content)
+    }
+
+    /// Uncounted read core. Internal scan callers (`grep`) MUST use this,
+    /// not the public `read_file`: a single workspace-wide grep touches up
+    /// to 50k files and would otherwise mark every one of them "read",
+    /// drowning the consumption metric in scan traffic (review 2026-08-05).
+    async fn read_file_inner(
+        &self,
+        workspace_id: &str,
+        raw_path: &str,
+    ) -> Result<(ResolvedFile, String)> {
+        let resolved = self.resolve_file(workspace_id, raw_path).await?;
+        let file_id = resolved.file_id();
+        let file = &resolved.file;
+        let content = match file.storage_type {
             StorageType::Inline => self
                 .meta
-                .get_file_content(&file_id)
+                .get_file_content(file_id)
                 .await?
-                .ok_or_else(|| VedaError::NotFound(format!("content for {file_id}"))),
+                .ok_or_else(|| VedaError::NotFound(format!("content for {file_id}")))?,
             StorageType::Chunked => {
-                let chunks = self.meta.get_file_chunks(&file_id, None, None).await?;
-                Ok(chunks.into_iter().map(|c| c.content).collect::<String>())
+                let chunks = self.meta.get_file_chunks(file_id, None, None).await?;
+                chunks.into_iter().map(|c| c.content).collect::<String>()
             }
-            StorageType::Blob => {
-                self.read_extracted_text(&file_id, &file).await?.ok_or_else(|| {
+            StorageType::Blob => self
+                .read_extracted_text(file_id, file)
+                .await?
+                .ok_or_else(|| {
                     VedaError::InvalidInput(if file.source_type.is_extractable() {
                         "文本提取尚未完成或该文件无法提取，可先用 search 检索其内容".into()
                     } else {
                         "binary file; use raw byte read".into()
                     })
-                })
-            }
-        }
+                })?,
+        };
+        Ok((resolved, content))
     }
 
     /// Stored extracted text for an extractable blob (pdf/word), or `None`
@@ -565,16 +608,17 @@ impl FsService {
         workspace_id: &str,
         raw_path: &str,
     ) -> Result<(Vec<u8>, String)> {
-        let (file_id, file) = self.resolve_file(workspace_id, raw_path).await?;
-        let bytes = match file.storage_type {
+        let resolved = self.resolve_file(workspace_id, raw_path).await?;
+        let file_id = resolved.file_id();
+        let bytes = match resolved.file.storage_type {
             StorageType::Inline => self
                 .meta
-                .get_file_content(&file_id)
+                .get_file_content(file_id)
                 .await?
                 .ok_or_else(|| VedaError::NotFound(format!("content for {file_id}")))?
                 .into_bytes(),
             StorageType::Chunked => {
-                let chunks = self.meta.get_file_chunks(&file_id, None, None).await?;
+                let chunks = self.meta.get_file_chunks(file_id, None, None).await?;
                 let total: usize = chunks.iter().map(|c| c.content.len()).sum();
                 let mut buf = Vec::with_capacity(total);
                 for c in chunks {
@@ -584,11 +628,12 @@ impl FsService {
             }
             StorageType::Blob => self
                 .meta
-                .get_file_blob(&file_id)
+                .get_file_blob(file_id)
                 .await?
                 .ok_or_else(|| VedaError::NotFound(format!("blob for {file_id}")))?,
         };
-        Ok((bytes, file.mime_type))
+        self.stats.record_read(workspace_id, &resolved.dentry.id);
+        Ok((bytes, resolved.file.mime_type))
     }
 
     /// Read a file for the data-plane preview endpoint. Text (inline/
@@ -603,23 +648,25 @@ impl FsService {
         raw_path: &str,
         max_bytes: u64,
     ) -> Result<api::FilePreview> {
-        let (file_id, file) = self.resolve_file(workspace_id, raw_path).await?;
+        let resolved = self.resolve_file(workspace_id, raw_path).await?;
+        let file = &resolved.file;
         if matches!(file.storage_type, StorageType::Blob) {
             // Extractable blobs (pdf/word) with a fresh extraction preview as
             // text — same shape a plain text file would have.
-            if let Some(text) = self.read_extracted_text(&file_id, &file).await? {
+            if let Some(text) = self.read_extracted_text(resolved.file_id(), file).await? {
                 let total = text.len() as u64;
                 let mut end = (max_bytes.min(total)) as usize;
                 while end > 0 && !text.is_char_boundary(end) {
                     end -= 1;
                 }
+                self.stats.record_read(workspace_id, &resolved.dentry.id);
                 return Ok(api::FilePreview {
                     path: raw_path.to_string(),
                     size: total,
                     truncated: total > max_bytes,
                     is_binary: false,
                     content: text[..end].to_string(),
-                    mime_type: file.mime_type,
+                    mime_type: file.mime_type.clone(),
                 });
             }
             // Map the raw mime to a user-friendly Chinese kind for the
@@ -638,23 +685,29 @@ impl FsService {
                 | "application/vnd.ms-excel" => "Excel 表格",
                 _ => "二进制文件",
             };
+            // No content was fetched — the client only sees a "preview not
+            // supported" placeholder. Deliberately NOT counted as a read:
+            // otherwise every image opened in the console looks "read" on
+            // the heat board despite nothing being consumed.
             return Ok(api::FilePreview {
                 path: raw_path.to_string(),
                 size: file.size_bytes.max(0) as u64,
                 truncated: false,
                 is_binary: true,
                 content: format!("暂不支持预览该格式（{kind}）"),
-                mime_type: file.mime_type,
+                mime_type: file.mime_type.clone(),
             });
         }
-        let (bytes, total) = self
-            .read_file_range(workspace_id, raw_path, 0, max_bytes)
-            .await?;
+        // Uncounted range core — the single record_read below covers the
+        // whole preview; going through public read_file_range would count
+        // text previews twice (review 2026-08-05).
+        let (bytes, total) = self.read_range_resolved(&resolved, 0, max_bytes).await?;
+        self.stats.record_read(workspace_id, &resolved.dentry.id);
         Ok(api::FilePreview {
             path: raw_path.to_string(),
             size: total,
             truncated: total > max_bytes,
-            mime_type: file.mime_type,
+            mime_type: resolved.file.mime_type.clone(),
             is_binary: false,
             content: String::from_utf8_lossy(&bytes).into_owned(),
         })
@@ -723,13 +776,28 @@ impl FsService {
         offset: u64,
         length: u64,
     ) -> Result<(Vec<u8>, u64)> {
-        let (file_id, file) = self.resolve_file(workspace_id, raw_path).await?;
+        let resolved = self.resolve_file(workspace_id, raw_path).await?;
+        let out = self.read_range_resolved(&resolved, offset, length).await?;
+        self.stats.record_read(workspace_id, &resolved.dentry.id);
+        Ok(out)
+    }
 
+    /// Uncounted range-read core over an already-resolved file. `preview`
+    /// delegates here so a single preview doesn't double-count (once for
+    /// itself, once for the range read it borrows).
+    async fn read_range_resolved(
+        &self,
+        resolved: &ResolvedFile,
+        offset: u64,
+        length: u64,
+    ) -> Result<(Vec<u8>, u64)> {
+        let file_id = resolved.file_id();
+        let file = &resolved.file;
         match file.storage_type {
             StorageType::Blob => {
                 let data = self
                     .meta
-                    .get_file_blob(&file_id)
+                    .get_file_blob(file_id)
                     .await?
                     .ok_or_else(|| VedaError::NotFound(format!("blob for {file_id}")))?;
                 let total = data.len() as u64;
@@ -742,7 +810,7 @@ impl FsService {
             StorageType::Inline => {
                 let content = self
                     .meta
-                    .get_file_content(&file_id)
+                    .get_file_content(file_id)
                     .await?
                     .ok_or_else(|| VedaError::NotFound(format!("content for {file_id}")))?;
                 let bytes = content.as_bytes();
@@ -764,7 +832,7 @@ impl FsService {
                 // Walk the cumulative byte offsets to find the index range
                 // overlapping [offset, end). byte_lens come back ordered by
                 // chunk_index from the store.
-                let byte_lens = self.meta.list_chunk_byte_lens(&file_id).await?;
+                let byte_lens = self.meta.list_chunk_byte_lens(file_id).await?;
                 let mut idx_min: Option<i32> = None;
                 let mut idx_max: Option<i32> = None;
                 let mut first_chunk_byte_start: u64 = 0;
@@ -792,7 +860,7 @@ impl FsService {
 
                 let chunks = self
                     .meta
-                    .get_chunks_in_index_range(&file_id, lo, hi)
+                    .get_chunks_in_index_range(file_id, lo, hi)
                     .await?;
                 let merged_len: usize = chunks.iter().map(|c| c.content.len()).sum();
                 let mut merged = Vec::with_capacity(merged_len);
@@ -828,11 +896,16 @@ impl FsService {
             )));
         }
 
-        let (file_id, file) = self.resolve_file(workspace_id, raw_path).await?;
+        let resolved = self.resolve_file(workspace_id, raw_path).await?;
+        let file_id = resolved.file_id();
+        let file = &resolved.file;
 
-        // early-return when the requested range lies beyond EOF
+        // early-return when the requested range lies beyond EOF — still a
+        // successful (empty-window) read; paging to EOF must count like
+        // every other page.
         if let Some(lc) = file.line_count {
             if start > lc {
+                self.stats.record_read(workspace_id, &resolved.dentry.id);
                 return Ok(String::new());
             }
         }
@@ -840,49 +913,53 @@ impl FsService {
         let skip = (start - 1) as usize;
         let take = (effective_end - start + 1) as usize;
 
-        match file.storage_type {
+        let content = match file.storage_type {
             // Extractable blobs (pdf/word) serve line windows over their
             // stored extracted text, so `cat --range` and agent tools can
             // page through big documents. Blobs have no line_count, so
             // skip/take on the line iterator does all EOF clamping.
             StorageType::Blob => {
-                let text = self.read_extracted_text(&file_id, &file).await?.ok_or_else(|| {
+                let text = self.read_extracted_text(file_id, file).await?.ok_or_else(|| {
                     VedaError::InvalidInput(if file.source_type.is_extractable() {
                         "文本提取尚未完成或该文件无法提取，可先用 search 检索其内容".into()
                     } else {
                         "cannot read lines from a binary file".into()
                     })
                 })?;
-                Ok(join_lines(text.lines().skip(skip).take(take)))
+                join_lines(text.lines().skip(skip).take(take))
             }
             StorageType::Inline => {
                 let content = self
                     .meta
-                    .get_file_content(&file_id)
+                    .get_file_content(file_id)
                     .await?
                     .ok_or_else(|| VedaError::NotFound(format!("content for {file_id}")))?;
-                Ok(join_lines(content.lines().skip(skip).take(take)))
+                join_lines(content.lines().skip(skip).take(take))
             }
             StorageType::Chunked => {
                 // get_file_chunks returns chunks overlapping [start, effective_end];
                 // the first chunk may contain lines before `start`, so rebase the skip.
                 let chunks = self
                     .meta
-                    .get_file_chunks(&file_id, Some(start), Some(effective_end))
+                    .get_file_chunks(file_id, Some(start), Some(effective_end))
                     .await?;
-                let Some(first) = chunks.first() else {
-                    return Ok(String::new());
-                };
-                let skip_in_chunks = (start - first.start_line).max(0) as usize;
-                Ok(join_lines(
-                    chunks
-                        .iter()
-                        .flat_map(|c| c.content.lines())
-                        .skip(skip_in_chunks)
-                        .take(take),
-                ))
+                match chunks.first() {
+                    None => String::new(),
+                    Some(first) => {
+                        let skip_in_chunks = (start - first.start_line).max(0) as usize;
+                        join_lines(
+                            chunks
+                                .iter()
+                                .flat_map(|c| c.content.lines())
+                                .skip(skip_in_chunks)
+                                .take(take),
+                        )
+                    }
+                }
             }
-        }
+        };
+        self.stats.record_read(workspace_id, &resolved.dentry.id);
+        Ok(content)
     }
 
     pub async fn list_dir(&self, workspace_id: &str, raw_path: &str) -> Result<Vec<api::DirEntry>> {
@@ -995,8 +1072,10 @@ impl FsService {
             if d.is_dir || d.file_id.is_none() {
                 continue;
             }
-            let content = match self.read_file(workspace_id, &d.path).await {
-                Ok(c) => c,
+            // Uncounted read: grep is a scan surface, not consumption —
+            // heat metrics must not count every file a grep sweeps over.
+            let content = match self.read_file_inner(workspace_id, &d.path).await {
+                Ok((_, c)) => c,
                 Err(_) => continue, // skip files we can't read (binary, missing, etc.)
             };
             for (i, line) in content.lines().enumerate() {

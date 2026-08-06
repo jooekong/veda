@@ -8,6 +8,8 @@
 - [ ] CI 发布 veda-server 二进制（alpha-plan 唯一未兑现尾巴；目前 server 升级仍需在 box 上源码 build）
 - [ ] OTLP trace 二期：开工先读 `docs/archive/plans/observability-otlp-plan.md` §0 协议事实
 - [ ] review-2026-05-08 尾巴：`/v1/grep` 无 wall-clock 预算（`veda-core/src/service/fs.rs:966`，目前只有 1000 结果 + 50k dentry 两个上限）
+- [ ] SQL `search()` UDTF 收敛到 SearchService（`veda-sql/src/search_table.rs` 直连 `vector.search` 且 inline 复制了 `search_full`+`resolve_paths` 逻辑；顺带补 `path_prefix`/`detail_level` 缺失。2026-08-05 热度统计评审确认的技术债——目前它也因此天然不计 `search_hits`，收敛后要决定是否保持豁免）
+- [ ] dir-summary 搜索命中 `path=None` 发给客户端（`milvus.rs::summary_rows_to_hits` 把 Milvus entity id 塞进 `file_id` 字段，目录摘要的 id 实为 dentry_id，`resolve_paths` 解析不到 → 前端无法展示。修复便宜：`summary_type` Milvus 已返回但被丢弃，按它分流 dentry 解析。2026-08-05 热度统计交叉评审双方确认独立排期不捆绑；热度计数已正确跳过这类命中，不受影响）
 
 ## Completed
 - [x] CJK 语言检测把日/韩文误标 zh-CN — 随 4b8edf2 修复（`veda-pipeline/src/summary.rs:139` 加 kana/hangul 占比判定，>25% Han 数即回退 en）

@@ -4,6 +4,7 @@ use tracing::warn;
 use unicode_normalization::UnicodeNormalization;
 use veda_types::*;
 
+use crate::service::access_stats::AccessRecorder;
 use crate::store::{EmbeddingService, MetadataStore, VectorStore};
 
 /// Approximate MySQL's `utf8mb4_0900_ai_ci` folding for one path segment:
@@ -38,6 +39,7 @@ pub struct SearchService {
     meta: Arc<dyn MetadataStore>,
     vector: Arc<dyn VectorStore>,
     embedding: Arc<dyn EmbeddingService>,
+    stats: Arc<AccessRecorder>,
 }
 
 impl SearchService {
@@ -46,10 +48,28 @@ impl SearchService {
         vector: Arc<dyn VectorStore>,
         embedding: Arc<dyn EmbeddingService>,
     ) -> Self {
+        let stats = Arc::new(AccessRecorder::disabled(meta.clone()));
         Self {
             meta,
             vector,
             embedding,
+            stats,
+        }
+    }
+
+    /// Production constructor: searches through this service bump
+    /// per-document hit counters on `recorder`.
+    pub fn with_stats(
+        meta: Arc<dyn MetadataStore>,
+        vector: Arc<dyn VectorStore>,
+        embedding: Arc<dyn EmbeddingService>,
+        recorder: Arc<AccessRecorder>,
+    ) -> Self {
+        Self {
+            meta,
+            vector,
+            embedding,
+            stats: recorder,
         }
     }
 
@@ -62,20 +82,34 @@ impl SearchService {
         path_prefix: Option<&str>,
         detail_level: DetailLevel,
     ) -> Result<Vec<SearchHit>> {
-        match detail_level {
+        let hits = match detail_level {
             DetailLevel::Abstract => {
                 self.search_abstract(workspace_id, query, mode, limit, path_prefix)
-                    .await
+                    .await?
             }
             DetailLevel::Overview => {
                 self.search_overview(workspace_id, query, mode, limit, path_prefix)
-                    .await
+                    .await?
             }
             DetailLevel::Full => {
                 self.search_full(workspace_id, query, mode, limit, path_prefix)
-                    .await
+                    .await?
             }
-        }
+        };
+        // Heat counting on the FINAL hit set — after prefix filtering and
+        // truncation, so only what the caller actually receives counts.
+        // Dedup per query (3 chunks of one file = 1 impression). Hits that
+        // never resolved (detached file_ids, directory-summary hits whose
+        // `file_id` is really a dentry_id) have no `dentry_id` and are
+        // skipped by construction.
+        let mut seen = std::collections::HashSet::new();
+        let dentry_ids: Vec<String> = hits
+            .iter()
+            .filter_map(|h| h.dentry_id.clone())
+            .filter(|id| seen.insert(id.clone()))
+            .collect();
+        self.stats.record_search_hits(workspace_id, &dentry_ids);
+        Ok(hits)
     }
 
     async fn search_abstract(
@@ -210,7 +244,10 @@ impl SearchService {
             Ok(path_map) => {
                 for hit in hits.iter_mut() {
                     if hit.path.is_none() {
-                        hit.path = path_map.get(&hit.file_id).cloned();
+                        if let Some(r) = path_map.get(&hit.file_id) {
+                            hit.path = Some(r.path.clone());
+                            hit.dentry_id = Some(r.dentry_id.clone());
+                        }
                     }
                 }
             }

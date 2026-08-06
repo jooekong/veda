@@ -32,6 +32,10 @@ pub struct MockState {
     /// `IN (...)` lists from the *truncated* entry set, so these have to
     /// stay bounded by the cap however large the workspace is.
     pub batch_id_counts: Vec<(&'static str, usize)>,
+    /// Rows captured by `upsert_doc_access_daily` (access-stats tests).
+    pub doc_access_rows: Vec<DocAccessRow>,
+    /// Arm `upsert_doc_access_daily` to fail (flush drop-window tests).
+    pub fail_doc_access_upsert: bool,
 }
 
 pub struct MockMetadataStore {
@@ -256,6 +260,94 @@ impl MetadataStore for MockMetadataStore {
             .iter()
             .find(|d| d.workspace_id == workspace_id && d.file_id.as_deref() == Some(file_id))
             .map(|d| d.path.clone()))
+    }
+
+    async fn get_dentry_paths_by_file_ids(
+        &self,
+        workspace_id: &str,
+        file_ids: &[String],
+    ) -> Result<HashMap<String, DentryPathRef>> {
+        // Mirror the MySQL impl: smallest path wins per file_id so
+        // copy-alias attribution is deterministic.
+        let st = self.state.lock().unwrap();
+        let mut sorted: Vec<&Dentry> = st
+            .dentries
+            .iter()
+            .filter(|d| {
+                d.workspace_id == workspace_id
+                    && d.file_id.as_ref().is_some_and(|f| file_ids.contains(f))
+            })
+            .collect();
+        // Mirror the MySQL `ORDER BY path, id` (id tie-break for
+        // collation-equal aliases; Rust String cmp is binary so the id key
+        // only matters for exact duplicates, which the schema forbids).
+        sorted.sort_by(|a, b| a.path.cmp(&b.path).then_with(|| a.id.cmp(&b.id)));
+        let mut map = HashMap::new();
+        for d in sorted {
+            let fid = d.file_id.clone().expect("filtered on Some");
+            map.entry(fid).or_insert(DentryPathRef {
+                dentry_id: d.id.clone(),
+                path: d.path.clone(),
+            });
+        }
+        Ok(map)
+    }
+
+    async fn upsert_doc_access_daily(&self, rows: &[DocAccessRow]) -> Result<()> {
+        let mut st = self.state.lock().unwrap();
+        if st.fail_doc_access_upsert {
+            return Err(VedaError::Storage("mock armed to fail".into()));
+        }
+        st.doc_access_rows.extend_from_slice(rows);
+        Ok(())
+    }
+
+    async fn query_doc_access(
+        &self,
+        workspace_id: &str,
+        since: chrono::NaiveDate,
+        order: DocAccessOrder,
+        limit: usize,
+    ) -> Result<Vec<api::DocAccessEntry>> {
+        // Aggregate captured rows joined against live dentries, mirroring
+        // the MySQL GROUP BY + INNER JOIN semantics.
+        let st = self.state.lock().unwrap();
+        let mut by_dentry: HashMap<String, (u64, u64)> = HashMap::new();
+        for r in st
+            .doc_access_rows
+            .iter()
+            .filter(|r| r.workspace_id == workspace_id && r.day >= since)
+        {
+            let e = by_dentry.entry(r.dentry_id.clone()).or_default();
+            e.0 += r.search_hits;
+            e.1 += r.reads;
+        }
+        let mut out: Vec<api::DocAccessEntry> = by_dentry
+            .into_iter()
+            .filter_map(|(dentry_id, (hits, reads))| {
+                st.dentries
+                    .iter()
+                    .find(|d| d.id == dentry_id)
+                    .map(|d| api::DocAccessEntry {
+                        path: d.path.clone(),
+                        search_hits: hits,
+                        reads,
+                    })
+            })
+            .collect();
+        match order {
+            DocAccessOrder::Reads => out.sort_by(|a, b| b.reads.cmp(&a.reads)),
+            DocAccessOrder::SearchHits => out.sort_by(|a, b| b.search_hits.cmp(&a.search_hits)),
+        }
+        out.truncate(limit);
+        Ok(out)
+    }
+
+    async fn sweep_doc_access(&self, cutoff: chrono::NaiveDate) -> Result<u64> {
+        let mut st = self.state.lock().unwrap();
+        let before = st.doc_access_rows.len();
+        st.doc_access_rows.retain(|r| r.day >= cutoff);
+        Ok((before - st.doc_access_rows.len()) as u64)
     }
 
     async fn query_fs_events(

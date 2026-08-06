@@ -10,6 +10,23 @@ that matters.
 ## [Unreleased]
 
 ### Added
+- **Per-document access heat stats — `GET /v1/stats/docs`.** Every fs
+  workspace now counts, per document per day, how often it appears in
+  search results (`search_hits`, deduped per query) and how often its
+  content is actually fetched (`reads`: download/preview/line/range reads
+  across REST, MCP `read_file`, answer tools, FUSE, and the platform
+  surface). The endpoint returns a ranking over a day window
+  (`days`/`limit`/`order_by`); the platform gateway gets the same board at
+  `GET /v1/workspace/{ws}/project/{id}/stats/docs`. Read-only `wk_` may
+  query. Semantics worth knowing: scan surfaces are exempt (a workspace-wide
+  `grep` or SQL `veda_fs()` glob does not mark everything "read"), agent
+  traffic counts (entering an LLM context is usage), hits are impressions
+  (top-k retrieval means hit ≠ relevant), renames keep a document's
+  history, deletion drops it off the board, and counting is best-effort
+  (in-process aggregation flushed every ~30s; a crash loses at most one
+  window). Config: `[stats]` — `enabled` / `flush_interval_secs` /
+  `retention_days` (swept daily by the stats task itself) /
+  `day_utc_offset_hours` (day bucketing, default +8).
 - **`veda-server --version`.** Prints `veda-server <crate version>` to stdout
   and exits 0; `--help` is still the only other flag and an unknown flag is
   still a hard error. The deploy runbook's post-build smoke asserted on

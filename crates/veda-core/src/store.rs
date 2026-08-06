@@ -1,6 +1,32 @@
 use async_trait::async_trait;
 use veda_types::*;
 
+/// Batch path-resolution result: the dentry a file_id maps to. When one
+/// file_id has several dentries (`copy_file` aliases), implementations MUST
+/// pick deterministically (smallest `path`) so access-stat attribution
+/// doesn't drift between queries.
+#[derive(Debug, Clone)]
+pub struct DentryPathRef {
+    pub dentry_id: String,
+    pub path: String,
+}
+
+/// One (workspace, day, dentry) delta flushed by the access recorder.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DocAccessRow {
+    pub workspace_id: String,
+    pub day: chrono::NaiveDate,
+    pub dentry_id: String,
+    pub search_hits: u64,
+    pub reads: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DocAccessOrder {
+    Reads,
+    SearchHits,
+}
+
 // ── Metadata Store ─────────────────────────────────────
 
 #[async_trait]
@@ -188,19 +214,14 @@ pub trait MetadataStore: Send + Sync {
         workspace_id: &str,
         file_id: &str,
     ) -> Result<Option<String>>;
+    /// Batch file_id → dentry resolution for search-hit display and access
+    /// counting. No default implementation: a per-id loop would be N+1 and
+    /// couldn't honor the deterministic-alias contract of [`DentryPathRef`].
     async fn get_dentry_paths_by_file_ids(
         &self,
         workspace_id: &str,
         file_ids: &[String],
-    ) -> Result<std::collections::HashMap<String, String>> {
-        let mut map = std::collections::HashMap::new();
-        for fid in file_ids {
-            if let Some(p) = self.get_dentry_path_by_file_id(workspace_id, fid).await? {
-                map.insert(fid.clone(), p);
-            }
-        }
-        Ok(map)
-    }
+    ) -> Result<std::collections::HashMap<String, DentryPathRef>>;
     async fn query_fs_events(
         &self,
         workspace_id: &str,
@@ -271,6 +292,23 @@ pub trait MetadataStore: Send + Sync {
         std::collections::HashSet<String>,
         std::collections::HashSet<String>,
     )>;
+    // doc access stats (heat counters)
+    /// Apply per-day access deltas. All rows MUST land in ONE transaction:
+    /// with partial application the caller can't retry without
+    /// double-counting the batches that already committed (review 2026-08-05).
+    async fn upsert_doc_access_daily(&self, rows: &[DocAccessRow]) -> Result<()>;
+    /// Heat ranking joined against live dentries (deleted docs drop out,
+    /// renamed docs keep their history via dentry_id). `since` is inclusive.
+    async fn query_doc_access(
+        &self,
+        workspace_id: &str,
+        since: chrono::NaiveDate,
+        order: DocAccessOrder,
+        limit: usize,
+    ) -> Result<Vec<api::DocAccessEntry>>;
+    /// Chunked delete of stats rows with `day < cutoff`. Returns rows removed.
+    async fn sweep_doc_access(&self, cutoff: chrono::NaiveDate) -> Result<u64>;
+
     async fn upsert_summary(&self, summary: &FileSummary) -> Result<()>;
     async fn delete_summary_by_file(&self, file_id: &str) -> Result<()>;
     /// Delete the directory summary row keyed by dentry_id. Used by the

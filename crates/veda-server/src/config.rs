@@ -13,6 +13,8 @@ pub struct ServerConfig {
     #[serde(default)]
     pub retention: RetentionConfig,
     #[serde(default)]
+    pub stats: StatsConfig,
+    #[serde(default)]
     pub otlp: OtlpConfig,
     #[serde(default)]
     pub allowed_origins: Vec<String>,
@@ -129,6 +131,57 @@ impl Default for WorkerConfig {
     }
 }
 
+
+/// Per-document access heat counters (`veda_doc_access_daily`).
+#[derive(Debug, Deserialize, Clone)]
+pub struct StatsConfig {
+    /// Kill switch for recording. Disabling stops the flush task and turns
+    /// record calls into no-ops; `GET /v1/stats/docs` keeps serving
+    /// already-accumulated data.
+    #[serde(default = "default_stats_enabled")]
+    pub enabled: bool,
+    /// Buffer flush cadence. Clamped to ≥ 5s. A crash or failed flush loses
+    /// at most one window — accepted, heat is best-effort.
+    #[serde(default = "default_stats_flush_interval_secs")]
+    pub flush_interval_secs: u64,
+    /// Stats rows older than this are swept once a day by the flush task
+    /// itself — NOT the `[retention]` sweep, so turning that off can't let
+    /// this table grow unbounded.
+    #[serde(default = "default_stats_retention_days")]
+    pub retention_days: u32,
+    /// Day-boundary offset from UTC in hours (default +8, CST). A config
+    /// value rather than process TZ so day bucketing never depends on the
+    /// box's environment.
+    #[serde(default = "default_stats_day_offset")]
+    pub day_utc_offset_hours: i8,
+}
+
+impl Default for StatsConfig {
+    fn default() -> Self {
+        Self {
+            enabled: default_stats_enabled(),
+            flush_interval_secs: default_stats_flush_interval_secs(),
+            retention_days: default_stats_retention_days(),
+            day_utc_offset_hours: default_stats_day_offset(),
+        }
+    }
+}
+
+fn default_stats_enabled() -> bool {
+    true
+}
+
+fn default_stats_flush_interval_secs() -> u64 {
+    30
+}
+
+fn default_stats_retention_days() -> u32 {
+    365
+}
+
+fn default_stats_day_offset() -> i8 {
+    8
+}
 
 #[derive(Debug, Deserialize, Clone)]
 pub struct RetentionConfig {
@@ -311,6 +364,7 @@ impl ServerConfig {
         let raw = std::fs::read_to_string(path)?;
         let mut cfg: Self = toml::from_str(&raw)?;
         cfg.apply_env_overrides();
+        cfg.validate()?;
         Ok(cfg)
     }
 
@@ -318,7 +372,21 @@ impl ServerConfig {
     pub fn from_toml(raw: &str) -> anyhow::Result<Self> {
         let mut cfg: Self = toml::from_str(raw)?;
         cfg.apply_env_overrides();
+        cfg.validate()?;
         Ok(cfg)
+    }
+
+    /// Post-load sanity checks. Fail fast at startup rather than letting a
+    /// typo'd value silently change semantics (same philosophy as the hard
+    /// error on unknown CLI flags).
+    fn validate(&self) -> anyhow::Result<()> {
+        // FixedOffset::east_opt would silently fall back to UTC past ±23,
+        // moving the stats day boundary without a trace.
+        let off = self.stats.day_utc_offset_hours;
+        if !(-23..=23).contains(&off) {
+            anyhow::bail!("[stats] day_utc_offset_hours must be in -23..=23, got {off}");
+        }
+        Ok(())
     }
 
     fn apply_env_overrides(&mut self) {
@@ -388,6 +456,10 @@ impl ServerConfig {
         env_parse("VEDA_RETENTION_INTERVAL_SECS", &mut self.retention.interval_secs);
         env_parse("VEDA_RETENTION_EVENTS_DAYS", &mut self.retention.events_retention_days);
         env_parse("VEDA_RETENTION_OUTBOX_DAYS", &mut self.retention.outbox_retention_days);
+        env_parse("VEDA_STATS_ENABLED", &mut self.stats.enabled);
+        env_parse("VEDA_STATS_FLUSH_INTERVAL_SECS", &mut self.stats.flush_interval_secs);
+        env_parse("VEDA_STATS_RETENTION_DAYS", &mut self.stats.retention_days);
+        env_parse("VEDA_STATS_DAY_UTC_OFFSET_HOURS", &mut self.stats.day_utc_offset_hours);
         env_parse("VEDA_DEV_MODE", &mut self.dev_mode);
 
         env_parse("VEDA_OTLP_ENABLED", &mut self.otlp.enabled);

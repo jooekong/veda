@@ -84,6 +84,15 @@ impl MysqlStore {
     INDEX idx_ws_poll (workspace_id, id),
     INDEX idx_created_at (created_at)
 )"#,
+            r#"CREATE TABLE IF NOT EXISTS veda_doc_access_daily (
+    workspace_id VARCHAR(36) NOT NULL,
+    day DATE NOT NULL,
+    dentry_id VARCHAR(36) NOT NULL,
+    search_hits BIGINT UNSIGNED NOT NULL DEFAULT 0,
+    read_count BIGINT UNSIGNED NOT NULL DEFAULT 0,
+    PRIMARY KEY (workspace_id, day, dentry_id),
+    INDEX idx_day (day)
+)"#,
             r#"CREATE TABLE IF NOT EXISTS veda_accounts (
     id VARCHAR(36) PRIMARY KEY,
     name VARCHAR(128) NOT NULL,

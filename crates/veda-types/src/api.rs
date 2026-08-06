@@ -153,6 +153,28 @@ pub struct FilePreview {
     pub content: String,
 }
 
+// ── Doc access stats ───────────────────────────────────
+
+/// One row of the per-workspace document heat ranking returned by
+/// `GET /v1/stats/docs`. Counts are summed over the requested day window.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DocAccessEntry {
+    pub path: String,
+    /// Times the document appeared in search results (impressions, deduped
+    /// per query). Vector search always returns top-k, so this is relative
+    /// heat, not relevance.
+    pub search_hits: u64,
+    /// Times the document's content was fetched server-side (REST/MCP/
+    /// answer-tool/FUSE/platform). Scan surfaces (grep, SQL) don't count.
+    pub reads: u64,
+}
+
+#[derive(Debug, Serialize)]
+pub struct DocAccessStatsResponse {
+    pub days: u32,
+    pub items: Vec<DocAccessEntry>,
+}
+
 // ── Search ─────────────────────────────────────────────
 
 // deny_unknown_fields: reject typo'd / unsupported fields (e.g. min_score,
@@ -504,6 +526,7 @@ mod tests {
     fn sample_hit(path: Option<&str>) -> SearchHit {
         SearchHit {
             file_id: "f1".into(),
+            dentry_id: None,
             chunk_index: Some(0),
             content: "hello".into(),
             score: 0.9,

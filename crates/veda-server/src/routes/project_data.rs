@@ -81,6 +81,10 @@ pub fn routes() -> Router<Arc<AppState>> {
         )
         .route("/v1/workspace/{workspace}/project/{id}/sql", post(fs_sql))
         .route("/v1/workspace/{workspace}/project/{id}/grep", post(fs_grep))
+        .route(
+            "/v1/workspace/{workspace}/project/{id}/stats/docs",
+            get(fs_doc_stats),
+        )
         // Same company-envelope rewrite as the management surface.
         .layer(axum::middleware::from_fn(company_envelope))
         // Bulk vectors upsert runs far over axum's 2MB default (a 500-record
@@ -192,6 +196,20 @@ async fn fs_search(
         )
         .await?;
     Ok(Json(ApiResponse::ok(hits)))
+}
+
+/// Document heat ranking for the AI-workbench console. Same clamping and
+/// order semantics as native `GET /v1/stats/docs` (shared builder); the
+/// company envelope middleware unwraps the single struct into a bare object.
+async fn fs_doc_stats(
+    State(state): State<Arc<AppState>>,
+    Path((workspace, id)): Path<(String, String)>,
+    gw: GatewayUser,
+    Query(q): Query<super::stats::DocStatsQuery>,
+) -> Result<Json<ApiResponse<veda_types::api::DocAccessStatsResponse>>, AppError> {
+    let ws = authz_and_load(&state, &gw, &workspace, &id, WorkspaceKind::Fs).await?;
+    let resp = super::stats::build_doc_stats(&state, &ws.id, &q).await?;
+    Ok(Json(ApiResponse::ok(resp)))
 }
 
 #[derive(Deserialize)]

@@ -181,7 +181,7 @@ impl VedaSearchFactory {
                 Ok(path_map) => {
                     for hit in &mut hits {
                         if hit.path.is_none() {
-                            hit.path = path_map.get(&hit.file_id).cloned();
+                            hit.path = path_map.get(&hit.file_id).map(|r| r.path.clone());
                         }
                     }
                 }

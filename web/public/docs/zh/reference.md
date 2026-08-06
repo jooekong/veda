@@ -332,6 +332,21 @@
 
 `{ sql }`，DataFusion 引擎，workspace 内作用域。表：`files`（递归 dentry）、每个结构化 collection 按名注册成表。内置 8 个 FS 标量 UDF（`veda_read/write/append/exists/size/mtime/remove/mkdir`）、`embedding()` UDF、`veda_fs()` / `veda_fs_events()` / `veda_storage_stats()` / `search()` 等表函数。支持标准 SELECT/WHERE/COUNT/JOIN。只读 key 调写 UDF 会被拒（当前表现为 `500`）。
 
+### 文档热度统计（`GET /v1/stats/docs`）
+
+看这个 workspace 里「哪些文档在被用」：按文档聚合的搜索命中数与读取数排行。只读 key 可查。平台面对应 `GET /v1/workspace/{workspace}/project/{id}/stats/docs`（返回裸对象）。
+
+- **参数**：`days`（统计窗口，默认 30，上限 365）、`limit`（默认 50，上限 200）、`order_by`（`reads` 默认 / `search_hits`）。
+- **响应**：`{ days, items: [{ path, search_hits, reads }] }`，按所选指标降序。
+
+**数字怎么读**（对不上数先看这里）：
+
+- `search_hits` = 文档出现在搜索结果里的次数（曝光量，同一次搜索同文件命中多段算 1 次）。向量检索恒返回 top-k，**命中 ≠ 相关**，只能看相对热度。
+- `reads` = 文档内容被服务端实际取出的次数（下载 / 预览 / 行读 / Range 读 / MCP `read_file` / 问答工具读）。FUSE 客户端缓存命中不产生请求（少计）；大文件分段读会多计。
+- **agent 流量计入**：RAG 问答内部检索、MCP coding agent、企微机器人的访问都算「被使用」——这不是「人搜了多少次」。
+- **扫描面不计入**：`grep` 与 SQL（`veda_read()` / `veda_fs()` / `search()` 表函数）属于批量扫描，不进热度；摘要读取（`/v1/abstract`、`/v1/overview`、`/v1/layout`）暂不计入。
+- 计数是**尽力而为**（内存聚合 ~30s 批量落库，异常时最多丢一个窗口）；重命名后历史延续，删除后从榜单消失。当天数据按 UTC+8 归日（服务端 `[stats] day_utc_offset_hours` 可配，公司部署默认 +8）。
+
 ### 结构化 Collection（`/v1/collections/*`）
 
 定义 schema + 自动嵌入字段，按字段过滤搜索。`POST /v1/collections`（建）、`GET /v1/collections`（列）、`GET/DELETE /v1/collections/{name}`、`POST /v1/collections/{name}/rows`（插入，body 是 `{"rows": [ {...}, ... ]}`——裸数组会被拒）、`POST /v1/collections/{name}/search`（`{ query, limit? }`）。过滤 / 聚合走 `veda sql`。

@@ -352,14 +352,21 @@ impl MetadataStore for MysqlStore {
         &self,
         workspace_id: &str,
         file_ids: &[String],
-    ) -> Result<std::collections::HashMap<String, String>> {
+    ) -> Result<std::collections::HashMap<String, DentryPathRef>> {
         if file_ids.is_empty() {
             return Ok(std::collections::HashMap::new());
         }
         let placeholders = vec!["?"; file_ids.len()].join(",");
+        // ORDER BY path + or_insert keeps the smallest path per file_id, so
+        // copy-alias attribution is deterministic across queries (trait
+        // contract on DentryPathRef). The `id` tie-break matters: the path
+        // column's collation is CI (see todos: collation not pinned), so
+        // case-only aliases like /A vs /a sort EQUAL and MySQL would return
+        // them in arbitrary order without it.
         let sql = format!(
-            "SELECT file_id, path FROM veda_dentries \
-             WHERE workspace_id = ? AND file_id IN ({placeholders})"
+            "SELECT id, file_id, path FROM veda_dentries \
+             WHERE workspace_id = ? AND file_id IN ({placeholders}) \
+             ORDER BY path, id"
         );
         let mut q = sqlx::query(&sql).bind(workspace_id);
         for id in file_ids {
@@ -368,11 +375,111 @@ impl MetadataStore for MysqlStore {
         let rows = q.fetch_all(&self.pool).await.map_err(storage_err)?;
         let mut map = std::collections::HashMap::with_capacity(rows.len());
         for r in &rows {
+            let dentry_id: String = r.try_get("id").map_err(storage_err)?;
             let fid: String = r.try_get("file_id").map_err(storage_err)?;
             let path: String = r.try_get("path").map_err(storage_err)?;
-            map.entry(fid).or_insert(path);
+            map.entry(fid).or_insert(DentryPathRef { dentry_id, path });
         }
         Ok(map)
+    }
+
+    async fn upsert_doc_access_daily(&self, rows: &[DocAccessRow]) -> Result<()> {
+        if rows.is_empty() {
+            return Ok(());
+        }
+        // One transaction for the whole delta set. Chunked multi-value
+        // INSERTs keep statements bounded; atomicity keeps retry semantics
+        // simple for the caller (all-or-nothing, no double-count on retry).
+        let mut tx = self.pool.begin().await.map_err(storage_err)?;
+        for chunk in rows.chunks(500) {
+            let values = vec!["(?,?,?,?,?)"; chunk.len()].join(",");
+            // Column is `read_count`, not `reads` — READS is a MySQL
+            // reserved word (caught by migrate against a real 8.0 server).
+            let sql = format!(
+                "INSERT INTO veda_doc_access_daily \
+                 (workspace_id, day, dentry_id, search_hits, read_count) \
+                 VALUES {values} \
+                 ON DUPLICATE KEY UPDATE \
+                 search_hits = search_hits + VALUES(search_hits), \
+                 read_count = read_count + VALUES(read_count)"
+            );
+            let mut q = sqlx::query(&sql);
+            for r in chunk {
+                q = q
+                    .bind(&r.workspace_id)
+                    .bind(r.day)
+                    .bind(&r.dentry_id)
+                    .bind(r.search_hits)
+                    .bind(r.reads);
+            }
+            q.execute(&mut *tx).await.map_err(storage_err)?;
+        }
+        tx.commit().await.map_err(storage_err)?;
+        Ok(())
+    }
+
+    async fn query_doc_access(
+        &self,
+        workspace_id: &str,
+        since: chrono::NaiveDate,
+        order: DocAccessOrder,
+        limit: usize,
+    ) -> Result<Vec<veda_types::api::DocAccessEntry>> {
+        let order_col = match order {
+            DocAccessOrder::Reads => "read_count",
+            DocAccessOrder::SearchHits => "hit_count",
+        };
+        // INNER JOIN against live dentries: deleted docs drop off the board,
+        // renames stay continuous (dentry_id survives them).
+        let sql = format!(
+            "SELECT d.path AS path, \
+             CAST(SUM(s.search_hits) AS UNSIGNED) AS hit_count, \
+             CAST(SUM(s.read_count) AS UNSIGNED) AS read_count \
+             FROM veda_doc_access_daily s \
+             JOIN veda_dentries d \
+               ON d.id = s.dentry_id AND d.workspace_id = s.workspace_id \
+             WHERE s.workspace_id = ? AND s.day >= ? \
+             GROUP BY s.dentry_id, d.path \
+             ORDER BY {order_col} DESC, path ASC \
+             LIMIT ?"
+        );
+        let rows = sqlx::query(&sql)
+            .bind(workspace_id)
+            .bind(since)
+            .bind(i64::try_from(limit).unwrap_or(200))
+            .fetch_all(&self.pool)
+            .await
+            .map_err(storage_err)?;
+        rows.iter()
+            .map(|r| {
+                Ok(veda_types::api::DocAccessEntry {
+                    path: r.try_get("path").map_err(storage_err)?,
+                    search_hits: r.try_get("hit_count").map_err(storage_err)?,
+                    reads: r.try_get("read_count").map_err(storage_err)?,
+                })
+            })
+            .collect()
+    }
+
+    async fn sweep_doc_access(&self, cutoff: chrono::NaiveDate) -> Result<u64> {
+        // Same chunked-delete shape as prune_fs_events_older_than: bounded
+        // lock lists, yield between chunks so live flushes interleave.
+        const CHUNK: u64 = 5000;
+        let mut total = 0u64;
+        loop {
+            let r = sqlx::query("DELETE FROM veda_doc_access_daily WHERE day < ? LIMIT 5000")
+                .bind(cutoff)
+                .execute(&self.pool)
+                .await
+                .map_err(storage_err)?;
+            let n = r.rows_affected();
+            total += n;
+            if n < CHUNK {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        Ok(total)
     }
 
     async fn query_fs_events(

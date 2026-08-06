@@ -95,8 +95,25 @@ async fn main() -> anyhow::Result<()> {
 
     milvus.init_collections(cfg.embedding.dimension).await?;
 
-    let fs_service = Arc::new(FsService::new(mysql.clone()));
-    let search_service = SearchService::new(mysql.clone(), milvus.clone(), embedding.clone());
+    // Heat counters: fs/search services record through this; SQL engine
+    // deliberately gets an FsService WITHOUT it below (scan-surface
+    // exemption — one SQL glob can read 10k files). Kill switch keeps the
+    // recorder alive for queries but makes record calls no-ops.
+    let access_recorder = Arc::new(veda_core::service::access_stats::AccessRecorder::new(
+        mysql.clone(),
+        cfg.stats.day_utc_offset_hours,
+        cfg.stats.enabled,
+    ));
+    let fs_service = Arc::new(FsService::with_stats(
+        mysql.clone(),
+        access_recorder.clone(),
+    ));
+    let search_service = SearchService::with_stats(
+        mysql.clone(),
+        milvus.clone(),
+        embedding.clone(),
+        access_recorder.clone(),
+    );
     let collection_service =
         CollectionService::new(mysql.clone(), milvus.clone(), embedding.clone());
     let vector_service = veda_core::service::vector::VectorService::new(
@@ -110,13 +127,16 @@ async fn main() -> anyhow::Result<()> {
         cfg.embedding.dimension,
     );
 
+    // Uncounted FsService for the SQL engine: `veda_read()`/`veda_fs()` are
+    // scan surfaces exempt from heat metrics (see docs/plans/doc-access-stats.md §1.3).
+    let fs_uncounted = Arc::new(FsService::new(mysql.clone()));
     let sql_engine = veda_sql::VedaSqlEngine::new(
         mysql.clone(),
         milvus.clone(),
         mysql.clone(),
         milvus.clone(),
         embedding.clone(),
-        fs_service.clone(),
+        fs_uncounted,
     );
 
     // On-demand MySQL↔Milvus reconciler. No background loop — driven by
@@ -200,6 +220,7 @@ async fn main() -> anyhow::Result<()> {
         answer_service,
         answer_concurrency,
         tunnel_bots,
+        access_recorder: access_recorder.clone(),
         draining: std::sync::atomic::AtomicBool::new(false),
     });
 
@@ -320,6 +341,58 @@ async fn main() -> anyhow::Result<()> {
         }))
     } else {
         info!("retention sweep disabled (fs_events + outbox)");
+        None
+    };
+
+    // Access-stats flush loop. On shutdown it only STOPS ticking — the
+    // drain window and in-flight requests are still recording at that
+    // point, so the final flush happens in main after serve() returns
+    // (all requests done), not here. Retention for the stats table also
+    // lives here (once per day), deliberately independent of the
+    // [retention] sweep's enabled flag.
+    let stats_handle = if cfg.stats.enabled {
+        let recorder = access_recorder.clone();
+        let interval = std::time::Duration::from_secs(cfg.stats.flush_interval_secs.max(5));
+        let retention_days = cfg.stats.retention_days;
+        let mut rx = shutdown_rx.clone();
+        info!(
+            flush_interval_secs = cfg.stats.flush_interval_secs,
+            retention_days,
+            day_utc_offset_hours = cfg.stats.day_utc_offset_hours,
+            "doc access stats enabled"
+        );
+        Some(tokio::spawn(async move {
+            let mut tick = tokio::time::interval(interval);
+            tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            tick.tick().await; // first tick fires immediately — discard
+            let mut last_sweep_day: Option<chrono::NaiveDate> = None;
+            loop {
+                tokio::select! {
+                    _ = tick.tick() => {}
+                    _ = rx.changed() => {
+                        if *rx.borrow() { return; }
+                    }
+                }
+                // Flush errors are already logged + counted inside; a failed
+                // window is dropped by design (no retry double-count).
+                let _ = recorder.flush().await;
+                let today = recorder.today();
+                if last_sweep_day != Some(today) {
+                    match recorder.sweep(retention_days).await {
+                        Ok(n) => {
+                            if n > 0 {
+                                info!(deleted = n, "doc access stats swept");
+                            }
+                            last_sweep_day = Some(today);
+                        }
+                        // Leave last_sweep_day unset so the next tick retries.
+                        Err(e) => tracing::warn!(err = %e, "doc access stats sweep failed"),
+                    }
+                }
+            }
+        }))
+    } else {
+        info!("doc access stats disabled");
         None
     };
 
@@ -449,6 +522,14 @@ async fn main() -> anyhow::Result<()> {
     }
     if let Some(handle) = retention_handle {
         let _ = handle.await;
+    }
+    if let Some(handle) = stats_handle {
+        let _ = handle.await;
+        // Final flush strictly AFTER serve() returned: every in-flight
+        // request (including the drain window) has finished, nothing else
+        // records. Flushing at shutdown-signal time instead would silently
+        // drop the tail (review 2026-08-05).
+        let _ = access_recorder.flush().await;
     }
     if let Some(handle) = otlp_handle {
         let _ = handle.await;

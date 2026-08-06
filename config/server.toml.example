@@ -152,6 +152,20 @@ events_retention_days = 14               # VEDA_RETENTION_EVENTS_DAYS
 # Terminal (completed/dead) outbox rows. Raise it for longer post-mortems.
 outbox_retention_days = 1                # VEDA_RETENTION_OUTBOX_DAYS
 
+# Per-document access heat counters (search_hits / reads per day, served by
+# GET /v1/stats/docs). In-process aggregation flushed on a timer; a failed
+# flush or crash loses at most one window (heat is best-effort by design).
+# Scan surfaces (grep, SQL veda_read/veda_fs/search()) are exempt from
+# counting. Sweeping this table is done by the flush task itself, NOT the
+# [retention] sweep above.
+[stats]
+enabled = true                           # VEDA_STATS_ENABLED
+flush_interval_secs = 30                 # VEDA_STATS_FLUSH_INTERVAL_SECS (min 5)
+retention_days = 365                     # VEDA_STATS_RETENTION_DAYS
+# Day-boundary offset from UTC in hours (+8 = CST). Config, not process TZ,
+# so day bucketing never depends on the box's environment.
+day_utc_offset_hours = 8                 # VEDA_STATS_DAY_UTC_OFFSET_HOURS
+
 # OTLP metrics push. Metrics go DIRECTLY to the remote collector — no agent
 # is installed on this host. Leave `endpoint` empty to discover collectors
 # through the monitor config service; set it to bypass discovery.

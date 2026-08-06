@@ -64,6 +64,10 @@ pub struct AppState {
     /// shared with the veda-tunnel process (which polls it every 30s). See
     /// `crate::tunnel_bots`.
     pub tunnel_bots: Arc<crate::tunnel_bots::TunnelBotStore>,
+    /// Doc access heat counters (`veda_doc_access_daily`). The fs/search
+    /// services record through their own Arc of this; routes use it for
+    /// `GET /v1/stats/docs` queries (works even with recording disabled).
+    pub access_recorder: Arc<veda_core::service::access_stats::AccessRecorder>,
     /// Flipped by the SIGTERM handler at the start of the drain window
     /// (`ServerConfig::drain_secs`). While set, `/v1/ready` reports 503
     /// "draining" so the LB pulls this node, but the listener keeps

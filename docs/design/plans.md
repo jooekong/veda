@@ -30,6 +30,7 @@ SQL 三件套 / revoke scope / platform authz+timeout / TimeoutLayer+CatchPanic 
 | [`db-workspace-followups.md`](../plans/db-workspace-followups.md) | 接业务方前待办：H1 Milvus GC / M1 维度校验 / A1 内存天花板（硬门槛）+ backlog 并入尾巴 |
 | [`embedding-throughput-plan.md`](../plans/embedding-throughput-plan.md) | **阶段 1 已实现**（07-29 最终形态：两级优先闸——交互插队/空闲时后台占满；攒批器经交叉 review 后按简化原则整体撤回，重启触发条件在 plan 内）；阶段 2 等生产数据再启 |
 | [`outbox-dedup-refactor.md`](../plans/outbox-dedup-refactor.md) | **搁置**（07-29 简化审计：无性能证据不动稳定写路径；更简的中间路线备忘在 plan 头部） |
+| [`doc-access-stats.md`](../plans/doc-access-stats.md) | 文档访问热度统计（业务方需求）：`GET /v1/stats/docs` 双面 + 按天聚合 + 进程内 Recorder；**已实现**（交叉评审→拍板→单测10+集成2全绿），待随下次发版部署；实现偏差见 §9 |
 
 ## 方向池
 

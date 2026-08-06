@@ -12,6 +12,7 @@ pub mod project_data;
 pub mod reconcile;
 pub mod search;
 pub mod sql;
+pub mod stats;
 pub mod tunnel_bots;
 pub mod vectors;
 
@@ -59,6 +60,7 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .merge(search::routes())
         .merge(collection::routes())
         .merge(sql::routes())
+        .merge(stats::routes())
         .layer(TimeoutLayer::with_status_code(
             StatusCode::REQUEST_TIMEOUT,
             Duration::from_secs(30),

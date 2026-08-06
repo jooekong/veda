@@ -546,6 +546,13 @@ pub struct SearchHit {
     /// search response (where the field is absent) without errors.
     #[serde(skip_serializing, default)]
     pub file_id: String,
+    /// Internal counting key, populated alongside `path` during batch
+    /// resolution — never serialized. Access stats aggregate on dentry_id
+    /// (stable across overwrite and rename, unlike `file_id`/`path`).
+    /// Stays `None` for hits that don't resolve (detached file_ids,
+    /// directory-summary hits), which is exactly the skip signal.
+    #[serde(skip_serializing, default)]
+    pub dentry_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub chunk_index: Option<i32>,
     pub content: String,

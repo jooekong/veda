@@ -1094,6 +1094,7 @@ mod engine_tests {
                 .iter()
                 .map(|(p, i, c)| SearchHit {
                     file_id: "f".into(),
+                    dentry_id: None,
                     chunk_index: Some(*i),
                     content: c.to_string(),
                     score: 0.9,
@@ -1465,6 +1466,7 @@ mod engine_tests {
                 .into_iter()
                 .map(|(p, i, c)| SearchHit {
                     file_id: "f".into(),
+                    dentry_id: None,
                     chunk_index: Some(i),
                     content: c,
                     score: 0.9,

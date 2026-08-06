@@ -80,6 +80,18 @@ veda-tunnel     外部 IM 接入（企微长连接）             (已上生产 
 - **暂不接**平台网关面与 tunnel：tunnel 是标准 `wk_` 消费者，要用直接调 `/v1/layout` 即可，server 侧零工作。CLI 侧提供 `veda layout`（人类可读块状布局：头行 + 缩进的完整 L0，TTY 按终端宽度折行、管道不折行；`--json` 供 agent）。
 - **测试**：8 条组装单测（mock 可注入摘要/计数，含「cap 必须下推到查询」的 `limit == 201` 断言——只看返回长度无法区分 load-all-then-truncate）+ `tests/map_test.rs` 真实 MySQL/Milvus 集成（SUBSTRING_INDEX 计数、目录优先序、250 条截断、鉴权 401/400、MCP↔REST 同构、disabled 仍返缓存摘要）。摘要用 `upsert_summary` 直接写入而非跑 LLM worker——要验的是 SQL，接 LLM 只会增加不确定性。
 
+## 文档访问热度统计 `GET /v1/stats/docs`（2026-08-05）
+
+fs workspace 按文档按天计数 `search_hits`（搜索曝光，按 query 去重）与 `reads`（内容被服务端实际取出），业务方看「哪些文档在被用」。设计与评审裁决：`docs/plans/doc-access-stats.md`（Claude+Codex 交叉评审后修订）。
+
+- **采集**：`veda-core/service/access_stats.rs::AccessRecorder`——进程内 `Mutex<HashMap>` 聚合（热路径纳秒级，单写者架构约束下安全），server 后台任务 30s 批量 `INSERT…ON DUPLICATE KEY UPDATE` 进 `veda_doc_access_daily`（PK `(workspace_id, day, dentry_id)` + `idx_day`；`read_count` 列名避开 MySQL 保留字 READS）。**flush 全量单事务，失败整体丢弃不重试**（重试无法 exactly-once，双计比丢一个 30s 窗口更糟）；final flush 在 `axum::serve` 返回后由 main 显式执行（在 shutdown 信号时刻 flush 会丢 drain 窗口的尾巴）。表清理由 stats 任务自己每日执行（`[stats] retention_days`，不受 `[retention].enabled` 影响）。
+- **聚合 key = `dentry_id`**：覆盖写/rename 下唯一稳定的身份（`file_id` 在 `ref_count>1` 覆盖写会换、copy 别名会合并；`path` 每 rename 断一次）。搜索侧经 `get_dentry_paths_by_file_ids`（已改返回 `DentryPathRef{dentry_id,path}`，`ORDER BY path` 保证 copy 别名归属确定）随 resolve 顺带填进 `SearchHit.dentry_id`（serde skip，server-only），零额外往返；resolve 不到的命中（游离 file_id / dir-summary 命中）无 dentry_id 自动跳过。
+- **埋点边界（评审核心裁决）**：只在公开方法最外层记一次——`FsService` 五个 read 方法（`read_file`/`read_file_raw`/`read_file_preview`/`read_file_range`/`read_file_lines`）成功路径 + `SearchService::search` 最终命中集（截断/prefix 过滤后）。内部复用走不计数的 `read_file_inner`/`read_range_resolved`：**grep 逐文件扫描零计数**（否则一次全库 grep 把 5 万文件全刷成已读）、preview 委托 range 不双计、不支持预览的二进制占位响应不算读。**SQL 面整体豁免**：组装时给 SQL engine 一个不带 recorder 的 `FsService` 实例（`FsService::new` 默认 disabled recorder，生产 fs/search 用 `with_stats` 显式接入）。worker 后台读走 store 直读天然不计。
+- **查询**：`GET /v1/stats/docs?days&limit&order_by`（`AuthWorkspace` fs-only，read-only `wk_` 可查）+ 平台面 `GET .../project/{id}/stats/docs`（同一 `build_doc_stats`，company envelope 展开）。SQL 按 PK 左前缀 range + join 活 dentry（rename 历史延续、删除自动消失）。天边界按 `[stats] day_utc_offset_hours`（默认 +8）在 Rust 侧换算,不依赖进程 TZ 与 MySQL 会话时区。
+- **配置** `[stats]`：`enabled`（kill switch,关闭停记录但查询照常）/ `flush_interval_secs`（≥5s）/ `retention_days` / `day_utc_offset_hours`,全部 `VEDA_STATS_*` 可覆盖。指标：`veda_doc_access_flush_seconds{outcome}` / `flushed_rows_total` / `dropped_total` / `retention_swept_total`。
+- **测试**：10 条单测（聚合/跨天分桶/失败丢弃/去重/不可归属跳过/grep 零计数/preview 恰一次/二进制预览不计/默认构造静默）+ `tests/stats_http_test.rs` 真实 MySQL 集成（端到端计数、grep 豁免、rename 延续、删除消失、排序、401/400/kind 闸、read-only 可查）。
+- **暂不计**（v1 候选）：来源维度（人/agent）、citation 计数、摘要消费（abstract/overview/layout）、SQL `search()` UDTF（本就绕过 SearchService,收敛是独立还债项,见 todos）。
+
 ## MCP 端点 `POST /mcp`（2026-07-22）
 
 Coding Agent（Claude Code/Cursor/Codex）原生接入面：**Streamable HTTP transport 的 stateless 模式**，手写 JSON-RPC（无 SDK 依赖），协议版本只宣称 `2025-06-18`（03-26 要求 batch，stateless 单消息服务器不实现故不宣称）。用户侧零安装——`.mcp.json` 配 `url` + `Authorization: Bearer wk_` 即接入。设计：`docs/archive/plans/coding-agent-kb-plan.md` §4。

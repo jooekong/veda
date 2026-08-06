@@ -978,6 +978,7 @@ impl MilvusStore {
                     .unwrap_or(0.0);
                 SearchHit {
                     file_id: id.to_string(),
+                    dentry_id: None,
                     chunk_index: None,
                     content: content.to_string(),
                     score,
@@ -1012,6 +1013,7 @@ impl MilvusStore {
                 .unwrap_or(0.0);
             out.push(SearchHit {
                 file_id,
+                dentry_id: None,
                 chunk_index,
                 content,
                 score,
