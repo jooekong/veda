@@ -368,15 +368,22 @@ async function renderDetail(app: HTMLElement, id: string) {
       ? section("文档", `<div id="adm-files" class="text-sm">加载中…</div>`)
       : section("向量查询", vectorConsoleHtml(d.datasets));
 
+  // fs heat board (search_hits / reads per doc).
+  const statsSection =
+    w.kind === "fs" ? section("文档热度", `<div id="adm-stats" class="text-sm">加载中…</div>`) : "";
+
   app.innerHTML = `${header("#/admin", w.name)}
     ${info}
     ${datasetsSection}
+    ${statsSection}
     ${toolSection}
     ${keysSection}`;
   bindLogout();
 
-  if (w.kind === "fs") initFilesBrowser(id);
-  else initVectorConsole(id);
+  if (w.kind === "fs") {
+    initDocStats(id);
+    initFilesBrowser(id);
+  } else initVectorConsole(id);
 }
 
 function infoItem(label: string, val: string): string {
@@ -388,6 +395,85 @@ function section(title: string, bodyHtml: string): string {
       <h2 class="text-sm font-semibold text-slate-700 mb-2">${esc(title)}</h2>
       <div class="bg-white border border-slate-200 rounded-lg overflow-x-auto">${bodyHtml}</div>
     </section>`;
+}
+
+// ── fs doc heat board ───────────────────────────────────
+interface DocAccessEntry {
+  path: string;
+  search_hits: number;
+  reads: number;
+}
+
+function initDocStats(wsId: string) {
+  const root = document.getElementById("adm-stats");
+  if (!root) return;
+  let days = 30;
+  let orderBy: "reads" | "search_hits" = "reads";
+
+  async function load() {
+    root!.innerHTML = `<div class="px-3 py-2 text-slate-500">加载中…</div>`;
+    let data: { days: number; items: DocAccessEntry[] };
+    try {
+      data = await adminApi(
+        `/admin/v1/workspaces/${encodeURIComponent(wsId)}/stats/docs?days=${days}&order_by=${orderBy}&limit=50`,
+      );
+    } catch (e: any) {
+      root!.innerHTML = `<div class="px-3 py-2 text-red-600">${esc(e.message)}</div>`;
+      return;
+    }
+
+    const sortBtn = (key: "reads" | "search_hits", label: string) =>
+      `<button data-order="${key}" class="adm-stats-order px-2 py-0.5 rounded text-xs ${
+        orderBy === key
+          ? "bg-slate-700 text-white"
+          : "bg-slate-100 text-slate-600 hover:bg-slate-200"
+      }">${label}</button>`;
+    const daysBtn = (n: number) =>
+      `<button data-days="${n}" class="adm-stats-days px-2 py-0.5 rounded text-xs ${
+        days === n ? "bg-slate-700 text-white" : "bg-slate-100 text-slate-600 hover:bg-slate-200"
+      }">${n} 天</button>`;
+
+    const controls = `
+      <div class="flex items-center gap-2 px-3 py-2 border-b border-slate-100 flex-wrap">
+        <span class="text-xs text-slate-400">窗口</span>${[7, 30, 90].map(daysBtn).join("")}
+        <span class="text-xs text-slate-400 ml-3">排序</span>
+        ${sortBtn("reads", "按读取")}${sortBtn("search_hits", "按命中")}
+        <span class="text-xs text-slate-400 ml-auto" title="命中=出现在搜索结果里(top-k 曝光,含 agent 检索);读取=内容被实际取出。grep/SQL 扫描不计;~30s 落库一次">ⓘ 口径</span>
+      </div>`;
+
+    const table = data.items.length
+      ? `<table class="w-full text-left text-sm">
+          <thead class="text-xs uppercase tracking-wide text-slate-500">
+            <tr><th class="px-3 py-2">路径</th><th class="px-3 py-2 text-right">搜索命中</th><th class="px-3 py-2 text-right">读取</th></tr>
+          </thead>
+          <tbody>${data.items
+            .map(
+              (it) => `<tr class="border-t border-slate-100">
+                <td class="px-3 py-2 font-mono text-xs break-all">${esc(it.path)}</td>
+                <td class="px-3 py-2 text-right">${it.search_hits}</td>
+                <td class="px-3 py-2 text-right">${it.reads}</td>
+              </tr>`,
+            )
+            .join("")}</tbody>
+        </table>`
+      : `<p class="text-sm text-slate-500 px-3 py-2">近 ${days} 天没有访问记录。计数约 30 秒落库一次,刚发生的访问稍等再刷。</p>`;
+
+    root!.innerHTML = controls + table;
+    root!.querySelectorAll(".adm-stats-days").forEach((el) =>
+      el.addEventListener("click", () => {
+        days = Number((el as HTMLElement).dataset.days);
+        load();
+      }),
+    );
+    root!.querySelectorAll(".adm-stats-order").forEach((el) =>
+      el.addEventListener("click", () => {
+        orderBy = (el as HTMLElement).dataset.order as "reads" | "search_hits";
+        load();
+      }),
+    );
+  }
+
+  load();
 }
 
 // ── fs documents browser ────────────────────────────────

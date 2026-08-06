@@ -91,6 +91,7 @@ fs workspace 按文档按天计数 `search_hits`（搜索曝光，按 query 去�
 - **配置** `[stats]`：`enabled`（kill switch,关闭停记录但查询照常）/ `flush_interval_secs`（≥5s）/ `retention_days` / `day_utc_offset_hours`,全部 `VEDA_STATS_*` 可覆盖。指标：`veda_doc_access_flush_seconds{outcome}` / `flushed_rows_total` / `dropped_total` / `retention_swept_total`。
 - **测试**：10 条单测（聚合/跨天分桶/失败丢弃/去重/不可归属跳过/grep 零计数/preview 恰一次/二进制预览不计/默认构造静默）+ `tests/stats_http_test.rs` 真实 MySQL 集成（端到端计数、grep 豁免、rename 延续、删除消失、排序、401/400/kind 闸、read-only 可查）。
 - **暂不计**（v1 候选）：来源维度（人/agent）、citation 计数、摘要消费（abstract/overview/layout）、SQL `search()` UDTF（本就绕过 SearchService,收敛是独立还债项,见 todos）。
+- **展示面**：admin 后台 workspace 详情页有「文档热度」区块（2026-08-06,见平台网关面 admin surface 节）；业务方侧 v0 仍为纯 API,console/CLI 展示按需后补。
 
 ## MCP 端点 `POST /mcp`（2026-07-22）
 
@@ -119,7 +120,7 @@ fs 数据面知识库问答：LLM 经 **OpenAI function calling** 自主多轮�
 - **数据面 `project_data.rs`**（`/v1/workspace/{workspace}/project/{id}/...`）：把 `wk_` 数据面（vectors upsert/search/query/delete + fs search/files/file/sql/grep + **fs 上传 `PUT /file?path=`/下载 `GET /file/content?path=`**，上传同 fs.rs 的 UTF-8/blob sniff 分流、下载带 RFC 5987 attachment 头）包装到网关 surface，前端不持 `wk_`。**读写都过外部 authz**（`authz_and_load`，2026-06-23 定）：数据面暴露实际内容，不依赖网关限路径，veda 独立验证用户在该 workspace 的权限。文件预览截断 256KB，二进制返回 `is_binary` 标识
 - **`platform.rs`**：网关在 base64 `user` header 里传身份（`GatewayUser`，取 `name`/`displayName` 落 `creator`/`creator_name`），Cookie 透传给平台 authz/workspace-lookup API；直连（无 header）自动回退原生 key 鉴权。首次 `POST` 按 workspace code 自动开户
 - **company envelope 中间件**：handler 返 veda `ApiResponse<T>`，中间件改写成公司规范（`Vec<_>` → `{data:[...], page,...}`；单对象 → bare object；create 返 200 非 201）
-- **admin surface `admin.rs`**（`/admin/v1/...`，独立 `admin_token` 门控，fail-closed：未配 token 404）：跨租户只读 dashboard（workspaces/files/file 预览/vectors search）+ db 向量写控制台（vectors upsert）；前端在 `web/src/admin.ts`
+- **admin surface `admin.rs`**（`/admin/v1/...`，独立 `admin_token` 门控，fail-closed：未配 token 404）：跨租户只读 dashboard（workspaces/files/file 预览/vectors search/**fs 文档热度榜 `GET .../stats/docs`**——复用 `build_doc_stats`，db workspace 返回空板）+ db 向量写控制台（vectors upsert）；前端在 `web/src/admin.ts`（fs 详情页含「文档热度」区块：7/30/90 天窗口 + 读取/命中排序 + 口径 tooltip）
 
 ## veda-tunnel（外部 IM 接入）
 

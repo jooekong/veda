@@ -40,6 +40,7 @@ pub fn routes() -> Router<Arc<AppState>> {
         .route("/admin/v1/workspaces/{id}", get(get_workspace))
         .route("/admin/v1/workspaces/{id}/files", get(list_files))
         .route("/admin/v1/workspaces/{id}/file", get(read_file))
+        .route("/admin/v1/workspaces/{id}/stats/docs", get(doc_stats))
         .route(
             "/admin/v1/workspaces/{id}/vectors/search",
             post(search_vectors),
@@ -312,6 +313,34 @@ async fn list_files(
     let path = q.path.as_deref().unwrap_or("/");
     let entries = state.fs_service.list_dir(&id, path).await?;
     Ok(Json(ApiResponse::ok(entries)))
+}
+
+/// GET /admin/v1/workspaces/{id}/stats/docs — the per-document heat board
+/// for one fs workspace, admin view. Windowing/clamping/order semantics are
+/// the shared `build_doc_stats` (same as native `/v1/stats/docs`), so the
+/// two surfaces cannot drift. db workspaces return an empty board rather
+/// than an error — same soft posture as `list_files`.
+async fn doc_stats(
+    State(state): State<Arc<AppState>>,
+    _auth: AdminAuth,
+    Path(id): Path<String>,
+    Query(q): Query<super::stats::DocStatsQuery>,
+) -> Result<Json<ApiResponse<veda_types::api::DocAccessStatsResponse>>, AppError> {
+    let ws = state
+        .auth_store
+        .get_workspace(&id)
+        .await?
+        .ok_or_else(|| VedaError::NotFound(format!("workspace {id}")))?;
+    if ws.kind != WorkspaceKind::Fs {
+        return Ok(Json(ApiResponse::ok(
+            veda_types::api::DocAccessStatsResponse {
+                days: 0,
+                items: Vec::new(),
+            },
+        )));
+    }
+    let resp = super::stats::build_doc_stats(&state, &id, &q).await?;
+    Ok(Json(ApiResponse::ok(resp)))
 }
 
 /// Max bytes returned by the file preview. Files larger than this are truncated

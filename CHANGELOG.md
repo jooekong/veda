@@ -10,6 +10,12 @@ that matters.
 ## [Unreleased]
 
 ### Added
+- **Admin console heat board.** The admin dashboard's fs-workspace detail
+  page now has a "文档热度" section: per-document search_hits / reads over
+  a 7/30/90-day window, sortable by either metric, with the metric
+  semantics in a tooltip. Backed by
+  `GET /admin/v1/workspaces/{id}/stats/docs` (admin token; db workspaces
+  return an empty board).
 - **Per-document access heat stats — `GET /v1/stats/docs`.** Every fs
   workspace now counts, per document per day, how often it appears in
   search results (`search_hits`, deduped per query) and how often its

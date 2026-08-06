@@ -353,6 +353,10 @@ async fn cleanup(state: &AppState, mysql: &MysqlStore, setups: &[&WsSetup]) {
             .bind(&s.ws_id)
             .execute(mysql.pool())
             .await;
+        let _ = sqlx::query("DELETE FROM veda_doc_access_daily WHERE workspace_id = ?")
+            .bind(&s.ws_id)
+            .execute(mysql.pool())
+            .await;
         let _ = sqlx::query("DELETE FROM veda_accounts WHERE id = ?")
             .bind(&s.acct_id)
             .execute(mysql.pool())
@@ -550,6 +554,66 @@ async fn admin_http_suite() {
         entries.iter().any(|e| e["name"] == "hello.txt"),
         "hello.txt not listed in admin files"
     );
+
+    // ── doc heat board (stats/docs) ──
+    // The recorder in this app is disabled, so seed the table directly —
+    // what's under test HERE is the admin endpoint's auth/kind/query
+    // wiring, not the counting pipeline (stats_http_test owns that).
+    {
+        let dentry: (String,) = sqlx::query_as(
+            "SELECT id FROM veda_dentries WHERE workspace_id = ? AND path = '/hello.txt'",
+        )
+        .bind(&fs.ws_id)
+        .fetch_one(mysql.pool())
+        .await
+        .expect("hello.txt dentry");
+        state
+            .meta_store
+            .upsert_doc_access_daily(&[veda_core::store::DocAccessRow {
+                workspace_id: fs.ws_id.clone(),
+                day: chrono::Utc::now().date_naive(),
+                dentry_id: dentry.0,
+                search_hits: 3,
+                reads: 7,
+            }])
+            .await
+            .expect("seed doc access row");
+
+        let uri = format!("/admin/v1/workspaces/{}/stats/docs?days=2", fs.ws_id);
+        let (st, body) = req(router.clone(), "GET", &uri, Some(ADMIN), None).await;
+        assert_eq!(st, StatusCode::OK, "admin stats: {body}");
+        let items = body["data"]["items"].as_array().expect("items");
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0]["path"], "/hello.txt");
+        assert_eq!(items[0]["search_hits"], 3);
+        assert_eq!(items[0]["reads"], 7);
+
+        // db workspace → empty board, not an error.
+        let uri = format!("/admin/v1/workspaces/{}/stats/docs", db.ws_id);
+        let (st, body) = req(router.clone(), "GET", &uri, Some(ADMIN), None).await;
+        assert_eq!(st, StatusCode::OK);
+        assert_eq!(body["data"]["items"].as_array().map(|a| a.len()), Some(0));
+
+        // unknown workspace → 404; no bearer → 401.
+        let (st, _) = req(
+            router.clone(),
+            "GET",
+            "/admin/v1/workspaces/nonexistent/stats/docs",
+            Some(ADMIN),
+            None,
+        )
+        .await;
+        assert_eq!(st, StatusCode::NOT_FOUND);
+        let (st, _) = req(
+            router.clone(),
+            "GET",
+            &format!("/admin/v1/workspaces/{}/stats/docs", fs.ws_id),
+            None,
+            None,
+        )
+        .await;
+        assert_eq!(st, StatusCode::UNAUTHORIZED);
+    }
 
     cleanup(&state, &mysql, &[&db, &fs]).await;
 }
