@@ -35,7 +35,32 @@
 
 ---
 
+## 对标 #2：Agent / 团队记忆赛道（2026-08-07 调研）
+
+**看了七家**：mem0、Letta（原 MemGPT）、腾讯 TencentDB-Agent-Memory、Zep/Graphiti、
+Memobase、LangMem、basic-memory（含代码级核实）。
+
+**跨项目共同结论**：写路径在退火不在加码（mem0 亲手砍掉自己发明的写时 LLM 决策）；
+图数据库在退场（mem0 开源版删光图存储、腾讯只用 SQLite、Zep 的时序创新用几根列可近似）；
+分层检索是共识（与 veda 文档三层同构）；巩固都是后台低频任务（= outbox worker + 防抖）。
+
+**两块行业空白 = veda 的机会**：① 团队记忆的治理（晋升审核 / 来源追溯 / 撤销彻底生效）
+没人做好，学术界 GateMem 测试实测现有系统普遍泄露越权和已删信息；
+② 「digest 只挑选拼装、不二次总结 + 引用可机械校验」无一家实现。
+veda 另有一个别人给不了的结构优势：**记忆和它的证据在同一个库**，`/v1/answer` 天然双源。
+
+**完整方案与调研细节**：[`agent-memory.md`](agent-memory.md)（提案态，未排期，含待拍板清单）。
+
+---
+
 ## 候选方向
+
+### D3 Agent / 团队记忆
+
+veda 除了存文档，再存一类「一句话一条的事实」，并区分个人域与团队域。
+最小形态：两张表（记忆 + digest）+ principals 身份表 + 3 个 MCP 工具，
+写入只追加、检索合并两域、个人晋升团队要过审。详见 [`agent-memory.md`](agent-memory.md)。
+与 D1 共享 actor / 审计基建。
 
 ### D1 Operation log + per-file 版本历史/恢复（含 actor 审计）★ 最优先
 

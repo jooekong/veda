@@ -35,7 +35,10 @@ SQL 三件套 / revoke scope / platform authz+timeout / TimeoutLayer+CatchPanic 
 ## 方向池
 
 - 未排期的演进方向 + 外部对标结论：[`future-directions.md`](future-directions.md)
-  （tigerfs / drive9 对标；候选：operation log + 版本历史（D1）、`veda skill install`（D2））
+  （tigerfs / drive9 / agent-memory 赛道七家对标；候选：operation log + 版本历史（D1）、
+  `veda skill install`（D2）、agent/团队记忆（D3））
+- Agent / 团队记忆完整设计提案：[`agent-memory.md`](agent-memory.md)
+  （**提案态，未排期，零代码**；含调研附录与待拍板清单）
 
 ## Phase 历史
 
