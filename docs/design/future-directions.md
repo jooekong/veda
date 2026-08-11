@@ -44,12 +44,16 @@ Memobase、LangMem、basic-memory（含代码级核实）。
 图数据库在退场（mem0 开源版删光图存储、腾讯只用 SQLite、Zep 的时序创新用几根列可近似）；
 分层检索是共识（与 veda 文档三层同构）；巩固都是后台低频任务（= outbox worker + 防抖）。
 
-**两块行业空白 = veda 的机会**：① 团队记忆的治理（晋升审核 / 来源追溯 / 撤销彻底生效）
-没人做好，学术界 GateMem 测试实测现有系统普遍泄露越权和已删信息；
-② 「digest 只挑选拼装、不二次总结 + 引用可机械校验」无一家实现。
+**两块行业空白 = veda 的机会**（08-11 二轮核查 11 家后收窄措辞）：
+① 共享域的**可见性控制**已有多家在做（腾讯 v2.0 四档 ACL、cognee dataset ACL），
+但**治理闭环**——删除全链路传播、可测的遗忘——没有一家做完整；
+GateMem 基准实测现有系统越权泄露 8.9%–33.9%、删除后仍答出 2.3%–37.2%，
+veda 的分域 + 硬删目标是这两项确定性归零（集成测试可断言）；
+② 「digest 只挑选拼装、不二次总结 + 引用可机械校验」11 家复核仍无一家实现。
 veda 另有一个别人给不了的结构优势：**记忆和它的证据在同一个库**，`/v1/answer` 天然双源。
 
-**完整方案与调研细节**：[`agent-memory.md`](agent-memory.md)（提案态，未排期，含待拍板清单）。
+**完整方案与调研细节**：[`agent-memory.md`](agent-memory.md)（提案态，未排期；
+08-11 已落三项拍板：可编辑零状态机 / 无审批 wiki 治理 / principal 归属标识）。
 
 ---
 
@@ -58,8 +62,9 @@ veda 另有一个别人给不了的结构优势：**记忆和它的证据在同�
 ### D3 Agent / 团队记忆
 
 veda 除了存文档，再存一类「一句话一条的事实」，并区分个人域与团队域。
-最小形态：两张表（记忆 + digest）+ principals 身份表 + 3 个 MCP 工具，
-写入只追加、检索合并两域、个人晋升团队要过审。详见 [`agent-memory.md`](agent-memory.md)。
+最小形态：两张表（记忆 + digest）+ principals 归属表 + 5 个 MCP 工具
+（save/update/delete/search/context），记忆可编辑可硬删、零状态机，
+团队域 wiki 式全员可写（无审批），检索合并两域。详见 [`agent-memory.md`](agent-memory.md)。
 与 D1 共享 actor / 审计基建。
 
 ### D1 Operation log + per-file 版本历史/恢复（含 actor 审计）★ 最优先
