@@ -164,6 +164,7 @@ impl VedaSearchFactory {
             limit,
             path_prefix: None,
             query_vector,
+            id_filter: None,
         };
         let mut hits = self.vector.search(&req).await?;
 

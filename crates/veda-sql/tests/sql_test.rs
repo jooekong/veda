@@ -140,6 +140,20 @@ impl MetadataStore for MockMetaFull {
     ) -> Result<std::collections::HashMap<String, DentryPathRef>> {
         Ok(std::collections::HashMap::new())
     }
+    async fn get_dentry_paths_by_ids(
+        &self,
+        _ws: &str,
+        _dentry_ids: &[String],
+    ) -> Result<std::collections::HashMap<String, String>> {
+        Ok(std::collections::HashMap::new())
+    }
+    async fn sum_bytes_by_child(
+        &self,
+        _ws: &str,
+        _parent: &str,
+    ) -> Result<std::collections::HashMap<String, i64>> {
+        Ok(std::collections::HashMap::new())
+    }
     async fn upsert_doc_access_daily(&self, _rows: &[DocAccessRow]) -> Result<()> {
         Ok(())
     }
@@ -644,6 +658,20 @@ impl MetadataStore for MockMeta {
         _ws: &str,
         _fids: &[String],
     ) -> Result<std::collections::HashMap<String, DentryPathRef>> {
+        Ok(std::collections::HashMap::new())
+    }
+    async fn get_dentry_paths_by_ids(
+        &self,
+        _ws: &str,
+        _dentry_ids: &[String],
+    ) -> Result<std::collections::HashMap<String, String>> {
+        Ok(std::collections::HashMap::new())
+    }
+    async fn sum_bytes_by_child(
+        &self,
+        _ws: &str,
+        _parent: &str,
+    ) -> Result<std::collections::HashMap<String, i64>> {
         Ok(std::collections::HashMap::new())
     }
     async fn upsert_doc_access_daily(&self, _rows: &[DocAccessRow]) -> Result<()> {

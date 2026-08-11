@@ -111,6 +111,11 @@ async fn serve_abstract(
     auth: AuthWorkspace,
     path: String,
 ) -> Result<Response, AppError> {
+    // Normalize once and use the SAME form for every lookup below:
+    // `get_summary` normalizes internally, but `never_summarized` does a
+    // raw dentry lookup — feeding it the un-normalized path would 202 a
+    // trailing-slash PNG instead of 415.
+    let path = veda_core::path::normalize_lenient(&path)?;
     let summary = state
         .search_service
         .get_summary(&auth.workspace_id, &path)
@@ -167,6 +172,8 @@ async fn serve_overview(
     auth: AuthWorkspace,
     path: String,
 ) -> Result<Response, AppError> {
+    // Same single-normalization contract as `serve_abstract`.
+    let path = veda_core::path::normalize_lenient(&path)?;
     let summary = state
         .search_service
         .get_summary(&auth.workspace_id, &path)

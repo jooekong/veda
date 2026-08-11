@@ -9,7 +9,32 @@ that matters.
 
 ## [Unreleased]
 
+### Fixed
+- **Scoped search no longer starves small directories.** `path_prefix`
+  searches used to fetch a global top-K and post-filter by path, so a
+  directory holding a few percent of the workspace lost every candidate
+  slot to its bigger siblings and returned nothing — even for queries
+  its files matched well. The subtree's file ids are now pushed into the
+  vector store as an `in` filter (all modes and detail levels; subtrees
+  above 1000 entries fall back to the old global shape), so ranking
+  happens inside the directory. Also fixed along the way: directory-
+  summary hits now resolve to a real path instead of being silently
+  dropped by the prefix filter, `/api-docs` no longer swallows
+  `/api-docs-v2`, and prefixes tolerate a missing leading slash.
+- **Trailing slashes no longer 404.** `veda abstract /docs/dal/` (and
+  any abstract/overview/search/events call with a trailing slash or
+  missing leading slash) now normalizes the path instead of failing the
+  exact-match lookup.
+- **File listings show real modification times.** `list_dir` reported
+  the dentry row's timestamp, which does not change on in-place
+  overwrite; it now uses the file record's time, same as `stat`.
+
 ### Added
+- **Folder sizes in admin and platform file browsers.** Directory
+  entries in `GET /admin/v1/workspaces/{id}/files` and the platform
+  `.../project/{id}/files` now carry recursive subtree byte totals
+  (`size_bytes`; empty dirs report 0). Hot paths (FUSE, CLI `ls`, SQL)
+  keep the cheap size-less listing.
 - **Platform QA-log detail now serializes `tool_trace` as a structured
   array.** `GET .../tunnel/qa/logs` rows carried the retrieval trace as a
   raw JSON string (double-decode for consumers) and the platform contract

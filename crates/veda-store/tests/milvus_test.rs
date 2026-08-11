@@ -84,6 +84,7 @@ async fn milvus_init_upsert_search_delete() {
         limit: 5,
         path_prefix: None,
         query_vector: Some(vec.clone()),
+        id_filter: None,
     };
     let mut found = false;
     for _ in 0..10 {
@@ -103,6 +104,7 @@ async fn milvus_init_upsert_search_delete() {
         limit: 5,
         path_prefix: None,
         query_vector: Some(vec.clone()),
+        id_filter: None,
     };
     let _ = store.search(&hy).await.expect("hybrid");
 
@@ -716,6 +718,7 @@ async fn fs_fulltext_finds_lexical_only_hit() {
         limit: 10,
         path_prefix: None,
         query_vector: None,
+        id_filter: None,
     };
     let mut hits = Vec::new();
     for _ in 0..15 {
@@ -933,6 +936,7 @@ async fn fs_hybrid_fuses_not_fallback() {
         limit: 3,
         path_prefix: None,
         query_vector: Some(mk(0.10)),
+        id_filter: None,
     };
     let mut hits = Vec::new();
     for _ in 0..15 {
@@ -959,4 +963,116 @@ async fn fs_hybrid_fuses_not_fallback() {
         store.delete_chunks(&ws, fid).await.ok();
     }
     store.delete_chunks(&ws, &fid_t).await.ok();
+}
+
+/// Scope pushdown: `id_filter` must restrict chunk retrieval to the given
+/// file_ids and summary retrieval to the given summary ids — this is what
+/// path_prefix searches ride on since 2026-08-11.
+#[tokio::test]
+#[ignore]
+async fn milvus_search_honors_id_filter() {
+    let (url, token, db) = load_milvus();
+    let store = MilvusStore::new(&url, token, db);
+    let dim = load_embedding_dim();
+    store.init_collections(dim).await.expect("init");
+
+    let ws = format!("ws_{}", Uuid::new_v4());
+    let fid_a = Uuid::new_v4().to_string();
+    let fid_b = Uuid::new_v4().to_string();
+    let vec_a: Vec<f32> = (0..dim).map(|i| (i as f32) * 0.01).collect();
+    // Same direction (cosine-identical) so ranking can't hide a hit.
+    let vec_b = vec_a.clone();
+    let chunks = vec![
+        ChunkWithEmbedding {
+            id: format!("{fid_a}_0"),
+            workspace_id: ws.clone(),
+            file_id: fid_a.clone(),
+            chunk_index: 0,
+            content: "scoped file a".into(),
+            vector: vec_a.clone(),
+        },
+        ChunkWithEmbedding {
+            id: format!("{fid_b}_0"),
+            workspace_id: ws.clone(),
+            file_id: fid_b.clone(),
+            chunk_index: 0,
+            content: "scoped file b".into(),
+            vector: vec_b,
+        },
+    ];
+    store.upsert_chunks_only(&chunks).await.expect("upsert");
+
+    let base = SearchRequest {
+        workspace_id: ws.clone(),
+        query: "scoped".into(),
+        mode: SearchMode::Semantic,
+        limit: 10,
+        path_prefix: None,
+        query_vector: Some(vec_a.clone()),
+        id_filter: None,
+    };
+
+    // Unscoped: both files come back.
+    let all = store.search(&base).await.expect("search all");
+    let mut fids: Vec<&str> = all.iter().map(|h| h.file_id.as_str()).collect();
+    fids.sort();
+    fids.dedup();
+    assert_eq!(fids.len(), 2, "both files visible without a scope");
+
+    // Scoped to fid_a: fid_b must not appear, in any mode.
+    for mode in [SearchMode::Semantic, SearchMode::Hybrid, SearchMode::Fulltext] {
+        let req = SearchRequest {
+            mode,
+            id_filter: Some(vec![fid_a.clone()]),
+            query_vector: if mode == SearchMode::Fulltext {
+                None
+            } else {
+                Some(vec_a.clone())
+            },
+            ..base.clone()
+        };
+        let hits = store.search(&req).await.expect("scoped search");
+        assert!(
+            !hits.is_empty(),
+            "{mode:?}: scoped search must still find the in-scope file"
+        );
+        assert!(
+            hits.iter().all(|h| h.file_id == fid_a),
+            "{mode:?}: out-of-scope file leaked through id_filter"
+        );
+    }
+
+    // Summaries: `id` is the filter column there.
+    let sum_a = Uuid::new_v4().to_string();
+    let sum_b = Uuid::new_v4().to_string();
+    let summaries = vec![
+        veda_types::SummaryWithEmbedding {
+            id: sum_a.clone(),
+            workspace_id: ws.clone(),
+            summary_type: "file".into(),
+            content: "summary a".into(),
+            vector: vec_a.clone(),
+        },
+        veda_types::SummaryWithEmbedding {
+            id: sum_b.clone(),
+            workspace_id: ws.clone(),
+            summary_type: "dir".into(),
+            content: "summary b".into(),
+            vector: vec_a.clone(),
+        },
+    ];
+    store.upsert_summaries(&summaries).await.expect("upsert summaries");
+    let req = SearchRequest {
+        id_filter: Some(vec![sum_b.clone()]),
+        ..base.clone()
+    };
+    let hits = store.search_summaries(&req).await.expect("scoped summaries");
+    assert_eq!(hits.len(), 1, "only the in-scope summary");
+    assert_eq!(hits[0].file_id, sum_b, "summary id rides in the file_id slot");
+
+    // Cleanup.
+    store.delete_chunks(&ws, &fid_a).await.ok();
+    store.delete_chunks(&ws, &fid_b).await.ok();
+    store.delete_summary(&ws, &sum_a).await.ok();
+    store.delete_summary(&ws, &sum_b).await.ok();
 }

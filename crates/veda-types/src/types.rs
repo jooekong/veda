@@ -531,6 +531,16 @@ pub struct SearchRequest {
     /// When set (e.g. by SearchService for semantic mode), vector backends use this for ANN search.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub query_vector: Option<Vec<f32>>,
+    /// Scope pushdown for path_prefix searches. The chunk collection
+    /// filters on `file_id`, the summary collection on `id` (which holds
+    /// file_ids for file summaries and dentry_ids for directory
+    /// summaries). Retrieval then ranks *inside* the subtree instead of
+    /// fetching a global top-K and post-filtering — a small directory in
+    /// a large workspace would otherwise be starved out of the candidate
+    /// window entirely. `Some(vec![])` must not reach the stores; the
+    /// service returns empty upfront.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id_filter: Option<Vec<String>>,
 }
 
 fn default_search_limit() -> usize {

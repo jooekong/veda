@@ -1861,3 +1861,78 @@ async fn mysql_try_insert_outbox_does_not_dedup_processing_for_new_writes() {
         .execute(store.pool())
         .await;
 }
+
+/// `sum_bytes_by_child` groups subtree bytes by direct child segment.
+/// The child-segment SUBSTRING position is computed in *characters* on
+/// the Rust side — a CJK parent path is the regression this pins.
+#[tokio::test]
+#[ignore]
+async fn mysql_sum_bytes_by_child_groups_subtrees() {
+    let url = load_mysql_url();
+    let store = MysqlStore::new(&url).await.expect("connect");
+    store.migrate().await.expect("migrate");
+    let ws = Uuid::new_v4().to_string();
+
+    // /数据层/api/a.json (10B), /数据层/api/sub/b.json (5B),
+    // /数据层/biz/c.md (7B), /数据层/top.md (3B)
+    let mk = |fid: &str, path: &str, name: &str, size: i64| {
+        let mut f = sample_file(&ws, fid, &format!("ck-{fid}"));
+        f.size_bytes = size;
+        let d = sample_dentry(&ws, path, name, Some(fid));
+        (f, d)
+    };
+    let fixtures = [
+        mk("fa", "/数据层/api/a.json", "a.json", 10),
+        mk("fb", "/数据层/api/sub/b.json", "b.json", 5),
+        mk("fc", "/数据层/biz/c.md", "c.md", 7),
+        mk("ft", "/数据层/top.md", "top.md", 3),
+    ];
+    let mut tx = store.begin_tx().await.expect("begin");
+    for (f, d) in &fixtures {
+        tx.insert_file(f).await.expect("file");
+        tx.insert_dentry(d).await.expect("dentry");
+    }
+    Box::new(tx).commit().await.expect("commit");
+
+    let sums = store
+        .sum_bytes_by_child(&ws, "/数据层")
+        .await
+        .expect("sum by child");
+    assert_eq!(sums.get("api").copied(), Some(15), "10 + 5 nested: {sums:?}");
+    assert_eq!(sums.get("biz").copied(), Some(7));
+    // Direct files group under their own name; callers only read dir keys.
+    assert_eq!(sums.get("top.md").copied(), Some(3));
+
+    // Root-level grouping works too (top segment below "/").
+    let root = store.sum_bytes_by_child(&ws, "/").await.expect("root sums");
+    assert_eq!(root.get("数据层").copied(), Some(25));
+
+    cleanup_workspace(&store, &ws).await;
+}
+
+/// Batch dentry_id → path used to resolve directory-summary search hits.
+#[tokio::test]
+#[ignore]
+async fn mysql_get_dentry_paths_by_ids_resolves_dirs() {
+    let url = load_mysql_url();
+    let store = MysqlStore::new(&url).await.expect("connect");
+    store.migrate().await.expect("migrate");
+    let ws = Uuid::new_v4().to_string();
+
+    let mut dir = sample_dentry(&ws, "/api-docs", "api-docs", None);
+    dir.is_dir = true;
+    let file = sample_dentry(&ws, "/api-docs/a.md", "a.md", None);
+    let mut tx = store.begin_tx().await.expect("begin");
+    tx.insert_dentry(&dir).await.expect("dir");
+    tx.insert_dentry(&file).await.expect("file");
+    Box::new(tx).commit().await.expect("commit");
+
+    let map = store
+        .get_dentry_paths_by_ids(&ws, &[dir.id.clone(), "ghost".to_string()])
+        .await
+        .expect("lookup");
+    assert_eq!(map.get(&dir.id).map(String::as_str), Some("/api-docs"));
+    assert!(!map.contains_key("ghost"), "unknown ids are simply absent");
+
+    cleanup_workspace(&store, &ws).await;
+}

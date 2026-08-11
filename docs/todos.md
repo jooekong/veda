@@ -36,3 +36,15 @@
 
 未排期。发现于 workspace layout 的 `file_count` 实现（见
 `docs/archive/plans/gitignore-and-workspace-layout.md` v4 记录）。
+
+## scoped 搜索的超限探测是 O(子树) filesort（2026-08-11 review 发现）
+
+`SearchService::resolve_scope` 用 `list_dentries_under_page(prefix, None, SCOPE_CAP+1)`
+探测子树是否超限。该查询是 `LIKE 'prefix/%' + ORDER BY path LIMIT 1001`，
+`veda_dentries` 只有 `path(255)` 前缀索引，ORDER BY 吃不到索引 → 扫全量匹配行
+后 filesort 取 1001。一个几万条目的目录被高频 scoped 搜索（answer loop 每轮
+search 工具都重新 resolve_scope）时每次全扫，然后照样 fallback 全局检索。
+
+修法：探测超限不需要顺序，改 `COUNT(*)`（或新增无 ORDER BY 的枚举方法）。
+代价是常规小目录多一条 SQL 往返，所以等生产出现大目录 + 高频 scoped 搜索
+的实测证据再动。当前生产量级（最大 workspace ~900 dentries）扫描成本毫秒级。

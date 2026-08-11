@@ -154,6 +154,47 @@ impl MetadataStore for MysqlStore {
         Ok(map)
     }
 
+    async fn sum_bytes_by_child(
+        &self,
+        workspace_id: &str,
+        parent_path: &str,
+    ) -> Result<std::collections::HashMap<String, i64>> {
+        // Same expression-grouping shape (and collation caveats) as
+        // `count_files_by_top_level` above, scoped to one parent. The
+        // child segment starts right after "parent/" — position is
+        // computed in Rust and bound as a parameter so the SQL stays a
+        // single static statement for both root and nested parents.
+        let (like, seg_start) = if parent_path == "/" {
+            ("/%".to_string(), 2i64)
+        } else {
+            (
+                format!("{}/%", escape_like(parent_path)),
+                parent_path.chars().count() as i64 + 2,
+            )
+        };
+        let rows = sqlx::query(
+            r#"SELECT SUBSTRING_INDEX(SUBSTRING(d.path, ?), '/', 1) AS child,
+                      CAST(COALESCE(SUM(f.size_bytes), 0) AS SIGNED) AS bytes
+               FROM veda_dentries d
+               JOIN veda_files f ON d.file_id = f.id
+               WHERE d.workspace_id = ? AND d.is_dir = false AND d.path LIKE ? ESCAPE '\\'
+               GROUP BY child"#,
+        )
+        .bind(seg_start)
+        .bind(workspace_id)
+        .bind(&like)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(storage_err)?;
+        let mut map = std::collections::HashMap::new();
+        for r in &rows {
+            let seg: String = r.try_get("child").map_err(storage_err)?;
+            let n: i64 = r.try_get("bytes").map_err(storage_err)?;
+            map.insert(seg, n);
+        }
+        Ok(map)
+    }
+
     async fn list_dentries_under_page(
         &self,
         workspace_id: &str,
@@ -379,6 +420,33 @@ impl MetadataStore for MysqlStore {
             let fid: String = r.try_get("file_id").map_err(storage_err)?;
             let path: String = r.try_get("path").map_err(storage_err)?;
             map.entry(fid).or_insert(DentryPathRef { dentry_id, path });
+        }
+        Ok(map)
+    }
+
+    async fn get_dentry_paths_by_ids(
+        &self,
+        workspace_id: &str,
+        dentry_ids: &[String],
+    ) -> Result<std::collections::HashMap<String, String>> {
+        if dentry_ids.is_empty() {
+            return Ok(std::collections::HashMap::new());
+        }
+        let placeholders = vec!["?"; dentry_ids.len()].join(",");
+        let sql = format!(
+            "SELECT id, path FROM veda_dentries \
+             WHERE workspace_id = ? AND id IN ({placeholders})"
+        );
+        let mut q = sqlx::query(&sql).bind(workspace_id);
+        for id in dentry_ids {
+            q = q.bind(id);
+        }
+        let rows = q.fetch_all(&self.pool).await.map_err(storage_err)?;
+        let mut map = std::collections::HashMap::with_capacity(rows.len());
+        for r in &rows {
+            let id: String = r.try_get("id").map_err(storage_err)?;
+            let path: String = r.try_get("path").map_err(storage_err)?;
+            map.insert(id, path);
         }
         Ok(map)
     }

@@ -726,8 +726,10 @@ impl FsService {
     }
 
     /// Same as `query_events` but with a server-side path-prefix filter.
-    /// The prefix is applied as a SQL `LIKE 'prefix%'`, so callers should
-    /// pass the canonical (post-`path::normalize`) form.
+    /// The prefix is applied as a SQL `LIKE 'prefix%'`; event paths are
+    /// stored canonical, so the raw caller-supplied prefix is folded
+    /// through `normalize_lenient` first (a trailing slash would
+    /// otherwise silently match nothing).
     pub async fn query_events_filtered(
         &self,
         workspace_id: &str,
@@ -735,8 +737,19 @@ impl FsService {
         path_prefix: Option<&str>,
         limit: usize,
     ) -> Result<Vec<FsEvent>> {
+        let normalized = match path_prefix {
+            Some(raw) => {
+                let p = path::normalize_lenient(raw)?;
+                if p == "/" {
+                    None
+                } else {
+                    Some(p)
+                }
+            }
+            None => None,
+        };
         self.meta
-            .query_fs_events(workspace_id, since_id, path_prefix, limit)
+            .query_fs_events(workspace_id, since_id, normalized.as_deref(), limit)
             .await
     }
 
@@ -995,10 +1008,52 @@ impl FsService {
                     size_bytes: file.map(|f| f.size_bytes),
                     mime_type: file.map(|f| f.mime_type.clone()),
                     created_at: d.created_at,
-                    updated_at: d.updated_at,
+                    // Files: content mtime, same source as `stat` — the
+                    // dentry row only changes on rename/relink, so an
+                    // in-place overwrite (ref_count==1, the common case)
+                    // would otherwise show a stale time here while stat
+                    // shows the real one. Directories keep the dentry
+                    // time (they have no file record).
+                    updated_at: file.map(|f| f.updated_at).unwrap_or(d.updated_at),
                 }
             })
             .collect())
+    }
+
+    /// `list_dir` plus aggregated subtree byte sizes on directory
+    /// entries. Costs one extra O(subtree) GROUP BY per call, which is
+    /// why it is a separate method: display surfaces (admin console,
+    /// platform file browser) opt in, hot paths (FUSE readdir, CLI ls,
+    /// SQL table functions) keep the cheap shape.
+    pub async fn list_dir_with_dir_sizes(
+        &self,
+        workspace_id: &str,
+        raw_path: &str,
+    ) -> Result<Vec<api::DirEntry>> {
+        let mut entries = self.list_dir(workspace_id, raw_path).await?;
+        if !entries.iter().any(|e| e.is_dir) {
+            return Ok(entries);
+        }
+        let norm = path::normalize(raw_path)?;
+        // MySQL groups children under the path column's collation and
+        // returns one arbitrary spelling per group — fold both sides
+        // the same way or a `Docs` entry misses its `docs` group key
+        // (same contract as the workspace layout's file_count).
+        let sums: HashMap<String, i64> = self
+            .meta
+            .sum_bytes_by_child(workspace_id, &norm)
+            .await?
+            .into_iter()
+            .map(|(k, v)| (path::fold_path_segment(&k), v))
+            .collect();
+        for e in entries.iter_mut().filter(|e| e.is_dir) {
+            e.size_bytes = Some(
+                sums.get(&path::fold_path_segment(&e.name))
+                    .copied()
+                    .unwrap_or(0),
+            );
+        }
+        Ok(entries)
     }
 
     /// Recursively list all dentries under a directory.

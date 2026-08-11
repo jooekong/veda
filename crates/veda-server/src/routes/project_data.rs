@@ -225,9 +225,11 @@ async fn fs_files(
     Query(q): Query<FilesQuery>,
 ) -> Result<Json<ApiResponse<Vec<DirEntry>>>, AppError> {
     let ws = authz_and_load(&state, &gw, &workspace, &id, WorkspaceKind::Fs).await?;
+    // Sized variant: the AI-workbench file browser shows folder sizes;
+    // this is a display surface, not a hot path.
     let entries = state
         .fs_service
-        .list_dir(&ws.id, q.path.as_deref().unwrap_or("/"))
+        .list_dir_with_dir_sizes(&ws.id, q.path.as_deref().unwrap_or("/"))
         .await?;
     Ok(Json(ApiResponse::ok(entries)))
 }

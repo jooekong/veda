@@ -35,6 +35,54 @@ pub fn normalize(path: &str) -> Result<String> {
     Ok(format!("/{}", parts.join("/")))
 }
 
+/// Approximate MySQL's `utf8mb4_0900_ai_ci` folding for one path segment:
+/// case-insensitive and accent-insensitive.
+///
+/// Needed because path comparison in veda happens in the database — the
+/// `path` column carries that collation and `get_dentry` / `list_dentries`
+/// compare against it directly — while Rust-side consumers (workspace
+/// layout, per-directory size aggregation) have to line database-side
+/// grouping results up with dentry names. Decompose to NFD and drop
+/// combining marks, which is what "accent-insensitive" means for the
+/// Latin range; then lowercase.
+///
+/// This is deliberately an approximation of a full collation table. A
+/// segment it folds differently from MySQL loses its aggregate (reported
+/// as 0). Not airtight the other way either: this strips ALL combining
+/// marks while MySQL keeps primary-weight ones (Thai/Indic vowel signs)
+/// distinct, so two MySQL-distinct directories can collide on one folded
+/// key and one shows the other's value. Accepted as-is: the CJK/Latin
+/// names this deployment actually has cannot hit that case.
+pub fn fold_path_segment(segment: &str) -> String {
+    segment
+        .nfd()
+        .filter(|c| !unicode_normalization::char::is_combining_mark(*c))
+        .collect::<String>()
+        .to_lowercase()
+}
+
+/// Lenient variant of [`normalize`] for user-facing entry points
+/// (search path_prefix, summary lookups, event filters): tolerates a
+/// missing leading slash on top of what `normalize` already folds away
+/// (trailing slashes, `//`, `.`). `veda abstract /docs/dal/` and
+/// `path_prefix: "docs/dal"` both mean `/docs/dal` — rejecting them as
+/// malformed just produces 404s that read like data loss.
+///
+/// Deliberately does NOT trim whitespace: spaces are legal in path
+/// segments (`validate_segment` allows them), so `/docs/report ` names
+/// a real, distinct entry — trimming would silently redirect the lookup
+/// to a sibling.
+pub fn normalize_lenient(raw: &str) -> Result<String> {
+    if raw.is_empty() || raw == "/" {
+        return Ok("/".to_string());
+    }
+    if raw.starts_with('/') {
+        normalize(raw)
+    } else {
+        normalize(&format!("/{raw}"))
+    }
+}
+
 fn validate_segment(seg: &str) -> Result<()> {
     if seg.len() > 255 {
         return Err(VedaError::InvalidPath(
@@ -212,6 +260,28 @@ mod tests {
         let n = normalize("/docs/.abstract/.").unwrap();
         assert_eq!(n, "/docs/.abstract");
         assert!(reject_reserved_basename(&n).is_err());
+    }
+
+    // ── normalize_lenient ─────────────────────────────────────────
+
+    #[test]
+    fn lenient_adds_missing_lead_slash_and_eats_trailing() {
+        assert_eq!(normalize_lenient("docs/dal").unwrap(), "/docs/dal");
+        assert_eq!(normalize_lenient("/docs/dal/").unwrap(), "/docs/dal");
+        assert_eq!(normalize_lenient("docs/dal/").unwrap(), "/docs/dal");
+        assert_eq!(normalize_lenient("").unwrap(), "/");
+        assert_eq!(normalize_lenient("/").unwrap(), "/");
+    }
+
+    #[test]
+    fn lenient_preserves_whitespace_in_segments() {
+        // Spaces are legal segment characters; trimming would silently
+        // point the lookup at a different entry (codex review P2).
+        assert_eq!(
+            normalize_lenient("/docs/report ").unwrap(),
+            "/docs/report "
+        );
+        assert_eq!(normalize_lenient("/a b/c").unwrap(), "/a b/c");
     }
 
     #[test]

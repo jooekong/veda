@@ -293,6 +293,54 @@ impl MetadataStore for MockMetadataStore {
         Ok(map)
     }
 
+    async fn sum_bytes_by_child(
+        &self,
+        workspace_id: &str,
+        parent_path: &str,
+    ) -> Result<HashMap<String, i64>> {
+        // Mirror the MySQL shape: group files under parent by first
+        // segment below it, summing file sizes.
+        let st = self.state.lock().unwrap();
+        let prefix = if parent_path == "/" {
+            "/".to_string()
+        } else {
+            format!("{parent_path}/")
+        };
+        let sizes: HashMap<&str, i64> =
+            st.files.iter().map(|f| (f.id.as_str(), f.size_bytes)).collect();
+        let mut map: HashMap<String, i64> = HashMap::new();
+        for d in st
+            .dentries
+            .iter()
+            .filter(|d| d.workspace_id == workspace_id && !d.is_dir)
+        {
+            if let Some(rest) = d.path.strip_prefix(&prefix) {
+                let child = rest.split('/').next().unwrap_or("").to_string();
+                let sz = d
+                    .file_id
+                    .as_deref()
+                    .and_then(|fid| sizes.get(fid).copied())
+                    .unwrap_or(0);
+                *map.entry(child).or_insert(0) += sz;
+            }
+        }
+        Ok(map)
+    }
+
+    async fn get_dentry_paths_by_ids(
+        &self,
+        workspace_id: &str,
+        dentry_ids: &[String],
+    ) -> Result<HashMap<String, String>> {
+        let st = self.state.lock().unwrap();
+        Ok(st
+            .dentries
+            .iter()
+            .filter(|d| d.workspace_id == workspace_id && dentry_ids.contains(&d.id))
+            .map(|d| (d.id.clone(), d.path.clone()))
+            .collect())
+    }
+
     async fn upsert_doc_access_daily(&self, rows: &[DocAccessRow]) -> Result<()> {
         let mut st = self.state.lock().unwrap();
         if st.fail_doc_access_upsert {

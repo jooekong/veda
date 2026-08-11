@@ -512,8 +512,11 @@ function initFilesBrowser(wsId: string) {
         const nameCell = e.is_dir
           ? `<a data-path="${attr(e.path)}" class="text-blue-600 hover:underline cursor-pointer">${esc(e.name)}</a>`
           : `<a data-file="${attr(e.path)}" class="text-slate-700 hover:text-blue-600 hover:underline cursor-pointer">${esc(e.name)}</a>`;
+        const sizeCell =
+          e.size_bytes == null ? "" : fmtBytes(e.size_bytes);
         return `<tr class="border-t border-slate-100">
           <td class="px-3 py-1.5">${icon} ${nameCell}</td>
+          <td class="px-3 py-1.5 text-xs text-slate-500 whitespace-nowrap text-right">${sizeCell}</td>
           <td class="px-3 py-1.5 text-xs text-slate-500 whitespace-nowrap">${fmtTime(e.updated_at)}</td>
         </tr>`;
       })

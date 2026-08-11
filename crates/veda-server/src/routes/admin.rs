@@ -311,7 +311,9 @@ async fn list_files(
         return Ok(Json(ApiResponse::ok(Vec::new())));
     }
     let path = q.path.as_deref().unwrap_or("/");
-    let entries = state.fs_service.list_dir(&id, path).await?;
+    // Sized variant: admin is a low-frequency display surface, the extra
+    // O(subtree) aggregate per level is acceptable there.
+    let entries = state.fs_service.list_dir_with_dir_sizes(&id, path).await?;
     Ok(Json(ApiResponse::ok(entries)))
 }
 

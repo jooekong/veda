@@ -1515,3 +1515,44 @@ async fn reserved_basename_rejected_at_every_mutating_call_site() {
         );
     }
 }
+
+#[tokio::test]
+async fn list_dir_with_dir_sizes_aggregates_subtrees() {
+    let (svc, _state) = make_service();
+    svc.write_file("ws1", "/docs/api/a.json", "0123456789", None, None)
+        .await
+        .unwrap();
+    svc.write_file("ws1", "/docs/api/sub/b.json", "01234", None, None)
+        .await
+        .unwrap();
+    svc.write_file("ws1", "/docs/biz/c.md", "0123456", None, None)
+        .await
+        .unwrap();
+    svc.write_file("ws1", "/docs/top.md", "012", None, None)
+        .await
+        .unwrap();
+
+    let entries = svc.list_dir_with_dir_sizes("ws1", "/docs").await.unwrap();
+    let get = |name: &str| entries.iter().find(|e| e.name == name).unwrap();
+
+    // Directory sizes are recursive subtree sums.
+    assert_eq!(get("api").size_bytes, Some(15), "10 + 5 nested");
+    assert_eq!(get("biz").size_bytes, Some(7));
+    // Files keep their own size.
+    assert_eq!(get("top.md").size_bytes, Some(3));
+
+    // The plain listing still reports directories as size-less — hot
+    // paths must not silently grow an O(subtree) aggregate.
+    let plain = svc.list_dir("ws1", "/docs").await.unwrap();
+    let api = plain.iter().find(|e| e.name == "api").unwrap();
+    assert_eq!(api.size_bytes, None);
+}
+
+#[tokio::test]
+async fn list_dir_with_dir_sizes_empty_dir_reports_zero() {
+    let (svc, _state) = make_service();
+    svc.mkdir("ws1", "/emptydir").await.unwrap();
+    let entries = svc.list_dir_with_dir_sizes("ws1", "/").await.unwrap();
+    let d = entries.iter().find(|e| e.name == "emptydir").unwrap();
+    assert_eq!(d.size_bytes, Some(0), "empty directory shows 0, not null");
+}

@@ -26,6 +26,14 @@ fn storage_err(e: impl ToString) -> VedaError {
 // here so store-side callers keep their `veda_store::` paths.
 pub use veda_core::milvus::{milvus_quote, vector_collection_name};
 
+/// Render a `field in ["a","b",…]` Milvus filter clause. Caller must
+/// guarantee `ids` is non-empty — `in []` is not valid Milvus syntax
+/// (the service layer short-circuits empty scopes before reaching us).
+fn in_list_expr(field: &str, ids: &[String]) -> String {
+    let quoted: Vec<String> = ids.iter().map(|i| milvus_quote(i)).collect();
+    format!("{field} in [{}]", quoted.join(","))
+}
+
 /// Milvus may return `data` as a flat array of hits or as an array of per-query hit arrays.
 fn flatten_entity_rows(data: Option<&Value>) -> Vec<Value> {
     let Some(data) = data else {
@@ -1032,9 +1040,16 @@ impl MilvusStore {
         vector: &[f32],
         limit: usize,
         text_filter: Option<&str>,
+        id_filter: Option<&[String]>,
     ) -> Result<Vec<SearchHit>> {
         let ws = milvus_quote(workspace_id);
         let mut filter = format!("workspace_id == {ws}");
+        if let Some(ids) = id_filter {
+            if ids.is_empty() {
+                return Ok(vec![]);
+            }
+            filter.push_str(&format!(" && {}", in_list_expr("file_id", ids)));
+        }
         if let Some(q) = text_filter {
             if !q.is_empty() {
                 let pat = format!(
@@ -1066,7 +1081,13 @@ impl MilvusStore {
     async fn hybrid_search_remote(&self, req: &SearchRequest) -> Result<Option<Vec<SearchHit>>> {
         let qv = req.query_vector.as_ref().unwrap();
         let ws = milvus_quote(&req.workspace_id);
-        let base_filter = format!("workspace_id == {ws}");
+        let mut base_filter = format!("workspace_id == {ws}");
+        if let Some(ids) = req.id_filter.as_deref() {
+            if ids.is_empty() {
+                return Ok(Some(vec![]));
+            }
+            base_filter.push_str(&format!(" && {}", in_list_expr("file_id", ids)));
+        }
         let lim = req.limit.min(16_383).max(1);
         // True hybrid: two real rankers fused by RRF.
         //   1. dense ANN over `vector` (semantic similarity)
@@ -1120,6 +1141,7 @@ impl MilvusStore {
         workspace_id: &str,
         query: &str,
         limit: usize,
+        id_filter: Option<&[String]>,
     ) -> Result<Vec<SearchHit>> {
         // Real BM25 over the sparse_vector field (Milvus tokenizes via the
         // BM25 function defined in the schema). Replaces the previous LIKE
@@ -1127,12 +1149,19 @@ impl MilvusStore {
         // the README's "BM25 keyword" claim. For literal-substring needs
         // (with line numbers), use `veda grep` instead.
         let ws = milvus_quote(workspace_id);
+        let mut filter = format!("workspace_id == {ws}");
+        if let Some(ids) = id_filter {
+            if ids.is_empty() {
+                return Ok(vec![]);
+            }
+            filter.push_str(&format!(" && {}", in_list_expr("file_id", ids)));
+        }
         let lim = limit.min(16_383).max(1);
         let body = json!({
             "collectionName": COLLECTION,
             "data": [query],
             "annsField": "sparse_vector",
-            "filter": format!("workspace_id == {ws}"),
+            "filter": filter,
             "limit": lim,
             "outputFields": ["id", "file_id", "chunk_index", "content"],
             "metricType": "BM25",
@@ -1222,16 +1251,18 @@ impl VectorStore for MilvusStore {
     }
 
     async fn search(&self, req: &SearchRequest) -> Result<Vec<SearchHit>> {
+        let id_filter = req.id_filter.as_deref();
         match req.mode {
             SearchMode::Fulltext => {
-                self.query_fulltext(&req.workspace_id, &req.query, req.limit)
+                self.query_fulltext(&req.workspace_id, &req.query, req.limit, id_filter)
                     .await
             }
             SearchMode::Semantic => {
                 let v = req.query_vector.as_ref().ok_or_else(|| {
                     VedaError::InvalidInput("search requires query_vector for vector modes".into())
                 })?;
-                self.ann_search(&req.workspace_id, v, req.limit, None).await
+                self.ann_search(&req.workspace_id, v, req.limit, None, id_filter)
+                    .await
             }
             SearchMode::Hybrid => {
                 let v = req.query_vector.as_ref().ok_or_else(|| {
@@ -1245,7 +1276,7 @@ impl VectorStore for MilvusStore {
                 if let Some(hits) = self.hybrid_search_remote(req).await? {
                     return Ok(hits);
                 }
-                self.ann_search(&req.workspace_id, v, req.limit, Some(&req.query))
+                self.ann_search(&req.workspace_id, v, req.limit, Some(&req.query), id_filter)
                     .await
             }
         }
@@ -1289,7 +1320,15 @@ impl VectorStore for MilvusStore {
 
     async fn search_summaries(&self, req: &SearchRequest) -> Result<Vec<SearchHit>> {
         let ws = milvus_quote(&req.workspace_id);
-        let filter = format!("workspace_id == {ws}");
+        let mut filter = format!("workspace_id == {ws}");
+        // The summary collection's `id` holds file_ids (file summaries)
+        // and dentry_ids (directory summaries); the scope carries both.
+        if let Some(ids) = req.id_filter.as_deref() {
+            if ids.is_empty() {
+                return Ok(vec![]);
+            }
+            filter.push_str(&format!(" && {}", in_list_expr("id", ids)));
+        }
         let lim = req.limit.min(16_383).max(1);
 
         match &req.query_vector {

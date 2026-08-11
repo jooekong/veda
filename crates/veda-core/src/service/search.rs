@@ -1,35 +1,39 @@
 use std::sync::Arc;
 
 use tracing::warn;
-use unicode_normalization::UnicodeNormalization;
 use veda_types::*;
 
+use crate::path::fold_path_segment;
 use crate::service::access_stats::AccessRecorder;
 use crate::store::{EmbeddingService, MetadataStore, VectorStore};
 
-/// Approximate MySQL's `utf8mb4_0900_ai_ci` folding for one path segment:
-/// case-insensitive and accent-insensitive.
-///
-/// Needed because path comparison in veda happens in the database — the
-/// `path` column carries that collation and `get_dentry` / `list_dentries`
-/// compare against it directly — while the workspace layout has to line
-/// database-side grouping results up with dentry names in Rust. Decompose to
-/// NFD and drop combining marks, which is what "accent-insensitive" means
-/// for the Latin range; then lowercase.
-///
-/// This is deliberately an approximation of a full collation table. A
-/// segment it folds differently from MySQL loses its `file_count` (reported
-/// as 0). Not airtight the other way either: this strips ALL combining
-/// marks while MySQL keeps primary-weight ones (Thai/Indic vowel signs)
-/// distinct, so two MySQL-distinct directories can collide on one folded
-/// key and one shows the other's count. Accepted as-is: the CJK/Latin
-/// names this deployment actually has cannot hit that case.
-fn fold_path_segment(segment: &str) -> String {
-    segment
-        .nfd()
-        .filter(|c| !unicode_normalization::char::is_combining_mark(*c))
-        .collect::<String>()
-        .to_lowercase()
+/// Above this many dentries under a path_prefix, scope pushdown falls
+/// back to global-search-then-filter: the id list would bloat the Milvus
+/// filter expression (~40 bytes per id). At 1000 the expression stays
+/// ~40KB, well inside request-body limits, and directories that large
+/// hold enough of the workspace that the global candidate window isn't
+/// starved the way a 4%-of-corpus directory is.
+const SCOPE_CAP: usize = 1000;
+
+/// Subtree ids resolved from a path_prefix, split by what each search
+/// layer filters on: chunks live under file ids, directory summaries
+/// under dentry ids.
+struct SearchScope {
+    file_ids: Vec<String>,
+    dir_ids: Vec<String>,
+}
+
+impl SearchScope {
+    fn is_empty(&self) -> bool {
+        self.file_ids.is_empty() && self.dir_ids.is_empty()
+    }
+    /// Filter for the summary collection, whose `id` column holds
+    /// file_ids for file summaries and dentry_ids for directory ones.
+    fn summary_ids(&self) -> Vec<String> {
+        let mut ids = self.file_ids.clone();
+        ids.extend(self.dir_ids.iter().cloned());
+        ids
+    }
 }
 
 /// Cloneable: every field is an `Arc`, so cloning is cheap ref-count bumps.
@@ -82,17 +86,51 @@ impl SearchService {
         path_prefix: Option<&str>,
         detail_level: DetailLevel,
     ) -> Result<Vec<SearchHit>> {
+        // Lenient prefix normalization at the single choke point every
+        // surface (REST, MCP, platform gateway, SQL UDTF) flows through:
+        // "api-docs/", "/api-docs/" and "/api-docs" all mean the same
+        // subtree, and "/" means no restriction at all.
+        let normalized_prefix = match path_prefix {
+            Some(raw) => {
+                let p = crate::path::normalize_lenient(raw)?;
+                if p == "/" {
+                    None
+                } else {
+                    Some(p)
+                }
+            }
+            None => None,
+        };
+        let path_prefix = normalized_prefix.as_deref();
+
+        // Resolve the subtree id scope so retrieval ranks INSIDE the
+        // prefix instead of hoping the subtree surfaces in a global
+        // top-K (it doesn't, for small directories — see repro of
+        // 2026-08-11: /api-docs at 4% of corpus scored 0/30 candidates
+        // on generic queries). `None` scope = no prefix or subtree too
+        // large; empty scope = prefix exists but holds nothing.
+        let scope = match path_prefix {
+            Some(p) => self.resolve_scope(workspace_id, p).await?,
+            None => None,
+        };
+        if let Some(s) = &scope {
+            if s.is_empty() {
+                return Ok(vec![]);
+            }
+        }
+        let scope = scope.as_ref();
+
         let hits = match detail_level {
             DetailLevel::Abstract => {
-                self.search_abstract(workspace_id, query, mode, limit, path_prefix)
+                self.search_abstract(workspace_id, query, mode, limit, path_prefix, scope)
                     .await?
             }
             DetailLevel::Overview => {
-                self.search_overview(workspace_id, query, mode, limit, path_prefix)
+                self.search_overview(workspace_id, query, mode, limit, path_prefix, scope)
                     .await?
             }
             DetailLevel::Full => {
-                self.search_full(workspace_id, query, mode, limit, path_prefix)
+                self.search_full(workspace_id, query, mode, limit, path_prefix, scope)
                     .await?
             }
         };
@@ -112,6 +150,71 @@ impl SearchService {
         Ok(hits)
     }
 
+    /// Enumerate the subtree under `prefix` (plus the prefix entry
+    /// itself) into an id scope. Returns `None` when the subtree
+    /// exceeds [`SCOPE_CAP`] — the caller then falls back to
+    /// global-search-then-filter rather than shipping an unbounded id
+    /// list to the vector store.
+    async fn resolve_scope(
+        &self,
+        workspace_id: &str,
+        prefix: &str,
+    ) -> Result<Option<SearchScope>> {
+        let mut scope = SearchScope {
+            file_ids: Vec::new(),
+            dir_ids: Vec::new(),
+        };
+        // The prefix entry itself is part of the scope: a directory's
+        // own summary is a legitimate hit for a search scoped to it,
+        // and a *file* path as prefix means "search this one file"
+        // (the LIKE 'prefix/%' listing below can't see either).
+        match self.meta.get_dentry(workspace_id, prefix).await? {
+            Some(d) if d.is_dir => scope.dir_ids.push(d.id),
+            Some(d) => {
+                if let Some(fid) = d.file_id {
+                    scope.file_ids.push(fid);
+                }
+            }
+            None => return Ok(Some(scope)), // nonexistent path: empty scope, empty result
+        }
+        let children = self
+            .meta
+            .list_dentries_under_page(workspace_id, prefix, None, SCOPE_CAP + 1)
+            .await?;
+        if children.len() > SCOPE_CAP {
+            warn!(
+                prefix,
+                cap = SCOPE_CAP,
+                "path_prefix subtree exceeds scope cap; falling back to global search + post-filter (coverage may be incomplete)"
+            );
+            return Ok(None);
+        }
+        for d in children {
+            if d.is_dir {
+                scope.dir_ids.push(d.id);
+            } else if let Some(fid) = d.file_id {
+                scope.file_ids.push(fid);
+            }
+        }
+        Ok(Some(scope))
+    }
+
+    /// Prefix match with a path-boundary: `/api-docs` must not swallow
+    /// `/api-docs-v2/…`. FALLBACK-ONLY post-filter (subtree over the
+    /// scope cap → global retrieval). When the id scope was pushed
+    /// down, every hit is in the subtree by construction and a
+    /// byte-level path comparison could only wrongly drop hits: the DB
+    /// compares paths with `utf8mb4_0900_ai_ci` (a stored `/Docs`
+    /// subtree resolves for a requested `/docs` prefix), and a COW
+    /// copy-alias resolves to its smallest path which may sit outside
+    /// the subtree even though the file itself is in scope.
+    fn prefix_matches(path: &str, prefix: &str) -> bool {
+        path == prefix
+            || (path.len() > prefix.len()
+                && path.starts_with(prefix)
+                && path.as_bytes()[prefix.len()] == b'/')
+    }
+
     async fn search_abstract(
         &self,
         workspace_id: &str,
@@ -119,12 +222,16 @@ impl SearchService {
         mode: SearchMode,
         limit: usize,
         path_prefix: Option<&str>,
+        scope: Option<&SearchScope>,
     ) -> Result<Vec<SearchHit>> {
         if mode != SearchMode::Semantic {
             warn!(requested_mode = ?mode, "abstract/overview search always uses semantic mode, ignoring requested mode");
         }
         let limit = if limit == 0 { 10 } else { limit };
-        let fetch_limit = if path_prefix.is_some() {
+        // With the scope pushed down, retrieval already ranks inside the
+        // subtree — fetch exactly `limit`. Only the fallback (prefix set
+        // but subtree over cap) still over-fetches for its post-filter.
+        let fetch_limit = if path_prefix.is_some() && scope.is_none() {
             limit * 3
         } else {
             limit
@@ -147,13 +254,20 @@ impl SearchService {
             limit: fetch_limit,
             path_prefix: path_prefix.map(|s| s.to_string()),
             query_vector,
+            id_filter: scope.map(|s| s.summary_ids()),
         };
 
         let mut hits = self.vector.search_summaries(&req).await?;
         self.resolve_paths(workspace_id, &mut hits).await;
 
-        if let Some(prefix) = path_prefix {
-            hits.retain(|h| h.path.as_ref().map_or(false, |p| p.starts_with(prefix)));
+        if scope.is_none() {
+            if let Some(prefix) = path_prefix {
+                hits.retain(|h| {
+                    h.path
+                        .as_ref()
+                        .map_or(false, |p| Self::prefix_matches(p, prefix))
+                });
+            }
         }
         hits.truncate(limit);
         Ok(hits)
@@ -166,9 +280,10 @@ impl SearchService {
         mode: SearchMode,
         limit: usize,
         path_prefix: Option<&str>,
+        scope: Option<&SearchScope>,
     ) -> Result<Vec<SearchHit>> {
         let mut hits = self
-            .search_abstract(workspace_id, query, mode, limit, path_prefix)
+            .search_abstract(workspace_id, query, mode, limit, path_prefix, scope)
             .await?;
 
         let file_ids: Vec<String> = hits.iter().map(|h| h.file_id.clone()).collect();
@@ -177,6 +292,24 @@ impl SearchService {
             for hit in &mut hits {
                 if let Some(summary) = summaries.get(&hit.file_id) {
                     hit.l1_overview = Some(summary.l1_overview.clone());
+                }
+            }
+        }
+        // Directory-summary hits carry the dentry id in the id slot, so
+        // the file-keyed lookup above can't fill their L1 — fetch those
+        // by dentry id or directory hits ship as L0-only Overview rows.
+        let dir_ids: Vec<String> = hits
+            .iter()
+            .filter(|h| h.l1_overview.is_none())
+            .map(|h| h.file_id.clone())
+            .collect();
+        if !dir_ids.is_empty() {
+            let dir_summaries = self.meta.get_summaries_by_dentry_ids(&dir_ids).await?;
+            for hit in &mut hits {
+                if hit.l1_overview.is_none() {
+                    if let Some(summary) = dir_summaries.get(&hit.file_id) {
+                        hit.l1_overview = Some(summary.l1_overview.clone());
+                    }
                 }
             }
         }
@@ -190,13 +323,22 @@ impl SearchService {
         mode: SearchMode,
         limit: usize,
         path_prefix: Option<&str>,
+        scope: Option<&SearchScope>,
     ) -> Result<Vec<SearchHit>> {
         let limit = if limit == 0 { 10 } else { limit };
-        let fetch_limit = if path_prefix.is_some() {
+        let fetch_limit = if path_prefix.is_some() && scope.is_none() {
             limit * 3
         } else {
             limit
         };
+        // Chunks only exist for files. A scope with directories but no
+        // files can't produce full-level hits, so skip the round-trip
+        // (also keeps the `Some(vec![])` contract off the stores).
+        if let Some(s) = scope {
+            if s.file_ids.is_empty() {
+                return Ok(vec![]);
+            }
+        }
 
         let query_vector = match mode {
             SearchMode::Semantic | SearchMode::Hybrid => {
@@ -215,12 +357,19 @@ impl SearchService {
             limit: fetch_limit,
             path_prefix: path_prefix.map(|s| s.to_string()),
             query_vector,
+            id_filter: scope.map(|s| s.file_ids.clone()),
         };
         let mut hits = self.vector.search(&req).await?;
         self.resolve_paths(workspace_id, &mut hits).await;
 
-        if let Some(prefix) = path_prefix {
-            hits.retain(|h| h.path.as_ref().map_or(false, |p| p.starts_with(prefix)));
+        if scope.is_none() {
+            if let Some(prefix) = path_prefix {
+                hits.retain(|h| {
+                    h.path
+                        .as_ref()
+                        .map_or(false, |p| Self::prefix_matches(p, prefix))
+                });
+            }
         }
 
         hits.truncate(limit);
@@ -255,9 +404,47 @@ impl SearchService {
                 warn!(err = %e, "failed to batch-resolve paths for search hits");
             }
         }
+
+        // Second pass: ids that didn't resolve as file_ids are directory
+        // dentry ids (directory-summary hits store the dentry id in the
+        // id slot — a directory has no file). Without this, every
+        // directory summary surfaced path-less and a path_prefix filter
+        // silently dropped it, even at rank 1. `dentry_id` stays None on
+        // purpose: access stats count *document* reads/impressions and a
+        // directory hit is not a document.
+        let unresolved: Vec<String> = hits
+            .iter()
+            .filter(|h| h.path.is_none())
+            .map(|h| h.file_id.clone())
+            .collect();
+        if unresolved.is_empty() {
+            return;
+        }
+        match self
+            .meta
+            .get_dentry_paths_by_ids(workspace_id, &unresolved)
+            .await
+        {
+            Ok(dir_map) => {
+                for hit in hits.iter_mut() {
+                    if hit.path.is_none() {
+                        if let Some(p) = dir_map.get(&hit.file_id) {
+                            hit.path = Some(p.clone());
+                        }
+                    }
+                }
+            }
+            Err(e) => {
+                warn!(err = %e, "failed to batch-resolve directory paths for summary hits");
+            }
+        }
     }
 
     pub async fn get_summary(&self, workspace_id: &str, path: &str) -> Result<Option<FileSummary>> {
+        // Dentry paths are stored canonical; a raw `/docs/dal/` from the
+        // CLI or MCP would 404 on the trailing slash without this.
+        let path = crate::path::normalize_lenient(path)?;
+        let path = path.as_str();
         let dentry = self.meta.get_dentry(workspace_id, path).await?;
         let Some(dentry) = dentry else {
             return Err(VedaError::NotFound(format!("path not found: {path}")));

@@ -86,12 +86,15 @@ async fn sse_events(
         }
     }
 
-    // Validate path_prefix at the boundary. An invalid prefix is a hard 400 —
+    // Validate path_prefix at the boundary. Lenient normalization (adds a
+    // missing lead slash, folds a trailing one) — same posture as search
+    // and summary lookups. A prefix that still fails is a hard 400;
     // silently widening to "all events" would be surprising for the caller.
     let path_prefix: Option<String> = match q.path_prefix.as_deref() {
         None => None,
         Some(s) if s.is_empty() => None,
-        Some(s) => match veda_core::path::normalize(s) {
+        Some(s) => match veda_core::path::normalize_lenient(s) {
+            Ok(n) if n == "/" => None,
             Ok(n) => Some(n),
             Err(_) => {
                 return (

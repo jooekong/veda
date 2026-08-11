@@ -75,6 +75,19 @@ pub trait MetadataStore: Send + Sync {
         &self,
         workspace_id: &str,
     ) -> Result<std::collections::HashMap<String, i64>>;
+    /// Aggregate file bytes under `parent_path` grouped by the first path
+    /// segment below it — i.e. subtree size per direct child. Keys carry
+    /// the database's collation semantics (one arbitrary spelling per
+    /// case/accent-folded group), so callers must fold both sides with
+    /// `path::fold_path_segment` before lookup. Root is `parent_path =
+    /// "/"`. Cost is O(dentries under parent) with no covering index —
+    /// display surfaces only (admin / platform file browser), never hot
+    /// paths (FUSE readdir, CLI ls).
+    async fn sum_bytes_by_child(
+        &self,
+        workspace_id: &str,
+        parent_path: &str,
+    ) -> Result<std::collections::HashMap<String, i64>>;
     /// Return up to `limit` dentries under `path_prefix` ordered by `path`
     /// ASC, strictly after `after_path` (exclusive cursor; `None` starts
     /// from the beginning). Caller pages by passing the last returned
@@ -222,6 +235,16 @@ pub trait MetadataStore: Send + Sync {
         workspace_id: &str,
         file_ids: &[String],
     ) -> Result<std::collections::HashMap<String, DentryPathRef>>;
+    /// Batch dentry_id → path lookup. Directory-summary search hits carry
+    /// the *dentry* id in their id slot (a directory has no file), so
+    /// path resolution needs this second key space besides
+    /// `get_dentry_paths_by_file_ids`. No default implementation: a
+    /// per-id loop would be N+1.
+    async fn get_dentry_paths_by_ids(
+        &self,
+        workspace_id: &str,
+        dentry_ids: &[String],
+    ) -> Result<std::collections::HashMap<String, String>>;
     async fn query_fs_events(
         &self,
         workspace_id: &str,
