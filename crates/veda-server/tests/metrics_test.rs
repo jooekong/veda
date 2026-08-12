@@ -121,6 +121,8 @@ async fn metrics_render_contains_expected_series() {
         mysql.clone(),
         mysql.clone(),
         milvus.clone(),
+        mysql.clone(),
+        milvus.clone(),
         embedding.clone(),
         None,
         4,

@@ -221,6 +221,8 @@ async fn worker_streams_chunks_for_large_file_embed() {
         mysql.clone(),
         mysql.clone(),
         milvus.clone(),
+        mysql.clone(),
+        milvus.clone(),
         embedding.clone(),
         None,
         4,

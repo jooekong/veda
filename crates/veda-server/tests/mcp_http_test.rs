@@ -678,6 +678,8 @@ async fn mcp_http_suite() {
         app.mysql.clone(),
         app.mysql.clone(),
         app.milvus.clone(),
+        app.mysql.clone(),
+        app.milvus.clone(),
         app.embedding.clone(),
         None,
         4,

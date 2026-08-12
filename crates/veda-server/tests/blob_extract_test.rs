@@ -228,6 +228,8 @@ async fn pdf_extracts_and_becomes_searchable_e2e() {
         mysql.clone(),
         mysql.clone(),
         milvus.clone(),
+        mysql.clone(),
+        milvus.clone(),
         embedding.clone(),
         None,
         4,
@@ -314,6 +316,8 @@ async fn word_extracts_readable_and_cleans_up_e2e() {
 
     let worker = Worker::new(
         mysql.clone(),
+        mysql.clone(),
+        milvus.clone(),
         mysql.clone(),
         milvus.clone(),
         embedding.clone(),

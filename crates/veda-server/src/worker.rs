@@ -9,7 +9,10 @@ use tokio::sync::watch;
 use tokio::time::sleep;
 use tracing::{debug, error, info, warn};
 
-use veda_core::store::{EmbeddingService, LlmService, MetadataStore, TaskQueue, VectorStore};
+use veda_core::store::{
+    EmbeddingService, LlmService, MemoryStore, MemoryVectorStore, MetadataStore, TaskQueue,
+    VectorStore,
+};
 use veda_pipeline::chunking::{is_binary_content, semantic_chunk};
 use veda_pipeline::extraction::extract_text;
 use veda_pipeline::summary;
@@ -38,6 +41,8 @@ pub struct Worker {
     meta: Arc<dyn MetadataStore>,
     task_queue: Arc<dyn TaskQueue>,
     vector: Arc<dyn VectorStore>,
+    memory_store: Arc<dyn MemoryStore>,
+    memory_vector: Arc<dyn MemoryVectorStore>,
     embedding: Arc<dyn EmbeddingService>,
     llm: Option<Arc<dyn LlmService>>,
     batch_size: usize,
@@ -46,10 +51,13 @@ pub struct Worker {
 }
 
 impl Worker {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         meta: Arc<dyn MetadataStore>,
         task_queue: Arc<dyn TaskQueue>,
         vector: Arc<dyn VectorStore>,
+        memory_store: Arc<dyn MemoryStore>,
+        memory_vector: Arc<dyn MemoryVectorStore>,
         embedding: Arc<dyn EmbeddingService>,
         llm: Option<Arc<dyn LlmService>>,
         batch_size: usize,
@@ -60,6 +68,8 @@ impl Worker {
             meta,
             task_queue,
             vector,
+            memory_store,
+            memory_vector,
             embedding,
             llm,
             batch_size,
@@ -231,6 +241,10 @@ impl Worker {
             OutboxEventType::ExtractSync => {
                 self.handle_extract_sync(&task.workspace_id, file_id, force_reembed)
                     .await?;
+                self.task_queue.complete(task.id).await?;
+            }
+            OutboxEventType::MemorySync => {
+                self.handle_memory_sync(&task.payload).await?;
                 self.task_queue.complete(task.id).await?;
             }
         }
@@ -787,6 +801,58 @@ impl Worker {
 
         Ok(())
     }
+
+    /// Heal the memory vector index after a synchronous write failed
+    /// (docs/plans/agent-memory-m1.md §2). Deletes are a plain retry;
+    /// upserts re-read the row under its own scope (payload carries it —
+    /// even infra reads go through the scope-filtered primitive), re-embed,
+    /// and re-upsert. A row that vanished or expired in the meantime is
+    /// simply done: the recheck read path already guarantees correctness,
+    /// this task only restores recall.
+    async fn handle_memory_sync(&self, payload: &serde_json::Value) -> Result<()> {
+        let memory_id = payload
+            .get("memory_id")
+            .and_then(|v| v.as_i64())
+            .ok_or_else(|| VedaError::Internal("memory_sync payload missing memory_id".into()))?;
+        let op = payload.get("op").and_then(|v| v.as_str()).unwrap_or("upsert");
+        if op == "delete" {
+            return self.memory_vector.delete_memory_vectors(&[memory_id]).await;
+        }
+        let scope_type = payload
+            .get("scope_type")
+            .and_then(|v| v.as_str())
+            .and_then(MemoryScopeType::parse)
+            .ok_or_else(|| VedaError::Internal("memory_sync payload missing scope_type".into()))?;
+        let scope_id = payload
+            .get("scope_id")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| VedaError::Internal("memory_sync payload missing scope_id".into()))?;
+        let filter = MemoryScopeFilter::Scope {
+            scope_type,
+            scope_id: scope_id.to_string(),
+        };
+        let rows = self
+            .memory_store
+            .get_memories_by_ids(&[memory_id], &filter)
+            .await?;
+        let Some(memory) = rows.into_iter().next() else {
+            debug!(memory_id, "memory gone before index heal, nothing to do");
+            return Ok(());
+        };
+        let mut vectors = self.embedding.embed(&[memory.content.clone()]).await?;
+        let vector = vectors
+            .pop()
+            .ok_or_else(|| VedaError::EmbeddingFailed("empty embedding batch".into()))?;
+        self.memory_vector
+            .upsert_memory_vectors(&[MemoryWithEmbedding {
+                id: memory.id,
+                scope_type: memory.scope_type,
+                scope_id: memory.scope_id.clone(),
+                origin_workspace_id: memory.origin_workspace_id.clone().unwrap_or_default(),
+                vector,
+            }])
+            .await
+    }
 }
 
 fn parent_path_of(path: &str) -> String {
@@ -818,6 +884,7 @@ fn outbox_event_label(event: OutboxEventType) -> &'static str {
         OutboxEventType::SummarySync => "summary_sync",
         OutboxEventType::DirSummarySync => "dir_summary_sync",
         OutboxEventType::ExtractSync => "extract_sync",
+        OutboxEventType::MemorySync => "memory_sync",
     }
 }
 

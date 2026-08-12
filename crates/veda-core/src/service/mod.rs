@@ -2,6 +2,7 @@ pub mod access_stats;
 pub mod answer;
 pub mod collection;
 pub mod fs;
+pub mod memory;
 pub mod search;
 pub mod vector;
 pub mod workspace;

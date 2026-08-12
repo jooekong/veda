@@ -184,6 +184,8 @@ async fn drain_outbox(
         mysql.clone(),
         mysql.clone(),
         milvus.clone(),
+        mysql.clone(),
+        milvus.clone(),
         embedding.clone(),
         None,
         4,

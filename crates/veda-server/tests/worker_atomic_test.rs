@@ -154,6 +154,8 @@ async fn drain_outbox(
         mysql.clone(),
         mysql.clone(),
         milvus.clone(),
+        mysql.clone(),
+        milvus.clone(),
         embedding.clone(),
         None,         // no LLM — tests don't exercise summary path
         4,            // small batch

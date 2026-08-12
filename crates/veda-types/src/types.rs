@@ -102,6 +102,10 @@ pub enum OutboxEventType {
     DirSummarySync,
     /// Extract text from a binary blob (pdf) → embed into Milvus for search.
     ExtractSync,
+    /// Heal the memory vector index after a synchronous Milvus write failed
+    /// (save/update/delete already committed to MySQL). Payload:
+    /// {memory_id, op: "upsert"|"delete", scope_type, scope_id}.
+    MemorySync,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -644,6 +648,24 @@ pub struct StorageStats {
 // Atomic memories with ownership partitioning (design: docs/design/agent-memory.md,
 // build plan: docs/plans/agent-memory-m1.md). MySQL is the single source of
 // truth; Milvus holds an index-only copy (id + scope scalars + vector).
+
+/// Wire-level scope selector (save/search inputs). Resolved server-side
+/// into a storage domain — clients never pass scope ids.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum MemoryScope {
+    /// Operator's personal domain (the default). Falls back to the agent's
+    /// own domain when no operator identity resolves (shared key).
+    #[default]
+    #[serde(rename = "mine")]
+    Mine,
+    /// Current workspace's team domain.
+    #[serde(rename = "team")]
+    Team,
+    /// The agent's own domain — meaningful for shared/unattended agents;
+    /// identical to Mine under M1's key-only identity.
+    #[serde(rename = "self")]
+    SelfScope,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

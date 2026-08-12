@@ -236,6 +236,8 @@ async fn main() -> anyhow::Result<()> {
             mysql.clone(),
             mysql.clone(),
             milvus.clone(),
+            mysql.clone(),
+            milvus.clone(),
             embedding_bg.clone(),
             llm.clone(),
             cfg.worker.batch_size,

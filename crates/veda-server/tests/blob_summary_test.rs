@@ -188,6 +188,8 @@ where
         rt.mysql.clone(),
         rt.mysql.clone(),
         rt.milvus.clone(),
+        rt.mysql.clone(),
+        rt.milvus.clone(),
         rt.embedding.clone(),
         llm,
         4,
