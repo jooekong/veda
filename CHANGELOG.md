@@ -27,6 +27,18 @@ that matters.
   forced Milvus-remnant window). Design: `docs/design/agent-memory.md`;
   build plan: `docs/plans/agent-memory-m1.md`.
 
+### Fixed
+- **Platform doc-heat stats returned the wrong shape, showing up as
+  "no data" in the AI-workbench console.** The company response
+  envelope treated any object carrying an `items` array as a paginated
+  list, so `GET /v1/workspace/{ws}/project/{id}/stats/docs` came back
+  as `{data: [...], page, ...}` instead of the documented bare
+  `{days, items}` — dropping `days` and leaving frontends built
+  against the APIDoc contract reading an absent `items` field. The
+  envelope now paginates only genuine `PaginatedResponse` bodies
+  (both `items` and `has_more` present); stats responses pass through
+  bare, matching APIDoc.
+
 ## [0.1.26] — 2026-08-12
 
 ### Added

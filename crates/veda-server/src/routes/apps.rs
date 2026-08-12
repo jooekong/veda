@@ -751,10 +751,13 @@ fn map_to_company(v: serde_json::Value) -> serde_json::Value {
         serde_json::Value::Null => json!({}),
         other => {
             // veda PaginatedResponse `{ items, has_more, next_cursor }` is still
-            // a list — unwrap into a page. (Apps surface doesn't currently emit
-            // this, but keep the mapping coherent.)
-            if let Some(items) = other.get("items").and_then(|i| i.as_array()) {
-                let has_more = other.get("has_more").and_then(|b| b.as_bool()).unwrap_or(false);
+            // a list — unwrap into a page. Require BOTH marker fields: a single
+            // object may legitimately carry an `items` array (stats/docs
+            // `{days, items}`) and must stay bare per the published contract.
+            if let (Some(items), Some(has_more)) = (
+                other.get("items").and_then(|i| i.as_array()),
+                other.get("has_more").and_then(|b| b.as_bool()),
+            ) {
                 return company_page(items.clone(), has_more);
             }
             // Single object (create / update / getToken) → returned as-is,
@@ -829,6 +832,21 @@ mod tests {
         assert_eq!(out["has_next_page"], true);
         assert!(out.get("next_cursor").is_none(), "cursor not leaked into envelope");
         assert!(out["data"][0].get("items").is_none(), "items unwrapped, not nested");
+    }
+
+    #[test]
+    fn envelope_stats_object_with_items_stays_bare() {
+        // DocAccessStatsResponse has an `items` field but is NOT a
+        // PaginatedResponse (no `has_more`); it must reach the workbench as
+        // the bare `{days, items}` object documented in APIDoc.
+        let out = map_to_company(json!({
+            "success": true,
+            "data": { "days": 7, "items": [{"path": "/a.md", "reads": 1, "search_hits": 0}] }
+        }));
+        assert_eq!(out["days"], 7);
+        assert_eq!(out["items"].as_array().unwrap().len(), 1);
+        assert!(out.get("data").is_none(), "stats object is not paginated");
+        assert!(out.get("page").is_none(), "stats object carries no pagination");
     }
 
     #[test]
