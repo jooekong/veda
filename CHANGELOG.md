@@ -581,7 +581,7 @@ that matters.
   by default (`[answer] enabled`, falls back to raw search when off). Verified
   end-to-end against real MySQL/Milvus/airouter: grounded cited answers,
   refusal (not hallucination) on out-of-scope questions. Design + review log:
-  `docs/plans/veda-answer-plan.md`.
+  `docs/archive/plans/veda-answer-plan.md`.
 - **veda-tunnel — external IM bridge (new crate, scaffold).** An independent
   process + binary (`crates/veda-tunnel`) that brings veda retrieval into
   WeCom (企业微信) via the aibot long connection (WSS). A standard `wk_`

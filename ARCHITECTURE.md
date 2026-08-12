@@ -82,7 +82,7 @@ veda-tunnel     外部 IM 接入（企微长连接）             (已上生产 
 
 ## 文档访问热度统计 `GET /v1/stats/docs`（2026-08-05）
 
-fs workspace 按文档按天计数 `search_hits`（搜索曝光，按 query 去重）与 `reads`（内容被服务端实际取出），业务方看「哪些文档在被用」。设计与评审裁决：`docs/plans/doc-access-stats.md`（Claude+Codex 交叉评审后修订）。
+fs workspace 按文档按天计数 `search_hits`（搜索曝光，按 query 去重）与 `reads`（内容被服务端实际取出），业务方看「哪些文档在被用」。设计与评审裁决：`docs/archive/plans/doc-access-stats.md`（Claude+Codex 交叉评审后修订）。
 
 - **采集**：`veda-core/service/access_stats.rs::AccessRecorder`——进程内 `Mutex<HashMap>` 聚合（热路径纳秒级，单写者架构约束下安全），server 后台任务 30s 批量 `INSERT…ON DUPLICATE KEY UPDATE` 进 `veda_doc_access_daily`（PK `(workspace_id, day, dentry_id)` + `idx_day`；`read_count` 列名避开 MySQL 保留字 READS）。**flush 全量单事务，失败整体丢弃不重试**（重试无法 exactly-once，双计比丢一个 30s 窗口更糟）；final flush 在 `axum::serve` 返回后由 main 显式执行（在 shutdown 信号时刻 flush 会丢 drain 窗口的尾巴）。表清理由 stats 任务自己每日执行（`[stats] retention_days`，不受 `[retention].enabled` 影响）。
 - **聚合 key = `dentry_id`**：覆盖写/rename 下唯一稳定的身份（`file_id` 在 `ref_count>1` 覆盖写会换、copy 别名会合并；`path` 每 rename 断一次）。搜索侧经 `get_dentry_paths_by_file_ids`（已改返回 `DentryPathRef{dentry_id,path}`，`ORDER BY path` 保证 copy 别名归属确定）随 resolve 顺带填进 `SearchHit.dentry_id`（serde skip，server-only），零额外往返；resolve 不到的命中（游离 file_id / dir-summary 命中）无 dentry_id 自动跳过。
