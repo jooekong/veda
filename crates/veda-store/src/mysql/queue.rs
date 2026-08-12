@@ -34,7 +34,22 @@ impl TaskQueue for MysqlStore {
         let mut dead_ids: Vec<(i64, String)> = Vec::new();
         let mut reclaims: Vec<(i64, String)> = Vec::new();
         for r in &rows {
-            let mut evt = row_to_outbox(r)?;
+            // An unparsable row (typically an event_type enum this binary
+            // predates, i.e. running an older build after a rollback) must
+            // not poison the whole batch: `?` here would abort the claim
+            // transaction every cycle and stall the entire outbox. Dead-
+            // letter the row alone and keep claiming — redrive after
+            // upgrading back is a manual UPDATE.
+            let mut evt = match row_to_outbox(r) {
+                Ok(e) => e,
+                Err(err) => {
+                    if let Ok(id) = r.try_get::<i64, _>("id") {
+                        tracing::warn!(task_id = id, err = %err, "outbox row unparsable, dead-lettering");
+                        dead_ids.push((id, "unparsable".to_string()));
+                    }
+                    continue;
+                }
+            };
             let was_processing = evt.status == OutboxStatus::Processing;
             if was_processing {
                 // Lease expired: previous attempt crashed without calling fail(),

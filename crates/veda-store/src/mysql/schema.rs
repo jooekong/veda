@@ -244,6 +244,10 @@ impl MysqlStore {
             // without the index it scans the whole pending backlog inside
             // the write transaction.
             "ALTER TABLE veda_outbox ADD INDEX idx_dedup (workspace_id, event_type, status)",
+            // memory_sync events use the scope id as the partition label;
+            // principal/prefixed ids need the same width as veda_memories
+            // (widening MODIFY is idempotent — reruns are no-ops).
+            "ALTER TABLE veda_outbox MODIFY COLUMN workspace_id VARCHAR(64) NOT NULL",
             // Search-hit path backfill resolves dentries by file_id; the
             // existing indexes all lead with path columns, so this lookup
             // otherwise scans every dentry in the workspace.

@@ -14,12 +14,12 @@ use chrono::{DateTime, Utc};
 use tracing::warn;
 use veda_types::{
     Memory, MemoryInsert, MemoryKind, MemoryPatch, MemoryScope, MemoryScopeFilter,
-    MemoryScopeType, MemoryWithEmbedding, NewMemory, OutboxEvent, OutboxEventType, OutboxStatus,
-    PrincipalKind, PrincipalSource, Result, VedaError,
+    MemoryScopeType, MemoryWithEmbedding, NewMemory, PrincipalKind, PrincipalSource, Result,
+    VedaError,
 };
 
 use crate::checksum::sha256_hex;
-use crate::store::{EmbeddingService, MemoryStore, MemoryVectorStore, TaskQueue};
+use crate::store::{EmbeddingService, MemoryStore, MemoryVectorStore};
 
 /// Memories are one-liners; anything longer belongs in a document.
 const MAX_CONTENT_CHARS: usize = 4096;
@@ -81,11 +81,15 @@ pub struct UpdateMemoryInput {
     pub expires_at: Option<DateTime<Utc>>,
 }
 
+// Durability note: every store write (insert/update-with-content/delete)
+// commits a MemorySync outbox task in the same transaction, so the worker
+// replay — not the synchronous Milvus writes below — is what guarantees the
+// vector index converges. The sync writes only buy immediate searchability;
+// their failures are warnings, never data loss.
 pub struct MemoryService {
     store: Arc<dyn MemoryStore>,
     vector: Arc<dyn MemoryVectorStore>,
     embedding: Arc<dyn EmbeddingService>,
-    task_queue: Arc<dyn TaskQueue>,
 }
 
 impl MemoryService {
@@ -93,13 +97,11 @@ impl MemoryService {
         store: Arc<dyn MemoryStore>,
         vector: Arc<dyn MemoryVectorStore>,
         embedding: Arc<dyn EmbeddingService>,
-        task_queue: Arc<dyn TaskQueue>,
     ) -> Self {
         Self {
             store,
             vector,
             embedding,
-            task_queue,
         }
     }
 
@@ -184,17 +186,14 @@ impl MemoryService {
             MemoryInsert::Duplicate(m) => (m, true),
         };
 
+        // Latency optimization only — the transactional MemorySync task
+        // the store just committed makes the index converge regardless.
         if let Err(e) = self
             .vector
             .upsert_memory_vectors(&[embedding_row(&memory, vector)])
             .await
         {
-            warn!(memory_id = memory.id, err = %e, "memory vector upsert failed, enqueueing heal");
-            // If even the outbox insert fails the memory would be silently
-            // unfindable — surface the error instead; the retried save takes
-            // the Duplicate path and heals.
-            self.enqueue_sync(&actor.workspace_id, &memory, "upsert")
-                .await?;
+            warn!(memory_id = memory.id, err = %e, "sync memory vector upsert failed; outbox heal will cover");
         }
 
         Ok(SaveMemoryOutcome {
@@ -286,9 +285,9 @@ impl MemoryService {
             .await?;
 
         if patch.content.is_some() {
-            // Re-embed. On failure the recheck read still serves the new
-            // text from MySQL (only ranking staleness), so a failed heal
-            // enqueue degrades to a warning instead of failing the edit.
+            // Sync re-embed for immediate ranking freshness; the store
+            // committed a MemorySync task with the row change, so failures
+            // here cost latency, not convergence.
             match self.embed_one(&memory.content).await {
                 Ok(v) => {
                     if let Err(e) = self
@@ -296,18 +295,11 @@ impl MemoryService {
                         .upsert_memory_vectors(&[embedding_row(&memory, v)])
                         .await
                     {
-                        warn!(memory_id = memory.id, err = %e, "memory re-embed upsert failed");
-                        if let Err(e) = self.enqueue_sync(&actor.workspace_id, &memory, "upsert").await
-                        {
-                            warn!(memory_id = memory.id, err = %e, "memory sync enqueue failed");
-                        }
+                        warn!(memory_id = memory.id, err = %e, "sync re-embed upsert failed; outbox heal will cover");
                     }
                 }
                 Err(e) => {
-                    warn!(memory_id = memory.id, err = %e, "re-embed failed, enqueueing heal");
-                    if let Err(e) = self.enqueue_sync(&actor.workspace_id, &memory, "upsert").await {
-                        warn!(memory_id = memory.id, err = %e, "memory sync enqueue failed");
-                    }
+                    warn!(memory_id = memory.id, err = %e, "sync re-embed failed; outbox heal will cover");
                 }
             }
         }
@@ -320,25 +312,11 @@ impl MemoryService {
             return Err(VedaError::NotFound(format!("memory {id}")));
         }
         // A leftover vector cannot resurface the memory (recheck finds no
-        // row); cleanup is hygiene, so failures degrade to the outbox and
-        // then to a warning.
+        // row); the store committed a delete task alongside the row delete,
+        // which also supersedes any in-flight upsert heal. This sync delete
+        // is immediacy only.
         if let Err(e) = self.vector.delete_memory_vectors(&[id]).await {
-            warn!(memory_id = id, err = %e, "memory vector delete failed, enqueueing");
-            let event = OutboxEvent {
-                id: 0,
-                workspace_id: actor.workspace_id.clone(),
-                event_type: OutboxEventType::MemorySync,
-                payload: serde_json::json!({ "memory_id": id, "op": "delete" }),
-                status: OutboxStatus::Pending,
-                retry_count: 0,
-                max_retries: 3,
-                available_at: Utc::now(),
-                lease_until: None,
-                created_at: Utc::now(),
-            };
-            if let Err(e) = self.task_queue.enqueue(&event).await {
-                warn!(memory_id = id, err = %e, "memory delete enqueue failed");
-            }
+            warn!(memory_id = id, err = %e, "sync memory vector delete failed; outbox task will cover");
         }
         Ok(())
     }
@@ -405,27 +383,6 @@ impl MemoryService {
         let mut vs = self.embedding.embed(&[text.to_string()]).await?;
         vs.pop()
             .ok_or_else(|| VedaError::EmbeddingFailed("empty embedding batch".into()))
-    }
-
-    async fn enqueue_sync(&self, workspace_id: &str, memory: &Memory, op: &str) -> Result<()> {
-        let event = OutboxEvent {
-            id: 0,
-            workspace_id: workspace_id.to_string(),
-            event_type: OutboxEventType::MemorySync,
-            payload: serde_json::json!({
-                "memory_id": memory.id,
-                "op": op,
-                "scope_type": memory.scope_type.as_str(),
-                "scope_id": memory.scope_id,
-            }),
-            status: OutboxStatus::Pending,
-            retry_count: 0,
-            max_retries: 3,
-            available_at: Utc::now(),
-            lease_until: None,
-            created_at: Utc::now(),
-        };
-        self.task_queue.enqueue(&event).await
     }
 }
 
@@ -541,7 +498,6 @@ mod tests {
         vectors_upserted: Vec<MemoryWithEmbedding>,
         vectors_deleted: Vec<i64>,
         candidates: Vec<MemoryCandidate>,
-        enqueued: Vec<OutboxEvent>,
         fail_vector_upsert: bool,
         duplicate_of: Option<i64>,
     }
@@ -664,40 +620,8 @@ mod tests {
         }
     }
 
-    #[async_trait]
-    impl TaskQueue for Mock {
-        async fn enqueue(&self, event: &OutboxEvent) -> Result<()> {
-            self.0.lock().unwrap().enqueued.push(event.clone());
-            Ok(())
-        }
-        async fn claim(&self, _batch_size: usize) -> Result<Vec<OutboxEvent>> {
-            unimplemented!()
-        }
-        async fn complete(&self, _task_id: i64) -> Result<()> {
-            unimplemented!()
-        }
-        async fn fail(&self, _task_id: i64, _error: &str) -> Result<()> {
-            unimplemented!()
-        }
-        async fn renew(&self, _task_ids: &[i64]) -> Result<()> {
-            unimplemented!()
-        }
-        async fn has_pending_event(
-            &self,
-            _event_type: OutboxEventType,
-            _workspace_id: &str,
-            _dedup_field: &str,
-            _dedup_value: &str,
-        ) -> Result<bool> {
-            Ok(false)
-        }
-        async fn prune_outbox_older_than(&self, _cutoff: DateTime<Utc>) -> Result<u64> {
-            unimplemented!()
-        }
-    }
-
     fn service(mock: Arc<Mock>) -> MemoryService {
-        MemoryService::new(mock.clone(), mock.clone(), Arc::new(MockEmbed), mock)
+        MemoryService::new(mock.clone(), mock.clone(), Arc::new(MockEmbed))
     }
 
     fn actor() -> MemoryActor {
@@ -789,20 +713,19 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn save_enqueues_heal_when_vector_write_fails() {
+    async fn save_survives_sync_vector_write_failure() {
+        // Durability comes from the store-transactional MemorySync task;
+        // the service's synchronous Milvus write is latency-only, so its
+        // failure must not fail the save.
         let mock = Arc::new(Mock::default());
         mock.0.lock().unwrap().fail_vector_upsert = true;
         let svc = service(mock.clone());
         let out = svc
             .save(&actor(), save_input(MemoryScope::Team, MemoryKind::Fact))
             .await
-            .unwrap();
+            .expect("save must succeed despite sync vector failure");
         assert!(!out.duplicate);
-        let s = mock.0.lock().unwrap();
-        assert_eq!(s.enqueued.len(), 1);
-        assert_eq!(s.enqueued[0].event_type, OutboxEventType::MemorySync);
-        assert_eq!(s.enqueued[0].payload["op"], "upsert");
-        assert_eq!(s.enqueued[0].payload["memory_id"], out.memory.id);
+        assert!(mock.0.lock().unwrap().vectors_upserted.is_empty());
     }
 
     #[tokio::test]

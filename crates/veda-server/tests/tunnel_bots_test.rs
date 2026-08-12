@@ -159,7 +159,6 @@ async fn build_test_app() -> (Arc<AppState>, axum::Router) {
             mysql.clone(),
             milvus.clone(),
             embedding.clone(),
-            mysql.clone(),
         )),
         summary_enabled: false,
         answer_service: None,

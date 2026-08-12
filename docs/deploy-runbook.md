@@ -189,6 +189,17 @@ ssh -o ServerAliveInterval=20 <node> '
   ```
   任一 > 0 → **只能 roll-forward**(发修复版),不能退 pre-blob。`veda_file_blobs` 表留着无害,致命的是**数据格式**旧码不认。
 
+**memory 门禁(0.1.26 之后的 memory 构建 → 回滚到 0.1.26 及以前)**:memory 写入会在
+outbox 常态产生 `memory_sync` 事件,0.1.26 及以前的 claim 对未知 event_type 是整批
+反序列化失败——一行 pending `memory_sync` 就能卡死旧 binary 的**整个 outbox**
+(chunk/summary 全停)。含 memory 的构建自身已免疫(未知类型单行 dead 化,2026-08-12),
+但那救不了被回滚到的旧版。回滚前必跑:
+  ```sql
+  UPDATE veda_outbox SET status='dead' WHERE event_type='memory_sync' AND status IN ('pending','processing');
+  ```
+  升级回来后按 payload 重放或直接 `POST /admin/v1/reconcile`;memory 向量索引缺失只降
+  召回不损正确性(MySQL 复核挡),dead 化是安全动作。
+
 **退到 d94bd20 之前的 binary(单 pod 简化)**:d94bd20 的 migrate 会 `ALTER TABLE veda_outbox DROP COLUMN lease_owner`。schema 本身可自愈——旧码启动时自己会把这个可空列加回来——但**退版瞬间处于 `processing` 的行 `lease_owner` 是 NULL**,而旧码的 `complete()`/`fail()` 都 fence 在 `WHERE lease_owner = ?` 上,这些行会 no-op 卡住,要等 10 分钟 lease 过期才被重新 claim。
 - 退版前 gate check:
   ```sql

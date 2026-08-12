@@ -137,7 +137,6 @@ async fn main() -> anyhow::Result<()> {
         mysql.clone(),
         milvus.clone(),
         embedding.clone(),
-        mysql.clone(),
     ));
 
     // Uncounted FsService for the SQL engine: `veda_read()`/`veda_fs()` are

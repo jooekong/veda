@@ -1,9 +1,42 @@
+use super::conn::insert_outbox_conn;
 use super::*;
 use veda_core::store::MemoryStore;
 use veda_types::{
     Memory, MemoryInsert, MemoryKind, MemoryPatch, MemoryScopeFilter, MemoryScopeType, NewMemory,
     Principal, PrincipalKind, PrincipalSource,
 };
+
+/// MemorySync heal task, enqueued in the SAME transaction as the memory
+/// write (the fs write-path invariant: data change and its sync task
+/// commit together, so no crash window can leave the vector index silently
+/// stale). The worker replay is idempotent — the synchronous Milvus write
+/// that follows in the service is just latency optimization.
+fn memory_sync_event(
+    scope_type: MemoryScopeType,
+    scope_id: &str,
+    memory_id: i64,
+    op: &str,
+) -> OutboxEvent {
+    OutboxEvent {
+        id: 0,
+        // Informational partition label; personal-domain rows have no
+        // caller workspace at this layer, the scope id serves both.
+        workspace_id: scope_id.to_string(),
+        event_type: OutboxEventType::MemorySync,
+        payload: serde_json::json!({
+            "memory_id": memory_id,
+            "op": op,
+            "scope_type": scope_type.as_str(),
+            "scope_id": scope_id,
+        }),
+        status: OutboxStatus::Pending,
+        retry_count: 0,
+        max_retries: 3,
+        available_at: Utc::now(),
+        lease_until: None,
+        created_at: Utc::now(),
+    }
+}
 
 const MEMORY_COLS: &str = "id, scope_type, scope_id, origin_workspace_id, topic, kind, content, \
      content_hash, source_ref, expires_at, last_used_at, created_by, created_at, updated_by, updated_at";
@@ -78,6 +111,7 @@ fn bind_filter<'q>(
 #[async_trait]
 impl MemoryStore for MysqlStore {
     async fn insert_memory(&self, mem: &NewMemory) -> Result<MemoryInsert> {
+        let mut tx = self.pool.begin().await.map_err(storage_err)?;
         let res = sqlx::query(
             r#"INSERT INTO veda_memories
                (scope_type, scope_id, origin_workspace_id, topic, kind, content,
@@ -95,11 +129,17 @@ impl MemoryStore for MysqlStore {
         .bind(mem.expires_at.map(|t| t.naive_utc()))
         .bind(&mem.created_by)
         .bind(&mem.created_by)
-        .execute(&self.pool)
+        .execute(&mut *tx)
         .await;
         match res {
             Ok(r) => {
                 let id = r.last_insert_id() as i64;
+                insert_outbox_conn(
+                    &mut *tx,
+                    &memory_sync_event(mem.scope_type, &mem.scope_id, id, "upsert"),
+                )
+                .await?;
+                tx.commit().await.map_err(storage_err)?;
                 let row = sqlx::query(&format!(
                     "SELECT {MEMORY_COLS} FROM veda_memories WHERE id = ?"
                 ))
@@ -110,6 +150,7 @@ impl MemoryStore for MysqlStore {
                 Ok(MemoryInsert::Inserted(row_to_memory(&row)?))
             }
             Err(e) if is_mysql_duplicate(&e) => {
+                drop(tx);
                 let row = sqlx::query(&format!(
                     "SELECT {MEMORY_COLS} FROM veda_memories \
                      WHERE scope_type = ? AND scope_id = ? AND content_hash = ?"
@@ -121,7 +162,25 @@ impl MemoryStore for MysqlStore {
                 .await
                 .map_err(storage_err)?;
                 match row {
-                    Some(r) => Ok(MemoryInsert::Duplicate(row_to_memory(&r)?)),
+                    Some(r) => {
+                        let existing = row_to_memory(&r)?;
+                        // A duplicate save is how a failed earlier save gets
+                        // retried — persist a heal task so its vector cannot
+                        // stay missing even if the service's sync write
+                        // fails again.
+                        let mut conn = self.pool.acquire().await.map_err(storage_err)?;
+                        insert_outbox_conn(
+                            &mut *conn,
+                            &memory_sync_event(
+                                existing.scope_type,
+                                &existing.scope_id,
+                                existing.id,
+                                "upsert",
+                            ),
+                        )
+                        .await?;
+                        Ok(MemoryInsert::Duplicate(existing))
+                    }
                     // Duplicate row deleted between our INSERT and SELECT —
                     // rare race; caller retries the whole save.
                     None => Err(VedaError::Storage(
@@ -143,6 +202,26 @@ impl MemoryStore for MysqlStore {
         if allowed.is_empty() {
             return Err(VedaError::NotFound(format!("memory {id}")));
         }
+        let mut tx = self.pool.begin().await.map_err(storage_err)?;
+        // Lock + scope-verify first: rows_affected can't distinguish
+        // "no such row in your domains" from "update changed nothing"
+        // (MySQL reports changed, not matched), and the heal task below
+        // must only be enqueued for a row that really is ours.
+        let lock_sql = format!(
+            "SELECT scope_type, scope_id FROM veda_memories WHERE id = ? AND {} FOR UPDATE",
+            allowed_expr(allowed)
+        );
+        let mut q = sqlx::query(&lock_sql).bind(id);
+        for (st, sid) in allowed {
+            q = q.bind(st.as_str()).bind(sid);
+        }
+        let Some(row) = q.fetch_optional(&mut *tx).await.map_err(storage_err)? else {
+            return Err(VedaError::NotFound(format!("memory {id}")));
+        };
+        let st_str: String = row.try_get("scope_type").map_err(storage_err)?;
+        let scope_type: MemoryScopeType = db_enum("memory_scope_type", &st_str)?;
+        let scope_id: String = row.try_get("scope_id").map_err(storage_err)?;
+
         let mut sets: Vec<&str> = Vec::new();
         if patch.content.is_some() {
             sets.push("content = ?");
@@ -158,11 +237,7 @@ impl MemoryStore for MysqlStore {
             sets.push("expires_at = ?");
         }
         sets.push("updated_by = ?");
-        let sql = format!(
-            "UPDATE veda_memories SET {} WHERE id = ? AND {}",
-            sets.join(", "),
-            allowed_expr(allowed)
-        );
+        let sql = format!("UPDATE veda_memories SET {} WHERE id = ?", sets.join(", "));
         let mut q = sqlx::query(&sql);
         if let Some(c) = &patch.content {
             let hash = patch
@@ -181,11 +256,7 @@ impl MemoryStore for MysqlStore {
             q = q.bind(e.naive_utc());
         }
         q = q.bind(updated_by).bind(id);
-        for (st, sid) in allowed {
-            q = q.bind(st.as_str()).bind(sid);
-        }
-        let res = q.execute(&self.pool).await;
-        match res {
+        match q.execute(&mut *tx).await {
             Ok(_) => {}
             Err(e) if is_mysql_duplicate(&e) => {
                 return Err(VedaError::AlreadyExists(
@@ -194,22 +265,24 @@ impl MemoryStore for MysqlStore {
             }
             Err(e) => return Err(storage_err(e)),
         }
-        // rows_affected can be 0 for a no-change update (MySQL reports
-        // changed rows, not matched), so verify by re-reading under the
-        // same scope guard instead.
-        let sql = format!(
-            "SELECT {MEMORY_COLS} FROM veda_memories WHERE id = ? AND {}",
-            allowed_expr(allowed)
-        );
-        let mut q = sqlx::query(&sql).bind(id);
-        for (st, sid) in allowed {
-            q = q.bind(st.as_str()).bind(sid);
+        // Content changed → the vector must follow; the task commits with
+        // the row change so no failure or crash window can lose it.
+        if patch.content.is_some() {
+            insert_outbox_conn(
+                &mut *tx,
+                &memory_sync_event(scope_type, &scope_id, id, "upsert"),
+            )
+            .await?;
         }
-        let row = q.fetch_optional(&self.pool).await.map_err(storage_err)?;
-        match row {
-            Some(r) => row_to_memory(&r),
-            None => Err(VedaError::NotFound(format!("memory {id}"))),
-        }
+        tx.commit().await.map_err(storage_err)?;
+
+        let sql = format!("SELECT {MEMORY_COLS} FROM veda_memories WHERE id = ?");
+        let row = sqlx::query(&sql)
+            .bind(id)
+            .fetch_one(&self.pool)
+            .await
+            .map_err(storage_err)?;
+        row_to_memory(&row)
     }
 
     async fn delete_memory(
@@ -220,6 +293,7 @@ impl MemoryStore for MysqlStore {
         if allowed.is_empty() {
             return Ok(false);
         }
+        let mut tx = self.pool.begin().await.map_err(storage_err)?;
         let sql = format!(
             "DELETE FROM veda_memories WHERE id = ? AND {}",
             allowed_expr(allowed)
@@ -228,8 +302,23 @@ impl MemoryStore for MysqlStore {
         for (st, sid) in allowed {
             q = q.bind(st.as_str()).bind(sid);
         }
-        let res = q.execute(&self.pool).await.map_err(storage_err)?;
-        Ok(res.rows_affected() > 0)
+        let res = q.execute(&mut *tx).await.map_err(storage_err)?;
+        let deleted = res.rows_affected() > 0;
+        if deleted {
+            // Durable delete task: also supersedes any in-flight upsert heal
+            // that read the row before this delete — the later delete task
+            // clears whatever that replay writes back. Scope fields are
+            // irrelevant for a vector delete-by-pk; the first allowed domain
+            // serves as the informational partition label.
+            let (label_type, label_id) = &allowed[0];
+            insert_outbox_conn(
+                &mut *tx,
+                &memory_sync_event(*label_type, label_id, id, "delete"),
+            )
+            .await?;
+        }
+        tx.commit().await.map_err(storage_err)?;
+        Ok(deleted)
     }
 
     async fn get_memories_by_ids(

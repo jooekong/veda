@@ -270,3 +270,19 @@ CLI `veda memory` 子命令（agent 用 MCP、人等 M4 浏览页）；`[memory]
   纯 JSON 结果对 LLM 的引导力不如一句话，属 §3「description 是产品一半」的延伸。
 - 其余全部按 plan 落地：分域读原语、复核双保险、outbox MemorySync、幂等 save、
   touch 不动 updated_at、纯相似度排序、零配置零 LLM。
+
+### Codex xhigh 评审轮（2026-08-12，3 findings → 2 修 1 拒）
+
+- **[修] 双写失败语义升级为事务性 outbox**（Codex #1 high）：save/update(content)/delete
+  在 store 层与业务写**同事务**提交 MemorySync 任务（对齐 fs 写路径不变量），worker 幂等
+  重放兜底；service 的同步 Milvus 写降级为纯延迟优化，失败只 warn。代价=每次记忆写多一次
+  后台 embed 重放，低频可接受。Codex 说「更新后永久不可召回」言重（旧向量仍指向同 id，
+  按旧语义可召回、复核返回新文本），但崩溃窗口无恢复记录属实，且违反 repo 既有事务入队模式。
+- **[修] claim 对未知 event_type 单行 dead 化**（Codex #2 high）：旧行为是整批反序列化
+  失败毒化 outbox——回滚到 0.1.26 时一行 pending memory_sync 即全局卡死。新 binary 免疫
+  （单行 dead + metric），保护的是未来所有版本；对本次回滚的门禁是 runbook 运维动作
+  （deploy-runbook.md 回滚节新增 memory 门禁 SQL）。
+- **[拒] 版本列/tombstone 防删除后重写**（Codex #3 medium）：worker 已有执行前行存在
+  re-check，残留窗口=embed 秒级；事务性 delete 任务恒在、晚于 stale upsert 执行会清残留
+  （单 worker 顺序消费）；且 Milvus 不存 content，残留物为无文本向量、检索被复核挡。
+  为此上版本列属过度设计。

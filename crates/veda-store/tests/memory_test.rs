@@ -6,7 +6,7 @@ use std::path::PathBuf;
 use chrono::{Duration, Utc};
 use serde::Deserialize;
 use uuid::Uuid;
-use veda_core::store::{MemoryStore, MemoryVectorStore};
+use veda_core::store::{MemoryStore, MemoryVectorStore, TaskQueue};
 use veda_store::{MilvusStore, MysqlStore};
 use veda_types::{
     MemoryInsert, MemoryKind, MemoryPatch, MemoryScopeFilter, MemoryScopeType,
@@ -326,6 +326,130 @@ async fn mysql_memory_crud_scoping_and_expiry() {
     }
     let _ = sqlx::query("DELETE FROM veda_principals WHERE id = ?")
         .bind(&p1.id)
+        .execute(pool)
+        .await;
+}
+
+/// Codex review round (2026-08-12): memory writes must commit their
+/// MemorySync heal task in the SAME transaction (the fs write-path
+/// invariant), and an outbox row with an event_type this binary doesn't
+/// know must dead-letter alone instead of poisoning the whole claim.
+#[tokio::test]
+#[ignore]
+async fn mysql_memory_outbox_tasks_and_claim_resilience() {
+    let cfg = load_config();
+    let store = MysqlStore::new(&cfg.mysql.database_url)
+        .await
+        .expect("connect");
+    store.migrate().await.expect("migrate");
+    let pool = store.pool();
+
+    let ws = format!("wsm_{}", Uuid::new_v4());
+    let team_scope = (MemoryScopeType::Workspace, ws.clone());
+
+    let count_tasks = |op: &'static str, id: i64| {
+        let pool = pool.clone();
+        async move {
+            let row: (i64,) = sqlx::query_as(
+                "SELECT COUNT(*) FROM veda_outbox WHERE event_type = 'memory_sync' \
+                 AND payload->>'$.op' = ? AND payload->>'$.memory_id' = ?",
+            )
+            .bind(op)
+            .bind(id.to_string())
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            row.0
+        }
+    };
+
+    // insert → one upsert task committed with the row
+    let m = match store
+        .insert_memory(&new_memory(
+            MemoryScopeType::Workspace,
+            &ws,
+            None,
+            "durable fact",
+            "p-test",
+        ))
+        .await
+        .unwrap()
+    {
+        MemoryInsert::Inserted(m) => m,
+        _ => panic!("dup"),
+    };
+    assert_eq!(count_tasks("upsert", m.id).await, 1, "insert commits a heal task");
+
+    // content update → second upsert task; metadata-only update → no new task
+    let patch = MemoryPatch {
+        content: Some("durable fact, corrected".into()),
+        content_hash: Some(sha256_hex("durable fact, corrected")),
+        ..Default::default()
+    };
+    store
+        .update_memory(m.id, &[team_scope.clone()], &patch, "p-test")
+        .await
+        .unwrap();
+    assert_eq!(count_tasks("upsert", m.id).await, 2, "content update commits a task");
+    let meta_patch = MemoryPatch {
+        topic: Some("durability".into()),
+        ..Default::default()
+    };
+    store
+        .update_memory(m.id, &[team_scope.clone()], &meta_patch, "p-test")
+        .await
+        .unwrap();
+    assert_eq!(
+        count_tasks("upsert", m.id).await,
+        2,
+        "metadata-only update must not re-embed"
+    );
+
+    // delete → delete task
+    assert!(store.delete_memory(m.id, &[team_scope.clone()]).await.unwrap());
+    assert_eq!(count_tasks("delete", m.id).await, 1, "delete commits a delete task");
+
+    // claim resilience: a row with an unknown event_type dead-letters alone
+    sqlx::query(
+        "INSERT INTO veda_outbox (workspace_id, event_type, payload, status, retry_count, \
+         max_retries, available_at, created_at) \
+         VALUES (?, 'from_the_future', '{}', 'pending', 0, 3, UTC_TIMESTAMP(), UTC_TIMESTAMP())",
+    )
+    .bind(&ws)
+    .execute(pool)
+    .await
+    .unwrap();
+    let claimed = store.claim(500).await.expect("claim must survive unknown event_type");
+    assert!(
+        claimed.iter().all(|e| e.workspace_id != ws || e.event_type == veda_types::OutboxEventType::MemorySync),
+        "only parsable rows come back"
+    );
+    let (status,): (String,) = sqlx::query_as(
+        "SELECT status FROM veda_outbox WHERE workspace_id = ? AND event_type = 'from_the_future'",
+    )
+    .bind(&ws)
+    .fetch_one(pool)
+    .await
+    .unwrap();
+    assert_eq!(status, "dead", "unknown event_type row dead-letters alone");
+
+    // cleanup: our outbox rows (claimed ones included) + memory rows
+    let _ = sqlx::query("DELETE FROM veda_outbox WHERE workspace_id = ?")
+        .bind(&ws)
+        .execute(pool)
+        .await;
+    // release unrelated rows this claim grabbed so other suites aren't
+    // blocked by a 10-minute lease
+    for e in claimed.iter().filter(|e| e.workspace_id != ws) {
+        let _ = sqlx::query(
+            "UPDATE veda_outbox SET status = 'pending', lease_until = NULL WHERE id = ? AND status = 'processing'",
+        )
+        .bind(e.id)
+        .execute(pool)
+        .await;
+    }
+    let _ = sqlx::query("DELETE FROM veda_memories WHERE scope_id = ?")
+        .bind(&ws)
         .execute(pool)
         .await;
 }
