@@ -9,6 +9,24 @@ that matters.
 
 ## [Unreleased]
 
+## [0.1.26] — 2026-08-12
+
+### Added
+- **Per-directory CLI config (`.veda.toml`).** The CLI walks up from
+  the working directory and, when it finds a `.veda.toml`, uses it
+  *instead of* the global `~/.config/veda/config.toml` — whole-file
+  replacement, no field merging, so a local file can never borrow the
+  global file's keys. `$VEDA_CONFIG=<absolute path>` pins the config
+  file explicitly, independent of the working directory (replaces the
+  `XDG_CONFIG_HOME` isolation trick for agents and scripts; relative
+  paths are rejected — they would re-resolve per CWD). Mutating
+  commands (`veda init`, `workspace switch`, `config set`, …) write
+  back to whichever file is in effect, and `veda status` / `veda
+  config show` name that file with a `[local]` / `[$VEDA_CONFIG]` tag.
+  A malformed local file aborts the command instead of silently
+  falling back to the global config, and `veda-fuse mount` inherits
+  the same resolution.
+
 ### Fixed
 - **Scoped search no longer starves small directories.** `path_prefix`
   searches used to fetch a global top-K and post-filter by path, so a
