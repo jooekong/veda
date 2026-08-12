@@ -103,6 +103,17 @@ Coding Agent（Claude Code/Cursor/Codex）原生接入面：**Streamable HTTP tr
 - **测试**：9+ 单元（协议校验/版本协商/截断/schema 形状）+ `tests/mcp_http_test.rs` 集成 mega-test（真实 MySQL/Milvus/embedding：协议边角、鉴权、read-only wk_ 全工具、grep 长行截断、worker 驱动的 hybrid 命中、path_prefix 过滤）。
 - 已知尾巴：answer 超时后 Engine 任务存活+permit 提前释放（REST/MCP 同款既有行为），见 `docs/todos.md`。
 
+## Agent/团队记忆 M1（2026-08-12）
+
+fs workspace 的第三类资产：一句话一条的原子记忆，个人/团队归属分域。设计权威 `docs/design/agent-memory.md`（18 节 + 三批拍板），施工图 `docs/plans/agent-memory-m1.md`。
+
+- **数据模型**：`veda_memories`（BIGINT id 供 `[mem:123]` 引用格式；`(scope_type, scope_id)` 归属分域——`workspace`=团队域 / `principal`=个人域；个人域 `origin_workspace_id` 区分项目笔记与随身偏好；`UNIQUE(scope_type, scope_id, content_hash)` 把精确去重压到 DB 层；**零状态列**——错→UPDATE、不要→硬删、到期→`expires_at` SQL 侧 `NOW()` 过滤）+ `veda_principals`（`(source, external_id)` 唯一，首见 lazy 建，M1 仅 key 源：`AuthWorkspace.key_id` → principal，一 key 一人）。`last_used_at` 检索命中即 touch（`updated_at=updated_at` 钉住审计列），排序权重 M2 再调。
+- **Milvus 纯索引**：共享 collection `veda_memories` 只存 id + 三个域标量 + vector，**content/kind/topic 刻意不进**——读路径定死「Milvus 只产候选（over-fetch 2×），MySQL 复核带同一 scope 条件为唯一权威」，因此 Milvus 任何失败只降召回不损正确性：漏写→outbox `MemorySync` 自愈（worker 按 payload 里的 scope 重读→重嵌→补写）、残留→复核查无此行自动消失、跨域混入→复核第二层挡。GateMem 两断言（越权检出=0/删后检出=0，含手工制造 Milvus 残留窗口）是 `tests/memory_http_test.rs` 的确定性断言。
+- **`veda-core/service/memory.rs`**：save 七步（embed 交互闸→同域近邻 top-3 返回引导改旧条→topic 缺省继承 top-1 近邻（cos≥0.75）→幂等 INSERT→Milvus 同步写失败入 outbox→重试撞唯一键=Duplicate 顺手补向量自愈）；scope 三档 `mine`（缺省）/`team`/`self`（M1 key 身份下 mine≡self）；origin 按 kind 默认（preference 随身、其余锁当前 workspace，显式 `""` 强制随身，永不报错）；update/delete 的 WHERE 带调用方可写域集合，跨域探测得 404 不泄露存在性。
+- **接入面**：REST `POST/PATCH/DELETE /v1/memory{,/id}` + `GET /v1/memory/search|context`（`AuthWorkspace` fs-only，read-only `wk_` 可读不可写）；MCP 工具 7→12（`memory_context/save/update/delete/search`，与 REST 共用 api.rs DTO + `deny_unknown_fields`），**首批写型工具**——specs 断言从「全 readOnly」改为 writer 白名单；工具 description 承载全部治理引导（scope 判据「知识关于谁」、宁缺毋滥三原则、近邻≥0.85 提示改旧），initialize instructions 引导开工先调 `memory_context`。零新配置键（唯一外部依赖 embedding 本就必配）。
+- **测试**：service 6 单测（scope/origin 解析、topic 继承阈值、双写失败入队、Duplicate 自愈、复核剔除+触点）+ store 层 `veda-store/tests/memory_test.rs`（真实 MySQL/Milvus：context 域合并 origin 过滤、过期过滤、touch 审计不变量）+ `veda-server/tests/memory_http_test.rs` mega（REST+MCP 端到端 + GateMem 两断言）。
+- **M1 边界**：digest/画像/对账提名/自动摄入（M3）、answer 双源（M2a）、浏览页（M4）均未做；CLI 无 memory 子命令；排序纯相似度。M2/M3 预备事实见施工图 §6。
+
 ## RAG 问答 `/v1/answer`（2026-07-14 改造为 Agentic）
 
 fs 数据面知识库问答：LLM 经 **OpenAI function calling** 自主多轮调用 `search` / `read_file` 召回,再生成**带可验证引用**的答案。设计见 `docs/plans/veda-answer-agentic.md`(取代 07-10 的 one-shot 组装管线,退役理由在内)。

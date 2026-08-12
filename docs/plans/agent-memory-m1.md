@@ -1,6 +1,8 @@
 # Agent Memory M1 施工图
 
-> **状态：已拍板开工（2026-08-12），未动代码。**
+> **状态：已实现（2026-08-12 当天完成，commit 82fbde9 → 6a8e9b5 → ccb4c1b → Step 4）。**
+> 单测 + store/server 两层真实依赖集成测试全绿；待部署 .161 dogfood（DoD #3）。
+> 实现偏差见 §8。
 > 架构与论证见 [`../design/agent-memory.md`](../design/agent-memory.md)（18 节提案 + 两批八项拍板），
 > 本文只管 M1 怎么落地：范围、数据模型细化、施工步骤、DoD。
 > 完工后按协议归档并在 `plans.md` 更新索引。
@@ -255,4 +257,16 @@ CLI `veda memory` 子命令（agent 用 MCP、人等 M4 浏览页）；`[memory]
 
 > 实现过程中偏离本 plan 的地方记在这里（协议要求），完工归档时随文带走。
 
-（暂无）
+- **scope_id / origin_workspace_id 定为 VARCHAR(64)**（plan DDL 写 36）：首跑集成测试
+  带前缀 id 撞 1406；64 与 Milvus 标量 max_length 对齐，零成本。
+- **update/delete 的 0-rows 判定改为「UPDATE 后按 allowed 域重读」**：MySQL 协议默认
+  报 changed 而非 matched，无变化的合法编辑会误判 NotFound；重读同时保证跨域探测
+  得 404 不泄露存在性。
+- **Worker::new 增加 memory_store/memory_vector 两参**（MemorySync 处理器需要），
+  连带 9 处测试构造点、11 处测试 AppState 初始化同步。
+- **service 层补 source_ref 校验**（必须是 JSON object 且 ≤4KB）——plan §1.2 写了
+  规则但没落到哪一层；放 service 使 REST/MCP 共享。
+- **MCP save 响应加 status 提示语**（duplicate / 近邻≥0.85 建议改旧条 / saved）：
+  纯 JSON 结果对 LLM 的引导力不如一句话，属 §3「description 是产品一半」的延伸。
+- 其余全部按 plan 落地：分域读原语、复核双保险、outbox MemorySync、幂等 save、
+  touch 不动 updated_at、纯相似度排序、零配置零 LLM。

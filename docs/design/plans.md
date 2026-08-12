@@ -22,7 +22,7 @@ SQL 三件套 / revoke scope / platform authz+timeout / TimeoutLayer+CatchPanic 
 
 | 计划 | 状态 |
 | --- | --- |
-| [`agent-memory-m1.md`](../plans/agent-memory-m1.md) | Agent/团队记忆 M1 施工图（2026-08-12 开工）：两张表 + 共享 Milvus collection + MemoryService + 5 MCP 工具；架构定稿在 [`design/agent-memory.md`](agent-memory.md) |
+| [`agent-memory-m1.md`](../plans/agent-memory-m1.md) | Agent/团队记忆 M1：**已实现**（08-12 当天四步全绿：两张表 + Milvus 纯索引 + MemoryService + REST/MCP 5 工具；GateMem 两断言进集成测试），待部署 .161 dogfood；M2a=answer 双源尽快、M2b 等案例；架构定稿 [`design/agent-memory.md`](agent-memory.md) |
 | [`veda-tunnel-plan.md`](../plans/veda-tunnel-plan.md) | **生产运行中**（专用机 .95）：企微长连接 + RAG 问答 + 三入口 bot 管理 + 平台 API（§18）；方向池见 `design/tunnel-directions.md`；尾巴=server 白名单改动未部署 |
 | [`veda-answer-agentic.md`](../plans/veda-answer-agentic.md) | **Stage 1 已实现 e2e 全绿**：`/v1/answer` agentic 多次召回(tool loop)+ prompt 分层;Stage 2 bot prompt 三入口贯通进行中 |
 | [`onepaas-api-alignment.md`](../plans/onepaas-api-alignment.md) | OnePaaS 接口规范对齐（分页 / 错误三件套 / 响应信封） |

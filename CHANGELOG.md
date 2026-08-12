@@ -9,6 +9,24 @@ that matters.
 
 ## [Unreleased]
 
+### Added
+- **Agent/team memory (M1).** fs workspaces now store *memories* alongside
+  documents: one-line facts (decisions, pitfalls, environment quirks,
+  preferences) with ownership partitioning — a shared team domain per
+  workspace, plus a private personal domain per key holder (project notes
+  pin to their workspace, preferences travel). Wiki-style governance: no
+  approval flow, anyone in the team domain can edit or hard-delete, every
+  row is signed (`created_by`/`updated_by`). Surfaces: REST
+  (`POST/PATCH/DELETE /v1/memory`, `GET /v1/memory/search|context`) and
+  five MCP tools (`memory_context/save/update/delete/search`) — saving
+  returns the nearest existing memories so agents update instead of piling
+  near-duplicates; read-only `wk_` keys can search but not write. Retrieval
+  is Milvus candidates + MySQL recheck: deleted memories and other people's
+  personal domains are *deterministically* unreachable (covered by
+  integration-test assertions modeled on the GateMem benchmark, including a
+  forced Milvus-remnant window). Design: `docs/design/agent-memory.md`;
+  build plan: `docs/plans/agent-memory-m1.md`.
+
 ## [0.1.26] — 2026-08-12
 
 ### Added
