@@ -165,6 +165,12 @@ async fn build_admin_app(
         metrics: test_metrics(),
         metrics_token: None,
         admin_token,
+        memory_service: std::sync::Arc::new(veda_core::service::memory::MemoryService::new(
+            mysql.clone(),
+            milvus.clone(),
+            embedding.clone(),
+            mysql.clone(),
+        )),
         summary_enabled: false,
         answer_service: None,
         answer_concurrency: 2,

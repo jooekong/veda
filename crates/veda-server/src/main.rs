@@ -94,6 +94,11 @@ async fn main() -> anyhow::Result<()> {
         ));
 
     milvus.init_collections(cfg.embedding.dimension).await?;
+    veda_core::store::MemoryVectorStore::init_memory_collection(
+        milvus.as_ref(),
+        cfg.embedding.dimension,
+    )
+    .await?;
 
     // Heat counters: fs/search services record through this; SQL engine
     // deliberately gets an FsService WITHOUT it below (scan-surface
@@ -126,6 +131,14 @@ async fn main() -> anyhow::Result<()> {
         milvus.clone(),
         cfg.embedding.dimension,
     );
+    // Interactive embedding (same handle as search): memory save/search are
+    // agent-facing calls, not background indexing.
+    let memory_service = Arc::new(veda_core::service::memory::MemoryService::new(
+        mysql.clone(),
+        milvus.clone(),
+        embedding.clone(),
+        mysql.clone(),
+    ));
 
     // Uncounted FsService for the SQL engine: `veda_read()`/`veda_fs()` are
     // scan surfaces exempt from heat metrics (see docs/plans/doc-access-stats.md §1.3).
@@ -217,6 +230,7 @@ async fn main() -> anyhow::Result<()> {
         metrics_token: cfg.metrics_token.clone(),
         admin_token: cfg.admin_token.clone(),
         summary_enabled: cfg.llm.is_some(),
+        memory_service,
         answer_service,
         answer_concurrency,
         tunnel_bots,

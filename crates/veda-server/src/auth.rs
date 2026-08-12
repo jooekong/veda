@@ -84,6 +84,10 @@ impl FromRequestParts<Arc<AppState>> for AuthAccount {
 pub struct AuthWorkspace {
     pub workspace_id: String,
     pub _account_id: String,
+    /// Row id of the wk_ key that authenticated this request. The memory
+    /// surface resolves it to a principal (key = identity under M1);
+    /// costs nothing — resolve_ws_key already fetched the row.
+    pub key_id: String,
     pub read_only: bool,
 }
 
@@ -220,6 +224,7 @@ impl FromRequestParts<Arc<AppState>> for AuthWorkspace {
             Ok(AuthWorkspace {
                 workspace_id: wk.workspace_id,
                 _account_id: wk.account_id,
+                key_id: wk.id,
                 read_only,
             })
         }

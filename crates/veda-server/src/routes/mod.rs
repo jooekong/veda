@@ -8,6 +8,7 @@ pub mod datasets;
 pub mod events;
 pub mod fs;
 pub mod mcp;
+pub mod memory;
 pub mod project_data;
 pub mod reconcile;
 pub mod search;
@@ -59,6 +60,7 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .merge(fs::routes())
         .merge(search::routes())
         .merge(collection::routes())
+        .merge(memory::routes())
         .merge(sql::routes())
         .merge(stats::routes())
         .layer(TimeoutLayer::with_status_code(

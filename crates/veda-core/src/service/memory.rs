@@ -15,7 +15,7 @@ use tracing::warn;
 use veda_types::{
     Memory, MemoryInsert, MemoryKind, MemoryPatch, MemoryScope, MemoryScopeFilter,
     MemoryScopeType, MemoryWithEmbedding, NewMemory, OutboxEvent, OutboxEventType, OutboxStatus,
-    Result, VedaError,
+    PrincipalKind, PrincipalSource, Result, VedaError,
 };
 
 use crate::checksum::sha256_hex;
@@ -32,6 +32,8 @@ const OVERFETCH: usize = 2;
 /// A topicless save inherits the top neighbor's topic only above this
 /// cosine score — below it the memory is genuinely new, leave topic unset.
 const TOPIC_INHERIT_MIN_SCORE: f32 = 0.75;
+/// Evidence pointers are references, not payloads.
+const MAX_SOURCE_REF_BYTES: usize = 4096;
 
 /// Server-resolved identities for one call. `principal_id` comes from the
 /// request identity (M1: the wk_ key), never from client input — that rule
@@ -101,11 +103,25 @@ impl MemoryService {
         }
     }
 
+    /// M1 identity resolution: the wk_ key is the person (one key per human
+    /// or per agent). First sighting lazily creates the principal.
+    pub async fn resolve_key_actor(&self, workspace_id: &str, key_id: &str) -> Result<MemoryActor> {
+        let principal = self
+            .store
+            .ensure_principal(PrincipalSource::Key, key_id, PrincipalKind::Human, None)
+            .await?;
+        Ok(MemoryActor {
+            workspace_id: workspace_id.to_string(),
+            principal_id: principal.id,
+        })
+    }
+
     pub async fn save(
         &self,
         actor: &MemoryActor,
         input: SaveMemoryInput,
     ) -> Result<SaveMemoryOutcome> {
+        validate_source_ref(input.source_ref.as_ref())?;
         let content = input.content.trim();
         if content.is_empty() {
             return Err(VedaError::InvalidInput("content is empty".into()));
@@ -234,6 +250,7 @@ impl MemoryService {
         {
             return Err(VedaError::InvalidInput("nothing to update".into()));
         }
+        validate_source_ref(input.source_ref.as_ref())?;
         let content = match &input.content {
             Some(c) => {
                 let c = c.trim();
@@ -410,6 +427,23 @@ impl MemoryService {
         };
         self.task_queue.enqueue(&event).await
     }
+}
+
+fn validate_source_ref(source_ref: Option<&serde_json::Value>) -> Result<()> {
+    if let Some(v) = source_ref {
+        if !v.is_object() {
+            return Err(VedaError::InvalidInput(
+                "source_ref must be a JSON object like {\"files\": [...]}".into(),
+            ));
+        }
+        let len = serde_json::to_string(v).map(|s| s.len()).unwrap_or(0);
+        if len > MAX_SOURCE_REF_BYTES {
+            return Err(VedaError::InvalidInput(format!(
+                "source_ref exceeds {MAX_SOURCE_REF_BYTES} bytes — store pointers, not payloads"
+            )));
+        }
+    }
+    Ok(())
 }
 
 fn resolve_scope(actor: &MemoryActor, scope: MemoryScope) -> (MemoryScopeType, String) {

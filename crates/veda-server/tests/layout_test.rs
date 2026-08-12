@@ -175,6 +175,12 @@ async fn build_app(summary_enabled: bool) -> TestApp {
         metrics: test_metrics(),
         metrics_token: None,
         admin_token: None,
+        memory_service: std::sync::Arc::new(veda_core::service::memory::MemoryService::new(
+            mysql.clone(),
+            milvus.clone(),
+            embedding.clone(),
+            mysql.clone(),
+        )),
         summary_enabled,
         answer_service: None,
         answer_concurrency: 2,

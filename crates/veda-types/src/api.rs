@@ -519,6 +519,109 @@ pub struct SqlRequest {
     pub sql: String,
 }
 
+// ── Memory ─────────────────────────────────────────────
+// Shared by the REST surface (/v1/memory/*) and the MCP memory_* tools so
+// the two cannot drift. deny_unknown_fields turns agent typos into clear
+// errors instead of silently dropped arguments.
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SaveMemoryApiRequest {
+    pub content: String,
+    #[serde(default)]
+    pub kind: Option<crate::MemoryKind>,
+    #[serde(default)]
+    pub scope: Option<crate::MemoryScope>,
+    #[serde(default)]
+    pub topic: Option<String>,
+    /// Personal-domain placement override: absent = default by kind
+    /// (preference travels, the rest pin to this workspace); "" = force
+    /// portable; a workspace id = pin there. Ignored for team scope.
+    #[serde(default)]
+    pub origin: Option<String>,
+    #[serde(default)]
+    pub source_ref: Option<serde_json::Value>,
+    #[serde(default)]
+    pub expires_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct UpdateMemoryApiRequest {
+    #[serde(default)]
+    pub content: Option<String>,
+    #[serde(default)]
+    pub topic: Option<String>,
+    #[serde(default)]
+    pub source_ref: Option<serde_json::Value>,
+    #[serde(default)]
+    pub expires_at: Option<DateTime<Utc>>,
+}
+
+/// Public view of one memory. `scope` collapses the storage domain to the
+/// caller's perspective: "team" or "mine" (the key's personal domain).
+/// content_hash and raw scope ids stay server-side.
+#[derive(Debug, Clone, Serialize)]
+pub struct MemoryItem {
+    pub id: i64,
+    pub scope: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub origin_workspace_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub topic: Option<String>,
+    pub kind: crate::MemoryKind,
+    pub content: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_ref: Option<serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub expires_at: Option<DateTime<Utc>>,
+    pub created_by: String,
+    pub created_at: DateTime<Utc>,
+    pub updated_by: String,
+    pub updated_at: DateTime<Utc>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub score: Option<f32>,
+}
+
+impl MemoryItem {
+    pub fn from_memory(m: crate::Memory, score: Option<f32>) -> Self {
+        Self {
+            id: m.id,
+            scope: match m.scope_type {
+                crate::MemoryScopeType::Workspace => "team",
+                crate::MemoryScopeType::Principal => "mine",
+            },
+            origin_workspace_id: m.origin_workspace_id,
+            topic: m.topic,
+            kind: m.kind,
+            content: m.content,
+            source_ref: m.source_ref,
+            expires_at: m.expires_at,
+            created_by: m.created_by,
+            created_at: m.created_at,
+            updated_by: m.updated_by,
+            updated_at: m.updated_at,
+            score,
+        }
+    }
+}
+
+#[derive(Debug, Serialize)]
+pub struct SaveMemoryResponse {
+    pub memory: MemoryItem,
+    /// True when an identical memory already existed — the returned row is
+    /// that one. Not an error: retried saves are expected.
+    pub duplicate: bool,
+    /// Nearest existing memories in the same domain. A close neighbor is
+    /// the cue to memory_update the old row instead of piling near-copies.
+    pub neighbors: Vec<MemoryItem>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct MemoryListResponse {
+    pub items: Vec<MemoryItem>,
+}
+
 #[cfg(test)]
 mod tests {
     use crate::types::SearchHit;

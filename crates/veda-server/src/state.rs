@@ -52,6 +52,9 @@ pub struct AppState {
     /// permanently disabled, and `GET /v1/summary/...` returns 501 Not
     /// Implemented instead of the misleading 202 "pending".
     pub summary_enabled: bool,
+    /// Agent/team memory (docs/plans/agent-memory-m1.md). Always on — the
+    /// only external dependency is embedding, which is mandatory anyway.
+    pub memory_service: Arc<veda_core::service::memory::MemoryService>,
     /// RAG answer service (retrieve → tiered assembly → LLM). `None` when
     /// [llm] is unconfigured — `POST /v1/answer` then returns 501
     /// FEATURE_DISABLED (same source of truth as `summary_enabled`).
