@@ -206,6 +206,7 @@ impl MysqlStore {
 mod auth;
 mod collection;
 mod conn;
+mod memory;
 mod metadata;
 mod queue;
 mod rows;

@@ -4,16 +4,18 @@ use async_trait::async_trait;
 use reqwest::header::{HeaderMap, HeaderValue, AUTHORIZATION, CONTENT_TYPE};
 use serde_json::{json, Value};
 use tracing::warn;
-use veda_core::store::{CollectionVectorStore, VectorStore, VectorWorkspaceStore};
+use veda_core::store::{CollectionVectorStore, MemoryVectorStore, VectorStore, VectorWorkspaceStore};
 use veda_types::{
-    ChunkWithEmbedding, FieldDefinition, Result, SearchHit, SearchMode, SearchRequest,
-    SummaryWithEmbedding, VectorRecordHit, VectorSearchHit, VectorSearchQuery, VedaError,
+    ChunkWithEmbedding, FieldDefinition, MemoryCandidate, MemoryScopeFilter, MemoryWithEmbedding,
+    Result, SearchHit, SearchMode, SearchRequest, SummaryWithEmbedding, VectorRecordHit,
+    VectorSearchHit, VectorSearchQuery, VedaError,
 };
 
 use std::time::Duration;
 
 const COLLECTION: &str = "veda_chunks";
 const SUMMARY_COLLECTION: &str = "veda_summaries";
+const MEMORY_COLLECTION: &str = "veda_memories";
 const MAX_RETRIES: u32 = 3;
 const BASE_BACKOFF_MS: u64 = 300;
 
@@ -1587,6 +1589,192 @@ fn record_vector_store_op(
         "outcome" => if ok { "ok" } else { "err" },
     )
     .record(started.elapsed().as_secs_f64());
+}
+
+/// Milvus boolean expression for a memory domain filter. Scope values are
+/// server-resolved ids, still quoted defensively. origin uses the empty
+/// string as the "portable" sentinel (VarChar, no NULL).
+fn memory_filter_expr(filter: &MemoryScopeFilter) -> String {
+    match filter {
+        MemoryScopeFilter::Scope {
+            scope_type,
+            scope_id,
+        } => format!(
+            "scope_type == \"{}\" && scope_id == {}",
+            scope_type.as_str(),
+            milvus_quote(scope_id)
+        ),
+        MemoryScopeFilter::Context {
+            workspace_id,
+            principal_id,
+        } => {
+            let w = milvus_quote(workspace_id);
+            let p = milvus_quote(principal_id);
+            format!(
+                "(scope_type == \"workspace\" && scope_id == {w}) || \
+                 (scope_type == \"principal\" && scope_id == {p} && \
+                  (origin_workspace_id == \"\" || origin_workspace_id == {w}))"
+            )
+        }
+    }
+}
+
+// Index-only memory collection (docs/plans/agent-memory-m1.md §1.3): id +
+// three scope scalars + vector, deliberately NO content/kind/topic — MySQL
+// recheck is the authority, so any Milvus failure can only reduce recall,
+// never surface deleted or cross-domain text.
+#[async_trait]
+impl MemoryVectorStore for MilvusStore {
+    async fn init_memory_collection(&self, embedding_dim: u32) -> Result<()> {
+        let has = self
+            .post(
+                "/v2/vectordb/collections/has",
+                json!({ "collectionName": MEMORY_COLLECTION }),
+            )
+            .await?;
+        if !has["data"]["has"].as_bool().unwrap_or(false) {
+            let dim = embedding_dim as i64;
+            let body = json!({
+                "collectionName": MEMORY_COLLECTION,
+                "schema": {
+                    "enableDynamicField": false,
+                    "fields": [
+                        {
+                            "fieldName": "id",
+                            "dataType": "Int64",
+                            "isPrimary": true
+                        },
+                        {
+                            "fieldName": "scope_type",
+                            "dataType": "VarChar",
+                            "elementTypeParams": { "max_length": 16 }
+                        },
+                        {
+                            "fieldName": "scope_id",
+                            "dataType": "VarChar",
+                            "elementTypeParams": { "max_length": 64 }
+                        },
+                        {
+                            "fieldName": "origin_workspace_id",
+                            "dataType": "VarChar",
+                            "elementTypeParams": { "max_length": 64 }
+                        },
+                        {
+                            "fieldName": "vector",
+                            "dataType": "FloatVector",
+                            "elementTypeParams": { "dim": dim }
+                        }
+                    ]
+                }
+            });
+            self.post_no_retry("/v2/vectordb/collections/create", body)
+                .await?;
+
+            let idx = json!({
+                "collectionName": MEMORY_COLLECTION,
+                "indexParams": [{
+                    "index_type": "AUTOINDEX",
+                    "metricType": "COSINE",
+                    "fieldName": "vector",
+                    "indexName": "vector"
+                }]
+            });
+            match self.post("/v2/vectordb/indexes/create", idx).await {
+                Ok(_) => {}
+                Err(e) => {
+                    let m = e.to_string();
+                    if !m.contains("same index name")
+                        && !m.contains("IndexAlreadyExists")
+                        && !m.contains("index already exist")
+                    {
+                        return Err(e);
+                    }
+                }
+            }
+        }
+        self.post(
+            "/v2/vectordb/collections/load",
+            json!({ "collectionName": MEMORY_COLLECTION }),
+        )
+        .await?;
+        Ok(())
+    }
+
+    async fn upsert_memory_vectors(&self, items: &[MemoryWithEmbedding]) -> Result<()> {
+        if items.is_empty() {
+            return Ok(());
+        }
+        let data: Vec<Value> = items
+            .iter()
+            .map(|m| {
+                json!({
+                    "id": m.id,
+                    "scope_type": m.scope_type.as_str(),
+                    "scope_id": m.scope_id,
+                    "origin_workspace_id": m.origin_workspace_id,
+                    "vector": m.vector
+                })
+            })
+            .collect();
+        let body = json!({
+            "collectionName": MEMORY_COLLECTION,
+            "data": data
+        });
+        self.post("/v2/vectordb/entities/upsert", body).await?;
+        Ok(())
+    }
+
+    async fn delete_memory_vectors(&self, ids: &[i64]) -> Result<()> {
+        if ids.is_empty() {
+            return Ok(());
+        }
+        let list = ids
+            .iter()
+            .map(|i| i.to_string())
+            .collect::<Vec<_>>()
+            .join(",");
+        let body = json!({
+            "collectionName": MEMORY_COLLECTION,
+            "filter": format!("id in [{list}]")
+        });
+        self.post("/v2/vectordb/entities/delete", body).await?;
+        Ok(())
+    }
+
+    async fn search_memory_candidates(
+        &self,
+        vector: &[f32],
+        filter: &MemoryScopeFilter,
+        limit: usize,
+    ) -> Result<Vec<MemoryCandidate>> {
+        let lim = limit.min(16_383).max(1);
+        let body = json!({
+            "collectionName": MEMORY_COLLECTION,
+            "data": [vector],
+            "annsField": "vector",
+            "filter": memory_filter_expr(filter),
+            "limit": lim,
+            "outputFields": ["id"],
+            "searchParams": { "metricType": "COSINE" },
+            "consistencyLevel": "Strong"
+        });
+        let v = self.post("/v2/vectordb/entities/search", body).await?;
+        let rows = flatten_entity_rows(v.get("data"));
+        let out = rows
+            .iter()
+            .take(lim)
+            .filter_map(|row| {
+                let id = row.get("id").and_then(|x| x.as_i64())?;
+                let score = row
+                    .get("distance")
+                    .and_then(|x| x.as_f64())
+                    .or_else(|| row.get("score").and_then(|x| x.as_f64()))
+                    .unwrap_or(0.0) as f32;
+                Some(MemoryCandidate { id, score })
+            })
+            .collect();
+        Ok(out)
+    }
 }
 
 #[async_trait]

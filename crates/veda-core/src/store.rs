@@ -540,6 +540,80 @@ pub trait VectorStore: Send + Sync {
     async fn init_collections(&self, embedding_dim: u32) -> Result<()>;
 }
 
+// ── Memory Store ───────────────────────────────────────
+// docs/plans/agent-memory-m1.md. MySQL is the single source of truth; all
+// reads/writes carry a scope condition (the one scope-filtered primitive —
+// no bypass queries), which is what makes the GateMem assertions
+// (cross-domain leak = 0, deleted recall = 0) deterministic.
+
+#[async_trait]
+pub trait MemoryStore: Send + Sync {
+    /// Insert; on UNIQUE(scope, content_hash) conflict return the existing
+    /// row as `Duplicate` (idempotent save — retries after partial failure
+    /// must not error).
+    async fn insert_memory(&self, mem: &NewMemory) -> Result<MemoryInsert>;
+
+    /// Update a memory the caller may write: WHERE id AND scope ∈ `allowed`.
+    /// 0 rows matched → NotFound (cross-domain probes must not learn
+    /// existence). A content change that collides with another row's hash
+    /// in the same scope → AlreadyExists.
+    async fn update_memory(
+        &self,
+        id: i64,
+        allowed: &[(MemoryScopeType, String)],
+        patch: &MemoryPatch,
+        updated_by: &str,
+    ) -> Result<Memory>;
+
+    /// Hard delete with the same scope guard. Ok(false) = no row matched.
+    async fn delete_memory(
+        &self,
+        id: i64,
+        allowed: &[(MemoryScopeType, String)],
+    ) -> Result<bool>;
+
+    /// The recheck-and-authority read: candidates from Milvus come back
+    /// through here. Filters expired rows (SQL-side NOW()) and re-applies
+    /// the scope filter — deleted rows vanish, cross-domain candidates are
+    /// dropped even if the vector index misbehaves.
+    async fn get_memories_by_ids(
+        &self,
+        ids: &[i64],
+        filter: &MemoryScopeFilter,
+    ) -> Result<Vec<Memory>>;
+
+    /// Bump last_used_at on retrieval hits. Must NOT touch updated_at
+    /// (edit audit).
+    async fn touch_memories(&self, ids: &[i64]) -> Result<()>;
+
+    /// Lazy principal creation, ensure_account-style: first sighting of
+    /// (source, external_id) inserts a row, races resolve to the winner.
+    async fn ensure_principal(
+        &self,
+        source: PrincipalSource,
+        external_id: &str,
+        kind: PrincipalKind,
+        display_name: Option<&str>,
+    ) -> Result<Principal>;
+}
+
+/// Vector side of the memory index. Separate from `VectorStore` so the fs
+/// chunk/summary implementors and their mocks stay untouched; MilvusStore
+/// implements both. Index-only: candidates carry (id, score), the content
+/// lives in MySQL.
+#[async_trait]
+pub trait MemoryVectorStore: Send + Sync {
+    async fn init_memory_collection(&self, embedding_dim: u32) -> Result<()>;
+    async fn upsert_memory_vectors(&self, items: &[MemoryWithEmbedding]) -> Result<()>;
+    async fn delete_memory_vectors(&self, ids: &[i64]) -> Result<()>;
+    async fn search_memory_candidates(
+        &self,
+        vector: &[f32],
+        filter: &MemoryScopeFilter,
+        limit: usize,
+    ) -> Result<Vec<MemoryCandidate>>;
+}
+
 // ── Task Queue ─────────────────────────────────────────
 
 #[async_trait]

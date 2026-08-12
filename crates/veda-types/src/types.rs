@@ -639,3 +639,227 @@ pub struct StorageStats {
     /// Deduped files are counted once per dentry (copy = double-counted).
     pub total_bytes: i64,
 }
+
+// ── Memory ─────────────────────────────────────────────
+// Atomic memories with ownership partitioning (design: docs/design/agent-memory.md,
+// build plan: docs/plans/agent-memory-m1.md). MySQL is the single source of
+// truth; Milvus holds an index-only copy (id + scope scalars + vector).
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MemoryScopeType {
+    /// Team domain — scope_id is a workspace id.
+    Workspace,
+    /// Personal domain — scope_id is a principal id.
+    Principal,
+}
+
+impl MemoryScopeType {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Workspace => "workspace",
+            Self::Principal => "principal",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "workspace" => Some(Self::Workspace),
+            "principal" => Some(Self::Principal),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MemoryKind {
+    Fact,
+    Preference,
+    Decision,
+    Procedure,
+    /// Profile conclusion induced from other memories (M3). Ranked lower at
+    /// read time by kind alone — no confidence column by design.
+    Derived,
+}
+
+impl MemoryKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Fact => "fact",
+            Self::Preference => "preference",
+            Self::Decision => "decision",
+            Self::Procedure => "procedure",
+            Self::Derived => "derived",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "fact" => Some(Self::Fact),
+            "preference" => Some(Self::Preference),
+            "decision" => Some(Self::Decision),
+            "procedure" => Some(Self::Procedure),
+            "derived" => Some(Self::Derived),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PrincipalKind {
+    Human,
+    Agent,
+}
+
+impl PrincipalKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Human => "human",
+            Self::Agent => "agent",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "human" => Some(Self::Human),
+            "agent" => Some(Self::Agent),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PrincipalSource {
+    Gateway,
+    Wecom,
+    Key,
+}
+
+impl PrincipalSource {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Gateway => "gateway",
+            Self::Wecom => "wecom",
+            Self::Key => "key",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "gateway" => Some(Self::Gateway),
+            "wecom" => Some(Self::Wecom),
+            "key" => Some(Self::Key),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Memory {
+    pub id: i64,
+    pub scope_type: MemoryScopeType,
+    pub scope_id: String,
+    /// Personal domain only: project note carries the workspace it belongs
+    /// to, portable preference stays None. Always None for team memories.
+    pub origin_workspace_id: Option<String>,
+    pub topic: Option<String>,
+    pub kind: MemoryKind,
+    pub content: String,
+    pub content_hash: String,
+    pub source_ref: Option<serde_json::Value>,
+    pub expires_at: Option<DateTime<Utc>>,
+    /// Bumped on retrieval hit (ranking signal), NOT on edit — edit audit
+    /// is updated_at.
+    pub last_used_at: Option<DateTime<Utc>>,
+    pub created_by: String,
+    pub created_at: DateTime<Utc>,
+    pub updated_by: String,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Principal {
+    pub id: String,
+    pub kind: PrincipalKind,
+    pub source: PrincipalSource,
+    pub external_id: String,
+    pub display_name: Option<String>,
+    pub created_at: DateTime<Utc>,
+}
+
+/// Insert payload — id/timestamps assigned by the store.
+#[derive(Debug, Clone)]
+pub struct NewMemory {
+    pub scope_type: MemoryScopeType,
+    pub scope_id: String,
+    pub origin_workspace_id: Option<String>,
+    pub topic: Option<String>,
+    pub kind: MemoryKind,
+    pub content: String,
+    pub content_hash: String,
+    pub source_ref: Option<serde_json::Value>,
+    pub expires_at: Option<DateTime<Utc>>,
+    pub created_by: String,
+}
+
+/// Outcome of an insert against UNIQUE(scope, content_hash): exact
+/// duplicates return the existing row so save stays idempotent (a retried
+/// save after a partial failure must not error).
+#[derive(Debug, Clone)]
+pub enum MemoryInsert {
+    Inserted(Memory),
+    Duplicate(Memory),
+}
+
+/// Partial update. None = keep. Content and content_hash travel together
+/// (service recomputes the hash). Clearing topic/expires_at is not
+/// supported in M1 — delete and re-save.
+#[derive(Debug, Clone, Default)]
+pub struct MemoryPatch {
+    pub content: Option<String>,
+    pub content_hash: Option<String>,
+    pub topic: Option<String>,
+    pub source_ref: Option<serde_json::Value>,
+    pub expires_at: Option<DateTime<Utc>>,
+}
+
+/// Read-side domain filter. Every memory read goes through a query carrying
+/// one of these — the single scope-filtered primitive (design §4.1); no
+/// bypass queries.
+#[derive(Debug, Clone)]
+pub enum MemoryScopeFilter {
+    /// Exactly one domain — save's neighbor search, scoped search.
+    Scope {
+        scope_type: MemoryScopeType,
+        scope_id: String,
+    },
+    /// The context union (design §8): team domain of `workspace_id` plus
+    /// the personal domain of `principal_id` restricted to
+    /// origin ∈ {workspace_id, none}.
+    Context {
+        workspace_id: String,
+        principal_id: String,
+    },
+}
+
+/// Index-only Milvus row: no content, no kind — MySQL recheck is the
+/// authority for everything but the vector.
+#[derive(Debug, Clone)]
+pub struct MemoryWithEmbedding {
+    pub id: i64,
+    pub scope_type: MemoryScopeType,
+    pub scope_id: String,
+    /// Empty string = none (Milvus VarChar has no NULL with dynamic
+    /// fields disabled).
+    pub origin_workspace_id: String,
+    pub vector: Vec<f32>,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct MemoryCandidate {
+    pub id: i64,
+    pub score: f32,
+}

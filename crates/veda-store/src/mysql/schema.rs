@@ -170,6 +170,38 @@ impl MysqlStore {
     UNIQUE INDEX idx_ws_name (workspace_id, name),
     INDEX idx_workspace (workspace_id)
 )"#,
+            // Agent/team memories (docs/plans/agent-memory-m1.md). BIGINT id
+            // for the [mem:123] citation format. last_used_at is a ranking
+            // signal bumped on retrieval, never on edit. No state columns by
+            // design: wrong -> update, unwanted -> hard delete.
+            r#"CREATE TABLE IF NOT EXISTS veda_memories (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+    scope_type VARCHAR(16) NOT NULL,
+    scope_id VARCHAR(64) NOT NULL,
+    origin_workspace_id VARCHAR(64) NULL,
+    topic VARCHAR(128) NULL,
+    kind VARCHAR(16) NOT NULL,
+    content TEXT NOT NULL,
+    content_hash CHAR(64) NOT NULL,
+    source_ref JSON NULL,
+    expires_at TIMESTAMP NULL,
+    last_used_at TIMESTAMP NULL,
+    created_by VARCHAR(36) NOT NULL,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_by VARCHAR(36) NOT NULL,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    UNIQUE INDEX uq_scope_hash (scope_type, scope_id, content_hash),
+    INDEX idx_scope_topic (scope_type, scope_id, topic)
+)"#,
+            r#"CREATE TABLE IF NOT EXISTS veda_principals (
+    id VARCHAR(36) PRIMARY KEY,
+    kind VARCHAR(16) NOT NULL,
+    source VARCHAR(16) NOT NULL,
+    external_id VARCHAR(128) NOT NULL,
+    display_name VARCHAR(128) NULL,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE INDEX uq_source_ext (source, external_id)
+)"#,
         ];
         for s in stmts {
             sqlx::query(s)
