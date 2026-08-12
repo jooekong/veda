@@ -32,6 +32,7 @@ SQL 三件套 / revoke scope / platform authz+timeout / TimeoutLayer+CatchPanic 
 | [`outbox-dedup-refactor.md`](../plans/outbox-dedup-refactor.md) | **搁置**（07-29 简化审计：无性能证据不动稳定写路径；更简的中间路线备忘在 plan 头部） |
 | [`doc-access-stats.md`](../plans/doc-access-stats.md) | 文档访问热度统计（业务方需求）：`GET /v1/stats/docs` 双面 + 按天聚合 + 进程内 Recorder；**已实现**（交叉评审→拍板→单测10+集成2全绿），待随下次发版部署；实现偏差见 §9 |
 | [`cli-local-config.md`](../plans/cli-local-config.md) | CLI 目录级配置 `.veda.toml`：整文件替换 + 向上递归 + `$VEDA_CONFIG` 钉定，save 写回来源；**已实现**（单测+冒烟全过），待随 CLI 发版 |
+| [`agent-memory-m1.md`](../plans/agent-memory-m1.md) | Agent/团队记忆 M1 施工图（2026-08-12 开工）：两张表 + 共享 Milvus collection + MemoryService + 5 MCP 工具；架构定稿在 [`design/agent-memory.md`](agent-memory.md) |
 
 ## 方向池
 
@@ -39,7 +40,7 @@ SQL 三件套 / revoke scope / platform authz+timeout / TimeoutLayer+CatchPanic 
   （tigerfs / drive9 / agent-memory 赛道七家对标；候选：operation log + 版本历史（D1）、
   `veda skill install`（D2）、agent/团队记忆（D3））
 - Agent / 团队记忆完整设计提案：[`agent-memory.md`](agent-memory.md)
-  （**提案态，未排期，零代码**；含调研附录与待拍板清单）
+  （架构定稿；**M1 已开工**，施工图 [`../plans/agent-memory-m1.md`](../plans/agent-memory-m1.md)）
 
 ## Phase 历史
 

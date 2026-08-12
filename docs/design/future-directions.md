@@ -52,22 +52,22 @@ veda 的分域 + 硬删目标是这两项确定性归零（集成测试可断言
 ② 「digest 只挑选拼装、不二次总结 + 引用可机械校验」11 家复核仍无一家实现。
 veda 另有一个别人给不了的结构优势：**记忆和它的证据在同一个库**，`/v1/answer` 天然双源。
 
-**完整方案与调研细节**：[`agent-memory.md`](agent-memory.md)（提案态，未排期；
-08-11 两批拍板：可编辑零状态机 / 无审批 wiki 治理 / principal 归属标识 /
-挂 fs workspace / scope 三档双身份 / 自动晋升只提名 / 展示层引用态+浏览态；
-待拍板仅剩落地形态）。
+**完整方案与调研细节**：[`agent-memory.md`](agent-memory.md)（08-11 两批拍板：
+可编辑零状态机 / 无审批 wiki 治理 / principal 归属标识 / 挂 fs workspace /
+scope 三档双身份 / 自动晋升只提名 / 展示层引用态+浏览态。
+**08-12 已开工**，出方向池进 plans：[`../plans/agent-memory-m1.md`](../plans/agent-memory-m1.md)）。
 
 ---
 
 ## 候选方向
 
-### D3 Agent / 团队记忆
+### D3 Agent / 团队记忆 —— 已开工（2026-08-12），出方向池
 
 veda 除了存文档，再存一类「一句话一条的事实」，并区分个人域与团队域。
 最小形态：两张表（记忆 + digest）+ principals 归属表 + 5 个 MCP 工具
 （save/update/delete/search/context），记忆可编辑可硬删、零状态机，
 团队域 wiki 式全员可写（无审批），检索合并两域。详见 [`agent-memory.md`](agent-memory.md)。
-与 D1 共享 actor / 审计基建。
+与 D1 共享 actor / 审计基建。**M1 施工图**：[`../plans/agent-memory-m1.md`](../plans/agent-memory-m1.md)。
 
 ### D1 Operation log + per-file 版本历史/恢复（含 actor 审计）★ 最优先
 
