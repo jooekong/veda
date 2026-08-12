@@ -1348,10 +1348,10 @@ async fn run_init_command(
 ) -> anyhow::Result<()> {
     // ── mode 1: --import-key ────────────────────────────────────────
     if let Some(key) = import_key {
-        // Backup the existing file before clobbering it. Use the
-        // canonical path (not whatever's in memory) so the safety
-        // net is the same regardless of how cfg was loaded.
-        let cfg_path = config::CliConfig::default_path()?;
+        // Backup the existing file before clobbering it — the resolved
+        // source (global or directory-level), i.e. exactly the file
+        // cfg.save() will overwrite below.
+        let cfg_path = cfg.source_path.clone();
         let bak = init::backup_config(&cfg_path)?;
         let server_url = cfg.server_url.clone();
         let kind = init::apply_import_key(&mut cfg, key, server_url)?;
@@ -1460,9 +1460,7 @@ async fn run_init_command(
         let outcome_result = init::run_anonymous(&new_client, &mut cfg, server_url).await;
         cfg.save()?;
         let outcome = outcome_result?;
-        let cfg_path = config::CliConfig::default_path()
-            .map(|p| p.display().to_string())
-            .unwrap_or_else(|_| "<config path>".into());
+        let cfg_path = cfg.source_path.display().to_string();
         println!();
         println!("✓ anonymous account created (id {})", outcome.account_id);
         println!("✓ default workspace ready (id {})", outcome.workspace_id);
@@ -1513,9 +1511,7 @@ async fn run_init_command(
     cfg.save()?;
     let outcome = outcome_result?;
 
-    let cfg_path = config::CliConfig::default_path()
-        .map(|p| p.display().to_string())
-        .unwrap_or_else(|_| "<config path>".into());
+    let cfg_path = cfg.source_path.display().to_string();
     println!();
     if outcome.created_account {
         println!("✓ account created (id {})", outcome.account_id);
@@ -2116,6 +2112,12 @@ async fn main() -> anyhow::Result<()> {
         }
         Commands::Config { action } => match action {
             ConfigCmd::Show => {
+                let source_tag = match cfg.source {
+                    config::ConfigSource::Global => "",
+                    config::ConfigSource::Local => " (local)",
+                    config::ConfigSource::EnvPin => " ($VEDA_CONFIG)",
+                };
+                println!("config_file: {}{source_tag}", cfg.source_path.display());
                 println!("server_url: {}", cfg.server_url);
                 println!(
                     "api_key: {}",

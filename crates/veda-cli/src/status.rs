@@ -6,7 +6,7 @@
 
 use std::time::Duration;
 
-use crate::config::CliConfig;
+use crate::config::{CliConfig, ConfigSource};
 
 /// Server-reachability check: GET /healthz with a short timeout. Returns
 /// true on 200 OK with body "ok", false on anything else (including
@@ -38,9 +38,33 @@ pub async fn ping_server(server_url: &str) -> bool {
 /// checking).
 pub fn render_status(cfg: &CliConfig, reachable: Option<bool>) -> String {
     if !is_configured(cfg) {
-        return "No configuration. Run `veda init` to set up, or export $VEDA_SERVER + $VEDA_KEY.\n"
-            .to_string();
+        // An empty directory-level / pinned file still shadows the
+        // global config (isolation is the point) — name it, or users
+        // wonder why their global setup "disappeared" in this directory.
+        return if cfg.source == ConfigSource::Global {
+            "No configuration. Run `veda init` to set up, or export $VEDA_SERVER + $VEDA_KEY.\n"
+                .to_string()
+        } else {
+            format!(
+                "No configuration in {} (this file shadows the global config). \
+                 Edit it or run `veda init` here.\n",
+                cfg.source_path.display()
+            )
+        };
     }
+    // Which file is in effect — first line so wrong-workspace debugging
+    // starts from the answer. Empty source_path = hand-constructed
+    // value (tests only); nothing meaningful to print.
+    let config_line = if cfg.source_path.as_os_str().is_empty() {
+        String::new()
+    } else {
+        let tag = match cfg.source {
+            ConfigSource::Global => "",
+            ConfigSource::Local => "  [local]",
+            ConfigSource::EnvPin => "  [$VEDA_CONFIG]",
+        };
+        format!("Config:      {}{tag}\n", cfg.source_path.display())
+    };
     // Surface where credentials actually come from — an env override
     // silently beating config.toml is the #1 "why is it hitting the wrong
     // workspace" confusion, so say it out loud.
@@ -63,7 +87,7 @@ pub fn render_status(cfg: &CliConfig, reachable: Option<bool>) -> String {
     } else {
         render_workspace_line(cfg)
     };
-    format!("{server_line}\n{account_key_line}Workspace:   {ws_state}\n")
+    format!("{config_line}{server_line}\n{account_key_line}Workspace:   {ws_state}\n")
 }
 
 /// "Workspace:" line content. ★ marks the active profile so users
@@ -187,6 +211,32 @@ mod tests {
             !out.lines().any(|l| l.starts_with("Server:") && l.ends_with(' ')),
             "trailing whitespace on server line: {out:?}"
         );
+    }
+
+    #[test]
+    fn render_shows_config_source_with_local_tag() {
+        let mut cfg = full_cfg();
+        cfg.source_path = "/proj/.veda.toml".into();
+        cfg.source = ConfigSource::Local;
+        let out = render_status(&cfg, None);
+        assert!(
+            out.contains("Config:      /proj/.veda.toml  [local]"),
+            "out: {out}"
+        );
+        // Hand-constructed configs (empty source_path) skip the line —
+        // covered implicitly by every other test in this module.
+    }
+
+    #[test]
+    fn render_empty_local_config_names_the_shadowing_file() {
+        let cfg = CliConfig {
+            source_path: "/proj/.veda.toml".into(),
+            source: ConfigSource::Local,
+            ..CliConfig::default()
+        };
+        let out = render_status(&cfg, None);
+        assert!(out.contains("/proj/.veda.toml"), "out: {out}");
+        assert!(out.contains("shadows the global config"), "out: {out}");
     }
 
     #[test]

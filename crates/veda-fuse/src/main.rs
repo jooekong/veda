@@ -280,9 +280,11 @@ impl EnvVars {
     }
 }
 
-/// Indirection over `~/.config/veda/config.toml` loading. The unit
-/// tests pass `Memory(cfg)` so they don't depend on the user's real
-/// home directory state.
+/// Indirection over CLI config loading (global config.toml, or a
+/// directory-level `.veda.toml` / `$VEDA_CONFIG` pin — resolution
+/// lives in `CliConfig::load`, so mount inherits the CLI's rules).
+/// The unit tests pass `Memory(cfg)` so they don't depend on the
+/// user's real home directory state.
 enum ConfigLoader {
     Real,
     #[cfg(test)]

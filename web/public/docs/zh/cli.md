@@ -44,7 +44,7 @@ veda ws list                                  # ws 是 workspace 的简写
 
 临时切换：`veda --workspace archive ls /docs`——只对这一条命令生效，不改 config；alias 必须已存在。
 
-配置在 `~/.config/veda/config.toml`。`veda status` 看当前状态（server / 凭证来源 / 活跃 workspace）；`veda config show` 是隐藏的排错入口，能看到完整 profile 列表。
+配置在 `~/.config/veda/config.toml`（或目录级 `.veda.toml`，见下节）。`veda status` 看当前状态（server / 凭证来源 / 活跃 workspace）；`veda config show` 是隐藏的排错入口，能看到完整 profile 列表。
 
 无 config 直连（CI / 脚本 / agent 场景，零落盘）：
 
@@ -55,6 +55,28 @@ veda search "..."               # 数据面命令直接可用，不写任何本�
 ```
 
 优先级 `--server` flag > 环境变量（`VEDA_SERVER` / `VEDA_KEY`）> config.toml。**key 没有 CLI flag**——只能走 `$VEDA_KEY` 或 config（`--key` 是 `veda-fuse mount` 独有的）。`veda status` 会标注凭证来源（env / config）。
+
+### 目录级配置（`.veda.toml`）
+
+把一份与 config.toml 同构的 `.veda.toml` 放进项目目录，veda 从当前目录**向上查找**，找到即**整体取代**全局配置（不做字段合并——局部文件永远借不到全局的 key）。这是给项目 / agent 绑定专属 workspace 的正规做法：
+
+```toml
+# .veda.toml — 含 wk_ key 时务必加进 .gitignore
+server_url = "https://veda.ddmc-inc.com"
+active_workspace = "default"
+
+[workspaces.default]
+key = "wk_xxx"
+```
+
+- 配置文件解析顺序：`$VEDA_CONFIG`（显式指定一个配置文件，**必须绝对路径**，与目录无关）> 就近 `.veda.toml` > 全局 config.toml。flag 和 `$VEDA_SERVER` / `$VEDA_KEY` 仍压过任何文件。
+- 写回同源：目录配置生效时，`veda init` / `workspace switch` / `config set` 改的是 `.veda.toml`，不碰全局文件。
+- `.veda.toml` 解析失败直接报错，**不会**静默回落全局（避免写进错误的 workspace）；文件存在但为空视为「本目录未配置」，同样不回落。
+- `veda status` / `veda config show` 第一行显示当前生效的配置文件，带 `[local]` / `[$VEDA_CONFIG]` 标记。
+
+团队 / agent 仓库推荐「**可提交、无密钥**」模式：`.veda.toml` 只写 `server_url`（不含 key，可以放心提交，worktree / 新 clone 天然带上），key 走 `$VEDA_KEY` 注入——wk_ key 本身就选定了 workspace。这样漏配 key 时得到的是明确报错，而不是静默打到全局配置。
+
+注意：`$VEDA_KEY` 会发给就近 `.veda.toml` 指定的任何 server——设着它就不要在不可信的 checkout 里跑 veda；要彻底免疫，把 `$VEDA_SERVER` 也一并 export（env server 压过文件里的 server）。
 
 ## 文件系统
 

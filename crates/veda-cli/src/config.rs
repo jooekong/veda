@@ -14,6 +14,25 @@ pub struct WorkspaceEntry {
     pub key: String,
 }
 
+/// Directory-level config filename, discovered by walking up from the
+/// current directory. Same schema as the global config.toml; when
+/// present it fully replaces the global file — no field merging, so a
+/// local file can never borrow (and exfiltrate) the global file's keys.
+pub const LOCAL_CONFIG_FILENAME: &str = ".veda.toml";
+
+/// How the loaded config file was chosen. Drives status/init display;
+/// save() always writes back to `source_path` regardless of variant.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ConfigSource {
+    /// Global `${XDG_CONFIG_HOME:-~/.config}/veda/config.toml`.
+    #[default]
+    Global,
+    /// `.veda.toml` found in the working directory or an ancestor.
+    Local,
+    /// File explicitly pinned via `$VEDA_CONFIG` (CWD-independent).
+    EnvPin,
+}
+
 /// In-memory CLI configuration. The on-disk shape is `RawConfig`; the
 /// two diverge to keep legacy migration logic out of the hot path —
 /// load_from() normalises old top-level `workspace_id` / `workspace_key`
@@ -31,6 +50,13 @@ pub struct CliConfig {
     pub env_key: Option<String>,
     /// True when `$VEDA_SERVER` overrode `server_url` — status display only.
     pub server_from_env: bool,
+    /// File this config was loaded from; save() writes back here so a
+    /// directory-level config is edited in place instead of leaking
+    /// mutations into the global file. Empty only for hand-constructed
+    /// values (tests) — load()/load_from() always set it.
+    pub source_path: PathBuf,
+    /// How `source_path` was chosen — display only.
+    pub source: ConfigSource,
 }
 
 impl Default for CliConfig {
@@ -42,6 +68,8 @@ impl Default for CliConfig {
             workspaces: BTreeMap::new(),
             env_key: None,
             server_from_env: false,
+            source_path: PathBuf::new(),
+            source: ConfigSource::Global,
         }
     }
 }
@@ -93,12 +121,57 @@ impl CliConfig {
         Ok(dir.join("config.toml"))
     }
 
-    pub fn load() -> Result<Self> {
-        Self::load_from(&Self::default_path()?)
+    /// Resolve which config file this invocation uses:
+    /// `$VEDA_CONFIG` (explicit pin) > nearest `.veda.toml` walking up
+    /// from `from_dir` > global [`Self::default_path`]. `from_dir` is a
+    /// parameter instead of reading the process CWD so tests never
+    /// touch process-global state (cwd/env mutations break under
+    /// parallel `cargo test`).
+    pub fn resolve_path(
+        env_pin: Option<String>,
+        from_dir: &Path,
+    ) -> Result<(PathBuf, ConfigSource)> {
+        if let Some(p) = env_pin
+            .map(|p| p.trim().to_string())
+            .filter(|p| !p.is_empty())
+        {
+            let p = PathBuf::from(p);
+            // The pin exists to be CWD-independent; a relative path
+            // would silently re-resolve against whatever directory each
+            // command runs from — the exact failure mode it prevents.
+            if !p.is_absolute() {
+                bail!(
+                    "$VEDA_CONFIG must be an absolute path (got '{}')",
+                    p.display()
+                );
+            }
+            return Ok((p, ConfigSource::EnvPin));
+        }
+        if let Some(p) = from_dir
+            .ancestors()
+            .map(|d| d.join(LOCAL_CONFIG_FILENAME))
+            .find(|c| c.is_file())
+        {
+            return Ok((p, ConfigSource::Local));
+        }
+        Ok((Self::default_path()?, ConfigSource::Global))
     }
 
+    pub fn load() -> Result<Self> {
+        let cwd = std::env::current_dir().context("cannot determine current directory")?;
+        let (path, source) = Self::resolve_path(std::env::var("VEDA_CONFIG").ok(), &cwd)?;
+        let mut cfg = Self::load_from(&path)?;
+        cfg.source = source;
+        Ok(cfg)
+    }
+
+    /// Write back to wherever this config was loaded from — the global
+    /// file, a directory-level `.veda.toml`, or a `$VEDA_CONFIG` pin.
     pub fn save(&self) -> Result<()> {
-        self.save_to(&Self::default_path()?)
+        if self.source_path.as_os_str().is_empty() {
+            bail!("config has no source path (constructed without load) — use save_to");
+        }
+        self.save_to(&self.source_path)
     }
 
     /// Read config from a specific path. Returns default if the file is
@@ -109,7 +182,12 @@ impl CliConfig {
     pub fn load_from(path: &Path) -> Result<Self> {
         let raw: RawConfig = if path.exists() {
             let s = std::fs::read_to_string(path)?;
-            toml::from_str(&s).context("parse config.toml")?
+            // Name the file: with directory-level configs in play there
+            // is more than one candidate, and a parse error must be
+            // attributable. Errors abort the command — never silently
+            // fall back to another file (that would route writes to the
+            // wrong workspace).
+            toml::from_str(&s).with_context(|| format!("parse {}", path.display()))?
         } else {
             RawConfig {
                 server_url: default_server_url(),
@@ -117,6 +195,7 @@ impl CliConfig {
             }
         };
         let mut cfg = Self::from_raw(raw);
+        cfg.source_path = path.to_path_buf();
         cfg.apply_env(
             std::env::var("VEDA_SERVER").ok(),
             std::env::var("VEDA_KEY").ok(),
@@ -178,6 +257,8 @@ impl CliConfig {
             workspaces,
             env_key: None,
             server_from_env: false,
+            source_path: PathBuf::new(),
+            source: ConfigSource::Global,
         }
     }
 
@@ -200,7 +281,15 @@ impl CliConfig {
             std::fs::create_dir_all(parent)?;
         }
         let raw = self.to_raw();
-        let s = toml::to_string_pretty(&raw)?;
+        let mut s = toml::to_string_pretty(&raw)?;
+        // Directory-level configs usually live inside a repo and carry
+        // wk_ keys — nudge users to keep them out of version control.
+        // Regenerated on every save (comments don't survive parsing).
+        if path.file_name().and_then(|n| n.to_str()) == Some(LOCAL_CONFIG_FILENAME) {
+            s = format!(
+                "# veda directory-level config — contains workspace keys, add to .gitignore\n{s}"
+            );
+        }
         std::fs::write(path, s)?;
         #[cfg(unix)]
         {
@@ -333,6 +422,9 @@ mod tests {
         saved.save_to(&path).unwrap();
 
         let loaded = CliConfig::load_from(&path).unwrap();
+        // load_from records where it read from; mirror that on the
+        // in-memory value so the whole-struct comparison stays exact.
+        saved.source_path = path.clone();
         assert_eq!(loaded, saved);
         assert_eq!(loaded.active_alias(), Some("default"));
         assert_eq!(loaded.active_wk().unwrap(), "wk-789");
@@ -474,6 +566,62 @@ key = "wk-work"
         // No `active_workspace` value is invented when the file didn't
         // declare one — caller has to pick explicitly.
         assert!(cfg.active_workspace.is_none());
+    }
+
+    #[test]
+    fn resolve_path_env_pin_then_local_then_global() {
+        let dir = tempdir().unwrap();
+        let nested = dir.path().join("a").join("b");
+        std::fs::create_dir_all(&nested).unwrap();
+        let local = dir.path().join("a").join(LOCAL_CONFIG_FILENAME);
+        std::fs::write(&local, "").unwrap();
+
+        // $VEDA_CONFIG wins even when a local file exists on the walk.
+        let (p, src) =
+            CliConfig::resolve_path(Some("/pin/cfg.toml".into()), &nested).unwrap();
+        assert_eq!(p, PathBuf::from("/pin/cfg.toml"));
+        assert_eq!(src, ConfigSource::EnvPin);
+
+        // Blank pin is ignored; nearest ancestor's .veda.toml is found
+        // from a subdirectory (walk-up).
+        let (p, src) = CliConfig::resolve_path(Some("  ".into()), &nested).unwrap();
+        assert_eq!(p, local);
+        assert_eq!(src, ConfigSource::Local);
+
+        // No .veda.toml anywhere up the chain → global path.
+        let bare = tempdir().unwrap();
+        let (_, src) = CliConfig::resolve_path(None, bare.path()).unwrap();
+        assert_eq!(src, ConfigSource::Global);
+
+        // Relative pins are rejected — they'd re-resolve per CWD,
+        // defeating the point of pinning.
+        let err = CliConfig::resolve_path(Some("rel/cfg.toml".into()), &nested)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("absolute"), "msg: {err}");
+    }
+
+    #[test]
+    fn save_writes_back_to_loaded_source() {
+        // Directory-level flow: mutations (workspace switch, id
+        // backfill…) must land in the file the config came from, never
+        // in the global path.
+        let dir = tempdir().unwrap();
+        let local = dir.path().join(LOCAL_CONFIG_FILENAME);
+        std::fs::write(&local, "server_url = \"http://one\"\n").unwrap();
+        let mut cfg = CliConfig::load_from(&local).unwrap();
+        cfg.server_url = "http://two".into();
+        cfg.save().unwrap();
+
+        let on_disk = std::fs::read_to_string(&local).unwrap();
+        assert!(on_disk.contains("http://two"), "on_disk: {on_disk}");
+        // .veda.toml gets the gitignore nudge header on every save.
+        assert!(
+            on_disk.starts_with("# veda directory-level config"),
+            "hint header missing: {on_disk}"
+        );
+        // A config that was never loaded has nowhere to save.
+        assert!(CliConfig::default().save().is_err());
     }
 
     #[test]
