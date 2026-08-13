@@ -531,7 +531,6 @@ pub struct SearchRequest {
     pub mode: SearchMode,
     #[serde(default = "default_search_limit")]
     pub limit: usize,
-    pub path_prefix: Option<String>,
     /// When set (e.g. by SearchService for semantic mode), vector backends use this for ANN search.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub query_vector: Option<Vec<f32>>,

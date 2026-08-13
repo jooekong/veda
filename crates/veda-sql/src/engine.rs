@@ -107,7 +107,7 @@ impl VedaSqlEngine {
             "veda_fs_events",
             Arc::new(VedaFsEventsFactory {
                 workspace_id: workspace_id.to_string(),
-                meta: self.meta.clone(),
+                fs_service: self.fs_service.clone(),
             }),
         );
 

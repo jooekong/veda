@@ -1556,3 +1556,197 @@ async fn list_dir_with_dir_sizes_empty_dir_reports_zero() {
     let d = entries.iter().find(|e| e.name == "emptydir").unwrap();
     assert_eq!(d.size_bytes, Some(0), "empty directory shows 0, not null");
 }
+
+// ── path-scope family: a prefix may name a directory subtree, a single
+//    file, or nothing (fix/path-scope-prefix-self) ─────────────────────
+
+#[tokio::test]
+async fn grep_with_file_path_scopes_to_that_single_file() {
+    let (svc, _state) = make_service();
+    svc.write_file("ws1", "/docs/a.md", "needle here", None, None)
+        .await
+        .unwrap();
+    svc.write_file("ws1", "/docs/b.md", "needle there", None, None)
+        .await
+        .unwrap();
+    let hits = svc
+        .grep("ws1", "needle", Some("/docs/a.md"), false, 100)
+        .await
+        .unwrap();
+    assert_eq!(hits.len(), 1);
+    assert_eq!(hits[0].path, "/docs/a.md");
+}
+
+#[tokio::test]
+async fn grep_with_dir_prefix_unchanged() {
+    let (svc, _state) = make_service();
+    svc.write_file("ws1", "/docs/a.md", "needle a", None, None)
+        .await
+        .unwrap();
+    svc.write_file("ws1", "/docs/sub/b.md", "needle b", None, None)
+        .await
+        .unwrap();
+    svc.write_file("ws1", "/other/c.md", "needle c", None, None)
+        .await
+        .unwrap();
+    let hits = svc
+        .grep("ws1", "needle", Some("/docs"), false, 100)
+        .await
+        .unwrap();
+    let mut paths: Vec<_> = hits.iter().map(|h| h.path.as_str()).collect();
+    paths.sort();
+    assert_eq!(paths, vec!["/docs/a.md", "/docs/sub/b.md"]);
+}
+
+#[tokio::test]
+async fn grep_root_scans_whole_workspace() {
+    let (svc, _state) = make_service();
+    svc.write_file("ws1", "/a.md", "needle", None, None)
+        .await
+        .unwrap();
+    svc.write_file("ws1", "/docs/b.md", "needle", None, None)
+        .await
+        .unwrap();
+    let hits = svc.grep("ws1", "needle", None, false, 100).await.unwrap();
+    assert_eq!(hits.len(), 2);
+}
+
+#[tokio::test]
+async fn grep_nonexistent_path_returns_empty() {
+    let (svc, _state) = make_service();
+    svc.write_file("ws1", "/a.md", "needle", None, None)
+        .await
+        .unwrap();
+    let hits = svc
+        .grep("ws1", "needle", Some("/nope"), false, 100)
+        .await
+        .unwrap();
+    assert!(hits.is_empty());
+}
+
+#[tokio::test]
+async fn grep_bare_prefix_equals_slashed() {
+    let (svc, _state) = make_service();
+    svc.write_file("ws1", "/docs/a.md", "needle", None, None)
+        .await
+        .unwrap();
+    let bare = svc
+        .grep("ws1", "needle", Some("docs"), false, 100)
+        .await
+        .unwrap();
+    let slashed = svc
+        .grep("ws1", "needle", Some("/docs"), false, 100)
+        .await
+        .unwrap();
+    assert_eq!(bare.len(), 1);
+    assert_eq!(bare[0].path, slashed[0].path);
+}
+
+#[tokio::test]
+async fn list_dir_recursive_on_file_errors() {
+    let (svc, _state) = make_service();
+    svc.write_file("ws1", "/notes.md", "x", None, None)
+        .await
+        .unwrap();
+    let err = svc
+        .list_dir_recursive("ws1", "/notes.md", 100)
+        .await
+        .unwrap_err();
+    assert!(matches!(err, VedaError::InvalidPath(_)));
+}
+
+#[tokio::test]
+async fn list_dir_recursive_on_missing_path_errors() {
+    let (svc, _state) = make_service();
+    let err = svc.list_dir_recursive("ws1", "/nope", 100).await.unwrap_err();
+    assert!(matches!(err, VedaError::NotFound(_)));
+}
+
+#[tokio::test]
+async fn list_dir_recursive_root_ok() {
+    let (svc, _state) = make_service();
+    svc.write_file("ws1", "/docs/a.md", "x", None, None)
+        .await
+        .unwrap();
+    let entries = svc.list_dir_recursive("ws1", "/", 100).await.unwrap();
+    assert!(entries.iter().any(|d| d.path == "/docs/a.md"));
+}
+
+#[tokio::test]
+async fn glob_files_literal_pattern_matches_file_itself() {
+    let (svc, _state) = make_service();
+    svc.write_file("ws1", "/notes.md", "x", None, None)
+        .await
+        .unwrap();
+    let out = svc.glob_files("ws1", "/notes.md", 100).await.unwrap();
+    assert_eq!(out.len(), 1);
+    assert_eq!(out[0].path, "/notes.md");
+}
+
+#[tokio::test]
+async fn glob_files_missing_prefix_returns_empty() {
+    let (svc, _state) = make_service();
+    let out = svc.glob_files("ws1", "/nope/*.md", 100).await.unwrap();
+    assert!(out.is_empty());
+}
+
+#[tokio::test]
+async fn glob_files_children_pattern_under_file_returns_empty() {
+    let (svc, _state) = make_service();
+    svc.write_file("ws1", "/notes.md", "x", None, None)
+        .await
+        .unwrap();
+    let out = svc.glob_files("ws1", "/notes.md/*", 100).await.unwrap();
+    assert!(out.is_empty());
+}
+
+#[tokio::test]
+async fn glob_files_root_pattern_ok() {
+    let (svc, _state) = make_service();
+    svc.write_file("ws1", "/a.txt", "x", None, None)
+        .await
+        .unwrap();
+    svc.write_file("ws1", "/docs/b.txt", "x", None, None)
+        .await
+        .unwrap();
+    let out = svc.glob_files("ws1", "/*.txt", 100).await.unwrap();
+    assert_eq!(out.len(), 1);
+    assert_eq!(out[0].path, "/a.txt");
+}
+
+// ── root destination guard: root must never receive a dentry row ──────
+
+#[tokio::test]
+async fn rename_to_root_rejected() {
+    let (svc, _state) = make_service();
+    svc.write_file("ws1", "/docs/a.md", "x", None, None)
+        .await
+        .unwrap();
+    let err = svc.rename("ws1", "/docs", "/").await.unwrap_err();
+    assert!(matches!(err, VedaError::InvalidPath(_)));
+    // Empty destination normalizes to "/" and takes the same rejection.
+    let err = svc.rename("ws1", "/docs", "").await.unwrap_err();
+    assert!(matches!(err, VedaError::InvalidPath(_)));
+}
+
+#[tokio::test]
+async fn copy_to_root_rejected() {
+    let (svc, _state) = make_service();
+    svc.write_file("ws1", "/a.md", "x", None, None)
+        .await
+        .unwrap();
+    let err = svc.copy_file("ws1", "/a.md", "/").await.unwrap_err();
+    assert!(matches!(err, VedaError::InvalidPath(_)));
+}
+
+#[tokio::test]
+async fn write_to_root_rejected() {
+    let (svc, _state) = make_service();
+    let err = svc
+        .write_file("ws1", "/", "x", None, None)
+        .await
+        .unwrap_err();
+    assert!(matches!(err, VedaError::InvalidPath(_)));
+    // mkdir("/") stays an idempotent no-op.
+    svc.mkdir("ws1", "/").await.unwrap();
+}

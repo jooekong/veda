@@ -895,10 +895,20 @@ async fn fs_events_stream_and_cursor() {
         assert!(r.json()["current_min_id"].is_number(), "410 carries current_min_id");
     }
 
-    // An invalid path_prefix is a hard 400 (not silently widened).
+    // A bare prefix (missing leading slash) is folded leniently — same
+    // posture as search. Only a prefix that still fails normalization
+    // is a hard 400 (not silently widened).
     let r = send(
         s.get("/v1/events")
             .query(&[("since_id", "0"), ("path_prefix", "no-leading-slash")])
+            .bearer_auth(&wk),
+    )
+    .await;
+    want(&r, 200, "bare path_prefix folded leniently");
+
+    let r = send(
+        s.get("/v1/events")
+            .query(&[("since_id", "0"), ("path_prefix", "bad:colon")])
             .bearer_auth(&wk),
     )
     .await;

@@ -162,7 +162,6 @@ impl VedaSearchFactory {
             query: query.to_string(),
             mode,
             limit,
-            path_prefix: None,
             query_vector,
             id_filter: None,
         };

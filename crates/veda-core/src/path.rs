@@ -154,6 +154,15 @@ pub const RESERVED_SIDECAR_BASENAMES: &[&str] = &[".abstract", ".overview"];
 /// `""` and silently let the write through.
 pub fn reject_reserved_basename(normalized_path: &str) -> Result<()> {
     let basename = filename(normalized_path);
+    // Empty basename means root ("/"). Every caller validates a write /
+    // copy / rename destination, and root must never get a dentry row:
+    // the whole path-scope layer (list_dentries_under_*, rename tx,
+    // move-event rebase) assumes the "root has no dentry" invariant.
+    if basename.is_empty() {
+        return Err(VedaError::InvalidPath(
+            "root cannot be a write/copy/rename destination".to_string(),
+        ));
+    }
     if RESERVED_SIDECAR_BASENAMES.contains(&basename) {
         return Err(VedaError::InvalidPath(format!(
             "'{basename}' is reserved for the FUSE summary sidecar and \
@@ -240,23 +249,21 @@ mod tests {
     }
 
     #[test]
-    fn reserved_basename_assumes_normalized_input() {
-        // Helper is meant to run *after* normalize. The contract
-        // pins that caller-provided raw forms (trailing slash, `/.`,
-        // double slashes) MUST be passed through `normalize` first
-        // — otherwise the basename derived here would be empty / a
-        // dot, sneaking the write through. This test demonstrates
-        // both: with a raw path the basename helper returns the
-        // wrong basename, but `normalize` first then check works.
-        // (Catches the surface-level bypass codex flagged in the
-        // route-layer-only check.)
-        assert!(reject_reserved_basename("/docs/.abstract/").is_ok(),
-            "raw path with trailing slash should slip through this helper");
-        // After normalize, the bypass is closed:
+    fn reserved_basename_rejects_root_and_reserved() {
+        // Helper is meant to run *after* normalize; every caller is
+        // validating a write/copy/rename destination, which must have a
+        // non-empty basename. Root — and any raw form whose basename is
+        // empty, like a trailing slash that skipped normalize — fails
+        // closed: root must never receive a dentry row.
+        assert!(reject_reserved_basename("/").is_err());
+        assert!(
+            reject_reserved_basename("/docs/.abstract/").is_err(),
+            "empty basename (raw trailing slash) fails closed"
+        );
+        // Normalized reserved names stay rejected:
         let n = normalize("/docs/.abstract/").unwrap();
         assert_eq!(n, "/docs/.abstract");
         assert!(reject_reserved_basename(&n).is_err());
-        // Same for the /. form.
         let n = normalize("/docs/.abstract/.").unwrap();
         assert_eq!(n, "/docs/.abstract");
         assert!(reject_reserved_basename(&n).is_err());

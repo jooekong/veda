@@ -196,7 +196,6 @@ fn search_request_defaults() {
     let req: SearchRequest = serde_json::from_str(json).unwrap();
     assert_eq!(req.mode, SearchMode::Hybrid);
     assert_eq!(req.limit, 10);
-    assert!(req.path_prefix.is_none());
     assert!(req.query_vector.is_none());
 }
 

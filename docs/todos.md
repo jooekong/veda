@@ -48,3 +48,17 @@ search 工具都重新 resolve_scope）时每次全扫，然后照样 fallback �
 修法：探测超限不需要顺序，改 `COUNT(*)`（或新增无 ORDER BY 的枚举方法）。
 代价是常规小目录多一条 SQL 往返，所以等生产出现大目录 + 高频 scoped 搜索
 的实测证据再动。当前生产量级（最大 workspace ~900 dentries）扫描成本毫秒级。
+
+## root dentry 陷阱族：休眠，由 destination guard 锁死（2026-08-13）
+
+「root 无 dentry 行」是 path-scope 层的全局不变量，现由 `reject_reserved_basename`
+的空 basename 检查在所有写入口（write/append/copy/rename destination）强制。
+若未来有意给 root 建 dentry 行，以下休眠问题全部激活，需先修：
+
+- `rename_dentries_under` 缺 root 分支（veda-store tx.rs，`"/"` → `LIKE '//%'`；
+  隔壁 delete 有）；
+- 目录自嵌检查对 root 构造 `"//"`（fs.rs rename）；child Move event rebase 对
+  root 丢分隔符（fs.rs rename）；
+- 三个 tx mock 的 root 分支与生产不一致（veda-core mock_store.rs、veda-sql sql_test.rs）。
+
+详见 docs/path-scope-fix-plan.md 的 P3 节。

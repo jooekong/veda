@@ -173,13 +173,23 @@ impl MetadataStore for MockMetaFull {
         &self,
         ws: &str,
         since: i64,
-        _prefix: Option<&str>,
+        prefix: Option<&str>,
         limit: usize,
     ) -> Result<Vec<FsEvent>> {
+        // Mirror the production shape (mysql metadata.rs query_fs_events):
+        // None / "/" → everything; otherwise trim a trailing slash and
+        // match the prefix itself or its path-boundary descendants.
         let st = self.fs_events.lock().unwrap();
         let mut v: Vec<_> = st
             .iter()
             .filter(|e| e.workspace_id == ws && e.id > since)
+            .filter(|e| match prefix {
+                None | Some("/") => true,
+                Some(p) => {
+                    let p = p.trim_end_matches('/');
+                    e.path == p || e.path.starts_with(&format!("{p}/"))
+                }
+            })
             .cloned()
             .collect();
         v.sort_by_key(|e| e.id);
@@ -2292,4 +2302,90 @@ async fn search_with_where_filter() {
         .unwrap();
     let total: usize = batches.iter().map(|b| b.num_rows()).sum();
     assert_eq!(total, 1);
+}
+
+// ── veda_fs_events prefix normalization (path-scope family) ────────────
+
+fn event_paths(batches: &[arrow::array::RecordBatch]) -> Vec<String> {
+    let mut out = vec![];
+    for b in batches {
+        let arr = b
+            .column(0)
+            .as_any()
+            .downcast_ref::<arrow::array::StringArray>()
+            .unwrap();
+        for i in 0..arr.len() {
+            out.push(arr.value(i).to_string());
+        }
+    }
+    out.sort();
+    out
+}
+
+#[tokio::test]
+async fn veda_fs_events_prefix_bare_equals_slashed() {
+    let meta = Arc::new(MockMetaFull::new());
+    let engine = make_full_engine(meta);
+
+    engine
+        .execute("ws1", false, "SELECT veda_write('/docs/a.txt', 'a')")
+        .await
+        .unwrap();
+    engine
+        .execute("ws1", false, "SELECT veda_write('/docs_alt/b.txt', 'b')")
+        .await
+        .unwrap();
+
+    let slashed = engine
+        .execute(
+            "ws1",
+            false,
+            "SELECT path FROM veda_fs_events(0, '/docs', 100)",
+        )
+        .await
+        .unwrap();
+    let bare = engine
+        .execute(
+            "ws1",
+            false,
+            "SELECT path FROM veda_fs_events(0, 'docs', 100)",
+        )
+        .await
+        .unwrap();
+
+    let slashed_paths = event_paths(&slashed);
+    let bare_paths = event_paths(&bare);
+    assert!(
+        !slashed_paths.is_empty(),
+        "slashed prefix should match the /docs writes"
+    );
+    assert_eq!(
+        bare_paths, slashed_paths,
+        "bare prefix must behave like the slashed one"
+    );
+    // Path-boundary: '/docs' must not swallow '/docs_alt'.
+    assert!(
+        slashed_paths
+            .iter()
+            .all(|p| p == "/docs" || p.starts_with("/docs/")),
+        "{slashed_paths:?}"
+    );
+}
+
+#[tokio::test]
+async fn veda_fs_dir_listing_on_file_errors() {
+    let meta = Arc::new(MockMetaFull::new());
+    let engine = make_full_engine(meta);
+
+    engine
+        .execute("ws1", false, "SELECT veda_write('/notes.txt', 'x')")
+        .await
+        .unwrap();
+    // Trailing slash forces DirListing mode; a file there is an error
+    // (same contract as list_dir), no longer an affirmative empty table.
+    let err = engine
+        .execute("ws1", false, "SELECT * FROM veda_fs('/notes.txt/')")
+        .await
+        .unwrap_err();
+    assert!(err.to_string().contains("is not a directory"), "{err}");
 }

@@ -252,7 +252,6 @@ impl SearchService {
             query: query.to_string(),
             mode: SearchMode::Semantic,
             limit: fetch_limit,
-            path_prefix: path_prefix.map(|s| s.to_string()),
             query_vector,
             id_filter: scope.map(|s| s.summary_ids()),
         };
@@ -355,7 +354,6 @@ impl SearchService {
             query: query.to_string(),
             mode,
             limit: fetch_limit,
-            path_prefix: path_prefix.map(|s| s.to_string()),
             query_vector,
             id_filter: scope.map(|s| s.file_ids.clone()),
         };

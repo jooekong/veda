@@ -82,7 +82,6 @@ async fn milvus_init_upsert_search_delete() {
         query: "".into(),
         mode: SearchMode::Semantic,
         limit: 5,
-        path_prefix: None,
         query_vector: Some(vec.clone()),
         id_filter: None,
     };
@@ -102,7 +101,6 @@ async fn milvus_init_upsert_search_delete() {
         query: "hello".into(),
         mode: SearchMode::Hybrid,
         limit: 5,
-        path_prefix: None,
         query_vector: Some(vec.clone()),
         id_filter: None,
     };
@@ -716,7 +714,6 @@ async fn fs_fulltext_finds_lexical_only_hit() {
         query: "zqxwprodcode".into(),
         mode: SearchMode::Fulltext,
         limit: 10,
-        path_prefix: None,
         query_vector: None,
         id_filter: None,
     };
@@ -934,7 +931,6 @@ async fn fs_hybrid_fuses_not_fallback() {
         query: "zqxwprodcode".into(),
         mode: SearchMode::Hybrid,
         limit: 3,
-        path_prefix: None,
         query_vector: Some(mk(0.10)),
         id_filter: None,
     };
@@ -1007,7 +1003,6 @@ async fn milvus_search_honors_id_filter() {
         query: "scoped".into(),
         mode: SearchMode::Semantic,
         limit: 10,
-        path_prefix: None,
         query_vector: Some(vec_a.clone()),
         id_filter: None,
     };

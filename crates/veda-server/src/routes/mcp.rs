@@ -410,7 +410,7 @@ fn tool_specs() -> Vec<Value> {
                 "type": "object",
                 "properties": {
                     "pattern": { "type": "string", "description": "Literal substring to find." },
-                    "path": { "type": "string", "description": "Restrict to a path prefix." },
+                    "path": { "type": "string", "description": "Restrict to a directory subtree or a single file." },
                     "ignore_case": { "type": "boolean", "description": "Case-insensitive match, default false." },
                     "limit": { "type": "integer", "description": "Max hits, default 100, cap 1000." }
                 },

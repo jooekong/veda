@@ -272,6 +272,24 @@ impl AnswerService {
         limit: usize,
         bot_prompt: Option<&str>,
     ) -> Result<mpsc::Receiver<AnswerStreamEvent>, AnswerError> {
+        // Single choke point for every surface (REST sync + stream, MCP
+        // ask): fold the caller's prefix through the same lenient
+        // normalization search uses. Without this, retrieval (lenient
+        // inside search) and the tool loop's strict scope check disagree
+        // on a bare "docs" — hits come back but read_file fails closed.
+        let normalized_prefix = match path_prefix {
+            Some(raw) => {
+                let p = crate::path::normalize_lenient(raw)?;
+                if p == "/" {
+                    None
+                } else {
+                    Some(p)
+                }
+            }
+            None => None,
+        };
+        let path_prefix = normalized_prefix.as_deref();
+
         let initial = match tokio::time::timeout(
             Duration::from_secs(15),
             self.tools.search(workspace_id, query, path_prefix, limit),
@@ -1429,6 +1447,22 @@ mod engine_tests {
         )
         .await;
         assert!(!msg.contains("路径超出允许范围"), "{msg}");
+        assert!(msg.contains("允许内容"), "{msg}");
+    }
+
+    #[tokio::test]
+    async fn bare_path_prefix_reads_inside_scope() {
+        // "docs" (no leading slash) is folded once at the answer_stream
+        // entry. Before that fix retrieval matched leniently but the tool
+        // loop's strict scope check failed every read closed with
+        // "path must start with /" — quality degraded silently.
+        let msg = read_file_tool_msg(
+            r#"{"path":"/docs/sub/ok.md"}"#,
+            vec![("/docs/sub/ok.md", "允许内容".to_string())],
+            "docs",
+        )
+        .await;
+        assert!(!msg.contains("无法读取"), "{msg}");
         assert!(msg.contains("允许内容"), "{msg}");
     }
 

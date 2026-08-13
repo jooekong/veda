@@ -10,7 +10,7 @@ use datafusion::error::Result;
 use datafusion::logical_expr::Expr;
 use tracing::warn;
 
-use veda_core::store::MetadataStore;
+use veda_core::service::fs::FsService;
 
 use crate::fs_udf;
 
@@ -28,7 +28,11 @@ fn fs_events_schema() -> SchemaRef {
 
 pub struct VedaFsEventsFactory {
     pub workspace_id: String,
-    pub meta: Arc<dyn MetadataStore>,
+    // FsService, not the raw store: query_events_filtered is the choke
+    // point that folds the prefix through normalize_lenient, same as the
+    // REST events route. Going straight to the store made
+    // veda_fs_events(0, 'docs', N) silently return 0 rows.
+    pub fs_service: Arc<FsService>,
 }
 
 impl Debug for VedaFsEventsFactory {
@@ -100,7 +104,7 @@ impl TableFunctionImpl for VedaFsEventsFactory {
             }
         }
 
-        let events = fs_udf::block_on(self.meta.query_fs_events(
+        let events = fs_udf::block_on(self.fs_service.query_events_filtered(
             &self.workspace_id,
             since_id,
             path_prefix.as_deref(),

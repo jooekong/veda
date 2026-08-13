@@ -94,6 +94,15 @@ pub trait MetadataStore: Send + Sync {
     /// `path` as the next `after_path`, stopping when fewer than `limit`
     /// rows come back.
     ///
+    /// Scope semantics callers depend on (do not change them here — fix
+    /// call sites instead):
+    /// - STRICT descendants: matches `{prefix}/…` only, never the prefix
+    ///   entry itself (`resolve_scope` adds it separately on purpose);
+    /// - a prefix that names a file or nothing therefore yields `[]` —
+    ///   "is this a directory?" is the caller's job (`get_dentry` first);
+    /// - root (`"/"`) is a separate whole-workspace branch, because the
+    ///   root has no dentry row and `LIKE '//%'` would match nothing.
+    ///
     /// Stable sort by `path` is REQUIRED so paging is deterministic
     /// across invocations even with concurrent writes.
     async fn list_dentries_under_page(

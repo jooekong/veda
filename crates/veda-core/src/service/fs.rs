@@ -1065,6 +1065,21 @@ impl FsService {
         max_entries: usize,
     ) -> Result<Vec<Dentry>> {
         let norm = path::normalize(raw_path)?;
+        // Same contract as the non-recursive list_dir above: a file or a
+        // missing path is an error, not an affirmative empty directory
+        // (the subtree listing is strict-descendants-only and would
+        // silently return [] for both). Root is legal but has no dentry
+        // row, so it skips the lookup.
+        if norm != "/" {
+            let dentry = self
+                .meta
+                .get_dentry(workspace_id, &norm)
+                .await?
+                .ok_or_else(|| VedaError::NotFound(norm.clone()))?;
+            if !dentry.is_dir {
+                return Err(VedaError::InvalidPath(format!("{norm} is not a directory")));
+            }
+        }
         // _capped enforces the limit during pagination, so we never load
         // more than `max_entries` rows at once. Old code did
         // load-all-then-check, which OOMed on huge workspaces (review C2).
@@ -1075,16 +1090,37 @@ impl FsService {
 
     /// Match files using a glob pattern. Returns matching dentries.
     /// Pattern supports `*` (any chars except `/`), `?` (single char), `**` (recursive).
+    /// A wildcard-free pattern naming an existing file matches that file;
+    /// a fixed prefix that is missing or not a directory means no match,
+    /// not an error.
     pub async fn glob_files(
         &self,
         workspace_id: &str,
         pattern: &str,
         max_matches: usize,
     ) -> Result<Vec<Dentry>> {
-        let prefix = glob_fixed_prefix(pattern);
-        let all = self
-            .list_dir_recursive(workspace_id, &prefix, max_matches)
-            .await?;
+        // Strict normalize: glob is a programmatic surface (SQL veda_fs,
+        // pub API), so relative patterns stay rejected rather than being
+        // silently rewritten like the chatty prefix entries.
+        let prefix = path::normalize(&glob_fixed_prefix(pattern))?;
+        let all = if prefix == "/" {
+            self.meta
+                .list_dentries_under_capped(workspace_id, &prefix, max_matches)
+                .await?
+        } else {
+            match self.meta.get_dentry(workspace_id, &prefix).await? {
+                None => return Ok(Vec::new()),
+                Some(d) if !d.is_dir => {
+                    let hit = glob_match(pattern, &d.path);
+                    return Ok(if hit { vec![d] } else { Vec::new() });
+                }
+                Some(_) => {
+                    self.meta
+                        .list_dentries_under_capped(workspace_id, &prefix, max_matches)
+                        .await?
+                }
+            }
+        };
         Ok(all
             .into_iter()
             .filter(|d| !d.is_dir && glob_match(pattern, &d.path))
@@ -1092,6 +1128,8 @@ impl FsService {
     }
 
     /// Substring grep across files under `path_prefix` ("/" by default).
+    /// A file path as prefix scopes to that single file; a nonexistent
+    /// path yields an empty result (same semantics as search).
     /// Returns up to `max_results` hits, each with file path, 1-indexed line
     /// number, and the matching line. Stops scanning as soon as `max_results`
     /// is reached. No regex / no glob filter — keep alpha simple.
@@ -1107,14 +1145,30 @@ impl FsService {
             return Ok(Vec::new());
         }
         let max = max_results.clamp(1, 1000);
-        let prefix = path::normalize(path_prefix.unwrap_or("/"))?;
+        // Lenient like every other user-facing prefix entry (search,
+        // events, answer): "docs" and "/docs" mean the same subtree.
+        let prefix = path::normalize_lenient(path_prefix.unwrap_or("/"))?;
 
+        // The subtree listing is strict-descendants-only and root has no
+        // dentry row, so root skips the lookup and anything else resolves
+        // the prefix entry itself first (mirrors search's resolve_scope).
         // Cap dentry walk separately from result cap; a workspace with 100k
         // empty-of-match files shouldn't OOM the server.
-        let entries = self
-            .meta
-            .list_dentries_under_capped(workspace_id, &prefix, 50_000)
-            .await?;
+        let entries = if prefix == "/" {
+            self.meta
+                .list_dentries_under_capped(workspace_id, &prefix, 50_000)
+                .await?
+        } else {
+            match self.meta.get_dentry(workspace_id, &prefix).await? {
+                None => return Ok(Vec::new()),
+                Some(d) if !d.is_dir => vec![d],
+                Some(_) => {
+                    self.meta
+                        .list_dentries_under_capped(workspace_id, &prefix, 50_000)
+                        .await?
+                }
+            }
+        };
 
         let needle = if ignore_case {
             pattern.to_lowercase()
@@ -1304,10 +1358,12 @@ impl FsService {
 
     pub async fn mkdir(&self, workspace_id: &str, raw_path: &str) -> Result<()> {
         let norm = path::normalize(raw_path)?;
-        path::reject_reserved_basename(&norm)?;
+        // Root check first: mkdir("/") stays an idempotent no-op (the root
+        // always exists), while the shared validator now rejects root.
         if norm == "/" {
             return Ok(());
         }
+        path::reject_reserved_basename(&norm)?;
 
         let existing = self.meta.get_dentry(workspace_id, &norm).await?;
         if let Some(d) = existing {
@@ -2096,7 +2152,10 @@ fn make_fs_event(
 fn glob_fixed_prefix(pattern: &str) -> String {
     let mut parts: Vec<&str> = Vec::new();
     for part in pattern.split('/') {
-        if part.contains('*') || part.contains('?') || part.contains('[') {
+        // Same alphabet as glob_match and detect_mode: `*` / `?` only.
+        // `[` is an ordinary path character everywhere else, and treating
+        // it as a wildcard here silently widened the scan to root.
+        if part.contains('*') || part.contains('?') {
             break;
         }
         parts.push(part);

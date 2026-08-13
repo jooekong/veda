@@ -497,7 +497,6 @@ async fn prefix_is_normalized_leniently() {
         .await
         .unwrap();
     let reqs = vector.chunk_reqs.lock().unwrap();
-    assert_eq!(reqs[0].path_prefix.as_deref(), Some("/api-docs"));
     assert!(reqs[0].id_filter.is_some());
     assert_eq!(out.len(), 1);
 }
