@@ -36,6 +36,12 @@
 
 ## 阶段 1 — 代码合并 + 发版(本机 Mac)
 
+> **先判断要不要发版(2026-08-13 定)**:`git diff <last-tag>..HEAD -- crates/veda-cli crates/veda-types`
+> 为空或与 CLI 无关 = server-only 改动,**跳过本阶段**——不 bump 不打 tag。gitlab tag 的唯一作用是
+> 触发 CLI CI 发布,server 永远节点源码 build;发一个行为不变的 CLI 纯属噪音(0.1.27 实测教训)。
+> server-only:合并 + push main 后直接进阶段 2,`TAG` 用 main 的 commit sha,部署记录写 commit + sha。
+> 版本自报会停在上一个真发版——属预期,binary 身份以 sha 为准(阶段 2 的 ②b)。
+
 ```bash
 cd <repo>
 # 1.1 合并到 main(feat 基于 main,应是 fast-forward)
@@ -68,7 +74,7 @@ curl -s --noproxy '*' --header "Deploy-Token: $TOKEN" \
 ### 2A. build 一次(发版 tag,在 `.89`,glibc 2.34)
 
 ```bash
-TAG=0.1.15   # 阶段 1 发版确定的版本
+TAG=0.1.15   # 阶段 1 发版确定的版本;server-only 部署(跳过了阶段 1)用 main 的 commit sha
 
 # 同步该 tag 全树源码(排除 target/.git;git archive 给旧 mtime,故传完 touch 防 cargo 跳过重编)
 TMP=$(mktemp -d); git archive "$TAG" | tar -x -C "$TMP"
@@ -160,7 +166,8 @@ ssh <node> '
 **验证清单(每节点逐项打勾)**:
 - [ ] healthz = ok
 - [ ] ready:mysql + milvus 都 ok
-- [ ] 版本:`/mcp` initialize 自报 `"version"` = 本次 TAG(**唯一权威的版本判据**)
+- [ ] 版本:`/mcp` initialize 自报 `"version"` = 本次 TAG(**唯一权威的版本判据**;
+      server-only sha 部署时自报的是上一个真发版,此项改核对各节点 binary sha = 2B 记录的 hash)
 - [ ] blob 探活:PUT 二进制 200 + roundtrip 无损 + 探活文件已清
 - [ ] 生产额外:无新 dead-letter(`SELECT status,COUNT(*) FROM veda_outbox GROUP BY status`)、RSS/连接数正常
 
