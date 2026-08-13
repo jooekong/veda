@@ -323,10 +323,21 @@
 一次调用拿**带可验证引用**的答案：服务端 LLM 自主多轮检索（search + read_file 工具循环）后作答，答案正文带内联 `[n]` 标注。需要 server 配置了 `[llm]`，仅 fs workspace。
 
 - **请求**：`{ query（≤1024 字符）, path_prefix?, limit?（预检索条数，默认 12 上限 24）, prompt?（自定义 bot 人设，≤4000）}`。
-- **响应**：`{ answer, citations: [{index, path, spans}], hit_count, estimated_context_tokens }`。`spans` 是 chunk 区间；**空数组 = 引用整篇文件**。同一文件的多个段落会产生多条同 path 的 citation（chunk 粒度，属预期）——展示层建议按 path 聚合。找不到依据时返回固定拒答话术且 citations 为空（不编造）。
+- **响应**：`{ answer, citations, hit_count, estimated_context_tokens }`。citation 分两类：**文档引用** `{index, path, spans}`（`spans` 是 chunk 区间，**空数组 = 引用整篇文件**；同一文件多个段落会产生多条同 path 的 citation，展示层建议按 path 聚合）；**记忆引用** `{index, memory: {id, content, updated_by, updated_at}}`（无 `path`——本 workspace 的团队记忆作为第二证据源自动参与检索，见「团队记忆」节）。展示层按「有 `path` 显示文件、有 `memory` 显示记忆内容」处理即可，旧消费者跳过无 path 条目不出错。找不到依据时返回固定拒答话术且 citations 为空（不编造）。
 - **流式**：`POST /v1/answer/stream`（SSE）五事件：`delta`（增量文本）/ `reset`（丢弃已积累 delta）/ `tool`（工具进度提示）/ `final`（权威完整结果，消费者必须用它替换累积文本）/ `error`。
 - **错误**：`429 THROTTLED`（每 workspace 并发上限，默认 2）；`501 FEATURE_DISABLED`（未配 LLM）；`502 LLM_UNAVAILABLE`（LLM 上游不可用）；`504 ANSWER_TIMEOUT`（超 90s 截止）。流式下这些以 `error` 事件的 `error_code` 出现。耗时通常 10–90s。
 - **CLI**：`veda ask "问题" [--path 前缀] [--json]`；MCP 的 `ask` 工具走同一条检索链路，但载荷更窄（见下）。
+
+### 团队记忆（`/v1/memory/*`）
+
+fs workspace 的第三类资产：**一句话一条**的事实（决策、坑、环境怪癖、偏好），与文档并存。两类归属域——**团队域**（`scope: "team"`，workspace 内全员可读可写可删，逐条署名负责，wiki 式无审批）与**个人域**（`scope: "mine"`，跟 key 走，别人物理不可见）。团队记忆自动参与 `/v1/answer` 检索并可作为记忆引用返回。主要面向 agent（MCP 记忆工具与此同一套语义）；只读 `wk_` 可检索、写入需 readwrite key。
+
+- `POST /v1/memory`：`{ content（≤4096 字符）, scope?（`mine` 缺省 / `team`）, kind?（`fact` 缺省 / `decision` / `procedure` / `preference`）, topic?, source_ref?, expires_at? }`。响应 `{ memory, duplicate, neighbors }`——`duplicate: true` 表示同域已有一字不差的一条（幂等返回既有行）；`neighbors` 是同域最近邻 top-3，**语义很近时应改旧条（PATCH）而不是再存一条**。
+- `GET /v1/memory/search?query=…&scope=&limit=`：语义检索。`scope` 缺省 = 团队 + 本 key 个人域合并。
+- `GET /v1/memory/context?query=…&limit=`：开工引导面——一次调用拿「与当前任务相关」的记忆，agent 会话开始时调一次。
+- `PATCH /v1/memory/{id}`：`{ content? / topic? / source_ref? / expires_at? }` 任给其一；改内容会重嵌向量并更新署名（`updated_by`）。
+- `DELETE /v1/memory/{id}`：硬删，立即从检索消失。跨域操作（改/删别人个人域）一律 `404`（不泄露存在性）。
+- 条目形状：`{ id, scope: "team"|"mine", kind, content, topic?, origin_workspace_id?, source_ref?, expires_at?, created_by, created_at, updated_by, updated_at }`；检索响应条目多一个 `score`。
 
 ### SQL（`POST /v1/sql`）
 
@@ -355,9 +366,9 @@
 
 给 Coding Agent(Claude Code / Cursor / Codex)的原生工具面——[MCP](https://modelcontextprotocol.io)(Model Context Protocol)Streamable HTTP transport 的 **stateless** 模式,协议版本 `2025-06-18`。用户侧零安装,配置示例见 [AI 助手集成](#/docs/skill)。
 
-- **鉴权**:与 REST 数据面同一道闸——`Authorization: Bearer wk_…`(fs workspace;db kind 返 400)。只读 `wk_` 全功能可用(7 个工具均只读),这是推荐发给消费者的 key。
+- **鉴权**:与 REST 数据面同一道闸——`Authorization: Bearer wk_…`(fs workspace;db kind 返 400)。只读 `wk_` 可用全部只读工具(7 个)+ 记忆检索(`memory_search`/`memory_context`);记忆写入工具(`memory_save`/`memory_update`/`memory_delete`)需要 readwrite key,只读 key 调用返回可读拒绝文本。
 - **协议行为**:每个 POST 一条 JSON-RPC 消息、回一个 JSON 响应;无 `id` 字段的 notification 返 `202`;不支持 batch;`GET /mcp` 返 `405`(无服务端 SSE 下行流);请求头 `MCP-Protocol-Version` 若存在且非支持版本返 `400`。单次工具调用 30s 上限(`ask` 95s),超时返回 `isError:true` + `tool '<name>' timed out`。
-- **工具(7 个,均只读)**:`layout`(工作区布局,等价 `GET /v1/layout`,无参数;`tools/list` 里排第一,`initialize` 的 instructions 也引导先调它——陌生 workspace 的第一次调用)/ `search`(hybrid 检索,`detail_level` 三层;`limit` 默认 10 上限 100)/ `grep`(字面量,带行号,匹配行截断 500B;`limit` 默认 100 上限 1000;注意路径参数叫 `path`,不是 REST 的 `path_prefix`)/ `read_file`(PDF/Word 返提取文本;整读上限 64KB,`start_line`/`end_line` 分页)/ `list_dir`(平铺超 10000 条截断并带 `truncated: true`;递归超 10000 条**直接返回错误不截断**——所以递归成功即完整,`truncated` 恒为 `false`)/ `overview`(L1 摘要,未就绪/未启用返回可读提示)/ `ask`(服务端 RAG,与 `POST /v1/answer` 同一条检索链路;返回 `{answer, citations, hit_count}`,只收 `question`/`path_prefix`——`limit` 固定 12、不支持 `prompt`、不返 `estimated_context_tokens`;与 REST 共享每 workspace 并发上限,超出返回「too many concurrent」提示,10–90s)。
+- **工具(12 个 = 7 只读 + 5 记忆)**:`layout`(工作区布局,等价 `GET /v1/layout`,无参数;`tools/list` 里排第一,`initialize` 的 instructions 也引导先调它——陌生 workspace 的第一次调用)/ `search`(hybrid 检索,`detail_level` 三层;`limit` 默认 10 上限 100)/ `grep`(字面量,带行号,匹配行截断 500B;`limit` 默认 100 上限 1000;注意路径参数叫 `path`,不是 REST 的 `path_prefix`)/ `read_file`(PDF/Word 返提取文本;整读上限 64KB,`start_line`/`end_line` 分页)/ `list_dir`(平铺超 10000 条截断并带 `truncated: true`;递归超 10000 条**直接返回错误不截断**——所以递归成功即完整,`truncated` 恒为 `false`)/ `overview`(L1 摘要,未就绪/未启用返回可读提示)/ `ask`(服务端 RAG,与 `POST /v1/answer` 同一条检索链路,团队记忆同样参与并可作为引用返回;返回 `{answer, citations, hit_count}`,只收 `question`/`path_prefix`——`limit` 固定 12、不支持 `prompt`、不返 `estimated_context_tokens`;与 REST 共享每 workspace 并发上限,超出返回「too many concurrent」提示,10–90s)/ **记忆 5 工具**(`memory_context` 开工时调一次拿相关记忆、`memory_save`(返回近邻引导改旧条而非重复写)、`memory_update`、`memory_delete`、`memory_search`;与 REST `/v1/memory` 同一套语义,见「团队记忆」节)。
 - **错误语义**:协议错误(坏 JSON、未知方法/工具、参数校验)→ JSON-RPC `error`;领域错误(文件不存在、功能未启用、限流、超时)→ `result.isError=true` + 可读文本,调用方 LLM 可据此自愈。
 - 冒烟示例:
 

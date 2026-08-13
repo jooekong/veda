@@ -10,6 +10,16 @@ that matters.
 ## [Unreleased]
 
 ### Added
+- **Team memories ground `/v1/answer` (memory M2a).** The RAG answer now
+  retrieves the workspace's team-domain memories alongside document
+  search and can cite them: memory citations carry
+  `memory: {id, content, updated_by, updated_at}` and no `path`
+  (`AnswerCitation.path` is now optional). WeCom bots render memory
+  sources as `[n] 记忆：…` lines and `veda ask` prints `记忆:` entries;
+  older consumers simply skip path-less citations, so servers can
+  upgrade first. Personal-domain memories stay out of answers until
+  operator identity passthrough lands (M3). Build plan:
+  `docs/plans/agent-memory-m2a.md`.
 - **Agent/team memory (M1).** fs workspaces now store *memories* alongside
   documents: one-line facts (decisions, pitfalls, environment quirks,
   preferences) with ownership partitioning — a shared team domain per
