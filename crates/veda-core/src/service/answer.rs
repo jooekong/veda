@@ -316,15 +316,24 @@ impl AnswerService {
         // Second evidence source (M2a): one team-domain memory retrieve.
         // Degrades to empty on failure — the memory index only ever reduces
         // recall, never blocks an answer (same demotion as sync Milvus
-        // writes in the memory service).
+        // writes in the memory service). Timeout-bounded like the pre-search
+        // above: this await runs before the SSE opens while holding the
+        // workspace answer permit, so an unbounded wait on the shared
+        // embedding gate would pin the permit and starve the workspace.
         let memories = match &self.memory {
-            Some(svc) => match svc
-                .team_memories(workspace_id, query, MEMORY_INJECT_LIMIT)
-                .await
+            Some(svc) => match tokio::time::timeout(
+                Duration::from_secs(15),
+                svc.team_memories(workspace_id, query, MEMORY_INJECT_LIMIT),
+            )
+            .await
             {
-                Ok(hits) => hits,
-                Err(e) => {
+                Ok(Ok(hits)) => hits,
+                Ok(Err(e)) => {
                     warn!(err = %e, "answer: memory retrieve failed, continuing without");
+                    Vec::new()
+                }
+                Err(_elapsed) => {
+                    warn!("answer: memory retrieve timed out, continuing without");
                     Vec::new()
                 }
             },

@@ -59,6 +59,21 @@ aidoc + APIDoc 的 memory 欠账（M1 时明确等 M2a）——aidoc 改动先�
 个人域进 answer、操作者透传、排序乘子、分数下限（各等 M3 / 数据）；
 M2b 对账提名（等真实案例）；digest（触发条件未到）。
 
+## 评审记录（2026-08-13，Codex 原生 review，2 findings 全修）
+
+1. **[修] SSE 前的记忆检索无超时**（P1）：`team_memories` 的 await 发生在
+   SSE 打开前、持有 workspace answer permit 时，且 route 层对 `answer_stream`
+   调用本身无 timeout——embedding 共享闸无限排队时 permit 永不释放，同
+   workspace 全部 429。修法与相邻初检一致：15s timeout 包裹，超时走既有降级
+   （warn + 空记忆）。
+2. **[修] `spans: []` 被 skip_serializing 吞掉**（P2）：给 spans 加的
+   `skip_serializing_if` 把**既有**整文件引用的 `{index,path,spans:[]}` 变成
+   `{index,path}`，破坏对外契约「空数组 = 整文件」。修法：spans 恒序列化
+   （保留 `default` 供反序列化宽容），memory 引用也带空 spans，消费端按
+   `path`/`memory` 判类不受影响。
+   顺带发现：`cargo fmt --check` 在 veda-cli 存量代码上不干净
+   （config.rs/main.rs 数处，非本期改动），另行处理。
+
 ## DoD
 
 集成测试全绿（含既有 answer / memory 套件零回归）→ 测试环境部署

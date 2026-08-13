@@ -302,7 +302,10 @@ pub struct AnswerCitation {
     pub index: usize,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub path: Option<String>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    /// Always serialized for file citations — `spans: []` is the documented
+    /// "whole file" marker, dropping it would break that contract. Memory
+    /// citations carry it empty too; consumers key on `path`/`memory`.
+    #[serde(default)]
     pub spans: Vec<ChunkSpan>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub memory: Option<MemoryCitationRef>,
