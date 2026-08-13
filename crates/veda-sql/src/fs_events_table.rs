@@ -104,13 +104,16 @@ impl TableFunctionImpl for VedaFsEventsFactory {
             }
         }
 
+        // External (not Execution/String): keeps the typed VedaError so
+        // df_error_to_veda recovers e.g. InvalidPath from a bad prefix as
+        // 400 instead of collapsing it to a 500 Storage error.
         let events = fs_udf::block_on(self.fs_service.query_events_filtered(
             &self.workspace_id,
             since_id,
             path_prefix.as_deref(),
             limit,
         ))
-        .map_err(|e| datafusion::error::DataFusionError::Execution(e.to_string()))?;
+        .map_err(|e| datafusion::error::DataFusionError::External(Box::new(e)))?;
 
         if events.len() == limit {
             warn!(

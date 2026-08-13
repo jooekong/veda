@@ -2383,9 +2383,29 @@ async fn veda_fs_dir_listing_on_file_errors() {
         .unwrap();
     // Trailing slash forces DirListing mode; a file there is an error
     // (same contract as list_dir), no longer an affirmative empty table.
+    // The typed error must survive DataFusion (4xx, not a 500 Storage).
     let err = engine
         .execute("ws1", false, "SELECT * FROM veda_fs('/notes.txt/')")
         .await
         .unwrap_err();
+    assert!(matches!(err, VedaError::InvalidPath(_)), "{err}");
     assert!(err.to_string().contains("is not a directory"), "{err}");
+}
+
+#[tokio::test]
+async fn veda_fs_events_invalid_prefix_is_typed_error() {
+    let meta = Arc::new(MockMetaFull::new());
+    let engine = make_full_engine(meta);
+
+    // A prefix that fails even lenient normalization keeps its typed
+    // InvalidPath through the UDTF (400 at the route, not 500).
+    let err = engine
+        .execute(
+            "ws1",
+            false,
+            "SELECT * FROM veda_fs_events(0, 'bad:colon', 10)",
+        )
+        .await
+        .unwrap_err();
+    assert!(matches!(err, VedaError::InvalidPath(_)), "{err}");
 }

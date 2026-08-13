@@ -46,10 +46,13 @@ impl TableFunctionImpl for VedaFsTableFactory {
 
         match mode {
             FsMode::DirListing => {
+                // External keeps the typed VedaError: a file / missing path
+                // is now InvalidPath / NotFound by design (4xx), not a
+                // backend failure to collapse into a 500.
                 let dentries =
                     fs_udf::block_on(fs.list_dir_recursive(&ws, &path, MAX_GLOB_FILE_COUNT))
                         .map_err(|e| {
-                            datafusion::error::DataFusionError::Execution(e.to_string())
+                            datafusion::error::DataFusionError::External(Box::new(e))
                         })?;
 
                 let batch = build_dir_listing_batch(&dentries, &fs, &ws)?;
@@ -66,7 +69,7 @@ impl TableFunctionImpl for VedaFsTableFactory {
             }
             FsMode::Glob => {
                 let matching = fs_udf::block_on(fs.glob_files(&ws, &path, MAX_GLOB_FILE_COUNT))
-                    .map_err(|e| datafusion::error::DataFusionError::Execution(e.to_string()))?;
+                    .map_err(|e| datafusion::error::DataFusionError::External(Box::new(e)))?;
 
                 let batches = read_glob_files(&fs, &ws, &matching)?;
 
