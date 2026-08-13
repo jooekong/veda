@@ -461,3 +461,180 @@ async fn answer_stream_end_to_end() {
 
     let _ = ws_id;
 }
+
+// ── M2a: answer dual-source (team memories as citations) ──
+
+/// fs workspace + a READWRITE wk_ and no files; returns (ws_id, raw_key).
+async fn provision_memory_ws(app: &App, tag: &str) -> (String, String) {
+    let now = Utc::now();
+    let acct = Account {
+        id: Uuid::new_v4().to_string(),
+        name: format!("answer-mem-{tag}"),
+        email: Some(format!("am-{}@test.com", Uuid::new_v4().simple())),
+        password_hash: None,
+        app_id: None,
+        status: AccountStatus::Active,
+        created_at: now,
+        updated_at: now,
+    };
+    app.state.auth_store.create_account(&acct).await.unwrap();
+    let ws_id = Uuid::new_v4().to_string();
+    app.state
+        .auth_store
+        .create_workspace(&Workspace {
+            id: ws_id.clone(),
+            account_id: acct.id.clone(),
+            name: format!("am-{}", &ws_id[..8]),
+            status: WorkspaceStatus::Active,
+            kind: WorkspaceKind::Fs,
+            app_id: None,
+            description: None,
+            created_at: now,
+            updated_at: now,
+        })
+        .await
+        .unwrap();
+    let raw_key = format!("wk_{}", Uuid::new_v4().simple());
+    let wk = WorkspaceKey {
+        id: Uuid::new_v4().to_string(),
+        workspace_id: ws_id.clone(),
+        account_id: acct.id.clone(),
+        name: "test".into(),
+        key_hash: sha256_hex(raw_key.as_bytes()),
+        permission: KeyPermission::ReadWrite,
+        status: KeyStatus::Active,
+        kind: WorkspaceKind::Fs,
+        created_at: now,
+    };
+    app.state
+        .auth_store
+        .create_app_workspace_key(&wk, &raw_key, None, None)
+        .await
+        .unwrap();
+    (ws_id, raw_key)
+}
+
+async fn post_json(
+    router: &axum::Router,
+    path: &str,
+    key: &str,
+    body: Value,
+) -> (StatusCode, Value) {
+    let req = Request::builder()
+        .method("POST")
+        .uri(path)
+        .header("authorization", format!("Bearer {key}"))
+        .header("content-type", "application/json")
+        .body(Body::from(body.to_string()))
+        .unwrap();
+    let resp = router.clone().oneshot(req).await.unwrap();
+    let status = resp.status();
+    let bytes = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+    let v: Value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
+    (status, v)
+}
+
+/// POST /v1/answer with retries on transient LLM-upstream failures (the
+/// shared airouter test key rate-limits consecutive agentic loops).
+async fn post_answer_retry(
+    router: &axum::Router,
+    key: &str,
+    body: Value,
+) -> (StatusCode, Value) {
+    for attempt in 0..3 {
+        let (status, v) = post_json(router, "/v1/answer", key, body.clone()).await;
+        let llm_blip = status == StatusCode::BAD_GATEWAY
+            && v["error_code"].as_str() == Some("LLM_UNAVAILABLE");
+        if !llm_blip || attempt == 2 {
+            return (status, v);
+        }
+        eprintln!("answer attempt {attempt}: LLM upstream blip, retrying");
+        tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+    }
+    unreachable!()
+}
+
+/// Positive: a fact that lives only in a team memory is answered and cited
+/// as a memory citation. Negative (GateMem at the answer surface): another
+/// workspace asking the same question gets zero evidence blocks — asserted
+/// structurally (hit_count/citations), independent of LLM behaviour.
+#[tokio::test]
+#[ignore = "needs real MySQL + Milvus + embedding + airouter (config/test.toml); run with --ignored"]
+async fn answer_memory_dual_source_and_isolation() {
+    let app = build_test_app().await;
+    let (ws_a, key_a) = provision_memory_ws(&app, "a").await;
+    let (_ws_b, key_b) = provision_memory_ws(&app, "b").await;
+
+    // Unique marker so retrieval can't match residue from earlier runs.
+    let marker = format!("M{}", &ws_a[..8]);
+    let fact = format!("服务 {marker} 的发布窗口定在每周四晚 8 点");
+
+    // Seed the memory over REST (the same surface agents use).
+    let (status, saved) = post_json(
+        &app.router,
+        "/v1/memory",
+        &key_a,
+        serde_json::json!({ "content": fact, "scope": "team", "kind": "decision" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "save: {saved}");
+    let mem_id = saved["data"]["memory"]["id"].as_i64().expect("memory id");
+
+    // Wait until the answer-path retrieve sees it (sync vector write +
+    // Strong consistency makes this fast; poll defends against blips).
+    let query = format!("{marker} 的发布窗口是什么时候?");
+    for i in 0..20 {
+        let hits = app
+            .state
+            .memory_service
+            .team_memories(&ws_a, &query, 5)
+            .await
+            .unwrap_or_default();
+        if !hits.is_empty() {
+            break;
+        }
+        assert!(i < 19, "seeded memory never became retrievable");
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    }
+
+    // ── positive: memory-grounded answer with a memory citation ──
+    let (status, resp) =
+        post_answer_retry(&app.router, &key_a, serde_json::json!({ "query": query })).await;
+    assert_eq!(status, StatusCode::OK, "answer: {resp}");
+    let data = &resp["data"];
+    let answer = data["answer"].as_str().unwrap_or_default();
+    assert!(
+        data["hit_count"].as_u64().unwrap_or(0) >= 1,
+        "memory injected as an evidence block: {data}"
+    );
+    let citations = data["citations"].as_array().cloned().unwrap_or_default();
+    let mem_cite = citations
+        .iter()
+        .find(|c| c["memory"]["id"].as_i64() == Some(mem_id));
+    assert!(
+        mem_cite.is_some(),
+        "answer cites the memory (answer: {answer}; citations: {citations:?})"
+    );
+    let mc = &mem_cite.unwrap()["memory"];
+    assert_eq!(mc["content"].as_str().unwrap(), fact, "content round-trips");
+    assert!(
+        mem_cite.unwrap()["path"].is_null(),
+        "memory citation carries no path"
+    );
+    assert!(answer.contains("周四"), "answer grounded in the memory: {answer}");
+
+    // ── negative: workspace B sees zero evidence from A (GateMem) ──
+    let (status, resp) =
+        post_answer_retry(&app.router, &key_b, serde_json::json!({ "query": query })).await;
+    assert_eq!(status, StatusCode::OK, "answer B: {resp}");
+    let data = &resp["data"];
+    assert_eq!(
+        data["hit_count"].as_u64().unwrap_or(99),
+        0,
+        "cross-workspace memory must never register as evidence: {data}"
+    );
+    assert!(
+        data["citations"].as_array().map(|c| c.is_empty()).unwrap_or(false),
+        "no citations for B: {data}"
+    );
+}
