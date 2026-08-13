@@ -150,10 +150,16 @@ async fn build_test_app() -> App {
         search_service.clone(),
         fs_service.clone(),
     ));
+    let memory_service = Arc::new(veda_core::service::memory::MemoryService::new(
+        mysql.clone(),
+        milvus.clone(),
+        embedding.clone(),
+    ));
     let answer_service = Some(Arc::new(AnswerService::new(
         tools,
         llm.clone(),
         AnswerParams::default(),
+        Some(memory_service.clone()),
     )));
     // Background indexing worker (1s poll) so the fixture write gets
     // chunked + embedded like production.
@@ -202,11 +208,7 @@ async fn build_test_app() -> App {
         metrics: test_metrics(),
         metrics_token: None,
         admin_token: None,
-        memory_service: std::sync::Arc::new(veda_core::service::memory::MemoryService::new(
-            mysql.clone(),
-            milvus.clone(),
-            embedding.clone(),
-        )),
+        memory_service,
         summary_enabled: false,
         answer_service,
         answer_concurrency: 2,

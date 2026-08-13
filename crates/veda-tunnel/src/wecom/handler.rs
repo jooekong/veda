@@ -505,35 +505,55 @@ fn render_markdown(hits: &[Hit]) -> String {
 /// skipped; if none remain, only the body is sent.
 fn render_answer(data: &AnswerData) -> String {
     let body = data.answer.trim();
-    let cited: Vec<(usize, &str)> = data
-        .citations
-        .iter()
-        .filter_map(|c| c.path.as_deref().map(|p| (c.index, p)))
-        .collect();
-    if cited.is_empty() {
-        return body.to_string();
+    /// One source-list entry: a file path (possibly cited for several
+    /// passages) or a team-memory line (M2a).
+    enum Entry<'a> {
+        File(&'a str, Vec<usize>),
+        Memory(&'a str, usize),
     }
-    // Group by path, preserving first-appearance order.
-    let mut files: Vec<(&str, Vec<usize>)> = Vec::new();
-    for (idx, path) in &cited {
-        match files.iter_mut().find(|(p, _)| p == path) {
-            Some((_, idxs)) => idxs.push(*idx),
-            None => files.push((path, vec![*idx])),
+    // Group file citations by path, preserving first-appearance order;
+    // memory citations are one entry each (one memory = one citation).
+    let mut entries: Vec<Entry> = Vec::new();
+    for c in &data.citations {
+        if let Some(path) = c.path.as_deref() {
+            match entries
+                .iter_mut()
+                .find(|e| matches!(e, Entry::File(p, _) if *p == path))
+            {
+                Some(Entry::File(_, idxs)) => idxs.push(c.index),
+                _ => entries.push(Entry::File(path, vec![c.index])),
+            }
+        } else if let Some(m) = &c.memory {
+            entries.push(Entry::Memory(&m.content, c.index));
         }
+    }
+    if entries.is_empty() {
+        return body.to_string();
     }
     // Basenames keep entries short, but knowledge bases hold same-named
     // files in different dirs — entries whose basename collides within the
     // displayed set fall back to their full path.
-    let shown = &files[..files.len().min(MAX_LISTED_CITATIONS)];
+    let shown = &entries[..entries.len().min(MAX_LISTED_CITATIONS)];
     let mut out = format!("{body}\n\n———\n出处：");
-    for (path, idxs) in shown {
-        let name = basename(path);
-        let dup = shown.iter().filter(|(p, _)| basename(p) == name).count() > 1;
-        let marks: String = idxs.iter().map(|i| format!("[{i}]")).collect();
-        out.push_str(&format!("\n{marks} `{}`", if dup { *path } else { name }));
+    for entry in shown {
+        match entry {
+            Entry::File(path, idxs) => {
+                let name = basename(path);
+                let dup = shown
+                    .iter()
+                    .filter(|e| matches!(e, Entry::File(p, _) if basename(p) == name))
+                    .count()
+                    > 1;
+                let marks: String = idxs.iter().map(|i| format!("[{i}]")).collect();
+                out.push_str(&format!("\n{marks} `{}`", if dup { *path } else { name }));
+            }
+            Entry::Memory(content, idx) => {
+                out.push_str(&format!("\n[{idx}] 记忆：{}", truncate(content, 60)));
+            }
+        }
     }
-    if files.len() > MAX_LISTED_CITATIONS {
-        out.push_str(&format!("\n等 {} 篇", files.len()));
+    if entries.len() > MAX_LISTED_CITATIONS {
+        out.push_str(&format!("\n等 {} 条", entries.len()));
     }
     out
 }
@@ -692,10 +712,12 @@ mod tests {
                 AnswerCitation {
                     index: 1,
                     path: Some("/a/接入.md".to_string()),
+                    memory: None,
                 },
                 AnswerCitation {
                     index: 2,
                     path: Some("/b/多活.md".to_string()),
+                    memory: None,
                 },
             ],
         };
@@ -719,10 +741,12 @@ mod tests {
                 AnswerCitation {
                     index: 1,
                     path: Some("/product/分类页百科.md".to_string()),
+                    memory: None,
                 },
                 AnswerCitation {
                     index: 2,
                     path: Some("/product/分类页百科.md".to_string()),
+                    memory: None,
                 },
             ],
         };
@@ -742,6 +766,7 @@ mod tests {
             .map(|i| AnswerCitation {
                 index: i,
                 path: Some(format!("/docs/f{i}.md")),
+                memory: None,
             })
             .collect();
         let data = AnswerData {
@@ -752,7 +777,32 @@ mod tests {
         let out = render_answer(&data);
         assert!(out.contains("[3] `f3.md`"), "{out}");
         assert!(!out.contains("f4.md"), "entries beyond the cap are folded");
-        assert!(out.ends_with("\n等 5 篇"), "fold note on its own line: {out}");
+        assert!(out.ends_with("\n等 5 条"), "fold note on its own line: {out}");
+    }
+
+    #[test]
+    fn render_answer_memory_citation_gets_own_line() {
+        let data = AnswerData {
+            hit_count: 2,
+            answer: "发布窗口是周四晚[1]，流程见文档[2]".to_string(),
+            citations: vec![
+                AnswerCitation {
+                    index: 1,
+                    path: None,
+                    memory: Some(crate::veda::MemoryCitation {
+                        content: "发布窗口定在每周四晚 8 点".to_string(),
+                    }),
+                },
+                AnswerCitation {
+                    index: 2,
+                    path: Some("/ops/发布流程.md".to_string()),
+                    memory: None,
+                },
+            ],
+        };
+        let out = render_answer(&data);
+        assert!(out.contains("\n[1] 记忆：发布窗口定在每周四晚 8 点"), "{out}");
+        assert!(out.contains("\n[2] `发布流程.md`"), "{out}");
     }
 
     #[test]
@@ -764,14 +814,17 @@ mod tests {
                 AnswerCitation {
                     index: 1,
                     path: Some("/dal/接入.md".to_string()),
+                    memory: None,
                 },
                 AnswerCitation {
                     index: 2,
                     path: Some("/fdc/接入.md".to_string()),
+                    memory: None,
                 },
                 AnswerCitation {
                     index: 3,
                     path: Some("/dal/faq.md".to_string()),
+                    memory: None,
                 },
             ],
         };
@@ -813,10 +866,12 @@ mod tests {
                 AnswerCitation {
                     index: 1,
                     path: None,
+                    memory: None,
                 },
                 AnswerCitation {
                     index: 2,
                     path: Some("/b.md".to_string()),
+                    memory: None,
                 },
             ],
         };
@@ -833,6 +888,7 @@ mod tests {
             citations: vec![AnswerCitation {
                 index: 1,
                 path: None,
+                memory: None,
             }],
         };
         assert_eq!(render_answer(&data), "答案");
@@ -858,6 +914,7 @@ mod tests {
             vec![AnswerCitation {
                 index: 1,
                 path: Some("/a.md".to_string()),
+                memory: None,
             }],
         ));
         assert_eq!(r.outcome, "answered");

@@ -1946,6 +1946,9 @@ async fn main() -> anyhow::Result<()> {
                                 seen.push(p);
                                 println!("  {p}");
                             }
+                        } else if let Some(m) = c["memory"]["content"].as_str() {
+                            // Team-memory citation (M2a): no path, show the line.
+                            println!("  记忆: {m}");
                         }
                     }
                 }

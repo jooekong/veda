@@ -200,7 +200,12 @@ async fn main() -> anyhow::Result<()> {
                 search_service.clone(),
                 fs_service.clone(),
             ));
-            Some(Arc::new(AnswerService::new(tools, llm.clone(), params)))
+            Some(Arc::new(AnswerService::new(
+                tools,
+                llm.clone(),
+                params,
+                Some(memory_service.clone()),
+            )))
         }
         _ => None,
     };

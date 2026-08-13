@@ -104,9 +104,21 @@ pub struct AnswerCitation {
     /// Server-assigned 1-based index; matches the `[n]` markers in `answer`.
     #[serde(default)]
     pub index: usize,
-    /// `None` when the backend couldn't resolve a live path for the citation.
+    /// `None` when the backend couldn't resolve a live path for the citation
+    /// — including team-memory citations, which carry `memory` instead.
     #[serde(default)]
     pub path: Option<String>,
+    /// Team-memory citation (M2a): the memory line itself is the source.
+    #[serde(default)]
+    pub memory: Option<MemoryCitation>,
+}
+
+/// Display fields of a memory citation. Only what the source list renders;
+/// the wire also carries id/updated_at, which the tunnel ignores.
+#[derive(Debug, Deserialize)]
+pub struct MemoryCitation {
+    #[serde(default)]
+    pub content: String,
 }
 
 /// Distinguishes "key is dead" (don't drop the WeCom connection, just flag

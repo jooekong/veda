@@ -21,10 +21,11 @@ use std::time::{Duration, Instant};
 use async_trait::async_trait;
 use tokio::sync::mpsc;
 use tracing::{debug, warn};
-use veda_types::api::{AnswerCitation, ChunkSpan};
+use veda_types::api::{AnswerCitation, ChunkSpan, MemoryCitationRef};
 use veda_types::{DetailLevel, SearchHit, SearchMode, VedaError};
 
 use crate::service::fs::FsService;
+use crate::service::memory::{MemoryHit, MemoryService};
 use crate::service::search::SearchService;
 use crate::store::{ChatMsg, ChatStreamItem, LlmService, ToolCall, ToolSpec};
 
@@ -79,6 +80,9 @@ const FINAL_RESERVE: Duration = Duration::from_secs(25);
 /// Total evidence-token budget across the whole loop. Conservative cap well
 /// inside deepseek context, forces answering instead of endless accumulation.
 const CONTEXT_TOKENS_CAP: usize = 24_000;
+/// Team memories injected once at loop start (M2a). No score floor — ranking
+/// thresholds wait for real usage data (plan §2).
+const MEMORY_INJECT_LIMIT: usize = 5;
 
 /// Tunables for the answer path. `max_tool_rounds` comes from `[llm]`
 /// config (0 degrades to a single pre-search + forced answer, the closest
@@ -225,11 +229,19 @@ pub struct AnswerService {
     tools: Arc<dyn ToolExecutor>,
     llm: Arc<dyn LlmService>,
     params: AnswerParams,
+    /// Second evidence source (M2a): team-domain memories injected at loop
+    /// start. None = memories absent from answers (tests, degraded wiring).
+    memory: Option<Arc<MemoryService>>,
 }
 
 impl AnswerService {
-    pub fn new(tools: Arc<dyn ToolExecutor>, llm: Arc<dyn LlmService>, params: AnswerParams) -> Self {
-        Self { tools, llm, params }
+    pub fn new(
+        tools: Arc<dyn ToolExecutor>,
+        llm: Arc<dyn LlmService>,
+        params: AnswerParams,
+        memory: Option<Arc<MemoryService>>,
+    ) -> Self {
+        Self { tools, llm, params, memory }
     }
 
     /// One-shot surface: runs the same engine as [`answer_stream`] and keeps
@@ -301,6 +313,28 @@ impl AnswerService {
         };
         debug!(hits = initial.len(), "answer: initial pre-search");
 
+        // Second evidence source (M2a): one team-domain memory retrieve.
+        // Degrades to empty on failure — the memory index only ever reduces
+        // recall, never blocks an answer (same demotion as sync Milvus
+        // writes in the memory service).
+        let memories = match &self.memory {
+            Some(svc) => match svc
+                .team_memories(workspace_id, query, MEMORY_INJECT_LIMIT)
+                .await
+            {
+                Ok(hits) => hits,
+                Err(e) => {
+                    warn!(err = %e, "answer: memory retrieve failed, continuing without");
+                    Vec::new()
+                }
+            },
+            None => Vec::new(),
+        };
+        debug!(memories = memories.len(), "answer: memory injection");
+
+        let mut registry = BlockRegistry::default();
+        let memory_evidence = render_memories(&mut registry, &memories);
+        let evidence = render_hits(&mut registry, &initial);
         let (tx, rx) = mpsc::channel::<AnswerStreamEvent>(32);
         let mut engine = Engine {
             llm: Arc::clone(&self.llm),
@@ -308,15 +342,15 @@ impl AnswerService {
             params: self.params.clone(),
             workspace_id: workspace_id.to_string(),
             path_prefix: path_prefix.map(String::from),
-            registry: BlockRegistry::default(),
+            registry,
             estimated_context_tokens: 0,
             tx,
         };
-        let evidence = engine.render_hits(&initial);
+        engine.estimated_context_tokens += estimate_tokens(&memory_evidence);
         engine.estimated_context_tokens += estimate_tokens(&evidence);
         let messages = vec![
             ChatMsg::system(build_system_prompt(bot_prompt)),
-            ChatMsg::user(initial_user_msg(query, &initial, &evidence)),
+            ChatMsg::user(initial_user_msg(query, &memory_evidence, &initial, &evidence)),
         ];
         tokio::spawn(engine.run(messages));
         Ok(rx)
@@ -333,16 +367,28 @@ fn build_system_prompt(bot_prompt: Option<&str>) -> String {
     format!("{TOOL_PROTOCOL}\n\n{persona}")
 }
 
-/// First user message: the question plus the pre-search evidence (or, when
-/// empty, an instruction to self-search).
-fn initial_user_msg(query: &str, hits: &[SearchHit], evidence: &str) -> String {
-    if hits.is_empty() {
-        format!("问题:{query}\n\n初检没有命中任何资料。请用 search 工具改写关键词检索(可多次、可拆子问题)。")
-    } else {
-        format!(
-            "问题:{query}\n\n以下是用问题原文初检的资料:\n{evidence}\n如资料不足以回答,请用工具补充检索。"
-        )
+/// First user message: the question, injected team memories (when any), and
+/// the pre-search evidence (or, when empty, an instruction to self-search).
+fn initial_user_msg(
+    query: &str,
+    memory_evidence: &str,
+    hits: &[SearchHit],
+    evidence: &str,
+) -> String {
+    let mut out = format!("问题:{query}\n");
+    if !memory_evidence.is_empty() {
+        out.push_str(&format!(
+            "\n以下是团队记忆(成员显式记录的一句话事实,可作为回答依据并用 [n] 引用):\n{memory_evidence}"
+        ));
     }
+    if hits.is_empty() {
+        out.push_str("\n初检没有命中任何资料。请用 search 工具改写关键词检索(可多次、可拆子问题)。");
+    } else {
+        out.push_str(&format!(
+            "\n以下是用问题原文初检的资料:\n{evidence}\n如资料不足以回答,请用工具补充检索。"
+        ));
+    }
+    out
 }
 
 // ── Engine (the agentic loop) ──────────────────────────
@@ -583,7 +629,7 @@ impl Engine {
                     .await
                 {
                     Ok(hits) => {
-                        let text = self.render_hits(&hits);
+                        let text = render_hits(&mut self.registry, &hits);
                         if text.is_empty() {
                             "没有检索到相关内容,请尝试其他关键词。".to_string()
                         } else {
@@ -621,7 +667,7 @@ impl Engine {
                     }
                 }
                 match self.tools.read_file(&self.workspace_id, &path).await {
-                    Ok(full) => self.render_file(&path, &full, offset),
+                    Ok(full) => render_file(&mut self.registry, &path, &full, offset),
                     Err(VedaError::NotFound(_)) => format!("文件不存在:{path}"),
                     Err(VedaError::InvalidInput(m)) => format!("无法读取:{m}"),
                     Err(e) => {
@@ -634,44 +680,70 @@ impl Engine {
         }
     }
 
-    /// Render search hits as numbered evidence blocks, registering new ones.
-    /// A re-hit of an already-registered block keeps its number and skips
-    /// the content (saves tokens, signals "seen before"). Hits without a
-    /// path/chunk_index can't be cited and are dropped. Empty output means
-    /// no usable hit.
-    fn render_hits(&mut self, hits: &[SearchHit]) -> String {
-        let mut out = String::new();
-        for h in hits {
-            let (Some(path), Some(idx)) = (h.path.as_deref(), h.chunk_index) else {
-                continue;
-            };
-            let (n, is_new) = self.registry.register_chunk(path, idx);
-            if is_new {
-                let snippet = truncate_chars(&h.content, HIT_SNIPPET_CHARS);
-                out.push_str(&format!("[{n}] {path} (chunk {idx}) <<<{snippet}>>>\n"));
-            } else {
-                out.push_str(&format!("[{n}] {path} (chunk {idx})(同前,内容略)\n"));
-            }
-        }
-        out
-    }
+}
 
-    /// Render one `read_file` window as a whole-file evidence block.
-    fn render_file(&mut self, path: &str, full: &str, offset: usize) -> String {
-        let n = self.registry.register_file(path);
-        let total = full.chars().count();
-        if offset >= total && total > 0 {
-            return format!("offset {offset} 超出文件长度({total} 字符)");
+/// Render search hits as numbered evidence blocks, registering new ones.
+/// A re-hit of an already-registered block keeps its number and skips
+/// the content (saves tokens, signals "seen before"). Hits without a
+/// path/chunk_index can't be cited and are dropped. Empty output means
+/// no usable hit.
+fn render_hits(registry: &mut BlockRegistry, hits: &[SearchHit]) -> String {
+    let mut out = String::new();
+    for h in hits {
+        let (Some(path), Some(idx)) = (h.path.as_deref(), h.chunk_index) else {
+            continue;
+        };
+        let (n, is_new) = registry.register_chunk(path, idx);
+        if is_new {
+            let snippet = truncate_chars(&h.content, HIT_SNIPPET_CHARS);
+            out.push_str(&format!("[{n}] {path} (chunk {idx}) <<<{snippet}>>>\n"));
+        } else {
+            out.push_str(&format!("[{n}] {path} (chunk {idx})(同前,内容略)\n"));
         }
-        let window: String = full.chars().skip(offset).take(READ_FILE_MAX_CHARS).collect();
-        let end = offset + window.chars().count();
-        let mut out =
-            format!("[{n}] 文件 {path}(共 {total} 字符,本段 {offset}-{end})\n<<<{window}>>>");
-        if end < total {
-            out.push_str(&format!("\n(未完,续读用 offset={end})"));
-        }
-        out
     }
+    out
+}
+
+/// Render one `read_file` window as a whole-file evidence block.
+fn render_file(registry: &mut BlockRegistry, path: &str, full: &str, offset: usize) -> String {
+    let n = registry.register_file(path);
+    let total = full.chars().count();
+    if offset >= total && total > 0 {
+        return format!("offset {offset} 超出文件长度({total} 字符)");
+    }
+    let window: String = full.chars().skip(offset).take(READ_FILE_MAX_CHARS).collect();
+    let end = offset + window.chars().count();
+    let mut out =
+        format!("[{n}] 文件 {path}(共 {total} 字符,本段 {offset}-{end})\n<<<{window}>>>");
+    if end < total {
+        out.push_str(&format!("\n(未完,续读用 offset={end})"));
+    }
+    out
+}
+
+/// Render injected team memories as evidence blocks — the design's
+/// "injection template": tag(kind) · date · author framing around the
+/// content. Memory content is capped like search snippets; the full line
+/// still travels in the citation.
+fn render_memories(registry: &mut BlockRegistry, hits: &[MemoryHit]) -> String {
+    let mut out = String::new();
+    for h in hits {
+        let m = &h.memory;
+        let n = registry.register_memory(MemoryCitationRef {
+            id: m.id,
+            content: m.content.clone(),
+            updated_by: m.updated_by.clone(),
+            updated_at: m.updated_at,
+        });
+        let snippet = truncate_chars(&m.content, HIT_SNIPPET_CHARS);
+        out.push_str(&format!(
+            "[{n}] 记忆({kind}·{date}·{author}) <<<{snippet}>>>\n",
+            kind = m.kind.as_str(),
+            date = m.updated_at.format("%Y-%m-%d"),
+            author = m.updated_by,
+        ));
+    }
+    out
 }
 
 /// Progress event for one tool call: tool name plus its key argument
@@ -732,20 +804,29 @@ fn tool_specs() -> Vec<ToolSpec> {
 
 // ── Block registry & citations ─────────────────────────
 
-/// One `[n]` evidence block. `span` is the chunk range for a search hit,
-/// `None` for a whole-file `read_file` block (wire: empty `spans`).
+/// One `[n]` evidence block: a document (search hit / read_file) or an
+/// injected team memory (M2a).
 struct Block {
     index: usize,
-    path: String,
-    span: Option<(i32, i32)>,
+    source: BlockSource,
+}
+
+enum BlockSource {
+    /// `span` is the chunk range for a search hit, `None` for a whole-file
+    /// `read_file` block (wire: empty `spans`).
+    File { path: String, span: Option<(i32, i32)> },
+    Memory(MemoryCitationRef),
 }
 
 /// Key for dedup: a search hit is one chunk of one file; a read_file block
-/// is the file itself regardless of offset windows.
+/// is the file itself regardless of offset windows. Memories inject once
+/// per loop so no key is needed, but the id guard keeps numbering stable if
+/// that ever changes.
 #[derive(Hash, PartialEq, Eq)]
 enum BlockKey {
     Chunk(String, i32),
     File(String),
+    Memory(i64),
 }
 
 /// Global numbering of evidence blocks across the whole loop. Numbers are
@@ -766,8 +847,10 @@ impl BlockRegistry {
         let n = self.blocks.len() + 1;
         self.blocks.push(Block {
             index: n,
-            path: path.to_string(),
-            span: Some((chunk_index, chunk_index)),
+            source: BlockSource::File {
+                path: path.to_string(),
+                span: Some((chunk_index, chunk_index)),
+            },
         });
         self.by_key.insert(key, n);
         (n, true)
@@ -779,20 +862,45 @@ impl BlockRegistry {
             return n;
         }
         let n = self.blocks.len() + 1;
-        self.blocks.push(Block { index: n, path: path.to_string(), span: None });
+        self.blocks.push(Block {
+            index: n,
+            source: BlockSource::File { path: path.to_string(), span: None },
+        });
+        self.by_key.insert(key, n);
+        n
+    }
+
+    fn register_memory(&mut self, memory: MemoryCitationRef) -> usize {
+        let key = BlockKey::Memory(memory.id);
+        if let Some(&n) = self.by_key.get(&key) {
+            return n;
+        }
+        let n = self.blocks.len() + 1;
+        self.blocks.push(Block { index: n, source: BlockSource::Memory(memory) });
         self.by_key.insert(key, n);
         n
     }
 }
 
 fn block_to_citation(b: &Block) -> AnswerCitation {
-    AnswerCitation {
-        index: b.index,
-        path: b.path.clone(),
-        spans: match b.span {
-            Some((lo, hi)) => vec![ChunkSpan { start_chunk_index: lo, end_chunk_index: hi }],
-            // Whole-file citation (read_file evidence).
-            None => Vec::new(),
+    match &b.source {
+        BlockSource::File { path, span } => AnswerCitation {
+            index: b.index,
+            path: Some(path.clone()),
+            spans: match span {
+                Some((lo, hi)) => {
+                    vec![ChunkSpan { start_chunk_index: *lo, end_chunk_index: *hi }]
+                }
+                // Whole-file citation (read_file evidence).
+                None => Vec::new(),
+            },
+            memory: None,
+        },
+        BlockSource::Memory(m) => AnswerCitation {
+            index: b.index,
+            path: None,
+            spans: Vec::new(),
+            memory: Some(m.clone()),
         },
     }
 }
@@ -914,12 +1022,65 @@ mod tests {
         assert_eq!(r.blocks.len(), 3);
     }
 
+    fn mem_ref(id: i64, content: &str) -> MemoryCitationRef {
+        MemoryCitationRef {
+            id,
+            content: content.into(),
+            updated_by: "p1".into(),
+            updated_at: chrono::Utc::now(),
+        }
+    }
+
+    #[test]
+    fn registry_memory_blocks_number_with_files() {
+        let mut r = BlockRegistry::default();
+        assert_eq!(r.register_memory(mem_ref(7, "事实A")), 1);
+        assert_eq!(r.register_memory(mem_ref(7, "事实A")), 1, "same id keeps its number");
+        assert_eq!(r.register_chunk("/a", 0), (2, true), "files number after memories");
+    }
+
+    // ── memory rendering & prompt assembly ─────────────
+
+    #[test]
+    fn render_memories_template_and_initial_msg_sections() {
+        use veda_types::{Memory, MemoryKind, MemoryScopeType};
+        let mem = Memory {
+            id: 9,
+            scope_type: MemoryScopeType::Workspace,
+            scope_id: "ws".into(),
+            origin_workspace_id: None,
+            topic: None,
+            kind: MemoryKind::Decision,
+            content: "发布窗口定在周四晚 8 点".into(),
+            content_hash: "h".into(),
+            source_ref: None,
+            expires_at: None,
+            last_used_at: None,
+            created_by: "p1".into(),
+            updated_by: "p2".into(),
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+        };
+        let mut r = BlockRegistry::default();
+        let text = render_memories(&mut r, &[MemoryHit { memory: mem, score: 0.9 }]);
+        // Template: [n] 记忆(kind·date·author) <<<content>>>
+        assert!(text.contains("[1] 记忆(decision·"), "{text}");
+        assert!(text.contains("·p2)"), "author is the last signer: {text}");
+        assert!(text.contains("<<<发布窗口定在周四晚 8 点>>>"), "{text}");
+
+        let msg = initial_user_msg("啥时候发布?", &text, &[], "");
+        assert!(msg.contains("团队记忆"), "{msg}");
+        assert!(msg.contains("初检没有命中任何资料"), "empty hits keep the self-search nudge");
+        let msg2 = initial_user_msg("啥时候发布?", "", &[], "");
+        assert!(!msg2.contains("团队记忆"), "no memory section when nothing injected");
+    }
+
     // ── align_citations ────────────────────────────────
 
     fn blocks_fixture() -> Vec<Block> {
         vec![
-            Block { index: 1, path: "/a".into(), span: Some((2, 4)) },
-            Block { index: 2, path: "/b".into(), span: None },
+            Block { index: 1, source: BlockSource::File { path: "/a".into(), span: Some((2, 4)) } },
+            Block { index: 2, source: BlockSource::File { path: "/b".into(), span: None } },
         ]
     }
 
@@ -930,12 +1091,32 @@ mod tests {
         assert!(grounded);
         let idx: Vec<usize> = cites.iter().map(|c| c.index).collect();
         assert_eq!(idx, vec![2, 1]);
-        assert_eq!(cites[0].path, "/b");
+        assert_eq!(cites[0].path.as_deref(), Some("/b"));
         assert!(cites[0].spans.is_empty(), "whole-file citation has no spans");
         assert_eq!(
             cites[1].spans,
             vec![ChunkSpan { start_chunk_index: 2, end_chunk_index: 4 }]
         );
+    }
+
+    #[test]
+    fn align_memory_block_maps_to_memory_citation() {
+        let mem = MemoryCitationRef {
+            id: 42,
+            content: "上线窗口是周四晚".into(),
+            updated_by: "p1".into(),
+            updated_at: chrono::Utc::now(),
+        };
+        let blocks = vec![
+            Block { index: 1, source: BlockSource::Memory(mem.clone()) },
+            Block { index: 2, source: BlockSource::File { path: "/b".into(), span: None } },
+        ];
+        let (_, cites, grounded) = align_citations("答案[1][2]".into(), &blocks);
+        assert!(grounded);
+        assert_eq!(cites[0].path, None, "memory citation has no path");
+        assert_eq!(cites[0].memory.as_ref().unwrap().id, 42);
+        assert_eq!(cites[0].memory.as_ref().unwrap().content, mem.content);
+        assert!(cites[1].memory.is_none(), "file citation has no memory");
     }
 
     #[test]
@@ -1150,7 +1331,7 @@ mod engine_tests {
         params: AnswerParams,
         query: &str,
     ) -> Vec<AnswerStreamEvent> {
-        let svc = AnswerService::new(tools, llm, params);
+        let svc = AnswerService::new(tools, llm, params, None);
         let mut rx = svc.answer_stream("ws", query, None, 12, None).await.unwrap();
         let mut out = Vec::new();
         while let Some(ev) = rx.recv().await {
@@ -1187,7 +1368,7 @@ mod engine_tests {
         let r = done_of(&events);
         assert!(r.grounded);
         assert_eq!(r.citations.len(), 1);
-        assert_eq!(r.citations[0].path, "/docs/a.md");
+        assert_eq!(r.citations[0].path.as_deref(), Some("/docs/a.md"));
         assert_eq!(r.hit_count, 1);
         assert_eq!(r.rounds, 0);
         // The first user message carried the pre-search evidence.
@@ -1385,7 +1566,7 @@ mod engine_tests {
             ScriptItem::Content("答案[1]"),
         ])]));
         let tools = Arc::new(StubTools::hits(vec![("/a", 0, "x")]));
-        let svc = AnswerService::new(tools, llm, fast_params(4));
+        let svc = AnswerService::new(tools, llm, fast_params(4), None);
         let r = svc.answer("ws", "q", None, 12, None).await.unwrap();
         assert_eq!(r.answer, "流式答案[1]");
         assert!(r.grounded);
@@ -1403,7 +1584,7 @@ mod engine_tests {
             round(vec![ScriptItem::Content("ok[1]")]),
         ]));
         let tools = Arc::new(StubTools { hits: vec![("/docs/a.md", 0, "x")], files });
-        let svc = AnswerService::new(tools, Arc::clone(&llm) as Arc<dyn LlmService>, fast_params(4));
+        let svc = AnswerService::new(tools, Arc::clone(&llm) as Arc<dyn LlmService>, fast_params(4), None);
         let mut rx = svc.answer_stream("ws", "q", Some(prefix), 12, None).await.unwrap();
         while rx.recv().await.is_some() {}
         let msg = llm.calls.lock().unwrap()[1].last_msg.content.clone();
@@ -1545,7 +1726,7 @@ mod engine_tests {
             round(vec![ScriptItem::Content("不该到这[1]")]),
         ]));
         let tools = Arc::new(StubTools::hits(vec![("/a", 0, "x")]));
-        let svc = AnswerService::new(tools, Arc::clone(&llm) as Arc<dyn LlmService>, fast_params(4));
+        let svc = AnswerService::new(tools, Arc::clone(&llm) as Arc<dyn LlmService>, fast_params(4), None);
         let rx = svc.answer_stream("ws", "q", None, 12, None).await.unwrap();
         drop(rx);
         tokio::time::sleep(Duration::from_millis(100)).await;

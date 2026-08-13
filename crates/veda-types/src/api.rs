@@ -291,14 +291,32 @@ pub struct AnswerApiResponse {
     pub estimated_context_tokens: usize,
 }
 
-/// One `[n]` reference. A search-hit citation carries exactly one chunk
-/// span; an empty `spans` means the whole file (evidence came from the
-/// model reading the file directly).
+/// One `[n]` reference — a document span or a team memory (M2a), never both.
+/// A search-hit citation carries a path and exactly one chunk span; an empty
+/// `spans` means the whole file (evidence came from the model reading the
+/// file directly). A memory citation carries `memory` and no path — older
+/// consumers that only know `path` skip it in their source list while the
+/// `[n]` marker in the body stays resolvable.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct AnswerCitation {
     pub index: usize,
-    pub path: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub spans: Vec<ChunkSpan>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub memory: Option<MemoryCitationRef>,
+}
+
+/// Memory identity + display fields for a memory citation. `content` is the
+/// full memory line (memories are one-liners by design); consumers truncate
+/// for their own display widths.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct MemoryCitationRef {
+    pub id: i64,
+    pub content: String,
+    pub updated_by: String,
+    pub updated_at: DateTime<Utc>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]

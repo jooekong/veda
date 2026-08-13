@@ -236,6 +236,22 @@ impl MemoryService {
         self.retrieve(query, &context_filter(actor), limit).await
     }
 
+    /// Team-domain retrieval without an operator identity — the answer
+    /// path's injection source (M2a). Personal domains need an operator and
+    /// stay out until identity passthrough lands (M3).
+    pub async fn team_memories(
+        &self,
+        workspace_id: &str,
+        query: &str,
+        limit: usize,
+    ) -> Result<Vec<MemoryHit>> {
+        let filter = MemoryScopeFilter::Scope {
+            scope_type: MemoryScopeType::Workspace,
+            scope_id: workspace_id.to_string(),
+        };
+        self.retrieve(query, &filter, limit).await
+    }
+
     pub async fn update(
         &self,
         actor: &MemoryActor,
