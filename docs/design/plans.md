@@ -22,7 +22,6 @@ SQL 三件套 / revoke scope / platform authz+timeout / TimeoutLayer+CatchPanic 
 
 | 计划 | 状态 |
 | --- | --- |
-| [`agent-memory-m2a.md`](../plans/agent-memory-m2a.md) | Agent/团队记忆 M2a：answer 双源（记忆=第二证据源+出处一类）；**开工 08-13**；M1 已上线三节点（0.1.27）并归档；M2b 等案例；架构定稿 [`design/agent-memory.md`](agent-memory.md) |
 | [`veda-tunnel-plan.md`](../plans/veda-tunnel-plan.md) | **生产运行中**（专用机 .95）：企微长连接 + RAG 问答 + 三入口 bot 管理 + 平台 API（§18）；方向池见 `design/tunnel-directions.md`；尾巴=server 白名单改动未部署 |
 | [`veda-answer-agentic.md`](../plans/veda-answer-agentic.md) | **Stage 1 已实现 e2e 全绿**：`/v1/answer` agentic 多次召回(tool loop)+ prompt 分层;Stage 2 bot prompt 三入口贯通进行中 |
 | [`onepaas-api-alignment.md`](../plans/onepaas-api-alignment.md) | OnePaaS 接口规范对齐（分页 / 错误三件套 / 响应信封） |
@@ -36,7 +35,7 @@ SQL 三件套 / revoke scope / platform authz+timeout / TimeoutLayer+CatchPanic 
   （tigerfs / drive9 / agent-memory 赛道七家对标；候选：operation log + 版本历史（D1）、
   `veda skill install`（D2）、agent/团队记忆（D3））
 - Agent / 团队记忆完整设计提案：[`agent-memory.md`](agent-memory.md)
-  （架构定稿；**M1 已开工**，施工图 [`../plans/agent-memory-m1.md`](../plans/agent-memory-m1.md)）
+  （架构定稿；M1 三节点 + M2a 测试环境已上线，施工图均已归档；下一步 M3 操作者身份透传）
 
 ## Phase 历史
 
@@ -55,7 +54,7 @@ SQL 三件套 / revoke scope / platform authz+timeout / TimeoutLayer+CatchPanic 
 
 ## 归档索引
 
-- 完成或被取代的 plan：[`docs/archive/plans/`](../archive/plans/)（alpha 6 周计划、sparse/score/write_mode、平台管理面、OTLP 两篇、Java SDK、coding-agent-kb——`/mcp` P0 + P1 三件套已全量，HTML/sync 等 P2 背包的触发条件在 plan 内；FUSE 三篇 fuse-plan / fuse-writeback-plan / 2026-04-24-fuse-top4-fixes；fs9-plan；pdf-word-summary-gap——08-04 当天发现修复上线+存量重刷闭环。**2026-08-05 新增四篇**：veda-answer-stream 与 veda-tunnel-qa-log——双双上线全节点后归档；okf-knowledge-base——07-23 拍板不做，设计存档备重启；gitignore-and-workspace-layout——`veda cp` ignore 规则 + `GET /v1/layout` 随 0.1.22–0.1.25 全部上线，collation 未固定问题移交 `docs/todos.md`。**2026-08-12 新增四篇**：cli-local-config——0.1.26 已发版；doc-access-stats——已全量上线三节点含生产；outbox-dedup-refactor——搁置（无性能证据不动稳定写路径，重启条件在 plan 头部）；veda-answer-plan——被 agentic 重构取代，余 DAL 真题评审由 qa-log 自动化接管。**2026-08-13 新增**：agent-memory-m1——M1 全量上线三节点（0.1.27），§6 M2/M3 预备事实仍被 m2a 引用）
+- 完成或被取代的 plan：[`docs/archive/plans/`](../archive/plans/)（alpha 6 周计划、sparse/score/write_mode、平台管理面、OTLP 两篇、Java SDK、coding-agent-kb——`/mcp` P0 + P1 三件套已全量，HTML/sync 等 P2 背包的触发条件在 plan 内；FUSE 三篇 fuse-plan / fuse-writeback-plan / 2026-04-24-fuse-top4-fixes；fs9-plan；pdf-word-summary-gap——08-04 当天发现修复上线+存量重刷闭环。**2026-08-05 新增四篇**：veda-answer-stream 与 veda-tunnel-qa-log——双双上线全节点后归档；okf-knowledge-base——07-23 拍板不做，设计存档备重启；gitignore-and-workspace-layout——`veda cp` ignore 规则 + `GET /v1/layout` 随 0.1.22–0.1.25 全部上线，collation 未固定问题移交 `docs/todos.md`。**2026-08-12 新增四篇**：cli-local-config——0.1.26 已发版；doc-access-stats——已全量上线三节点含生产；outbox-dedup-refactor——搁置（无性能证据不动稳定写路径，重启条件在 plan 头部）；veda-answer-plan——被 agentic 重构取代，余 DAL 真题评审由 qa-log 自动化接管。**2026-08-13 新增**：agent-memory-m1——M1 全量上线三节点（0.1.27），§6 M2/M3 预备事实仍被 m2a 引用。**2026-08-14 新增**：agent-memory-m2a——answer 双源（记忆=第二证据源+出处一类）已上线测试环境（server `3c70b305` .161/.89 + tunnel .89，`d8a0ed0`），生产随下次发版窗口；M3=操作者身份透传）
 - 旧 review 报告：[`docs/archive/reviews/`](../archive/reviews/)（含 06-18 的四篇原材料稿：原始 + cursor + final-claude + final-codex）。留在 `docs/reviews/` 的有 4 篇：2026-04-30（C/S/W open 项锚点）、2026-06-10（上线前 review）、2026-06-15（全员开放加固基线）、2026-06-18-final（必修清单权威稿，头部有 2026-08-05 的 7修4欠 核对注记）
 - 历史设计 / 研究稿：[`docs/archive/design/`](../archive/design/)（原始 design.md、simplify-v0、cli-skill 等，凭证/reconciler 等细节已被演进甩开，**勿当现状读**——现状见 `ARCHITECTURE.md`）
 - 一次性快照与已完结实录：`docs/archive/` 根（alpha-tryout、production-audit、vectors-merge-backlog、handoff-*、loadtest-2026-06-05 与 loadtest-prod-2026-06-11 两篇压测实录。**2026-08-05 归档**：vectors-merge-plan——Phase 9 原始设计，多章节已被演进推翻，历史 § 锚仍被代码注释引用；postmortem-2026-07-empty-abstracts——空摘要事故已全闭环；word-e2e-sop / layout-cp-e2e-sop / blob-pdf-test-sop——对应功能验收完成后的一次性 SOP）

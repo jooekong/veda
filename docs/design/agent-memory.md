@@ -1,7 +1,7 @@
 # Agent / 团队记忆（设计定稿）
 
 > **状态：M1 已上线三节点（0.1.27，施工图归档 [`../archive/plans/agent-memory-m1.md`](../archive/plans/agent-memory-m1.md)）；
-> M2a answer 双源已实现（2026-08-13，施工图 [`../plans/agent-memory-m2a.md`](../plans/agent-memory-m2a.md)）。**
+> M2a answer 双源已上线测试环境（2026-08-14，生产随下次发版窗口；施工图归档 [`../archive/plans/agent-memory-m2a.md`](../archive/plans/agent-memory-m2a.md)）。**
 > 2026-08-07 业界调研 + 方案初稿；2026-08-11 二轮对标核查
 > （§18 增补）+ Claude/Codex 双评审后修订，两批拍板：第一批——**记忆可编辑（零状态机）、
 > 团队域无审批（wiki 式轻治理）、principal 只做归属标识（不新增鉴权）**；第二批——

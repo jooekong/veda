@@ -78,3 +78,15 @@ M2b 对账提名（等真实案例）；digest（触发条件未到）。
 
 集成测试全绿（含既有 answer / memory 套件零回归）→ 测试环境部署
 （server .161/.89 + tunnel 测试实例 .89）→ 归档本计划。生产随下次发版窗口，Joe 拍板。
+
+## 部署记录（2026-08-14，DoD 完成）
+
+- server-only 部署（不发版，版本自报仍 0.1.27）：main `d8a0ed0` 在 .89 build 一次，
+  server sha `3c70b305` 上 .161/.89，tunnel sha `f1080882` 上 .89 测试实例；
+  生产 .85/.95 未动，随下次发版窗口。
+- 验证：三项产物校验 + 双 binary 内容锚点（「以下是团队记忆」/「记忆：」）；
+  两节点 healthz/ready 绿、journal 零错误；tunnel bot `conn_state=subscribed`；
+  公网入口 200。
+- 行为冒烟（.89 真实链路）：匿名 workspace 种团队记忆 → `/v1/answer` 答案
+  引用 `[1]` 并给出正确事实，citation 为 `{index, spans:[], memory:{id,content,
+  updated_by,updated_at}}`（无 path、spans 恒序列化、hit_count=1）——引用态即上线。
