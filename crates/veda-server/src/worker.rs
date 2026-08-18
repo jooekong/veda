@@ -257,11 +257,11 @@ impl Worker {
     /// full `Vec<FileChunk>` plus the assembled buffer simultaneously, ~2x).
     async fn load_full_content(&self, file: &FileRecord) -> veda_types::Result<String> {
         match file.storage_type {
-            StorageType::Inline => Ok(self
+            StorageType::Inline => self
                 .meta
                 .get_file_content(&file.id)
                 .await?
-                .unwrap_or_default()),
+                .ok_or_else(|| VedaError::NotFound(format!("content for {}", file.id))),
             StorageType::Chunked => {
                 let total = file.size_bytes.max(0) as usize;
                 let mut buf = String::with_capacity(total);

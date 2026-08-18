@@ -978,6 +978,25 @@ async fn append_to_existing_file() {
 }
 
 #[tokio::test]
+async fn append_missing_inline_content_row_fails() {
+    let (svc, state) = make_service();
+    let resp = svc
+        .write_file("ws1", "/log.txt", "line1\n", None, None)
+        .await
+        .unwrap();
+    // Corrupt state: file row survives, its inline content row is gone.
+    // The append full-rewrite path must fail loudly instead of treating the
+    // file as empty and replacing it with just the appended bytes.
+    state.lock().unwrap().file_contents.remove(&resp.file_id);
+
+    let err = svc
+        .append_file("ws1", "/log.txt", "line2\n")
+        .await
+        .expect_err("append must not rewrite a file whose content row is missing");
+    assert!(matches!(err, VedaError::NotFound(_)), "err: {err}");
+}
+
+#[tokio::test]
 async fn write_file_size_limit() {
     let (svc, _) = make_service();
     let big = "x".repeat(51 * 1024 * 1024);

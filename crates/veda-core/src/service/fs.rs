@@ -1907,7 +1907,10 @@ async fn read_full_content(
     file: &FileRecord,
 ) -> Result<String> {
     match file.storage_type {
-        StorageType::Inline => Ok(tx.get_file_content(file_id).await?.unwrap_or_default()),
+        StorageType::Inline => tx
+            .get_file_content(file_id)
+            .await?
+            .ok_or_else(|| VedaError::NotFound(format!("content for {file_id}"))),
         StorageType::Chunked => {
             let chunks = tx.get_file_chunks(file_id, None, None).await?;
             let total: usize = chunks.iter().map(|c| c.content.len()).sum();
