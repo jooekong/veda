@@ -35,9 +35,6 @@ pub struct AppState {
     /// upstream, misses are batched into one upstream call per `embed()`.
     /// Separate from the fs-side embedding (Stage 3.1 cache is vector-only).
     pub vector_embedding: Arc<dyn EmbeddingService>,
-    /// Embedding dim from `config.embedding.dimension`. Stamped into Milvus
-    /// vector field on db workspace collection creation.
-    pub embedding_dim: u32,
     pub sql_engine: VedaSqlEngine,
     pub metrics: MetricsHandle,
     /// Bearer token required to read `/v1/metrics`. `None` disables the

@@ -717,7 +717,7 @@ impl MetadataStore for MysqlStore {
             .begin()
             .await
             .map_err(|e| VedaError::Storage(e.to_string()))?;
-        Ok(Box::new(MysqlMetadataTx { tx: Some(tx) }))
+        Ok(Box::new(super::tx::MysqlMetadataTx { tx }))
     }
 
     async fn get_summary_by_file(&self, file_id: &str) -> Result<Option<FileSummary>> {

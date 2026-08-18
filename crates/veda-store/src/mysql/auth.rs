@@ -464,13 +464,6 @@ impl AuthStore for MysqlStore {
         // UNIQUE(account_id, name), veda_datasets has UNIQUE(workspace_id,
         // name). Map both to AlreadyExists so the route returns 409 instead
         // of an opaque 500.
-        fn is_dup_key(e: &sqlx::Error) -> bool {
-            matches!(e, sqlx::Error::Database(db) if db
-                .try_downcast_ref::<sqlx::mysql::MySqlDatabaseError>()
-                .map(|x| x.number() == 1062)
-                .unwrap_or(false))
-        }
-
         let mut tx = self.pool.begin().await.map_err(storage_err)?;
 
         if let Err(e) = sqlx::query(
@@ -489,7 +482,7 @@ impl AuthStore for MysqlStore {
         .execute(&mut *tx)
         .await
         {
-            if is_dup_key(&e) {
+            if is_mysql_duplicate(&e) {
                 return Err(VedaError::AlreadyExists(format!(
                     "workspace {}",
                     workspace.name
@@ -513,7 +506,7 @@ impl AuthStore for MysqlStore {
         .await
         {
             // tx drops here → the workspace insert rolls back too.
-            if is_dup_key(&e) {
+            if is_mysql_duplicate(&e) {
                 return Err(VedaError::AlreadyExists(format!("dataset {}", dataset.name)));
             }
             return Err(storage_err(e));
@@ -572,16 +565,6 @@ impl AuthStore for MysqlStore {
             .map(row_to_workspace)
             .collect();
         Ok((items?, has_more))
-    }
-
-    async fn list_active_workspace_ids(&self) -> Result<Vec<String>> {
-        let rows: Vec<(String,)> = sqlx::query_as(
-            r#"SELECT id FROM veda_workspaces WHERE status = 'active'"#,
-        )
-        .fetch_all(&self.pool)
-        .await
-        .map_err(storage_err)?;
-        Ok(rows.into_iter().map(|(id,)| id).collect())
     }
 
     async fn list_all_workspaces_with_counts(
@@ -668,14 +651,10 @@ impl AuthStore for MysqlStore {
         .await;
         match res {
             Ok(_) => Ok(()),
-            Err(sqlx::Error::Database(db_err))
-                if db_err
-                    .try_downcast_ref::<sqlx::mysql::MySqlDatabaseError>()
-                    .map(|e| e.number() == 1062)
-                    .unwrap_or(false) =>
-            {
-                Err(VedaError::AlreadyExists(format!("dataset {}", dataset.name)))
-            }
+            Err(e) if is_mysql_duplicate(&e) => Err(VedaError::AlreadyExists(format!(
+                "dataset {}",
+                dataset.name
+            ))),
             Err(e) => Err(storage_err(e)),
         }
     }

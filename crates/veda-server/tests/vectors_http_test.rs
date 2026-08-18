@@ -140,7 +140,6 @@ async fn build_test_app() -> (Arc<AppState>, Arc<MysqlStore>, axum::Router) {
         vector_store: milvus.clone(),
         reconciler: Arc::new(veda_server::reconciler::Reconciler::new(
             mysql.clone(),
-            mysql.clone(),
             milvus.clone(),
             mysql.clone(),
         )),
@@ -156,7 +155,6 @@ async fn build_test_app() -> (Arc<AppState>, Arc<MysqlStore>, axum::Router) {
             cfg.embedding.dimension,
         ),
         vector_embedding,
-        embedding_dim: cfg.embedding.dimension,
         sql_engine,
         // `install()` sets the *global* Prometheus recorder (once per process),
         // but several #[ignore]d tests in this binary each build an app — so
@@ -254,7 +252,7 @@ async fn provision_test_account(state: &AppState) -> TestSetup {
         .unwrap();
     state
         .vector_workspace_store
-        .create_vector_collection(&ws_id, state.embedding_dim)
+        .create_vector_collection(&ws_id, load_config().embedding.dimension)
         .await
         .unwrap();
 

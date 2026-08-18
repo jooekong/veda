@@ -148,34 +148,18 @@ pub(super) async fn get_file_chunks_conn(
 
 pub(super) async fn insert_fs_event_conn(conn: &mut sqlx::MySqlConnection, event: &FsEvent) -> Result<()> {
     let et = db_enum_str(&event.event_type);
-    if event.id == 0 {
-        sqlx::query(
-            r#"INSERT INTO veda_fs_events (workspace_id, event_type, path, file_id, created_at)
-               VALUES (?, ?, ?, ?, ?)"#,
-        )
-        .bind(&event.workspace_id)
-        .bind(et)
-        .bind(&event.path)
-        .bind(&event.file_id)
-        .bind(event.created_at.naive_utc())
-        .execute(&mut *conn)
-        .await
-        .map_err(storage_err)?;
-    } else {
-        sqlx::query(
-            r#"INSERT INTO veda_fs_events (id, workspace_id, event_type, path, file_id, created_at)
-               VALUES (?, ?, ?, ?, ?, ?)"#,
-        )
-        .bind(event.id)
-        .bind(&event.workspace_id)
-        .bind(et)
-        .bind(&event.path)
-        .bind(&event.file_id)
-        .bind(event.created_at.naive_utc())
-        .execute(&mut *conn)
-        .await
-        .map_err(storage_err)?;
-    }
+    sqlx::query(
+        r#"INSERT INTO veda_fs_events (workspace_id, event_type, path, file_id, created_at)
+           VALUES (?, ?, ?, ?, ?)"#,
+    )
+    .bind(&event.workspace_id)
+    .bind(et)
+    .bind(&event.path)
+    .bind(&event.file_id)
+    .bind(event.created_at.naive_utc())
+    .execute(conn)
+    .await
+    .map_err(storage_err)?;
     Ok(())
 }
 
@@ -193,44 +177,23 @@ pub(super) async fn insert_outbox_conn(conn: &mut sqlx::MySqlConnection, event: 
         .naive_utc()
         .with_nanosecond(0)
         .expect("nanosecond 0 is always valid");
-    if event.id == 0 {
-        sqlx::query(
-            r#"INSERT INTO veda_outbox
-            (workspace_id, event_type, payload, status, retry_count, max_retries, available_at, lease_until, created_at)
-            VALUES (?, ?, CAST(? AS JSON), ?, ?, ?, ?, ?, ?)"#,
-        )
-        .bind(&event.workspace_id)
-        .bind(et)
-        .bind(&payload)
-        .bind(status)
-        .bind(event.retry_count)
-        .bind(event.max_retries)
-        .bind(available_at)
-        .bind(event.lease_until.map(|x| x.naive_utc()))
-        .bind(event.created_at.naive_utc())
-        .execute(conn)
-        .await
-        .map_err(storage_err)?;
-    } else {
-        sqlx::query(
-            r#"INSERT INTO veda_outbox
-            (id, workspace_id, event_type, payload, status, retry_count, max_retries, available_at, lease_until, created_at)
-            VALUES (?, ?, ?, CAST(? AS JSON), ?, ?, ?, ?, ?, ?)"#,
-        )
-        .bind(event.id)
-        .bind(&event.workspace_id)
-        .bind(et)
-        .bind(&payload)
-        .bind(status)
-        .bind(event.retry_count)
-        .bind(event.max_retries)
-        .bind(available_at)
-        .bind(event.lease_until.map(|x| x.naive_utc()))
-        .bind(event.created_at.naive_utc())
-        .execute(conn)
-        .await
-        .map_err(storage_err)?;
-    }
+    sqlx::query(
+        r#"INSERT INTO veda_outbox
+        (workspace_id, event_type, payload, status, retry_count, max_retries, available_at, lease_until, created_at)
+        VALUES (?, ?, CAST(? AS JSON), ?, ?, ?, ?, ?, ?)"#,
+    )
+    .bind(&event.workspace_id)
+    .bind(et)
+    .bind(&payload)
+    .bind(status)
+    .bind(event.retry_count)
+    .bind(event.max_retries)
+    .bind(available_at)
+    .bind(event.lease_until.map(|x| x.naive_utc()))
+    .bind(event.created_at.naive_utc())
+    .execute(conn)
+    .await
+    .map_err(storage_err)?;
     Ok(())
 }
 

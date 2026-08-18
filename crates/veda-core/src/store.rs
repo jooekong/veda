@@ -673,7 +673,6 @@ pub trait CollectionMetaStore: Send + Sync {
         workspace_id: &str,
         name: &str,
     ) -> Result<Option<CollectionSchema>>;
-    async fn get_collection_schema_by_id(&self, id: &str) -> Result<Option<CollectionSchema>>;
     async fn list_collection_schemas(&self, workspace_id: &str) -> Result<Vec<CollectionSchema>>;
     async fn delete_collection_schema(&self, id: &str) -> Result<()>;
 }
@@ -888,9 +887,6 @@ pub trait AuthStore: Send + Sync {
         after: Option<&str>,
         limit: u32,
     ) -> Result<(Vec<Workspace>, bool)>;
-    /// Return the IDs of all active workspaces across all accounts.
-    /// Used by the reconciler to iterate workspaces during drift detection.
-    async fn list_active_workspace_ids(&self) -> Result<Vec<String>>;
 
     /// Admin surface: every active workspace across all accounts, each with
     /// its active dataset + key counts and creator identity, sorted newest

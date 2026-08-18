@@ -153,10 +153,9 @@ async fn build_runtime() -> (
 }
 
 async fn create_workspace(mysql: &MysqlStore, ws: &str) {
-    // The reconciler discovers workspaces through AuthStore::list_active_workspace_ids,
-    // which only returns rows from `veda_workspaces`. Insert one with a stable
-    // dummy account_id. We don't need the account row to exist for these tests
-    // because the reconciler never joins back to accounts.
+    // Insert a workspace row with a dummy account_id. We don't need the
+    // account row to exist for these tests because the reconciler never
+    // joins back to accounts.
     let now = chrono::Utc::now();
     mysql
         .create_workspace(&Workspace {
@@ -202,7 +201,7 @@ async fn drain_outbox(
 /// Orphans are deleted on first observation (production behavior); the
 /// snapshot race is guarded by the reconciler's in-pass re-checks.
 fn make_reconciler_immediate(mysql: Arc<MysqlStore>, milvus: Arc<MilvusStore>) -> Reconciler {
-    Reconciler::new(mysql.clone(), mysql.clone(), milvus.clone(), mysql.clone())
+    Reconciler::new(mysql.clone(), milvus.clone(), mysql.clone())
 }
 
 // ── Tests ──────────────────────────────────────────────
@@ -359,46 +358,6 @@ async fn reconciler_clean_workspace_reports_zero_drift() {
     assert_eq!(ws_report.chunk_orphan, 0);
 
     cleanup_workspace(&mysql, &ws).await;
-}
-
-#[tokio::test]
-#[ignore]
-async fn reconciler_skips_disabled_or_archived_workspaces() {
-    // Archived workspace must NOT appear in the reconciler's pass: the
-    // reconciler relies on AuthStore::list_active_workspace_ids and we
-    // filter by `status = 'active'`.
-    let _g = serial_guard().await;
-    let _ = tracing_subscriber::fmt::try_init();
-    let (mysql, _milvus, _embedding, _fs) = build_runtime().await;
-    let ws = Uuid::new_v4().to_string();
-
-    let now = chrono::Utc::now();
-    mysql
-        .create_workspace(&Workspace {
-            id: ws.clone(),
-            account_id: Uuid::new_v4().to_string(),
-            name: "archived".into(),
-            status: WorkspaceStatus::Archived,
-            kind: WorkspaceKind::Fs,
-            app_id: None,
-            description: None,
-            created_at: now,
-            updated_at: now,
-        })
-        .await
-        .expect("create archived workspace");
-
-    let active = mysql.list_active_workspace_ids().await.unwrap();
-    assert!(
-        !active.contains(&ws),
-        "archived workspace must not be returned"
-    );
-
-    // Cleanup
-    let _ = sqlx::query("DELETE FROM veda_workspaces WHERE id = ?")
-        .bind(&ws)
-        .execute(mysql.pool())
-        .await;
 }
 
 /// Codex finding #1 regression: reconciler-driven repair must bypass the

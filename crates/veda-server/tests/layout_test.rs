@@ -154,7 +154,6 @@ async fn build_app(summary_enabled: bool) -> TestApp {
         vector_store: milvus.clone(),
         reconciler: Arc::new(veda_server::reconciler::Reconciler::new(
             mysql.clone(),
-            mysql.clone(),
             milvus.clone(),
             mysql.clone(),
         )),
@@ -170,7 +169,6 @@ async fn build_app(summary_enabled: bool) -> TestApp {
             cfg.embedding.dimension,
         ),
         vector_embedding,
-        embedding_dim: cfg.embedding.dimension,
         sql_engine,
         metrics: test_metrics(),
         metrics_token: None,

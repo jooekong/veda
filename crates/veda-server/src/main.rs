@@ -157,7 +157,6 @@ async fn main() -> anyhow::Result<()> {
     // within a single pass.
     let reconciler = Arc::new(reconciler::Reconciler::new(
         mysql.clone(),
-        mysql.clone(),
         milvus.clone(),
         mysql.clone(),
     ));
@@ -228,7 +227,6 @@ async fn main() -> anyhow::Result<()> {
         reconciler,
         vector_workspace_store: milvus.clone(),
         vector_embedding,
-        embedding_dim: cfg.embedding.dimension,
         sql_engine,
         metrics: metrics.clone(),
         metrics_token: cfg.metrics_token.clone(),

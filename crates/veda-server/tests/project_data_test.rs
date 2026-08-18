@@ -140,7 +140,6 @@ async fn build_test_app() -> (Arc<AppState>, axum::Router) {
         vector_store: milvus.clone(),
         reconciler: Arc::new(veda_server::reconciler::Reconciler::new(
             mysql.clone(),
-            mysql.clone(),
             milvus.clone(),
             mysql.clone(),
         )),
@@ -156,7 +155,6 @@ async fn build_test_app() -> (Arc<AppState>, axum::Router) {
             cfg.embedding.dimension,
         ),
         vector_embedding,
-        embedding_dim: cfg.embedding.dimension,
         sql_engine,
         metrics: test_metrics(),
         metrics_token: None,
@@ -242,7 +240,7 @@ async fn provision(state: &AppState) -> Setup {
         .unwrap();
     state
         .vector_workspace_store
-        .create_vector_collection(&db_ws_id, state.embedding_dim)
+        .create_vector_collection(&db_ws_id, load_config().embedding.dimension)
         .await
         .unwrap();
 

@@ -213,7 +213,5 @@ mod rows;
 mod schema;
 mod tx;
 
-pub use tx::MysqlMetadataTx;
-
 use conn::*;
 use rows::*;

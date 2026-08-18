@@ -23,9 +23,9 @@ use std::sync::Arc;
 
 use chrono::Utc;
 use serde::Serialize;
-use tracing::{debug, info, warn};
+use tracing::{debug, info};
 
-use veda_core::store::{AuthStore, MetadataStore, TaskQueue, VectorStore};
+use veda_core::store::{MetadataStore, TaskQueue, VectorStore};
 use veda_types::{Dentry, OutboxEventType, SourceType};
 
 use crate::outbox::enqueue_dedup;
@@ -38,21 +38,6 @@ pub struct WorkspaceReport {
     pub chunk_orphan: usize,   // Milvus has, MySQL missing — deleted
     pub summary_missing: usize,
     pub summary_orphan: usize,
-}
-
-/// Aggregate outcome across all workspaces, returned by `run_once`.
-#[derive(Debug, Default, Clone)]
-pub struct ReconcileReport {
-    pub workspaces: Vec<WorkspaceReport>,
-}
-
-impl ReconcileReport {
-    pub fn total_drift(&self) -> usize {
-        self.workspaces
-            .iter()
-            .map(|w| w.chunk_missing + w.chunk_orphan + w.summary_missing + w.summary_orphan)
-            .sum()
-    }
 }
 
 /// Identifies an entity that should exist in the Milvus summary collection.
@@ -126,7 +111,6 @@ fn materialize_summary_entities(
 
 pub struct Reconciler {
     meta: Arc<dyn MetadataStore>,
-    auth: Arc<dyn AuthStore>,
     vector: Arc<dyn VectorStore>,
     task_queue: Arc<dyn TaskQueue>,
 }
@@ -134,96 +118,20 @@ pub struct Reconciler {
 impl Reconciler {
     pub fn new(
         meta: Arc<dyn MetadataStore>,
-        auth: Arc<dyn AuthStore>,
         vector: Arc<dyn VectorStore>,
         task_queue: Arc<dyn TaskQueue>,
     ) -> Self {
         Self {
             meta,
-            auth,
             vector,
             task_queue,
         }
     }
 
-    /// Run one reconciliation pass over every active workspace. Per-workspace
-    /// errors are logged but do not abort the overall pass. `dry_run` reports
-    /// drift without enqueuing repairs or deleting orphans.
-    pub async fn run_once(&self, dry_run: bool) -> veda_types::Result<ReconcileReport> {
-        let workspace_ids = self.auth.list_active_workspace_ids().await?;
-        let mut report = ReconcileReport::default();
-        info!(
-            workspace_count = workspace_ids.len(),
-            "reconciler pass starting"
-        );
-        for ws in workspace_ids {
-            match self.reconcile_workspace(&ws, dry_run).await {
-                Ok(r) => {
-                    // Per-workspace drift goes to logs, not metrics labels:
-                    // workspace_id is high-cardinality and effectively a
-                    // tenant identifier, neither of which belongs in a
-                    // Prometheus label (Codex finding #2). Aggregated drift
-                    // by kind is emitted at the end of the pass below.
-                    if r.chunk_missing
-                        + r.chunk_orphan
-                        + r.summary_missing
-                        + r.summary_orphan
-                        > 0
-                    {
-                        info!(
-                            workspace_id = %ws,
-                            chunk_missing = r.chunk_missing,
-                            chunk_orphan = r.chunk_orphan,
-                            summary_missing = r.summary_missing,
-                            summary_orphan = r.summary_orphan,
-                            "reconciler healed drift"
-                        );
-                    } else {
-                        debug!(workspace_id = %ws, "reconciler: clean");
-                    }
-                    report.workspaces.push(r);
-                }
-                Err(e) => {
-                    warn!(workspace_id = %ws, err = %e, "reconciler workspace failed");
-                }
-            }
-        }
-
-        // Cluster-wide drift gauges: sum across workspaces, only `kind` as
-        // a label. Operators investigating "which workspace?" follow the
-        // structured logs above (workspace_id is in tracing fields). This
-        // intentionally trades workspace-level metric attribution for
-        // bounded label cardinality and tenant privacy.
-        let mut chunk_missing = 0u64;
-        let mut chunk_orphan = 0u64;
-        let mut summary_missing = 0u64;
-        let mut summary_orphan = 0u64;
-        for w in &report.workspaces {
-            chunk_missing += w.chunk_missing as u64;
-            chunk_orphan += w.chunk_orphan as u64;
-            summary_missing += w.summary_missing as u64;
-            summary_orphan += w.summary_orphan as u64;
-        }
-        ::metrics::gauge!("veda_drift_total", "kind" => "chunk_missing")
-            .set(chunk_missing as f64);
-        ::metrics::gauge!("veda_drift_total", "kind" => "chunk_orphan")
-            .set(chunk_orphan as f64);
-        ::metrics::gauge!("veda_drift_total", "kind" => "summary_missing")
-            .set(summary_missing as f64);
-        ::metrics::gauge!("veda_drift_total", "kind" => "summary_orphan")
-            .set(summary_orphan as f64);
-        info!(
-            workspaces = report.workspaces.len(),
-            total_drift = report.total_drift(),
-            "reconciler pass complete"
-        );
-        Ok(report)
-    }
-
-    /// Run reconciliation for a single workspace. Public so tests sharing a
-    /// MySQL/Milvus instance can scope each test to their own workspace
-    /// without other parallel tests' transient drift confusing this run.
-    /// Production callers use `run_once` to iterate all active workspaces.
+    /// Run reconciliation for a single workspace. The only entry point:
+    /// `POST /admin/v1/reconcile/{workspace_id}` calls this directly, and
+    /// tests sharing a MySQL/Milvus instance scope each run to their own
+    /// workspace so other parallel tests' transient drift can't confuse it.
     pub async fn reconcile_workspace(
         &self,
         workspace_id: &str,
@@ -578,40 +486,6 @@ impl Reconciler {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn report_total_drift_sums_all_categories() {
-        let report = ReconcileReport {
-            workspaces: vec![
-                WorkspaceReport {
-                    workspace_id: "ws1".into(),
-                    chunk_missing: 2,
-                    chunk_orphan: 1,
-                    summary_missing: 0,
-                    summary_orphan: 3,
-                },
-                WorkspaceReport {
-                    workspace_id: "ws2".into(),
-                    chunk_missing: 5,
-                    chunk_orphan: 0,
-                    summary_missing: 1,
-                    summary_orphan: 0,
-                },
-            ],
-        };
-        assert_eq!(report.total_drift(), 2 + 1 + 0 + 3 + 5 + 0 + 1 + 0);
-    }
-
-    #[test]
-    fn report_zero_drift_when_clean() {
-        let report = ReconcileReport {
-            workspaces: vec![WorkspaceReport {
-                workspace_id: "ws1".into(),
-                ..Default::default()
-            }],
-        };
-        assert_eq!(report.total_drift(), 0);
-    }
 
     /// The bidirectional diff is implemented via `HashSet::difference`. This
     /// asserts the set semantics we depend on (std's invariants), guarding

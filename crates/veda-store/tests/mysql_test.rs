@@ -1558,13 +1558,6 @@ async fn mysql_collection_schema_crud() {
     assert_eq!(got.collection_type, CollectionType::Structured);
     assert_eq!(got.embedding_source.as_deref(), Some("content"));
 
-    let by_id = store
-        .get_collection_schema_by_id(&coll_id)
-        .await
-        .unwrap()
-        .unwrap();
-    assert_eq!(by_id.name, "articles");
-
     let list = store.list_collection_schemas(&ws_id).await.unwrap();
     assert_eq!(list.len(), 1);
 

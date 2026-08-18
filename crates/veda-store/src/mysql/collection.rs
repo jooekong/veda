@@ -46,19 +46,6 @@ impl CollectionMetaStore for MysqlStore {
         row.map(|r| row_to_collection_schema(&r)).transpose()
     }
 
-    async fn get_collection_schema_by_id(&self, id: &str) -> Result<Option<CollectionSchema>> {
-        let row = sqlx::query(
-            r#"SELECT id, workspace_id, name, collection_type, schema_json, embedding_source,
-                      embedding_dim, status, created_at, updated_at
-               FROM veda_collection_schemas WHERE id = ?"#,
-        )
-        .bind(id)
-        .fetch_optional(&self.pool)
-        .await
-        .map_err(storage_err)?;
-        row.map(|r| row_to_collection_schema(&r)).transpose()
-    }
-
     async fn list_collection_schemas(&self, workspace_id: &str) -> Result<Vec<CollectionSchema>> {
         let rows = sqlx::query(
             r#"SELECT id, workspace_id, name, collection_type, schema_json, embedding_source,

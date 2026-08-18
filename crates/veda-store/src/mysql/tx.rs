@@ -1,21 +1,13 @@
 use super::*;
 
 pub struct MysqlMetadataTx {
-    pub(super) tx: Option<Transaction<'static, sqlx::MySql>>,
-}
-
-impl MysqlMetadataTx {
-    fn tx_mut(&mut self) -> Result<&mut Transaction<'static, sqlx::MySql>> {
-        self.tx
-            .as_mut()
-            .ok_or_else(|| VedaError::Storage("transaction already finished".into()))
-    }
+    pub(super) tx: Transaction<'static, sqlx::MySql>,
 }
 
 #[async_trait]
 impl MetadataTx for MysqlMetadataTx {
     async fn get_dentry(&mut self, workspace_id: &str, path: &str) -> Result<Option<Dentry>> {
-        let t = self.tx_mut()?;
+        let t = &mut self.tx;
         let row = sqlx::query(
             r#"SELECT id, workspace_id, parent_path, name, path, file_id, is_dir, created_at, updated_at
                FROM veda_dentries WHERE workspace_id = ? AND path = ? FOR UPDATE"#,
@@ -29,7 +21,7 @@ impl MetadataTx for MysqlMetadataTx {
     }
 
     async fn insert_dentry(&mut self, dentry: &Dentry) -> Result<()> {
-        let t = self.tx_mut()?;
+        let t = &mut self.tx;
         match sqlx::query(
             r#"INSERT INTO veda_dentries
             (id, workspace_id, parent_path, name, path, file_id, is_dir, created_at, updated_at)
@@ -48,11 +40,7 @@ impl MetadataTx for MysqlMetadataTx {
         .await
         {
             Ok(_) => Ok(()),
-            Err(sqlx::Error::Database(ref db_err))
-                if db_err
-                    .try_downcast_ref::<sqlx::mysql::MySqlDatabaseError>()
-                    .is_some_and(|e| e.number() == 1062) =>
-            {
+            Err(e) if is_mysql_duplicate(&e) => {
                 Err(VedaError::AlreadyExists(format!("dentry {}", dentry.path)))
             }
             Err(e) => Err(storage_err(e)),
@@ -65,7 +53,7 @@ impl MetadataTx for MysqlMetadataTx {
         path: &str,
         file_id: &str,
     ) -> Result<()> {
-        let t = self.tx_mut()?;
+        let t = &mut self.tx;
         sqlx::query(r#"UPDATE veda_dentries SET file_id = ? WHERE workspace_id = ? AND path = ?"#)
             .bind(file_id)
             .bind(workspace_id)
@@ -77,7 +65,7 @@ impl MetadataTx for MysqlMetadataTx {
     }
 
     async fn delete_dentry(&mut self, workspace_id: &str, path: &str) -> Result<u64> {
-        let t = self.tx_mut()?;
+        let t = &mut self.tx;
         let r = sqlx::query(r#"DELETE FROM veda_dentries WHERE workspace_id = ? AND path = ?"#)
             .bind(workspace_id)
             .bind(path)
@@ -94,7 +82,7 @@ impl MetadataTx for MysqlMetadataTx {
         after_path: Option<&str>,
         limit: usize,
     ) -> Result<Vec<Dentry>> {
-        let t = self.tx_mut()?;
+        let t = &mut self.tx;
         list_dentries_under_page_conn(t.as_mut(), workspace_id, path_prefix, after_path, limit)
             .await
     }
@@ -104,7 +92,7 @@ impl MetadataTx for MysqlMetadataTx {
         workspace_id: &str,
         parent_path: &str,
     ) -> Result<u64> {
-        let t = self.tx_mut()?;
+        let t = &mut self.tx;
         let r = if parent_path == "/" {
             sqlx::query(
                 r#"DELETE FROM veda_dentries WHERE workspace_id = ? AND path <> '/' AND path LIKE '/%'"#,
@@ -132,7 +120,7 @@ impl MetadataTx for MysqlMetadataTx {
         new_parent: &str,
         new_name: &str,
     ) -> Result<()> {
-        let t = self.tx_mut()?;
+        let t = &mut self.tx;
         sqlx::query(
             r#"UPDATE veda_dentries SET path = ?, parent_path = ?, name = ?
                WHERE workspace_id = ? AND path = ?"#,
@@ -154,7 +142,7 @@ impl MetadataTx for MysqlMetadataTx {
         old_prefix: &str,
         new_prefix: &str,
     ) -> Result<u64> {
-        let t = self.tx_mut()?;
+        let t = &mut self.tx;
         // CHAR_LENGTH (not Rust's byte len) — MySQL SUBSTRING on VARCHAR uses
         // character offsets, so Unicode paths need character-based slicing.
         let like = format!("{}/%", escape_like(old_prefix));
@@ -177,7 +165,7 @@ impl MetadataTx for MysqlMetadataTx {
     }
 
     async fn get_file(&mut self, file_id: &str) -> Result<Option<FileRecord>> {
-        let t = self.tx_mut()?;
+        let t = &mut self.tx;
         let row = sqlx::query(
             r#"SELECT id, workspace_id, size_bytes, mime_type, storage_type, source_type,
                       line_count, checksum_sha256, revision, ref_count,
@@ -192,7 +180,7 @@ impl MetadataTx for MysqlMetadataTx {
     }
 
     async fn insert_file(&mut self, file: &FileRecord) -> Result<()> {
-        let t = self.tx_mut()?;
+        let t = &mut self.tx;
         sqlx::query(
             r#"INSERT INTO veda_files
             (id, workspace_id, size_bytes, mime_type, storage_type, source_type, line_count,
@@ -229,7 +217,7 @@ impl MetadataTx for MysqlMetadataTx {
         mime_type: &str,
         source_type: SourceType,
     ) -> Result<()> {
-        let t = self.tx_mut()?;
+        let t = &mut self.tx;
         let r = sqlx::query(
             r#"UPDATE veda_files
                SET revision = ?, size_bytes = ?, checksum_sha256 = ?, line_count = ?, storage_type = ?, mime_type = ?, source_type = ?, last_embedded_content_hash = NULL
@@ -256,7 +244,7 @@ impl MetadataTx for MysqlMetadataTx {
     }
 
     async fn decrement_ref_count(&mut self, file_id: &str) -> Result<i32> {
-        let t = self.tx_mut()?;
+        let t = &mut self.tx;
         let row = sqlx::query(r#"SELECT ref_count FROM veda_files WHERE id = ? FOR UPDATE"#)
             .bind(file_id)
             .fetch_optional(t.as_mut())
@@ -281,7 +269,7 @@ impl MetadataTx for MysqlMetadataTx {
     }
 
     async fn increment_ref_count(&mut self, file_id: &str) -> Result<()> {
-        let t = self.tx_mut()?;
+        let t = &mut self.tx;
         sqlx::query(r#"UPDATE veda_files SET ref_count = ref_count + 1 WHERE id = ?"#)
             .bind(file_id)
             .execute(t.as_mut())
@@ -291,7 +279,7 @@ impl MetadataTx for MysqlMetadataTx {
     }
 
     async fn delete_file(&mut self, file_id: &str) -> Result<()> {
-        let t = self.tx_mut()?;
+        let t = &mut self.tx;
         sqlx::query(r#"DELETE FROM veda_files WHERE id = ?"#)
             .bind(file_id)
             .execute(t.as_mut())
@@ -301,7 +289,7 @@ impl MetadataTx for MysqlMetadataTx {
     }
 
     async fn get_file_content(&mut self, file_id: &str) -> Result<Option<String>> {
-        let t = self.tx_mut()?;
+        let t = &mut self.tx;
         let row = sqlx::query(r#"SELECT content FROM veda_file_contents WHERE file_id = ?"#)
             .bind(file_id)
             .fetch_optional(t.as_mut())
@@ -319,12 +307,12 @@ impl MetadataTx for MysqlMetadataTx {
         start_line: Option<i32>,
         end_line: Option<i32>,
     ) -> Result<Vec<FileChunk>> {
-        let t = self.tx_mut()?;
+        let t = &mut self.tx;
         get_file_chunks_conn(t.as_mut(), file_id, start_line, end_line).await
     }
 
     async fn insert_file_content(&mut self, file_id: &str, content: &str) -> Result<()> {
-        let t = self.tx_mut()?;
+        let t = &mut self.tx;
         sqlx::query(
             r#"INSERT INTO veda_file_contents (file_id, content) VALUES (?, ?)
                ON DUPLICATE KEY UPDATE content = VALUES(content)"#,
@@ -338,7 +326,7 @@ impl MetadataTx for MysqlMetadataTx {
     }
 
     async fn delete_file_content(&mut self, file_id: &str) -> Result<()> {
-        let t = self.tx_mut()?;
+        let t = &mut self.tx;
         sqlx::query(r#"DELETE FROM veda_file_contents WHERE file_id = ?"#)
             .bind(file_id)
             .execute(t.as_mut())
@@ -348,7 +336,7 @@ impl MetadataTx for MysqlMetadataTx {
     }
 
     async fn insert_file_blob(&mut self, file_id: &str, data: &[u8]) -> Result<()> {
-        let t = self.tx_mut()?;
+        let t = &mut self.tx;
         sqlx::query(
             r#"INSERT INTO veda_file_blobs (file_id, data) VALUES (?, ?)
                ON DUPLICATE KEY UPDATE data = VALUES(data)"#,
@@ -362,7 +350,7 @@ impl MetadataTx for MysqlMetadataTx {
     }
 
     async fn delete_file_blob(&mut self, file_id: &str) -> Result<()> {
-        let t = self.tx_mut()?;
+        let t = &mut self.tx;
         sqlx::query(r#"DELETE FROM veda_file_blobs WHERE file_id = ?"#)
             .bind(file_id)
             .execute(t.as_mut())
@@ -372,7 +360,7 @@ impl MetadataTx for MysqlMetadataTx {
     }
 
     async fn delete_file_extract(&mut self, file_id: &str) -> Result<()> {
-        let t = self.tx_mut()?;
+        let t = &mut self.tx;
         sqlx::query(r#"DELETE FROM veda_file_extracts WHERE file_id = ?"#)
             .bind(file_id)
             .execute(t.as_mut())
@@ -385,7 +373,7 @@ impl MetadataTx for MysqlMetadataTx {
         if chunks.is_empty() {
             return Ok(());
         }
-        let t = self.tx_mut()?;
+        let t = &mut self.tx;
         for batch in chunks.chunks(CHUNK_INSERT_BATCH) {
             let placeholders: Vec<&str> = batch.iter().map(|_| "(?, ?, ?, ?, ?, ?, ?)").collect();
             let sql = format!(
@@ -411,7 +399,7 @@ impl MetadataTx for MysqlMetadataTx {
     }
 
     async fn delete_file_chunks(&mut self, file_id: &str) -> Result<()> {
-        let t = self.tx_mut()?;
+        let t = &mut self.tx;
         sqlx::query(r#"DELETE FROM veda_file_chunks WHERE file_id = ?"#)
             .bind(file_id)
             .execute(t.as_mut())
@@ -425,7 +413,7 @@ impl MetadataTx for MysqlMetadataTx {
         file_id: &str,
         from_chunk_index: i32,
     ) -> Result<()> {
-        let t = self.tx_mut()?;
+        let t = &mut self.tx;
         sqlx::query(r#"DELETE FROM veda_file_chunks WHERE file_id = ? AND chunk_index >= ?"#)
             .bind(file_id)
             .bind(from_chunk_index)
@@ -436,7 +424,7 @@ impl MetadataTx for MysqlMetadataTx {
     }
 
     async fn insert_outbox(&mut self, event: &OutboxEvent) -> Result<()> {
-        let t = self.tx_mut()?;
+        let t = &mut self.tx;
         insert_outbox_conn(t.as_mut(), event).await
     }
 
@@ -445,7 +433,7 @@ impl MetadataTx for MysqlMetadataTx {
         event: &OutboxEvent,
         file_id: &str,
     ) -> Result<bool> {
-        let t = self.tx_mut()?;
+        let t = &mut self.tx;
         let et = db_enum_str(&event.event_type);
         // Only deduplicate against `pending` events. A `processing` event is
         // already in flight against an older snapshot of the file; if we
@@ -474,7 +462,7 @@ impl MetadataTx for MysqlMetadataTx {
     }
 
     async fn insert_fs_event(&mut self, event: &FsEvent) -> Result<()> {
-        let t = self.tx_mut()?;
+        let t = &mut self.tx;
         insert_fs_event_conn(t.as_mut(), event).await
     }
 
@@ -482,7 +470,7 @@ impl MetadataTx for MysqlMetadataTx {
         if events.is_empty() {
             return Ok(());
         }
-        let t = self.tx_mut()?;
+        let t = &mut self.tx;
         for batch in events.chunks(FS_EVENT_INSERT_BATCH) {
             let placeholders: Vec<&str> = batch.iter().map(|_| "(?, ?, ?, ?, ?)").collect();
             let sql = format!(
@@ -503,21 +491,13 @@ impl MetadataTx for MysqlMetadataTx {
         Ok(())
     }
 
-    async fn commit(mut self: Box<Self>) -> Result<()> {
-        let tx = self
-            .tx
-            .take()
-            .ok_or_else(|| VedaError::Storage("transaction already finished".into()))?;
-        tx.commit().await.map_err(storage_err)?;
+    async fn commit(self: Box<Self>) -> Result<()> {
+        self.tx.commit().await.map_err(storage_err)?;
         Ok(())
     }
 
-    async fn rollback(mut self: Box<Self>) -> Result<()> {
-        let tx = self
-            .tx
-            .take()
-            .ok_or_else(|| VedaError::Storage("transaction already finished".into()))?;
-        tx.rollback().await.map_err(storage_err)?;
+    async fn rollback(self: Box<Self>) -> Result<()> {
+        self.tx.rollback().await.map_err(storage_err)?;
         Ok(())
     }
 }

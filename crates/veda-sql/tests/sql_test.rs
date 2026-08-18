@@ -842,9 +842,6 @@ impl CollectionMetaStore for MockCollMeta {
     ) -> Result<Option<CollectionSchema>> {
         Ok(None)
     }
-    async fn get_collection_schema_by_id(&self, _id: &str) -> Result<Option<CollectionSchema>> {
-        Ok(None)
-    }
     async fn list_collection_schemas(&self, _ws: &str) -> Result<Vec<CollectionSchema>> {
         Ok(self.schemas.lock().unwrap().clone())
     }

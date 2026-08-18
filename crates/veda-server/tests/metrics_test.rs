@@ -3,8 +3,8 @@
 //!
 //! Calls `obs::install()` at the start (once per binary, which is fine since
 //! this file has a single test) then exercises a complete write → worker
-//! drain → reconciler pass against real MySQL + Milvus + embedding, and
-//! asserts the Prometheus render contains the expected metric names.
+//! drain against real MySQL + Milvus + embedding, and asserts the
+//! Prometheus render contains the expected metric names.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -17,7 +17,6 @@ use veda_core::service::fs::FsService;
 use veda_core::store::{AuthStore, VectorStore};
 use veda_pipeline::embedding::EmbeddingProvider;
 use veda_server::obs;
-use veda_server::reconciler::Reconciler;
 use veda_server::worker::Worker;
 use veda_store::{MilvusStore, MysqlStore};
 use veda_types::{Workspace, WorkspaceKind, WorkspaceStatus};
@@ -112,7 +111,6 @@ async fn metrics_render_contains_expected_series() {
     // Emit something for every metric we care about:
     //   * fs.write_file → outbox row created, eventually picked up by worker
     //   * worker.process_task → veda_outbox_process_seconds + veda_embed_*
-    //   * reconciler.reconcile_workspace → veda_drift_total gauges
     fs.write_file(&ws, "/m.md", "metrics test content", None, None)
         .await
         .unwrap();
@@ -135,12 +133,6 @@ async fn metrics_render_contains_expected_series() {
     let _ = tx.send(true);
     let _ = h.await;
 
-    let recon = Reconciler::new(mysql.clone(), mysql.clone(), milvus.clone(), mysql.clone());
-    // Use run_once, not reconcile_workspace: the cluster-wide drift gauges
-    // are only emitted after the per-pass aggregation in run_once. Single-
-    // workspace reconciliation does the work but doesn't update metrics.
-    let _ = recon.run_once(false).await.unwrap();
-
     let body = metrics.render();
     eprintln!("--- BEGIN /metrics render ---\n{body}\n--- END ---");
 
@@ -158,12 +150,6 @@ async fn metrics_render_contains_expected_series() {
         body.contains("veda_embed_total"),
         "missing veda_embed_total counter"
     );
-    // Drift gauges from reconciler — exposed regardless of drift count.
-    assert!(
-        body.contains("veda_drift_total"),
-        "missing veda_drift_total gauge"
-    );
-
     // Cleanup
     let pool = mysql.pool();
     let _ = sqlx::query("DELETE FROM veda_outbox WHERE workspace_id = ?")
