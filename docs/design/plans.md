@@ -22,6 +22,7 @@ SQL 三件套 / revoke scope / platform authz+timeout / TimeoutLayer+CatchPanic 
 
 | 计划 | 状态 |
 | --- | --- |
+| [`agent-memory-m3a.md`](../plans/agent-memory-m3a.md) | **待实施**（2026-08-18 定稿，Codex 对抗评审 7 findings 已裁决入档）：操作者透传 + 工号/部门域 + Milvus hybrid 检索升级；无历史数据迁移（拍板）；qa_log 摄入留 M3b |
 | [`veda-tunnel-plan.md`](../plans/veda-tunnel-plan.md) | **生产运行中**（专用机 .95）：企微长连接 + RAG 问答 + 三入口 bot 管理 + 平台 API（§18）；方向池见 `design/tunnel-directions.md`；尾巴=server 白名单改动未部署 |
 | [`veda-answer-agentic.md`](../plans/veda-answer-agentic.md) | **Stage 1 已实现 e2e 全绿**：`/v1/answer` agentic 多次召回(tool loop)+ prompt 分层;Stage 2 bot prompt 三入口贯通进行中 |
 | [`onepaas-api-alignment.md`](../plans/onepaas-api-alignment.md) | OnePaaS 接口规范对齐（分页 / 错误三件套 / 响应信封） |
