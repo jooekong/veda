@@ -135,6 +135,47 @@ SHOW INDEX FROM veda_files WHERE Key_name = 'idx_checksum';
 SHOW COLUMNS FROM veda_outbox LIKE 'lease_owner';
 ```
 
+## Execution log — 2026-08-18
+
+Phases 1–3 executed same day (Opus 5 implemented per batch, Fable verified each
+diff + gates, committed after acceptance). Commits `099a4dd` (bug 02), `a2a3caa`
+(bug 01 + worker twin), `6572121` (2A manifests/micro), `8abfab7` (2B
+store/trait), `612c174` (2C pipeline/misc), `7c1b5a0` (3A fail-loud), `e60418a`
+(3B store surface). Net −2,712 lines. Phase 4 untouched, as planned.
+
+Deviations from the plan, with reasons:
+
+- **25c skipped**: deleting `MysqlStore::new` trades a 1-line convenience
+  constructor for `PoolConfig::default()` boilerplate at ~30 test sites —
+  negative value.
+- **24e skipped**: `source_ref`'s `unwrap_or(0)` is unreachable (serializing a
+  `serde_json::Value` cannot fail) — churn without payoff.
+- **Extra fix beyond plan**: `veda-sql/src/search_table.rs` had the identical
+  warn-and-continue swallow as 26a on the SQL `veda_search` UDTF path (audit
+  missed it); fixed in `7c1b5a0`.
+- **metrics_test.rs kept**: the plan said delete the run_once test fn, but it
+  also asserts three unrelated metrics — only the circular
+  run_once/veda_drift_total parts were removed.
+- **Known-simplification**: worker-side bug-01 fix has no dedicated unit test
+  (identical one-line pattern as the fs.rs site, which is mutation-checked);
+  building a worker mock harness wasn't worth it.
+
+Test-env deployment (prod .85 NOT deployed):
+
+- Binary `f8c4a4ea88a2…` built on .89 from `e60418a` (glibc 2.34, sha-change
+  verified), swap-first deployed to .161 + .89. Both: healthz ok, mysql+milvus
+  ready, blob probe roundtrip ok, hybrid search 200, MCP self-reports 0.1.27
+  (sha deploy — binary hash is the version judge, per runbook).
+- DB gates on test MySQL (vecfs): `collection_type` = {raw, structured} — live
+  `raw` rows exist, vindicating the 16a refutation (do NOT delete the variant);
+  `status` = {active} only, so 16b was safe; `kind` = {fact}.
+- Suites against the deployed env: mysql_test 33/33, milvus_test 16/16 (incl.
+  new `fs_hybrid_surfaces_error`, reworked `upsert_chunks_only` write path,
+  trimmed outputFields on real Milvus), the 3 config-gated local tests 3/3,
+  remote e2e black-box 33/33 via the public entry.
+- The `idx_checksum` index still exists on live DBs (CREATE TABLE IF NOT
+  EXISTS); `SHOW INDEX` + `DROP INDEX` remains the deferred ops decision.
+
 ## Expected payoff
 
 - Phases 1–3: two real bug fixes (one data-destruction class, one silent quality
