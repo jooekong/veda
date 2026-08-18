@@ -713,23 +713,11 @@ impl FsService {
         })
     }
 
-    /// Query file system events since a given ID.
-    pub async fn query_events(
-        &self,
-        workspace_id: &str,
-        since_id: i64,
-        limit: usize,
-    ) -> Result<Vec<FsEvent>> {
-        self.meta
-            .query_fs_events(workspace_id, since_id, None, limit)
-            .await
-    }
-
-    /// Same as `query_events` but with a server-side path-prefix filter.
-    /// The prefix is applied as a SQL `LIKE 'prefix%'`; event paths are
-    /// stored canonical, so the raw caller-supplied prefix is folded
-    /// through `normalize_lenient` first (a trailing slash would
-    /// otherwise silently match nothing).
+    /// File system events since a given ID, optionally narrowed by a
+    /// server-side path prefix. The prefix is applied as a SQL
+    /// `LIKE 'prefix%'`; event paths are stored canonical, so the raw
+    /// caller-supplied prefix is folded through `normalize_lenient` first
+    /// (a trailing slash would otherwise silently match nothing).
     pub async fn query_events_filtered(
         &self,
         workspace_id: &str,

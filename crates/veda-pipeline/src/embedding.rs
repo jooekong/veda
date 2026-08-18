@@ -1,5 +1,4 @@
 use std::sync::Arc;
-use std::sync::RwLock;
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -24,10 +23,6 @@ const BASE_BACKOFF_MS: u64 = 500;
 /// re-enters the same sleep, effectively deadlocking that slot.
 const MAX_RETRY_AFTER_SECS: u64 = 60;
 
-/// Default cap on concurrent upstream embedding calls. The provider quota
-/// is RPM-based and shared company-wide (2026-06-11 load test), so the gate
-/// is a conservative budget, not a measured ceiling. `[embedding].max_concurrency`.
-const DEFAULT_MAX_CONCURRENCY: usize = 8;
 /// Concurrent upstream calls one large (multi-chunk) embed() may issue.
 /// Same-priority waiters are FIFO, so this stops one bulk upsert from
 /// parking dozens of waiters ahead of concurrent interactive queries.
@@ -213,9 +208,10 @@ struct EmbedCore {
     api_url: String,
     api_key: String,
     model: String,
-    request_dimensions: Option<u32>,
-    configured_dim: Option<usize>,
-    discovered_dim: RwLock<Option<usize>>,
+    /// Sent upstream in the request body so the provider returns vectors of
+    /// this width (`[embedding].dimension`, required).
+    request_dimensions: u32,
+    configured_dim: usize,
     /// Max texts per upstream call. Aliyun Bailian caps at 10; OpenAI
     /// tolerates 2048+. Configurable via `[embedding].batch_size`.
     batch_size: usize,
@@ -232,28 +228,11 @@ pub struct EmbeddingProvider {
 }
 
 impl EmbeddingProvider {
-    pub fn new(
-        api_url: impl Into<String>,
-        api_key: impl Into<String>,
-        model: impl Into<String>,
-        dimension: Option<u32>,
-        batch_size: usize,
-    ) -> Result<Self> {
-        Self::new_tuned(
-            api_url,
-            api_key,
-            model,
-            dimension,
-            batch_size,
-            DEFAULT_MAX_CONCURRENCY,
-        )
-    }
-
     pub fn new_tuned(
         api_url: impl Into<String>,
         api_key: impl Into<String>,
         model: impl Into<String>,
-        dimension: Option<u32>,
+        dimension: u32,
         batch_size: usize,
         max_concurrency: usize,
     ) -> Result<Self> {
@@ -263,7 +242,7 @@ impl EmbeddingProvider {
             .build()
             .map_err(|e| VedaError::EmbeddingFailed(e.to_string()))?;
 
-        let configured_dim = dimension.map(|d| d as usize);
+        let configured_dim = dimension as usize;
         // batch_size 0 would loop forever in chunks(); reject loudly so
         // a misconfiguration shows up at startup, not as a stuck embed.
         if batch_size == 0 {
@@ -285,7 +264,6 @@ impl EmbeddingProvider {
                 model: model.into(),
                 request_dimensions: dimension,
                 configured_dim,
-                discovered_dim: RwLock::new(None),
                 batch_size,
                 gate: TwoLevelGate::new(max_concurrency),
             }),
@@ -315,23 +293,15 @@ impl EmbeddingService for BackgroundEmbedding {
 }
 
 impl EmbedCore {
+    /// Trust boundary: the provider is free to hand back vectors of any
+    /// width. One that disagrees with the configured dimension would be
+    /// rejected by Milvus later, or silently corrupt the collection.
     fn resolve_dimension(&self, embedding_len: usize) -> Result<()> {
-        if let Some(expected) = self.configured_dim {
-            if embedding_len != expected {
-                return Err(VedaError::EmbeddingFailed(format!(
-                    "embedding length {embedding_len} does not match configured dimension {expected}"
-                )));
-            }
-        } else if let Ok(mut guard) = self.discovered_dim.write() {
-            if let Some(d) = *guard {
-                if d != embedding_len {
-                    return Err(VedaError::EmbeddingFailed(format!(
-                        "inconsistent embedding lengths: expected {d}, got {embedding_len}"
-                    )));
-                }
-            } else {
-                *guard = Some(embedding_len);
-            }
+        let expected = self.configured_dim;
+        if embedding_len != expected {
+            return Err(VedaError::EmbeddingFailed(format!(
+                "embedding length {embedding_len} does not match configured dimension {expected}"
+            )));
         }
         Ok(())
     }
@@ -343,7 +313,7 @@ impl EmbedCore {
         let body = EmbeddingRequest {
             model: self.model.clone(),
             input: texts.to_vec(),
-            dimensions: self.request_dimensions,
+            dimensions: Some(self.request_dimensions),
         };
 
         let mut req = self.client.post(&self.api_url).json(&body);
@@ -447,7 +417,6 @@ impl EmbedCore {
         texts: &[String],
         prio: GatePriority,
     ) -> Result<Vec<Vec<f32>>> {
-        let mut last_err = None;
         for attempt in 0..=MAX_RETRIES {
             let waited = std::time::Instant::now();
             let permit = self.gate.acquire(prio).await;
@@ -473,11 +442,10 @@ impl EmbedCore {
                     let backoff_ms = compute_backoff_ms(attempt, e.retry_after);
                     warn!(attempt, backoff_ms, err = %e.inner, "embedding failed, retrying");
                     tokio::time::sleep(Duration::from_millis(backoff_ms)).await;
-                    last_err = Some(e.inner);
                 }
             }
         }
-        Err(last_err.unwrap())
+        unreachable!("retry loop returns on the final attempt")
     }
 }
 
@@ -500,14 +468,7 @@ impl Drop for InflightGuard {
 
 impl EmbedCore {
     fn dimension_inner(&self) -> usize {
-        if let Some(d) = self.configured_dim {
-            return d;
-        }
-        self.discovered_dim
-            .read()
-            .ok()
-            .and_then(|g| *g)
-            .unwrap_or(0)
+        self.configured_dim
     }
 
     /// Chunk + gate + retry + metrics: the one embedding path. Chunks run
@@ -1002,8 +963,7 @@ mod tests {
         let peak = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let url = spawn_embed_stub(Duration::from_millis(100), peak.clone()).await;
 
-        let provider =
-            Arc::new(EmbeddingProvider::new_tuned(url, "", "m", Some(4), 10, 2).unwrap());
+        let provider = Arc::new(EmbeddingProvider::new_tuned(url, "", "m", 4, 10, 2).unwrap());
         let calls = (0..8).map(|i| {
             let p = provider.clone();
             tokio::spawn(async move { p.embed(&[format!("t{i}")]).await })

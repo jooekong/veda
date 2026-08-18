@@ -256,9 +256,11 @@ async fn answer_stream(
         .await
     {
         Ok(rx) => rx,
+        // Two failures can land here, both from the pre-SSE retrieve: Store
+        // (any VedaError, via the From impl) and Timeout (its 15s budget).
+        // The LLM is only touched by the spawned loop task, so LlmFailed can
+        // reach the client as a stream event, never as a pre-open error.
         Err(AnswerError::Store(e)) => return Err(AppError(e)),
-        // answer_stream only errors before spawning the loop task, and only
-        // with Store — defensive mapping for the other arms.
         Err(AnswerError::Timeout) => {
             timer.set_outcome("timeout");
             return Ok(err_response(
@@ -267,15 +269,7 @@ async fn answer_stream(
                 "answer generation exceeded the deadline",
             ));
         }
-        Err(AnswerError::LlmFailed(e)) => {
-            timer.set_outcome("llm_error");
-            warn!(err = %e, "answer stream: llm failed pre-open");
-            return Ok(err_response(
-                StatusCode::BAD_GATEWAY,
-                "LLM_UNAVAILABLE",
-                "llm upstream unavailable",
-            ));
-        }
+        Err(AnswerError::LlmFailed(_)) => unreachable!("no llm call before the stream task spawns"),
     };
 
     let ws = auth.workspace_id.clone();

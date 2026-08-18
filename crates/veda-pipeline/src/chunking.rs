@@ -1,8 +1,5 @@
 use veda_types::SemanticChunk;
 
-/// Default `max_tokens` for [`semantic_chunk`] when callers want ~512-token sections.
-pub const DEFAULT_SEMANTIC_MAX_TOKENS: usize = 512;
-
 /// Binary payloads smuggled in as valid UTF-8 (e.g. an image whose bytes
 /// happen to decode — in the wild: NUL-flooded PNG attachments synced into
 /// an fs workspace). They are garbage to embed and tokenizers price control

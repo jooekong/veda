@@ -206,12 +206,13 @@ async fn pdf_extracts_and_becomes_searchable_e2e() {
         .await
         .unwrap();
     let embedding = Arc::new(
-        EmbeddingProvider::new(
+        EmbeddingProvider::new_tuned(
             &cfg.embedding.api_url,
             &cfg.embedding.api_key,
             &cfg.embedding.model,
-            Some(cfg.embedding.dimension),
+            cfg.embedding.dimension,
             cfg.embedding.batch_size,
+            8,
         )
         .unwrap(),
     );
@@ -284,12 +285,13 @@ async fn word_extracts_readable_and_cleans_up_e2e() {
         .await
         .unwrap();
     let embedding = Arc::new(
-        EmbeddingProvider::new(
+        EmbeddingProvider::new_tuned(
             &cfg.embedding.api_url,
             &cfg.embedding.api_key,
             &cfg.embedding.model,
-            Some(cfg.embedding.dimension),
+            cfg.embedding.dimension,
             cfg.embedding.batch_size,
+            8,
         )
         .unwrap(),
     );

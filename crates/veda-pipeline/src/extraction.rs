@@ -2,15 +2,12 @@ use veda_types::{Result, VedaError, MIME_DOC, MIME_DOCX, MIME_OLE_STORAGE};
 
 use crate::word;
 
-/// Best-effort text extraction from a file's raw bytes, for search indexing.
-/// Text files return their UTF-8 content; PDFs their text layer; Word
-/// documents (.doc/.docx) their body text.
+/// Text extraction from a file's raw bytes, for search indexing: PDFs give
+/// their text layer, Word documents (.doc/.docx) their body text. Only ever
+/// called for those mimes — plain text is indexed straight from the blob, so
+/// it never reaches an ExtractSync task.
 pub fn extract_text(data: &[u8], mime_type: &str) -> Result<String> {
     match mime_type {
-        "text/plain" | "text/plain; charset=utf-8" | "text/plain;charset=utf-8" => {
-            String::from_utf8(data.to_vec())
-                .map_err(|e| VedaError::InvalidInput(format!("text/plain is not valid UTF-8: {e}")))
-        }
         "application/pdf" => extract_pdf_text(data),
         MIME_DOCX => word::extract_docx_text(data),
         // x-ole-storage: OLE container of undetermined sub-type — attempt the
@@ -36,17 +33,6 @@ fn extract_pdf_text(data: &[u8]) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn extracts_plain_text() {
-        assert_eq!(extract_text(b"hello veda", "text/plain").unwrap(), "hello veda");
-    }
-
-    #[test]
-    fn plain_text_invalid_utf8_errors() {
-        let err = extract_text(&[0xff, 0xfe, 0xc0], "text/plain").unwrap_err();
-        assert!(matches!(err, VedaError::InvalidInput(_)));
-    }
 
     #[test]
     fn unsupported_mime_errors() {

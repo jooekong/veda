@@ -40,7 +40,7 @@ veda-server 原生提供 MCP 端点(`POST /mcp`,Streamable HTTP,协议 2025-06-1
 
 - **项目级**——某个项目要绑定专属知识库时,用上面的 `.mcp.json` 提交进仓库,团队 clone 即得。
 
-配好后 agent 自动获得 6 个只读工具,不需要任何提示词教学:
+配好后 agent 自动获得这几个只读检索工具,不需要任何提示词教学:
 
 `search`(混合语义+关键词检索,支持 L0/L1/L2 分层省 token)· `grep`(字面量定位,带行号)· `read_file`(PDF/Word 返回提取文本)· `list_dir` · `overview`(L1 结构化概览)· `ask`(一站式 RAG 问答,带 `[n]` 引用出处)
 
@@ -48,8 +48,8 @@ veda-server 原生提供 MCP 端点(`POST /mcp`,Streamable HTTP,协议 2025-06-1
 
 - **一个条目绑一个 workspace**(key 决定)。接多个知识库就配多个条目,起不同名字(`veda-kb` / `veda-api-docs`)。
 - `.mcp.json` 可以提交进项目 git 仓库,团队 clone 即用(key 建议走各自环境注入,不要把 key 提交进库)。
-- 工具全只读——上传维护知识库内容走下方的 CLI 路径。
-- **减确认弹窗**:工具全只读,可以放心把 `mcp__veda-kb__*` 加进 Claude Code settings 的 `permissions.allow`;新版 server 已按 MCP 规范声明 `readOnlyHint`,支持该标注的 client 会自动放宽确认。
+- 检索工具全只读——上传维护知识库内容走下方的 CLI 路径。例外是 agent memory 那组:`memory_save` / `memory_update` / `memory_delete` 会写(`memory_context` / `memory_search` 仍是只读)。
+- **减确认弹窗**:每个工具都按 MCP 规范声明了自己的 `readOnlyHint`,支持该标注的 client 会对只读工具自动放宽确认。把 `mcp__veda-kb__*` 加进 Claude Code settings 的 `permissions.allow` 依然省事,只是这个通配也一并放行了上面三个写操作。
 - 个别只支持 stdio 的老工具,用社区 [`mcp-remote`](https://www.npmjs.com/package/mcp-remote) 桥接到同一个 url 即可。
 - 端点协议细节见 [API 参考的 MCP 章节](#/docs/reference)。
 

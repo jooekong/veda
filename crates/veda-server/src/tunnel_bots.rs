@@ -535,7 +535,8 @@ impl TunnelBotStore {
 
     /// Newest-first Q&A rows (with per-row vote counts) plus the total matching
     /// the filter, constrained to `bot_ids`. Empty scope → empty page, no query.
-    /// `page` is 1-based; `size` is clamped defensively to 1..=100.
+    /// `page` is 1-based and `size` bounded; the HTTP route clamps both at the
+    /// boundary (`clamp_page` / `clamp_size` in routes/tunnel_bots.rs).
     pub async fn qa_logs(
         &self,
         bot_ids: &[String],
@@ -547,10 +548,9 @@ impl TunnelBotStore {
         if bot_ids.is_empty() {
             return Ok((Vec::new(), 0));
         }
-        let size = size.clamp(1, 100);
-        // u64 arithmetic: a caller-supplied huge `page` must not overflow u32
-        // (release builds would wrap into a bogus offset).
-        let offset = (u64::from(page.max(1)) - 1) * u64::from(size);
+        // u64 arithmetic: page × size overflows u32 well before it overflows
+        // u64 (release builds would wrap into a bogus offset).
+        let offset = (u64::from(page) - 1) * u64::from(size);
         let ph = in_placeholders(bot_ids.len());
         let dv = down_voted as i32;
 

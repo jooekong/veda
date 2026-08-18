@@ -7,11 +7,14 @@
 //! per POST. GET/DELETE on `/mcp` get axum's automatic 405, which per spec
 //! tells clients "no downstream stream / no client-terminated sessions".
 //!
-//! Seven read-only tools, all thin wrappers over the in-process service
-//! layer (never the HTTP loopback): layout / search / grep / read_file /
-//! list_dir / overview / ask. `ask` shares the per-workspace concurrency gate and
-//! metrics histograms with `POST /v1/answer` (routes/answer.rs) so both
-//! surfaces draw from one LLM budget.
+//! Twelve tools, all thin wrappers over the in-process service layer (never
+//! the HTTP loopback). Nine read: layout / search / grep / read_file /
+//! list_dir / overview / ask / memory_context / memory_search — `search`
+//! also records doc-access stats. Three write: memory_save / memory_update /
+//! memory_delete. Each carries its own `readOnlyHint` annotation. `ask`
+//! shares the per-workspace concurrency gate and metrics histograms with
+//! `POST /v1/answer` (routes/answer.rs) so both surfaces draw from one LLM
+//! budget.
 //!
 //! Error split:
 //! - protocol errors (bad JSON, unknown method/tool, invalid params) →

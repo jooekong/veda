@@ -1377,7 +1377,10 @@ async fn events_min_id_after_writes() {
     svc.write_file("ws1", "/b.txt", "2", None, None).await.unwrap();
     let min = svc.events_min_id("ws1").await.unwrap();
     assert!(min.is_some(), "writes must produce events");
-    let events = svc.query_events("ws1", 0, 100).await.unwrap();
+    let events = svc
+        .query_events_filtered("ws1", 0, None, 100)
+        .await
+        .unwrap();
     assert_eq!(min, events.iter().map(|e| e.id).min());
 }
 
@@ -1395,7 +1398,11 @@ async fn prune_events_older_than_clears_old_rows() {
     let cutoff = chrono::Utc::now() - chrono::Duration::days(7);
     let n = svc.prune_events_older_than(cutoff).await.unwrap();
     assert!(n > 0, "expected at least one deletion, got {n}");
-    assert!(svc.query_events("ws1", 0, 100).await.unwrap().is_empty());
+    assert!(svc
+        .query_events_filtered("ws1", 0, None, 100)
+        .await
+        .unwrap()
+        .is_empty());
 }
 
 #[tokio::test]

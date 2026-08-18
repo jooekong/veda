@@ -40,7 +40,7 @@ veda-server natively serves an MCP endpoint (`POST /mcp`, Streamable HTTP transp
 
 - **Project level** — when one project binds its own dedicated KB, commit the `.mcp.json` above into the repo; teammates get it on clone.
 
-The agent then discovers six read-only tools — no prompt engineering needed:
+The agent then discovers these read-only retrieval tools — no prompt engineering needed:
 
 `search` (hybrid semantic+keyword, tiered L0/L1/L2 detail) · `grep` (literal, line numbers) · `read_file` (PDF/Word return extracted text) · `list_dir` · `overview` (L1 structured summary) · `ask` (one-shot RAG answer with `[n]` citations)
 
@@ -48,8 +48,8 @@ Notes:
 
 - **One entry binds one workspace** (the key decides). Multiple knowledge bases = multiple entries with distinct names (`veda-kb` / `veda-api-docs`).
 - `.mcp.json` can live in your project's git repo so teammates get it on clone (inject the key via env, don't commit it).
-- Tools are read-only — content maintenance goes through the CLI path below.
-- **Fewer permission prompts**: since every tool is read-only, it's safe to allowlist `mcp__veda-kb__*` in Claude Code's `permissions.allow`; newer servers also declare `readOnlyHint` per the MCP spec, and clients that honor it relax confirmation automatically.
+- The retrieval tools are read-only — content maintenance goes through the CLI path below. The agent-memory tools are the exception: `memory_save` / `memory_update` / `memory_delete` write (`memory_context` / `memory_search` only read).
+- **Fewer permission prompts**: every tool declares `readOnlyHint` per the MCP spec, and clients that honor it relax confirmation on the read-only ones automatically. Allowlisting `mcp__veda-kb__*` in Claude Code's `permissions.allow` stays convenient — just note the glob also waves through the three memory writes.
 - For stdio-only clients, bridge with the community [`mcp-remote`](https://www.npmjs.com/package/mcp-remote) package.
 - Protocol details: see the MCP section in the [API reference](#/docs/reference).
 

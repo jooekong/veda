@@ -115,8 +115,7 @@ struct ChatRequest {
     messages: Vec<ChatMessage>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     tools: Vec<ToolSpecWire>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    max_tokens: Option<usize>,
+    max_tokens: usize,
     temperature: f32,
     /// OpenAI-compatible streaming switch; false is the wire default but we
     /// always send it explicitly to keep both code paths symmetrical.
@@ -211,7 +210,7 @@ impl LlmProvider {
             model: model.to_string(),
             messages: vec![ChatMessage::user(prompt)],
             tools: Vec::new(),
-            max_tokens: Some(max_tokens),
+            max_tokens,
             temperature: 0.0,
             stream: false,
             // Summaries want text, not reasoning: on airouter the thinking
@@ -235,7 +234,7 @@ impl LlmProvider {
             model: self.model.clone(),
             messages: messages.iter().map(ChatMessage::from).collect(),
             tools: tools.iter().map(ToolSpecWire::from).collect(),
-            max_tokens: Some(max_tokens),
+            max_tokens,
             temperature: 0.0,
             stream: true,
             enable_thinking: None,
@@ -284,7 +283,6 @@ impl LlmProvider {
         prompt: &str,
         max_tokens: usize,
     ) -> std::result::Result<String, LlmError> {
-        let mut last_err = None;
         for attempt in 0..=MAX_RETRIES {
             match self.chat_once(model, prompt, max_tokens).await {
                 Ok(v) => return Ok(v),
@@ -296,11 +294,10 @@ impl LlmProvider {
                     let backoff_ms = backoff.as_millis();
                     warn!(attempt, backoff_ms, err = %e.inner, "LLM call failed, retrying");
                     tokio::time::sleep(backoff).await;
-                    last_err = Some(e);
                 }
             }
         }
-        Err(last_err.expect("loop returns directly on the final attempt"))
+        unreachable!("retry loop returns on the final attempt")
     }
 
     /// Summarize call: retry the primary model, then — only if quota is what

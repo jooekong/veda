@@ -101,12 +101,13 @@ async fn build_test_app() -> (Arc<AppState>, axum::Router) {
     ));
 
     let embedding = Arc::new(
-        EmbeddingProvider::new(
+        EmbeddingProvider::new_tuned(
             &cfg.embedding.api_url,
             &cfg.embedding.api_key,
             &cfg.embedding.model,
-            Some(cfg.embedding.dimension),
+            cfg.embedding.dimension,
             cfg.embedding.batch_size,
+            8,
         )
         .expect("embedding"),
     );

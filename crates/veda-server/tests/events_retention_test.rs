@@ -91,7 +91,7 @@ async fn events_min_id_advances_after_retention_delete() {
     fs.write_file(&ws, "/c.txt", "3", None, None).await.unwrap();
 
     let initial_min = fs.events_min_id(&ws).await.unwrap().unwrap();
-    let events = fs.query_events(&ws, 0, 100).await.unwrap();
+    let events = fs.query_events_filtered(&ws, 0, None, 100).await.unwrap();
     assert_eq!(events.len(), 3);
 
     // Simulate retention: delete the first event by created_at filter set to
@@ -265,8 +265,14 @@ async fn three_client_event_flow_data_layer() {
     }
 
     // A and C drain everything from id 0.
-    let a_first = fs.query_events(&ws, cursor_a, 100).await.unwrap();
-    let c_first = fs.query_events(&ws, cursor_c, 100).await.unwrap();
+    let a_first = fs
+        .query_events_filtered(&ws, cursor_a, None, 100)
+        .await
+        .unwrap();
+    let c_first = fs
+        .query_events_filtered(&ws, cursor_c, None, 100)
+        .await
+        .unwrap();
     assert_eq!(a_first.len(), 5, "A should see all 5 writes");
     assert_eq!(c_first.len(), 5, "C should see all 5 writes");
     cursor_a = a_first.last().unwrap().id;
@@ -277,7 +283,7 @@ async fn three_client_event_flow_data_layer() {
     );
 
     // B drains too, then "disconnects" — we just stop polling.
-    let b_first = fs.query_events(&ws, 0, 100).await.unwrap();
+    let b_first = fs.query_events_filtered(&ws, 0, None, 100).await.unwrap();
     cursor_b_at_disconnect = b_first.last().unwrap().id;
 
     // ── Phase 2: more writes while B is offline. A and C see them. ──
@@ -286,8 +292,14 @@ async fn three_client_event_flow_data_layer() {
             .await
             .unwrap();
     }
-    let a_second = fs.query_events(&ws, cursor_a, 100).await.unwrap();
-    let c_second = fs.query_events(&ws, cursor_c, 100).await.unwrap();
+    let a_second = fs
+        .query_events_filtered(&ws, cursor_a, None, 100)
+        .await
+        .unwrap();
+    let c_second = fs
+        .query_events_filtered(&ws, cursor_c, None, 100)
+        .await
+        .unwrap();
     assert_eq!(a_second.len(), 3, "A should see the 3 offline-window writes");
     assert_eq!(c_second.len(), 3, "C should see them too");
     cursor_a = a_second.last().unwrap().id;
@@ -349,7 +361,10 @@ async fn three_client_event_flow_data_layer() {
     );
     // B's recovery protocol: jump to max_id, list_dir resync, resubscribe.
     // Resubscribed B sees no events yet (nothing newer than max_id).
-    let b_recovered = fs.query_events(&ws, max_id, 100).await.unwrap();
+    let b_recovered = fs
+        .query_events_filtered(&ws, max_id, None, 100)
+        .await
+        .unwrap();
     assert!(
         b_recovered.is_empty(),
         "B should see no events when resubscribing at max_id"
@@ -361,9 +376,18 @@ async fn three_client_event_flow_data_layer() {
     fs.write_file(&ws, "/post_recovery.txt", "z", None, None)
         .await
         .unwrap();
-    let a_third = fs.query_events(&ws, cursor_a, 100).await.unwrap();
-    let c_third = fs.query_events(&ws, cursor_c, 100).await.unwrap();
-    let b_third = fs.query_events(&ws, max_id, 100).await.unwrap();
+    let a_third = fs
+        .query_events_filtered(&ws, cursor_a, None, 100)
+        .await
+        .unwrap();
+    let c_third = fs
+        .query_events_filtered(&ws, cursor_c, None, 100)
+        .await
+        .unwrap();
+    let b_third = fs
+        .query_events_filtered(&ws, max_id, None, 100)
+        .await
+        .unwrap();
     assert_eq!(a_third.len(), 1, "A should see the post-recovery write");
     assert_eq!(c_third.len(), 1, "C should see the post-recovery write");
     assert_eq!(b_third.len(), 1, "B should see the post-recovery write");

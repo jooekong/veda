@@ -18,7 +18,8 @@ struct EmbeddingSection {
     api_url: String,
     api_key: String,
     model: String,
-    dimension: Option<u32>,
+    // Required, like the server's own [embedding] section (test.toml.example).
+    dimension: u32,
     // airouter/DashScope caps inputs at 10 per request (see test.toml).
     #[serde(default = "default_embed_batch")]
     batch_size: usize,
@@ -38,8 +39,15 @@ fn load_test_config() -> EmbeddingSection {
 
 fn make_provider() -> EmbeddingProvider {
     let cfg = load_test_config();
-    EmbeddingProvider::new(cfg.api_url, cfg.api_key, cfg.model, cfg.dimension, cfg.batch_size)
-        .expect("provider")
+    EmbeddingProvider::new_tuned(
+        cfg.api_url,
+        cfg.api_key,
+        cfg.model,
+        cfg.dimension,
+        cfg.batch_size,
+        8,
+    )
+    .expect("provider")
 }
 
 #[tokio::test]
@@ -50,8 +58,7 @@ async fn embedding_single_text() -> Result<()> {
         .embed(&["hello from veda-pipeline".to_string()])
         .await?;
     assert_eq!(vecs.len(), 1);
-    let dim = cfg_dimension_or_vector_len(&provider, &vecs[0]);
-    assert_eq!(vecs[0].len(), dim);
+    assert_eq!(vecs[0].len(), provider.dimension());
     Ok(())
 }
 
@@ -66,9 +73,8 @@ async fn embedding_batch() -> Result<()> {
     ];
     let vecs = provider.embed(&texts).await?;
     assert_eq!(vecs.len(), 3);
-    let dim = cfg_dimension_or_vector_len(&provider, &vecs[0]);
     for v in &vecs {
-        assert_eq!(v.len(), dim);
+        assert_eq!(v.len(), provider.dimension());
     }
     Ok(())
 }
@@ -76,17 +82,11 @@ async fn embedding_batch() -> Result<()> {
 #[tokio::test]
 #[ignore]
 async fn embedding_dimension_matches_config() -> Result<()> {
-    let cfg = load_test_config();
-    let expected = cfg.dimension.map(|d| d as usize);
+    let expected = load_test_config().dimension as usize;
     let provider = make_provider();
     let vecs = provider.embed(&["dimension check".to_string()]).await?;
-    let len = vecs[0].len();
-    if let Some(d) = expected {
-        assert_eq!(len, d);
-        assert_eq!(provider.dimension(), d);
-    } else {
-        assert_eq!(len, provider.dimension());
-    }
+    assert_eq!(vecs[0].len(), expected);
+    assert_eq!(provider.dimension(), expected);
     Ok(())
 }
 
@@ -97,15 +97,6 @@ async fn embedding_empty_input() -> Result<()> {
     let vecs = provider.embed(&[]).await?;
     assert!(vecs.is_empty());
     Ok(())
-}
-
-fn cfg_dimension_or_vector_len(provider: &EmbeddingProvider, vector: &[f32]) -> usize {
-    let d = provider.dimension();
-    if d > 0 {
-        d
-    } else {
-        vector.len()
-    }
 }
 
 // ── EmbeddingCache integration tests (Stage 3.3) ────────────────────

@@ -456,37 +456,28 @@ fn prompt_or(label: &str, default: Option<&str>) -> anyhow::Result<String> {
     }
 }
 
-/// Resolve an init param: prefer the flag, else prompt, else apply
-/// default. In `--non-interactive` mode, missing-with-no-default is a
+/// Resolve an init param: prefer the flag, else prompt. These params have
+/// no sensible default, so in `--non-interactive` mode a missing one is a
 /// hard error rather than a prompt.
 fn resolve_field(
     label: &str,
     flag: Option<String>,
-    default: Option<&str>,
     non_interactive: bool,
-    has_default: bool,
 ) -> anyhow::Result<String> {
     if let Some(v) = flag {
         let trimmed = v.trim();
-        if trimmed.is_empty() && !has_default {
+        if trimmed.is_empty() {
             anyhow::bail!("--{} cannot be empty", label.to_lowercase().replace(' ', "-"));
         }
-        return Ok(if trimmed.is_empty() {
-            default.unwrap_or("").to_string()
-        } else {
-            trimmed.to_string()
-        });
+        return Ok(trimmed.to_string());
     }
     if non_interactive {
-        if let Some(d) = default {
-            return Ok(d.to_string());
-        }
         anyhow::bail!(
             "--non-interactive but --{} not provided",
             label.to_lowercase().replace(' ', "-")
         );
     }
-    prompt_or(label, default)
+    prompt_or(label, None)
 }
 
 /// Resolve the password specifically: never echo, never default. Reads
@@ -522,37 +513,25 @@ mod resolve_tests {
 
     #[test]
     fn resolve_field_uses_flag_value() {
-        let out = resolve_field("Email", Some("a@b.com".into()), None, true, false).unwrap();
+        let out = resolve_field("Email", Some("a@b.com".into()), true).unwrap();
         assert_eq!(out, "a@b.com");
     }
 
     #[test]
     fn resolve_field_trims_flag_value() {
-        let out = resolve_field("Email", Some("  a@b.com  ".into()), None, true, false).unwrap();
+        let out = resolve_field("Email", Some("  a@b.com  ".into()), true).unwrap();
         assert_eq!(out, "a@b.com");
     }
 
     #[test]
-    fn resolve_field_empty_flag_with_default_uses_default() {
-        let out = resolve_field("Workspace", Some("".into()), Some("default"), true, true).unwrap();
-        assert_eq!(out, "default");
-    }
-
-    #[test]
-    fn resolve_field_empty_flag_without_default_errors() {
-        let err = resolve_field("Email", Some("".into()), None, true, false).unwrap_err();
+    fn resolve_field_empty_flag_errors() {
+        let err = resolve_field("Email", Some("".into()), true).unwrap_err();
         assert!(err.to_string().contains("--email"), "msg: {err}");
     }
 
     #[test]
-    fn resolve_field_non_interactive_no_flag_with_default_uses_default() {
-        let out = resolve_field("Workspace", None, Some("default"), true, true).unwrap();
-        assert_eq!(out, "default");
-    }
-
-    #[test]
-    fn resolve_field_non_interactive_no_flag_no_default_errors() {
-        let err = resolve_field("Email", None, None, true, false).unwrap_err();
+    fn resolve_field_non_interactive_no_flag_errors() {
+        let err = resolve_field("Email", None, true).unwrap_err();
         let msg = err.to_string();
         assert!(msg.contains("non-interactive"), "msg: {msg}");
         assert!(msg.contains("--email"), "msg: {msg}");
@@ -1417,7 +1396,7 @@ async fn run_init_command(
                 }
             }
         }
-        let email = resolve_field("Email", email, None, non_interactive, false)?;
+        let email = resolve_field("Email", email, non_interactive)?;
         let password = resolve_password(password, non_interactive)?;
         let new_client = client::Client::new(&cfg.server_url);
         let account_id = init::run_claim(&new_client, &cfg, email, password, name).await?;
@@ -1472,7 +1451,7 @@ async fn run_init_command(
         return Ok(());
     }
 
-    let email = resolve_field("Email", email, None, non_interactive, false)?;
+    let email = resolve_field("Email", email, non_interactive)?;
     // In non-interactive named mode the user often only has email +
     // password (e.g. CI / agent). Derive name from the email's
     // local-part so they don't have to repeat themselves; the
@@ -1486,7 +1465,7 @@ async fn run_init_command(
     let name = if login {
         String::new()
     } else {
-        resolve_field("Name", name.or(derived_name), None, non_interactive, false)?
+        resolve_field("Name", name.or(derived_name), non_interactive)?
     };
     let password = resolve_password(password, non_interactive)?;
     let workspace = workspace_name

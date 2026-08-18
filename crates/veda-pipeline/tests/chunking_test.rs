@@ -1,4 +1,8 @@
-use veda_pipeline::chunking::{is_binary_content, semantic_chunk, DEFAULT_SEMANTIC_MAX_TOKENS};
+use veda_pipeline::chunking::{is_binary_content, semantic_chunk};
+
+/// Section budget these cases chunk against. The worker asks for 2048; 512
+/// just keeps the fixtures small enough to reason about.
+const MAX_TOKENS: usize = 512;
 
 #[test]
 fn binary_content_detection() {
@@ -11,7 +15,7 @@ fn binary_content_detection() {
 #[test]
 fn semantic_chunk_splits_on_markdown_headings() {
     let text = "intro line\n\n## Section A\n\nbody a\n\n### Nested\n\nbody nested\n\n## Section B\n\nbody b";
-    let chunks = semantic_chunk(text, DEFAULT_SEMANTIC_MAX_TOKENS);
+    let chunks = semantic_chunk(text, MAX_TOKENS);
 
     assert!(chunks.len() >= 3);
     assert_eq!(chunks[0].index, 0);
@@ -50,7 +54,7 @@ fn semantic_chunk_sliding_window_for_long_section() {
 
 #[test]
 fn semantic_chunk_empty_input() {
-    assert!(semantic_chunk("", DEFAULT_SEMANTIC_MAX_TOKENS).is_empty());
+    assert!(semantic_chunk("", MAX_TOKENS).is_empty());
 }
 
 /// A file starting with a blank line before its first heading produces an
@@ -59,7 +63,7 @@ fn semantic_chunk_empty_input() {
 /// batch just like an oversized one.
 #[test]
 fn semantic_chunk_drops_empty_leading_section() {
-    let chunks = semantic_chunk("\n# Title\n\nbody text", DEFAULT_SEMANTIC_MAX_TOKENS);
+    let chunks = semantic_chunk("\n# Title\n\nbody text", MAX_TOKENS);
     assert!(!chunks.is_empty());
     for c in &chunks {
         assert!(!c.content.is_empty(), "empty chunk would 400 the embed batch");
