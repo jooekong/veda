@@ -890,12 +890,11 @@ async fn db_hybrid_surfaces_error() {
 
 /// Falsification test for the fs (veda_chunks) hybrid path — review finding F1.
 /// fs defaults to Hybrid in production, but the only existing test merely
-/// `expect()`ed no error, and `hybrid_search_remote` SILENTLY falls back to ANN
-/// on failure (`score_type` becomes "cosine"). So a broken BM25 fusion would
-/// have shipped unnoticed. Here a token doc is placed FAR in dense space; if
-/// hybrid truly fuses, BM25 pulls it into top-3 AND `score_type == "rrf"`. If
-/// fs silently fell back to ANN, `score_type` would be "cosine" → this fails,
-/// surfacing the latent bug instead of hiding it.
+/// `expect()`ed no error, so a broken BM25 fusion would have shipped unnoticed.
+/// Here a token doc is placed FAR in dense space; if hybrid truly fuses, BM25
+/// pulls it into top-3 AND `score_type == "rrf"`. A "cosine" score_type would
+/// mean the fs path degraded to plain ANN → this fails, surfacing the latent
+/// bug instead of hiding it.
 #[tokio::test]
 #[ignore]
 async fn fs_hybrid_fuses_not_fallback() {
@@ -959,6 +958,42 @@ async fn fs_hybrid_fuses_not_fallback() {
         store.delete_chunks(&ws, fid).await.ok();
     }
     store.delete_chunks(&ws, &fid_t).await.ok();
+}
+
+/// fs mirror of `db_hybrid_surfaces_error`: the fs Hybrid arm must surface
+/// backend errors, never degrade to ANN (finding F1 — the old
+/// `hybrid_search_remote` warned and fell back, flipping `score_type` from
+/// "rrf" to "cosine" on every failing request; per decision D4 there is now no
+/// fallback branch at all). Pointing the store at a database that was never
+/// created makes Milvus reject hybrid_search; we assert that propagates as
+/// `Err` instead of coming back as an `Ok` full of "cosine" hits.
+#[tokio::test]
+#[ignore]
+async fn fs_hybrid_surfaces_error() {
+    let (url, token, _db) = load_milvus();
+    // Milvus db names are [A-Za-z_][A-Za-z0-9_]*, so no hyphens here.
+    let missing_db = format!("veda_missing_{}", Uuid::new_v4().simple());
+    let store = MilvusStore::new(&url, token, Some(missing_db));
+    let dim = load_embedding_dim();
+
+    let req = SearchRequest {
+        workspace_id: format!("ws_{}", Uuid::new_v4()),
+        query: "zqxwprodcode".into(),
+        mode: SearchMode::Hybrid,
+        limit: 3,
+        query_vector: Some((0..dim).map(|i| (i as f32) * 0.001).collect()),
+        id_filter: None,
+    };
+
+    let result = store.search(&req).await;
+    assert!(
+        result.is_err(),
+        "fs hybrid against a missing database must Err, not fall back to ANN (got score_types {:?})",
+        result.map(|hits| hits
+            .into_iter()
+            .map(|h| h.score_type)
+            .collect::<Vec<_>>())
+    );
 }
 
 /// Scope pushdown: `id_filter` must restrict chunk retrieval to the given

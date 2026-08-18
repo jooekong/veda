@@ -1041,7 +1041,6 @@ impl MilvusStore {
         workspace_id: &str,
         vector: &[f32],
         limit: usize,
-        text_filter: Option<&str>,
         id_filter: Option<&[String]>,
     ) -> Result<Vec<SearchHit>> {
         let ws = milvus_quote(workspace_id);
@@ -1051,18 +1050,6 @@ impl MilvusStore {
                 return Ok(vec![]);
             }
             filter.push_str(&format!(" && {}", in_list_expr("file_id", ids)));
-        }
-        if let Some(q) = text_filter {
-            if !q.is_empty() {
-                let pat = format!(
-                    "%{}%",
-                    q.replace('\\', "\\\\")
-                        .replace('%', "\\%")
-                        .replace('_', "\\_")
-                        .replace('"', "\\\"")
-                );
-                filter.push_str(&format!(" && content like {}", milvus_quote(&pat)));
-            }
         }
         let lim = limit.min(16_383).max(1);
         let body = json!({
@@ -1080,13 +1067,13 @@ impl MilvusStore {
         Ok(Self::rows_to_hits(&rows, limit, "cosine"))
     }
 
-    async fn hybrid_search_remote(&self, req: &SearchRequest) -> Result<Option<Vec<SearchHit>>> {
+    async fn hybrid_search_remote(&self, req: &SearchRequest) -> Result<Vec<SearchHit>> {
         let qv = req.query_vector.as_ref().unwrap();
         let ws = milvus_quote(&req.workspace_id);
         let mut base_filter = format!("workspace_id == {ws}");
         if let Some(ids) = req.id_filter.as_deref() {
             if ids.is_empty() {
-                return Ok(Some(vec![]));
+                return Ok(vec![]);
             }
             base_filter.push_str(&format!(" && {}", in_list_expr("file_id", ids)));
         }
@@ -1126,16 +1113,16 @@ impl MilvusStore {
             "outputFields": ["id", "workspace_id", "file_id", "chunk_index", "content"],
             "consistencyLevel": "Strong"
         });
-        match self.post("/v2/vectordb/entities/hybrid_search", body).await {
-            Ok(v) => {
-                let rows = flatten_entity_rows(v.get("data"));
-                Ok(Some(Self::rows_to_hits(&rows, req.limit, "rrf")))
-            }
-            Err(e) => {
-                warn!(err = %e, "hybrid_search_remote failed, falling back to ANN search");
-                Ok(None)
-            }
-        }
+        // No fallback (decision D4, same as the db-side twin above): transient
+        // errors are already absorbed by the retry layer in `post`, so an error
+        // that reaches here is a deterministic body/index/config bug. Silently
+        // degrading to ANN would hide it on every request (score_type quietly
+        // flips "rrf" -> "cosine"). Propagate instead.
+        let v = self
+            .post("/v2/vectordb/entities/hybrid_search", body)
+            .await?;
+        let rows = flatten_entity_rows(v.get("data"));
+        Ok(Self::rows_to_hits(&rows, req.limit, "rrf"))
     }
 
     async fn query_fulltext(
@@ -1263,7 +1250,7 @@ impl VectorStore for MilvusStore {
                 let v = req.query_vector.as_ref().ok_or_else(|| {
                     VedaError::InvalidInput("search requires query_vector for vector modes".into())
                 })?;
-                self.ann_search(&req.workspace_id, v, req.limit, None, id_filter)
+                self.ann_search(&req.workspace_id, v, req.limit, id_filter)
                     .await
             }
             SearchMode::Hybrid => {
@@ -1275,11 +1262,7 @@ impl VectorStore for MilvusStore {
                         "query_vector must be non-empty".into(),
                     ));
                 }
-                if let Some(hits) = self.hybrid_search_remote(req).await? {
-                    return Ok(hits);
-                }
-                self.ann_search(&req.workspace_id, v, req.limit, Some(&req.query), id_filter)
-                    .await
+                self.hybrid_search_remote(req).await
             }
         }
     }
