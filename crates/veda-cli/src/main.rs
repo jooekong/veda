@@ -41,9 +41,9 @@ struct Cli {
     workspace: Option<String>,
 
     /// Emit machine-readable JSON instead of the human-friendly
-    /// default. Currently affects `ls`, `search`, `grep`, `layout`,
-    /// `collection search`, and `sql`. Other commands either
-    /// already emit JSON (`sql` payload rows) or only print
+    /// default. Currently affects `ls`, `search`, `ask`, `grep`,
+    /// and `layout`. Other commands either already emit JSON
+    /// (`sql` and `collection search` payload rows) or only print
     /// status messages — they ignore the flag.
     #[arg(long, global = true)]
     json: bool,
@@ -1336,7 +1336,6 @@ async fn print_summary_layer(
 #[allow(clippy::too_many_arguments)]
 async fn run_init_command(
     mut cfg: config::CliConfig,
-    server_flag_set: bool,
     login: bool,
     upgrade: bool,
     import_key: Option<String>,
@@ -1435,7 +1434,6 @@ async fn run_init_command(
     // server URL would defeat the "0-input" pitch and breaks
     // non-tty contexts (curl | sh, CI). Only prompt in named
     // mode when the user has signaled they want interaction.
-    let _ = server_flag_set; // retained for symmetry; cfg already merged
     let is_anonymous = email.is_none() && !login && name.is_none() && workspace_name.is_none();
     let server_url = if non_interactive || is_anonymous {
         cfg.server_url.clone()
@@ -1613,7 +1611,6 @@ async fn main() -> anyhow::Result<()> {
         } => {
             run_init_command(
                 cfg,
-                cli.server.is_some(),
                 login,
                 upgrade,
                 import_key,
@@ -2096,7 +2093,6 @@ async fn main() -> anyhow::Result<()> {
                 // object per line — the same shape as --json mode.
                 // The flag is accepted for consistency but doesn't
                 // change behavior here.
-                let _ = json_output;
                 if let Some(arr) = resp["data"].as_array() {
                     for row in arr {
                         println!("{row}");
@@ -2106,7 +2102,6 @@ async fn main() -> anyhow::Result<()> {
         },
         Commands::Sql { query } => {
             let resp = c.execute_sql(cfg.active_wk()?, &query).await?;
-            let _ = json_output;
             if let Some(arr) = resp["data"].as_array() {
                 for row in arr {
                     println!("{row}");

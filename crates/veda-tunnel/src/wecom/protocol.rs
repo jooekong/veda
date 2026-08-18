@@ -21,7 +21,6 @@ pub const CMD_MSG_CALLBACK: &str = "aibot_msg_callback";
 pub const CMD_EVENT_CALLBACK: &str = "aibot_event_callback";
 
 pub const EVENT_DISCONNECTED: &str = "disconnected_event";
-pub const EVENT_ENTER_CHAT: &str = "enter_chat";
 pub const EVENT_FEEDBACK: &str = "feedback_event";
 
 pub const MSGTYPE_TEXT: &str = "text";

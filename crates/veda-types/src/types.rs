@@ -404,12 +404,6 @@ pub struct FileRecord {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct FileContent {
-    pub file_id: String,
-    pub content: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FileChunk {
     pub file_id: String,
     pub chunk_index: i32,

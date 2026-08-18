@@ -55,7 +55,7 @@ impl TableFunctionImpl for VedaFsTableFactory {
                             datafusion::error::DataFusionError::External(Box::new(e))
                         })?;
 
-                let batch = build_dir_listing_batch(&dentries, &fs, &ws)?;
+                let batch = build_dir_listing_batch(&dentries, &fs)?;
                 let schema = format::dir_listing_schema();
                 let table = MemTable::try_new(schema, vec![vec![batch]])?;
                 Ok(Arc::new(table))
@@ -104,7 +104,7 @@ fn detect_mode(path: &str) -> FsMode {
     }
 }
 
-fn build_dir_listing_batch(dentries: &[Dentry], fs: &FsService, _ws: &str) -> Result<RecordBatch> {
+fn build_dir_listing_batch(dentries: &[Dentry], fs: &FsService) -> Result<RecordBatch> {
     let n = dentries.len();
 
     let file_ids: Vec<&str> = dentries

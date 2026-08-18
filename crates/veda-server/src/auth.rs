@@ -11,9 +11,6 @@ use crate::state::AppState;
 
 pub struct AuthAccount {
     pub account_id: String,
-    /// Token's `app_id` governance label. `None` for legacy account-owner
-    /// keys; `Some` for service tokens issued for company apps.
-    pub app_id: Option<String>,
     /// Token's workspace scope. `None` = unrestricted (token can access
     /// any workspace under its account). `Some(list)` = token can only
     /// access workspaces whose `id` is in the list.
@@ -74,7 +71,6 @@ impl FromRequestParts<Arc<AppState>> for AuthAccount {
 
             Ok(AuthAccount {
                 account_id: key.account_id,
-                app_id: key.app_id,
                 allowed_workspaces: key.allowed_workspaces,
             })
         }
@@ -83,7 +79,6 @@ impl FromRequestParts<Arc<AppState>> for AuthAccount {
 
 pub struct AuthWorkspace {
     pub workspace_id: String,
-    pub _account_id: String,
     /// Row id of the wk_ key that authenticated this request. The memory
     /// surface resolves it to a principal (key = identity under M1);
     /// costs nothing — resolve_ws_key already fetched the row.
@@ -223,7 +218,6 @@ impl FromRequestParts<Arc<AppState>> for AuthWorkspace {
             }
             Ok(AuthWorkspace {
                 workspace_id: wk.workspace_id,
-                _account_id: wk.account_id,
                 key_id: wk.id,
                 read_only,
             })
@@ -315,7 +309,6 @@ mod tests {
     fn auth(allowed: Option<Vec<&str>>) -> AuthAccount {
         AuthAccount {
             account_id: "acct".into(),
-            app_id: None,
             allowed_workspaces: allowed.map(|v| v.into_iter().map(String::from).collect()),
         }
     }

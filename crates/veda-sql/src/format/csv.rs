@@ -18,7 +18,7 @@ pub fn parse_csv(
         .with_header(has_header)
         .infer_schema(cursor, Some(100))?;
 
-    let out_schema = build_output_schema(&inferred_schema, path);
+    let out_schema = build_output_schema(&inferred_schema);
 
     if content.trim().is_empty() {
         return Ok(RecordBatch::new_empty(out_schema));
@@ -66,7 +66,7 @@ pub fn parse_csv(
     Ok(RecordBatch::try_new(out_schema, columns)?)
 }
 
-fn build_output_schema(inferred: &Schema, _path: &str) -> SchemaRef {
+fn build_output_schema(inferred: &Schema) -> SchemaRef {
     let mut fields: Vec<Field> = vec![Field::new("_line_number", DataType::Int64, false)];
     for f in inferred.fields() {
         fields.push(f.as_ref().clone());

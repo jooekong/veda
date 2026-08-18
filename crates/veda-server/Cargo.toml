@@ -26,9 +26,7 @@ axum = "0.8"
 base64 = "0.22"
 async-stream = "0.3"
 futures = "0.3"
-tower = "0.5"
 tower-http = { version = "0.6", features = ["cors", "trace", "timeout", "catch-panic"] }
-tokio-util = "0.7"
 argon2 = "0.5"
 toml = "0.8"
 arrow = { version = "58", features = ["json"] }
@@ -62,6 +60,8 @@ chrono = { workspace = true }
 tracing-subscriber = { workspace = true }
 serde_urlencoded = "0.7"
 http-body-util = "0.1"
+# Only `tower::ServiceExt::oneshot` in the HTTP tests; src/ uses tower-http.
+tower = "0.5"
 
 [build-dependencies]
 # Generates the OTLP gRPC client from vendored proto. protoc-bin-vendored ships

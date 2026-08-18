@@ -155,7 +155,7 @@ fn skip_frontmatter(content: &str) -> &str {
 /// kana/hangul (Japanese/Korean exclusives)? If that share is high, the
 /// doc is Japanese or Korean and we fall back to `en`. Otherwise Han
 /// majority → `zh-CN`. Heuristic only; looks at the first 500 chars.
-pub fn detect_output_language(sample: &str) -> &'static str {
+fn detect_output_language(sample: &str) -> &'static str {
     let chars: Vec<char> = sample.chars().take(500).collect();
     let n = chars.len();
     if n == 0 {

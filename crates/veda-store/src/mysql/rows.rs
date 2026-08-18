@@ -45,10 +45,6 @@ pub(super) fn row_to_account(row: &sqlx::mysql::MySqlRow) -> Result<Account> {
     })
 }
 
-/// Whitelist the apps-surface `order_by` / `order` into safe SQL fragments —
-/// caller input must never be interpolated into SQL raw. Defaults `created_at`
-/// `DESC`.
-
 pub(super) fn row_to_dataset(row: &sqlx::mysql::MySqlRow) -> Result<Dataset> {
     let st: String = row.try_get("status").map_err(storage_err)?;
     Ok(Dataset {

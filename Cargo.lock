@@ -5327,7 +5327,6 @@ name = "veda-cli"
 version = "0.1.27"
 dependencies = [
  "anyhow",
- "chrono",
  "clap",
  "dirs",
  "ignore",
@@ -5341,10 +5340,7 @@ dependencies = [
  "terminal_size",
  "tokio",
  "toml",
- "tracing",
- "tracing-subscriber",
  "unicode-width",
- "veda-types",
  "wiremock",
 ]
 
@@ -5356,7 +5352,6 @@ dependencies = [
  "chrono",
  "infer",
  "metrics",
- "serde",
  "serde_json",
  "sha2",
  "tokio",
@@ -5437,7 +5432,6 @@ dependencies = [
  "serde_yaml",
  "sqlx",
  "tokio",
- "tokio-util",
  "toml",
  "tonic",
  "tonic-build",
@@ -5457,14 +5451,11 @@ dependencies = [
 name = "veda-sql"
 version = "0.1.27"
 dependencies = [
- "anyhow",
  "arrow",
  "arrow-csv",
- "arrow-json",
  "async-trait",
  "chrono",
  "datafusion",
- "serde",
  "serde_json",
  "tokio",
  "tracing",
@@ -5477,7 +5468,6 @@ dependencies = [
 name = "veda-store"
 version = "0.1.27"
 dependencies = [
- "anyhow",
  "async-trait",
  "chrono",
  "metrics",
