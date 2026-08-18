@@ -187,7 +187,6 @@ pub enum CollectionType {
 #[serde(rename_all = "snake_case")]
 pub enum CollectionStatus {
     Active,
-    Deleting,
 }
 
 // ── Control Plane ──────────────────────────────────────
@@ -708,17 +707,6 @@ impl MemoryKind {
             Self::Derived => "derived",
         }
     }
-
-    pub fn parse(s: &str) -> Option<Self> {
-        match s {
-            "fact" => Some(Self::Fact),
-            "preference" => Some(Self::Preference),
-            "decision" => Some(Self::Decision),
-            "procedure" => Some(Self::Procedure),
-            "derived" => Some(Self::Derived),
-            _ => None,
-        }
-    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -733,14 +721,6 @@ impl PrincipalKind {
         match self {
             Self::Human => "human",
             Self::Agent => "agent",
-        }
-    }
-
-    pub fn parse(s: &str) -> Option<Self> {
-        match s {
-            "human" => Some(Self::Human),
-            "agent" => Some(Self::Agent),
-            _ => None,
         }
     }
 }
@@ -759,15 +739,6 @@ impl PrincipalSource {
             Self::Gateway => "gateway",
             Self::Wecom => "wecom",
             Self::Key => "key",
-        }
-    }
-
-    pub fn parse(s: &str) -> Option<Self> {
-        match s {
-            "gateway" => Some(Self::Gateway),
-            "wecom" => Some(Self::Wecom),
-            "key" => Some(Self::Key),
-            _ => None,
         }
     }
 }

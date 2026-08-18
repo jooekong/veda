@@ -362,25 +362,6 @@ impl MetadataStore for MysqlStore {
         rows.iter().map(|r| row_to_file_chunk(r)).collect()
     }
 
-    async fn find_file_by_checksum(
-        &self,
-        workspace_id: &str,
-        checksum: &str,
-    ) -> Result<Option<FileRecord>> {
-        let row = sqlx::query(
-            r#"SELECT id, workspace_id, size_bytes, mime_type, storage_type, source_type, line_count,
-                      checksum_sha256, revision, ref_count, last_embedded_content_hash,
-                      created_at, updated_at
-               FROM veda_files WHERE workspace_id = ? AND checksum_sha256 = ? LIMIT 1"#,
-        )
-        .bind(workspace_id)
-        .bind(checksum)
-        .fetch_optional(&self.pool)
-        .await
-        .map_err(storage_err)?;
-        row.map(|r| row_to_file(&r)).transpose()
-    }
-
     async fn get_dentry_path_by_file_id(
         &self,
         workspace_id: &str,

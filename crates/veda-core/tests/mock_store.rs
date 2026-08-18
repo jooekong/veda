@@ -224,19 +224,6 @@ impl MetadataStore for MockMetadataStore {
         Ok(filter_overlap(chunks, start_line, end_line))
     }
 
-    async fn find_file_by_checksum(
-        &self,
-        workspace_id: &str,
-        checksum: &str,
-    ) -> Result<Option<FileRecord>> {
-        let st = self.state.lock().unwrap();
-        Ok(st
-            .files
-            .iter()
-            .find(|f| f.workspace_id == workspace_id && f.checksum_sha256 == checksum)
-            .cloned())
-    }
-
     async fn insert_dentry_ignore(&self, dentry: &Dentry) -> Result<()> {
         let mut st = self.state.lock().unwrap();
         let exists = st

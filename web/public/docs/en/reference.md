@@ -263,7 +263,7 @@ All fs endpoints authenticate with a `wk_` (bound to an fs workspace); writes re
 | `GET /v1/fs?list` / `GET /v1/fs?stat` | Root listing / root metadata. `{*path}` never matches an empty segment, so this bare path is the **only** way to list the workspace root. A bare `GET /v1/fs` with no parameter → `400 INVALID_INPUT` (`use ?stat or ?list`). |
 | `HEAD /v1/fs/{path}` | Existence probe: `200` if present, `404` if not. **HEAD carries no response body** — for metadata use `GET /v1/fs/{path}?stat`. |
 | `DELETE /v1/fs/{path}` | Delete (directories recurse). |
-| `POST /v1/fs-copy` | `{ from, to }` server-side copy (content-addressed dedup). |
+| `POST /v1/fs-copy` | `{ from, to }` server-side copy. Copy-on-write: both paths share one stored copy via `ref_count` until either side is written. |
 | `POST /v1/fs-rename` | `{ from, to }` rename. |
 | `POST /v1/fs-mkdir` | `{ path }` create a directory. |
 | `POST /v1/grep` | `{ pattern, path_prefix?, ignore_case?, max_results?=100 }` literal substring scan (not regex, synchronous); returns `{path, line_no, line}[]`. |

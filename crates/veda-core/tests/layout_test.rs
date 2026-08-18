@@ -38,7 +38,7 @@ impl VectorStore for NoVector {
     async fn ping(&self) -> Result<()> {
         Ok(())
     }
-    async fn upsert_chunks(&self, _c: &[ChunkWithEmbedding]) -> Result<()> {
+    async fn upsert_chunks_only(&self, _c: &[ChunkWithEmbedding]) -> Result<()> {
         Ok(())
     }
     async fn delete_chunks(&self, _ws: &str, _fid: &str) -> Result<()> {

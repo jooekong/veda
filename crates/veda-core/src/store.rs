@@ -209,11 +209,6 @@ pub trait MetadataStore: Send + Sync {
             .filter(|c| c.chunk_index >= idx_min && c.chunk_index <= idx_max)
             .collect())
     }
-    async fn find_file_by_checksum(
-        &self,
-        workspace_id: &str,
-        checksum: &str,
-    ) -> Result<Option<FileRecord>>;
     /// Idempotent directory insert: succeeds silently if the dentry already
     /// exists. Used by `ensure_parents` outside a transaction so that parent
     /// directory creation does not hold row locks.
@@ -503,16 +498,11 @@ pub trait MetadataTx: Send {
 #[async_trait]
 pub trait VectorStore: Send + Sync {
     async fn ping(&self) -> Result<()>;
-    async fn upsert_chunks(&self, chunks: &[ChunkWithEmbedding]) -> Result<()>;
-    /// Same as `upsert_chunks` but skips the trailing "delete chunk_index >
-    /// max_in_batch" sweep. Use when streaming a single file's chunks in
-    /// multiple batches — call this for every batch, then `delete_chunks_above`
-    /// once at the end with the overall max chunk_index. Default impl falls
-    /// back to `upsert_chunks` (which does the sweep itself); only override
-    /// for stores where the sweep is not safe between partial batches.
-    async fn upsert_chunks_only(&self, chunks: &[ChunkWithEmbedding]) -> Result<()> {
-        self.upsert_chunks(chunks).await
-    }
+    /// Upsert chunks without any trailing "delete chunk_index > max_in_batch"
+    /// sweep. A single file's chunks stream in multiple batches — call this for
+    /// every batch, then `delete_chunks_above` once at the end with the overall
+    /// max chunk_index.
+    async fn upsert_chunks_only(&self, chunks: &[ChunkWithEmbedding]) -> Result<()>;
     /// Delete chunks with `chunk_index > max_chunk_index` for `(workspace_id,
     /// file_id)`. Pair with `upsert_chunks_only` to avoid the
     /// "first batch upserts, second batch fails, search index missing the

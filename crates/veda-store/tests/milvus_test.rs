@@ -75,7 +75,7 @@ async fn milvus_init_upsert_search_delete() {
         content: "hello milvus integration".into(),
         vector: vec.clone(),
     }];
-    store.upsert_chunks(&chunks).await.expect("upsert");
+    store.upsert_chunks_only(&chunks).await.expect("upsert");
 
     let mut req = SearchRequest {
         workspace_id: ws.clone(),

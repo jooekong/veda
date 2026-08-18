@@ -1058,7 +1058,7 @@ impl MilvusStore {
             "annsField": "vector",
             "filter": filter,
             "limit": lim,
-            "outputFields": ["id", "workspace_id", "file_id", "chunk_index", "content"],
+            "outputFields": ["file_id", "chunk_index", "content"],
             "searchParams": { "metricType": "COSINE" },
             "consistencyLevel": "Strong"
         });
@@ -1090,7 +1090,7 @@ impl MilvusStore {
             "limit": lim,
             "offset": 0,
             "ignoreGrowing": false,
-            "outputFields": ["id", "workspace_id", "file_id", "chunk_index", "content"],
+            "outputFields": ["file_id", "chunk_index", "content"],
             "metricType": "COSINE"
         });
         let bm25 = json!({
@@ -1099,7 +1099,7 @@ impl MilvusStore {
             "filter": base_filter,
             "limit": lim,
             "offset": 0,
-            "outputFields": ["id", "workspace_id", "file_id", "chunk_index", "content"],
+            "outputFields": ["file_id", "chunk_index", "content"],
             "metricType": "BM25"
         });
         let body = json!({
@@ -1110,7 +1110,7 @@ impl MilvusStore {
                 "params": { "k": 60 }
             },
             "limit": lim,
-            "outputFields": ["id", "workspace_id", "file_id", "chunk_index", "content"],
+            "outputFields": ["file_id", "chunk_index", "content"],
             "consistencyLevel": "Strong"
         });
         // No fallback (decision D4, same as the db-side twin above): transient
@@ -1152,7 +1152,7 @@ impl MilvusStore {
             "annsField": "sparse_vector",
             "filter": filter,
             "limit": lim,
-            "outputFields": ["id", "file_id", "chunk_index", "content"],
+            "outputFields": ["file_id", "chunk_index", "content"],
             "metricType": "BM25",
             "consistencyLevel": "Strong"
         });
@@ -1168,19 +1168,6 @@ impl VectorStore for MilvusStore {
         self.post("/v2/vectordb/collections/list", json!({}))
             .await?;
         Ok(())
-    }
-
-    async fn upsert_chunks(&self, chunks: &[ChunkWithEmbedding]) -> Result<()> {
-        if chunks.is_empty() {
-            return Ok(());
-        }
-        // Whole-file path: upsert + sweep trailing stale. Safe when all
-        // chunks of the file are passed in a single call.
-        self.upsert_chunks_only(chunks).await?;
-        let max_index = chunks.iter().map(|c| c.chunk_index).max().unwrap_or(0);
-        let file_id = &chunks[0].file_id;
-        let ws_id = &chunks[0].workspace_id;
-        self.delete_chunks_above(ws_id, file_id, max_index).await
     }
 
     async fn upsert_chunks_only(&self, chunks: &[ChunkWithEmbedding]) -> Result<()> {

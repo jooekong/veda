@@ -216,7 +216,7 @@ Vector dataset 是 db workspace 内的逻辑分组（内部物理 pk = `{dataset
 - MySQL = control plane (元数据、认证、outbox)
 - Milvus = data plane (向量搜索、structured collection 数据)
 - 文件分层存储：UTF-8 文本 ≤256KB inline，>256KB chunked；非 UTF-8 存 `veda_file_blobs`（LONGBLOB，magic-byte 判 MIME）；可提取 blob（pdf/word）的派生全文存 `veda_file_extracts`（file_id PK + source_sha256，纯缓存可整表重建，与 blob 同事务删除 + 读侧 sha 校验双保险防 stale）
-- Content-addressed dedup (SHA256)
+- Dedup 只有两条路径，**没有跨路径的内容寻址**：同路径同 checksum 的写入是 no-op（`If-None-Match: "<sha256>"` / 服务端 checksum 比对，返回 `content_unchanged`）；copy 走 ref_count 共享同一份内容（COW，写时才分家）。两个不同路径写相同内容 = 存两份
 - Outbox pattern 实现最终一致性。文件写入与其 ChunkSync/SummarySync 入队在**同一 MySQL 事务**提交，写路径不会漂移。机制：10 分钟租约 + `FOR UPDATE SKIP LOCKED` 抢占，失败退避 `30·2^n`（上限 1h），超 `max_retries` 转 `dead`。**2026-07 单 pod 简化删除了 `lease_owner` fencing 列**——终态转换现在只 fence `status='processing'`，靠内容哈希水印保证罕见的重复执行幂等；`lease_until` 到期接管（崩溃恢复）不变。这把「单写者」假设变成显式约束：**绝不能让两个 server 进程指向同一个数据库**（本地开发和集成测试也算），扩容到多 pod 前必须先把 fencing 加回来。该迁移只能停机升级，不兼容滚动发布。残余漂移来源只有死信任务（`veda_outbox_dead_total` + `veda_outbox_depth{status}` 暴露，告警在 Monitor 平台配）和 Milvus 侧数据丢失（磁盘/运维/破坏式迁移）。**不再有 6h 后台 reconcile loop**；改为按需 `POST /admin/v1/reconcile/{workspace_id}?dry_run=`（ops `metrics_token` 鉴权，默认 dry_run=true 只报告，失败响亮返回 500）
 - Account → Workspace 多租户；控制面 `vk_`、数据面 `wk_`，纯 key 校验（JWT 已移除）
 - VedaError::Storage 使用 String（而非 anyhow::Error）避免 lib crate 兼容问题

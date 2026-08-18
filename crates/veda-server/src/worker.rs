@@ -402,9 +402,9 @@ impl Worker {
         // a mid-loop failure is safe — the next outbox claim retries from the
         // first batch. The watermark below only fires after every batch lands.
         //
-        // Critical: use `upsert_chunks_only` per batch, then ONE
-        // `delete_chunks_above` after every batch succeeds. The all-in-one
-        // `upsert_chunks` would delete chunk_index > batch_max after batch 1,
+        // Critical: `upsert_chunks_only` per batch, then ONE
+        // `delete_chunks_above` after every batch succeeds. Sweeping inside
+        // each batch would delete chunk_index > batch_max after batch 1,
         // wiping any stale tail chunks before batch 2 had a chance to write
         // them — if batch 2+ failed the search index would be missing the
         // tail until a successful retry. Splitting the sweep keeps stale

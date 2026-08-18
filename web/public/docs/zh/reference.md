@@ -263,7 +263,7 @@
 | `GET /v1/fs?list` / `GET /v1/fs?stat` | 根目录列表 / 根元数据。`{*path}` 匹配不到空段，所以列 workspace 根**只能**走这个裸路径。不带参数的 `GET /v1/fs` → `400 INVALID_INPUT`（`use ?stat or ?list`）。 |
 | `HEAD /v1/fs/{path}` | 存在性探针：存在 `200`、不存在 `404`。**HEAD 不带响应体**——要元数据请用 `GET /v1/fs/{path}?stat`。 |
 | `DELETE /v1/fs/{path}` | 删（目录递归）。 |
-| `POST /v1/fs-copy` | `{ from, to }` 服务端复制（内容寻址去重）。 |
+| `POST /v1/fs-copy` | `{ from, to }` 服务端复制。写时复制：两个路径通过 `ref_count` 共享同一份内容，任一侧被写入时才分家。 |
 | `POST /v1/fs-rename` | `{ from, to }` 重命名。 |
 | `POST /v1/fs-mkdir` | `{ path }` 建目录。 |
 | `POST /v1/grep` | `{ pattern, path_prefix?, ignore_case?, max_results?=100 }` 字面子串扫描（非正则，同步），返回 `{path, line_no, line}[]`。 |

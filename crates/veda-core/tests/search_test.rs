@@ -29,7 +29,7 @@ impl VectorStore for MockVector {
     async fn ping(&self) -> Result<()> {
         Ok(())
     }
-    async fn upsert_chunks(&self, _chunks: &[ChunkWithEmbedding]) -> Result<()> {
+    async fn upsert_chunks_only(&self, _chunks: &[ChunkWithEmbedding]) -> Result<()> {
         Ok(())
     }
     async fn delete_chunks(&self, _ws: &str, _fid: &str) -> Result<()> {
@@ -328,7 +328,7 @@ impl VectorStore for RecordingVector {
     async fn ping(&self) -> Result<()> {
         Ok(())
     }
-    async fn upsert_chunks(&self, _chunks: &[ChunkWithEmbedding]) -> Result<()> {
+    async fn upsert_chunks_only(&self, _chunks: &[ChunkWithEmbedding]) -> Result<()> {
         Ok(())
     }
     async fn delete_chunks(&self, _ws: &str, _fid: &str) -> Result<()> {

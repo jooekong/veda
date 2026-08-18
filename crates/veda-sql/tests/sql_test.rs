@@ -127,9 +127,6 @@ impl MetadataStore for MockMetaFull {
     ) -> Result<Vec<FileChunk>> {
         Ok(vec![])
     }
-    async fn find_file_by_checksum(&self, _ws: &str, _cksum: &str) -> Result<Option<FileRecord>> {
-        Ok(None)
-    }
     async fn get_dentry_path_by_file_id(&self, _ws: &str, _fid: &str) -> Result<Option<String>> {
         Ok(None)
     }
@@ -657,9 +654,6 @@ impl MetadataStore for MockMeta {
     ) -> Result<Vec<FileChunk>> {
         Ok(vec![])
     }
-    async fn find_file_by_checksum(&self, _ws: &str, _cksum: &str) -> Result<Option<FileRecord>> {
-        Ok(None)
-    }
     async fn get_dentry_path_by_file_id(&self, _ws: &str, _fid: &str) -> Result<Option<String>> {
         Ok(None)
     }
@@ -787,7 +781,7 @@ impl VectorStore for MockVector {
     async fn ping(&self) -> Result<()> {
         Ok(())
     }
-    async fn upsert_chunks(&self, _chunks: &[ChunkWithEmbedding]) -> Result<()> {
+    async fn upsert_chunks_only(&self, _chunks: &[ChunkWithEmbedding]) -> Result<()> {
         Ok(())
     }
     async fn delete_chunks(&self, _ws: &str, _fid: &str) -> Result<()> {

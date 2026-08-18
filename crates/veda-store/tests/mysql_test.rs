@@ -546,7 +546,7 @@ async fn mysql_outbox_lease_renew_extends_processing_only() {
 
 #[tokio::test]
 #[ignore]
-async fn mysql_checksum_lookup_and_delete_file() {
+async fn mysql_file_chunks_and_delete_file() {
     let url = load_mysql_url();
     let store = MysqlStore::new(&url).await.expect("connect");
     store.migrate().await.expect("migrate");
@@ -568,12 +568,6 @@ async fn mysql_checksum_lookup_and_delete_file() {
     .await
     .unwrap();
     Box::new(tx).commit().await.unwrap();
-    let found = store
-        .find_file_by_checksum(&ws, sum)
-        .await
-        .unwrap()
-        .expect("by checksum");
-    assert_eq!(found.id, fid);
     let chunks = store.get_file_chunks(&fid, None, None).await.unwrap();
     assert_eq!(chunks.len(), 1);
     let mut tx = store.begin_tx().await.unwrap();

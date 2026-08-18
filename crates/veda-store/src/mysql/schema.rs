@@ -32,8 +32,7 @@ impl MysqlStore {
     last_embedded_content_hash VARCHAR(64) NULL,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-    INDEX idx_workspace (workspace_id),
-    INDEX idx_checksum (workspace_id, checksum_sha256)
+    INDEX idx_workspace (workspace_id)
 )"#,
             r#"CREATE TABLE IF NOT EXISTS veda_file_contents (
     file_id VARCHAR(36) PRIMARY KEY,
