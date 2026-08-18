@@ -8,7 +8,6 @@ use datafusion::common::ScalarValue;
 use datafusion::datasource::memory::MemTable;
 use datafusion::error::Result;
 use datafusion::logical_expr::Expr;
-use tracing::warn;
 
 use veda_core::store::{EmbeddingService, MetadataStore, VectorStore};
 use veda_types::*;
@@ -173,20 +172,13 @@ impl VedaSearchFactory {
             .map(|h| h.file_id.clone())
             .collect();
         if !missing_fids.is_empty() {
-            match self
+            let path_map = self
                 .meta
                 .get_dentry_paths_by_file_ids(ws, &missing_fids)
-                .await
-            {
-                Ok(path_map) => {
-                    for hit in &mut hits {
-                        if hit.path.is_none() {
-                            hit.path = path_map.get(&hit.file_id).map(|r| r.path.clone());
-                        }
-                    }
-                }
-                Err(e) => {
-                    warn!(err = %e, "search(): failed to batch-resolve paths");
+                .await?;
+            for hit in &mut hits {
+                if hit.path.is_none() {
+                    hit.path = path_map.get(&hit.file_id).map(|r| r.path.clone());
                 }
             }
         }

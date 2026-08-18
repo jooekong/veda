@@ -257,7 +257,7 @@ impl SearchService {
         };
 
         let mut hits = self.vector.search_summaries(&req).await?;
-        self.resolve_paths(workspace_id, &mut hits).await;
+        self.resolve_paths(workspace_id, &mut hits).await?;
 
         if scope.is_none() {
             if let Some(prefix) = path_prefix {
@@ -358,7 +358,7 @@ impl SearchService {
             id_filter: scope.map(|s| s.file_ids.clone()),
         };
         let mut hits = self.vector.search(&req).await?;
-        self.resolve_paths(workspace_id, &mut hits).await;
+        self.resolve_paths(workspace_id, &mut hits).await?;
 
         if scope.is_none() {
             if let Some(prefix) = path_prefix {
@@ -374,32 +374,28 @@ impl SearchService {
         Ok(hits)
     }
 
-    async fn resolve_paths(&self, workspace_id: &str, hits: &mut [SearchHit]) {
+    /// Fills in `path` on hits that came back path-less. Fails loud: both
+    /// callers post-filter on `path`, so a swallowed store error used to
+    /// ship a 200 with silently fewer results.
+    async fn resolve_paths(&self, workspace_id: &str, hits: &mut [SearchHit]) -> Result<()> {
         let missing_fids: Vec<String> = hits
             .iter()
             .filter(|h| h.path.is_none())
             .map(|h| h.file_id.clone())
             .collect();
         if missing_fids.is_empty() {
-            return;
+            return Ok(());
         }
-        match self
+        let path_map = self
             .meta
             .get_dentry_paths_by_file_ids(workspace_id, &missing_fids)
-            .await
-        {
-            Ok(path_map) => {
-                for hit in hits.iter_mut() {
-                    if hit.path.is_none() {
-                        if let Some(r) = path_map.get(&hit.file_id) {
-                            hit.path = Some(r.path.clone());
-                            hit.dentry_id = Some(r.dentry_id.clone());
-                        }
-                    }
+            .await?;
+        for hit in hits.iter_mut() {
+            if hit.path.is_none() {
+                if let Some(r) = path_map.get(&hit.file_id) {
+                    hit.path = Some(r.path.clone());
+                    hit.dentry_id = Some(r.dentry_id.clone());
                 }
-            }
-            Err(e) => {
-                warn!(err = %e, "failed to batch-resolve paths for search hits");
             }
         }
 
@@ -416,26 +412,20 @@ impl SearchService {
             .map(|h| h.file_id.clone())
             .collect();
         if unresolved.is_empty() {
-            return;
+            return Ok(());
         }
-        match self
+        let dir_map = self
             .meta
             .get_dentry_paths_by_ids(workspace_id, &unresolved)
-            .await
-        {
-            Ok(dir_map) => {
-                for hit in hits.iter_mut() {
-                    if hit.path.is_none() {
-                        if let Some(p) = dir_map.get(&hit.file_id) {
-                            hit.path = Some(p.clone());
-                        }
-                    }
+            .await?;
+        for hit in hits.iter_mut() {
+            if hit.path.is_none() {
+                if let Some(p) = dir_map.get(&hit.file_id) {
+                    hit.path = Some(p.clone());
                 }
             }
-            Err(e) => {
-                warn!(err = %e, "failed to batch-resolve directory paths for summary hits");
-            }
         }
+        Ok(())
     }
 
     pub async fn get_summary(&self, workspace_id: &str, path: &str) -> Result<Option<FileSummary>> {

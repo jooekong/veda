@@ -1332,7 +1332,12 @@ impl VectorStore for MilvusStore {
                 let rows = flatten_entity_rows(v.get("data"));
                 Ok(Self::summary_rows_to_hits(&rows, req.limit))
             }
-            _ => Ok(vec![]),
+            // Summary search is vector-only; the caller always embeds first.
+            // Returning Ok(vec![]) here made a broken embedding path look
+            // like an empty index.
+            _ => Err(VedaError::InvalidInput(
+                "search_summaries requires a non-empty query_vector".into(),
+            )),
         }
     }
 

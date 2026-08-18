@@ -81,7 +81,7 @@ impl VedaSqlEngine {
                 self.coll_vector.clone(),
                 workspace_id.to_string(),
                 schema.clone(),
-            );
+            )?;
             ctx.register_table(&schema.name, Arc::new(table))
                 .map_err(|e| VedaError::Storage(e.to_string()))?;
         }

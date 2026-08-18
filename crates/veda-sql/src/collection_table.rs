@@ -18,7 +18,7 @@ use datafusion::physical_plan::{
     SendableRecordBatchStream,
 };
 use veda_core::store::CollectionVectorStore;
-use veda_types::{CollectionSchema, FieldDefinition};
+use veda_types::{CollectionSchema, FieldDefinition, VedaError};
 
 fn build_schema(fields: &[FieldDefinition]) -> SchemaRef {
     let mut arrow_fields = vec![Field::new("id", DataType::Utf8, false)];
@@ -47,18 +47,25 @@ impl CollectionTable {
         coll_vector: Arc<dyn CollectionVectorStore>,
         workspace_id: String,
         collection: CollectionSchema,
-    ) -> Self {
-        let fields: Vec<FieldDefinition> =
-            serde_json::from_value(collection.schema_json.clone()).unwrap_or_default();
+    ) -> veda_types::Result<Self> {
+        // Corrupt schema_json used to default to an id-only table, so the
+        // user saw DataFusion "no such column" instead of the real cause.
+        let raw = collection.schema_json.clone();
+        let fields: Vec<FieldDefinition> = serde_json::from_value(raw).map_err(|e| {
+            VedaError::Storage(format!(
+                "collection '{}': invalid schema_json: {e}",
+                collection.name
+            ))
+        })?;
         let schema = build_schema(&fields);
         let milvus_name = collection.milvus_name();
-        Self {
+        Ok(Self {
             coll_vector,
             workspace_id,
             collection,
             milvus_name,
             schema,
-        }
+        })
     }
 }
 

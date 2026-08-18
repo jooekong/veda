@@ -32,7 +32,15 @@ impl MetadataStore for MysqlStore {
                 "pending" => pending = n,
                 "processing" => processing = n,
                 "dead" => dead = n,
-                _ => {}
+                // The SQL restricts the status set, but the column is an
+                // unconstrained VARCHAR under a case-insensitive collation:
+                // a row can pass the IN and still miss these literals, which
+                // would silently drop a whole backlog category.
+                other => {
+                    return Err(VedaError::Storage(format!(
+                        "count_index_backlog: unexpected outbox status {other:?}"
+                    )));
+                }
             }
         }
         Ok((pending, processing, dead))
@@ -689,8 +697,10 @@ impl MetadataStore for MysqlStore {
         .map_err(storage_err)?;
 
         Ok(StorageStats {
-            total_files: row.try_get::<i64, _>("total_files").unwrap_or(0),
-            total_directories: row.try_get::<i64, _>("total_directories").unwrap_or(0),
+            total_files: row.try_get::<i64, _>("total_files").map_err(storage_err)?,
+            total_directories: row
+                .try_get::<i64, _>("total_directories")
+                .map_err(storage_err)?,
             // Surface decode errors instead of silently swallowing to 0. The
             // CAST(... AS SIGNED) above keeps this an i64-decodable column;
             // the prior COALESCE(SUM(...)) returned DECIMAL, which
@@ -822,10 +832,14 @@ impl MetadataStore for MysqlStore {
         let mut file_ids = std::collections::HashSet::new();
         let mut dentry_ids = std::collections::HashSet::new();
         for r in &rows {
-            if let Ok(Some(fid)) = r.try_get::<Option<String>, _>("file_id") {
+            // Propagate decode errors: swallowing them shrinks the key set
+            // and the reconciler reads a short list as "these are missing".
+            let fid: Option<String> = r.try_get("file_id").map_err(storage_err)?;
+            if let Some(fid) = fid {
                 file_ids.insert(fid);
             }
-            if let Ok(Some(did)) = r.try_get::<Option<String>, _>("dentry_id") {
+            let did: Option<String> = r.try_get("dentry_id").map_err(storage_err)?;
+            if let Some(did) = did {
                 dentry_ids.insert(did);
             }
         }
