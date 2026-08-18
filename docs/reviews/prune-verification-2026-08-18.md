@@ -176,6 +176,18 @@ Test-env deployment (prod .85 NOT deployed):
 - The `idx_checksum` index still exists on live DBs (CREATE TABLE IF NOT
   EXISTS); `SHOW INDEX` + `DROP INDEX` remains the deferred ops decision.
 
+Production deployment (same day, after test-env verification):
+
+- Same binary `f8c4a4ea88a2…` swap-first deployed to .85. Pre-swap DB gates
+  through an SSH tunnel via .85 (prod MySQL allowlists client IPs; the Mac
+  isn't on it): `status` = {active} only (16b safe), `collection_type` = {raw}
+  — prod also carries live raw rows, re-vindicating the 16a refutation;
+  `veda_memories` empty; outbox baseline 83 completed / 0 pending / 0 dead.
+- Post-swap: healthz ok, mysql+milvus ready, disk sha matches, blob probe
+  roundtrip + cleanup, hybrid search 200, MCP self-reports 0.1.27, RSS ~32MB,
+  zero journal errors, outbox 85 completed (+2 = the probe's own events) /
+  0 dead. All three nodes (.161/.89/.85) now run `f8c4a4ea` @ `e60418a`.
+
 ## Expected payoff
 
 - Phases 1–3: two real bug fixes (one data-destruction class, one silent quality
