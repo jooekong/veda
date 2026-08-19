@@ -201,6 +201,9 @@ principal 表定义(拆 identities)并把 memory collection 重建为 v2(content
 - **升级到 M3a 前**:目标库执行 `DROP TABLE IF EXISTS veda_principals, veda_principal_identities;`
   + `TRUNCATE veda_memories;` + Milvus `POST /v2/vectordb/collections/drop {"collectionName":"veda_memories"}`,
   重启后自建(存量记忆为 dogfood 级,拍板不保留)。
+  另跑 `DELETE FROM veda_outbox WHERE event_type='memory_sync';` —— TRUNCATE 重置
+  auto_increment 后新记忆会复用旧 id,残留的 pending `memory_sync`(尤其 delete op)
+  会按新 id 误删新记忆的向量(2026-08-19 veda_it 实测撞号)。
 - **从 M3a 回滚**:反向同样三 DROP,让旧 binary 自建旧定义;另跑下方 memory_sync dead 化。
 
 **memory 门禁(0.1.26 之后的 memory 构建 → 回滚到 0.1.26 及以前)**:memory 写入会在
