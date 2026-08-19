@@ -8,6 +8,10 @@ pub struct ServerConfig {
     pub milvus: MilvusConfig,
     pub embedding: EmbeddingConfig,
     pub llm: Option<LlmConfig>,
+    /// External person directory (company SSO/HR). Absent = identity-only
+    /// mode: operators resolve per-entrance, no emp_no merge, no dept domain.
+    #[serde(default)]
+    pub people: Option<PeopleConfig>,
     #[serde(default)]
     pub worker: WorkerConfig,
     #[serde(default)]
@@ -44,6 +48,23 @@ pub struct ServerConfig {
     /// what dev/tests want. Env override: `VEDA_DRAIN_SECS`.
     #[serde(default)]
     pub drain_secs: u64,
+}
+
+/// `[people]` — the person directory HTTP endpoint. The request shape lives
+/// in `people.rs` (single function; SSO specifics get wired there).
+#[derive(Debug, Clone, Deserialize)]
+pub struct PeopleConfig {
+    pub base_url: String,
+    #[serde(default)]
+    pub token: Option<String>,
+    /// Per-lookup timeout. Small on purpose: lookups sit on request paths
+    /// (cache misses only) and every caller degrades on failure.
+    #[serde(default = "default_people_timeout_secs")]
+    pub timeout_secs: u64,
+}
+
+fn default_people_timeout_secs() -> u64 {
+    2
 }
 
 #[derive(Debug, Deserialize)]

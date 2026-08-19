@@ -323,19 +323,21 @@
 一次调用拿**带可验证引用**的答案：服务端 LLM 自主多轮检索（search + read_file 工具循环）后作答，答案正文带内联 `[n]` 标注。需要 server 配置了 `[llm]`，仅 fs workspace。
 
 - **请求**：`{ query（≤1024 字符）, path_prefix?, limit?（预检索条数，默认 12 上限 24）, prompt?（自定义 bot 人设，≤4000）}`。
-- **响应**：`{ answer, citations, hit_count, estimated_context_tokens }`。citation 分两类：**文档引用** `{index, path, spans}`（`spans` 是 chunk 区间，**空数组 = 引用整篇文件**；同一文件多个段落会产生多条同 path 的 citation，展示层建议按 path 聚合）；**记忆引用** `{index, memory: {id, content, updated_by, updated_at}}`（无 `path`——本 workspace 的团队记忆作为第二证据源自动参与检索，见「团队记忆」节）。展示层按「有 `path` 显示文件、有 `memory` 显示记忆内容」处理即可，旧消费者跳过无 path 条目不出错。找不到依据时返回固定拒答话术且 citations 为空（不编造）。
+- **响应**：`{ answer, citations, hit_count, estimated_context_tokens }`。citation 分两类：**文档引用** `{index, path, spans}`（`spans` 是 chunk 区间，**空数组 = 引用整篇文件**；同一文件多个段落会产生多条同 path 的 citation，展示层建议按 path 聚合）；**记忆引用** `{index, memory: {id, content, updated_by, updated_at, scope}}`（无 `path`；`scope` 为域标签 `team`/`dept`/`mine`——本 workspace 的团队记忆作为第二证据源自动参与检索，带操作者头的请求还会并入其部门域与个人域，见「团队记忆」节）。展示层按「有 `path` 显示文件、有 `memory` 显示记忆内容」处理即可，旧消费者跳过无 path 条目不出错。找不到依据时返回固定拒答话术且 citations 为空（不编造）。
 - **流式**：`POST /v1/answer/stream`（SSE）五事件：`delta`（增量文本）/ `reset`（丢弃已积累 delta）/ `tool`（工具进度提示）/ `final`（权威完整结果，消费者必须用它替换累积文本）/ `error`。
 - **错误**：`429 THROTTLED`（每 workspace 并发上限，默认 2）；`501 FEATURE_DISABLED`（未配 LLM）；`502 LLM_UNAVAILABLE`（LLM 上游不可用）；`504 ANSWER_TIMEOUT`（超 90s 截止）。流式下这些以 `error` 事件的 `error_code` 出现。耗时通常 10–90s。
 - **CLI**：`veda ask "问题" [--path 前缀] [--json]`；MCP 的 `ask` 工具走同一条检索链路，但载荷更窄（见下）。
 
 ### 团队记忆（`/v1/memory/*`）
 
-fs workspace 的第三类资产：**一句话一条**的事实（决策、坑、环境怪癖、偏好），与文档并存。两类归属域——**团队域**（`scope: "team"`，workspace 内全员可读可写可删，逐条署名负责，wiki 式无审批）与**个人域**（`scope: "mine"`，跟 key 走，别人物理不可见）。团队记忆自动参与 `/v1/answer` 检索并可作为记忆引用返回。主要面向 agent（MCP 记忆工具与此同一套语义）；只读 `wk_` 可检索、写入需 readwrite key。
+fs workspace 的第三类资产：**一句话一条**的事实（决策、坑、环境怪癖、偏好），与文档并存。三类归属域——**团队域**（`scope: "team"`，workspace 内全员可读可写可删，逐条署名负责，wiki 式无审批）、**部门域**（`scope: "dept"`，跟人的部门走、跨 workspace 可见，需操作者头且服务端能解析出部门）与**个人域**（`scope: "mine"`，跟操作者/key 走，别人物理不可见）。团队记忆自动参与 `/v1/answer` 检索并可作为记忆引用返回；请求带操作者头时部门域与个人域一并参与。检索为语义 + 关键词混合（精确 token 如错误码、主机名、工号可直接命中）。主要面向 agent（MCP 记忆工具与此同一套语义）；只读 `wk_` 可检索、写入需 readwrite key。
 
-- `POST /v1/memory`：`{ content（≤4096 字符）, scope?（`mine` 缺省 / `team`）, kind?（`fact` 缺省 / `decision` / `procedure` / `preference`）, topic?, source_ref?, expires_at? }`。响应 `{ memory, duplicate, neighbors }`——`duplicate: true` 表示同域已有一字不差的一条（幂等返回既有行）；`neighbors` 是同域最近邻 top-3，**语义很近时应改旧条（PATCH）而不是再存一条**。
-- `GET /v1/memory/search?query=…&scope=&limit=`：语义检索。`scope` 缺省 = 团队 + 本 key 个人域合并。
+**操作者头（可选）**：`X-Veda-Operator: wecom:<企微userid>` 或 `emp:<工号>`——声明「这次请求背后的人」。带头后 `mine` 指向这个人的个人域（跨入口按工号合并，需服务端配置人员目录）、`dept` 可用；不带头维持 key 即身份的语义。头格式非法返回 400。企微 bot 私聊自动带、群聊不带（群里答案全群可见，不注入私域）。
+
+- `POST /v1/memory`：`{ content（≤4096 字符）, scope?（`mine` 缺省 / `team` / `dept`）, kind?（`fact` 缺省 / `decision` / `procedure` / `preference`）, topic?, source_ref?, expires_at? }`。响应 `{ memory, duplicate, neighbors }`——`duplicate: true` 表示同域已有一字不差的一条（幂等返回既有行）；`neighbors` 是同域最近邻 top-3，**语义很近时应改旧条（PATCH）而不是再存一条**。
+- `GET /v1/memory/search?query=…&scope=&limit=`：混合检索（语义+关键词）。`scope` 缺省 = 团队 + 个人域（带操作者头时再并入部门域）。
 - `GET /v1/memory/context?query=…&limit=`：开工引导面——一次调用拿「与当前任务相关」的记忆，agent 会话开始时调一次。
-- `PATCH /v1/memory/{id}`：`{ content? / topic? / source_ref? / expires_at? }` 任给其一；改内容会重嵌向量并更新署名（`updated_by`）。
+- `PATCH /v1/memory/{id}`：`{ content? / topic? / source_ref? / expires_at? / scope? }` 任给其一；改内容会重嵌向量并更新署名（`updated_by`）。`scope` 实现**升域/搬家**（如个人 → 团队）：同一条原地改域，id 与署名历史保留；目标域已有一字不差的一条时返回冲突，删旧条后重试。
 - `DELETE /v1/memory/{id}`：硬删，立即从检索消失。跨域操作（改/删别人个人域）一律 `404`（不泄露存在性）。
 - 条目形状：`{ id, scope: "team"|"mine", kind, content, topic?, origin_workspace_id?, source_ref?, expires_at?, created_by, created_at, updated_by, updated_at }`；检索响应条目多一个 `score`。
 

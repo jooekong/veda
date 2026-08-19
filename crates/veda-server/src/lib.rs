@@ -8,6 +8,7 @@ pub mod config;
 pub mod error;
 pub mod obs;
 pub mod outbox;
+pub mod people;
 pub mod platform;
 pub mod reconciler;
 pub mod routes;

@@ -3,7 +3,7 @@ use super::*;
 use veda_core::store::MemoryStore;
 use veda_types::{
     Memory, MemoryInsert, MemoryKind, MemoryPatch, MemoryScopeFilter, MemoryScopeType, NewMemory,
-    Principal, PrincipalKind, PrincipalSource,
+    PersonProfile, Principal, PrincipalKind, PrincipalSource,
 };
 
 /// MemorySync heal task, enqueued in the SAME transaction as the memory
@@ -80,14 +80,20 @@ fn allowed_expr(allowed: &[(MemoryScopeType, String)]) -> String {
 }
 
 /// The read-side scope filter (single primitive, design §4.1). Literal
-/// 'workspace'/'principal' strings are constants, not caller input.
+/// 'workspace'/'principal'/'dept' strings are constants, not caller input.
 fn filter_expr(filter: &MemoryScopeFilter) -> &'static str {
     match filter {
         MemoryScopeFilter::Scope { .. } => "(scope_type = ? AND scope_id = ?)",
-        MemoryScopeFilter::Context { .. } => {
+        MemoryScopeFilter::Context { dept_id: None, .. } => {
             "((scope_type = 'workspace' AND scope_id = ?) \
               OR (scope_type = 'principal' AND scope_id = ? \
                   AND (origin_workspace_id IS NULL OR origin_workspace_id = ?)))"
+        }
+        MemoryScopeFilter::Context { dept_id: Some(_), .. } => {
+            "((scope_type = 'workspace' AND scope_id = ?) \
+              OR (scope_type = 'principal' AND scope_id = ? \
+                  AND (origin_workspace_id IS NULL OR origin_workspace_id = ?)) \
+              OR (scope_type = 'dept' AND scope_id = ?))"
         }
     }
 }
@@ -104,7 +110,14 @@ fn bind_filter<'q>(
         MemoryScopeFilter::Context {
             workspace_id,
             principal_id,
-        } => q.bind(workspace_id).bind(principal_id).bind(workspace_id),
+            dept_id,
+        } => {
+            let q = q.bind(workspace_id).bind(principal_id).bind(workspace_id);
+            match dept_id {
+                Some(d) => q.bind(d),
+                None => q,
+            }
+        }
     }
 }
 
@@ -222,6 +235,13 @@ impl MemoryStore for MysqlStore {
         let scope_type: MemoryScopeType = db_enum("memory_scope_type", &st_str)?;
         let scope_id: String = row.try_get("scope_id").map_err(storage_err)?;
 
+        // A round-tripped unchanged scope is NOT a move — treating it as
+        // one would wrongly clear origin_workspace_id (a pinned personal
+        // note would go portable) and churn the vector row.
+        let scope_move = patch
+            .scope
+            .as_ref()
+            .filter(|(st, sid)| *st != scope_type || sid != &scope_id);
         let mut sets: Vec<&str> = Vec::new();
         if patch.content.is_some() {
             sets.push("content = ?");
@@ -235,6 +255,13 @@ impl MemoryStore for MysqlStore {
         }
         if patch.expires_at.is_some() {
             sets.push("expires_at = ?");
+        }
+        if scope_move.is_some() {
+            // Scope move relocates the row in place; only personal rows
+            // carry an origin, so it clears on any move.
+            sets.push("scope_type = ?");
+            sets.push("scope_id = ?");
+            sets.push("origin_workspace_id = NULL");
         }
         sets.push("updated_by = ?");
         let sql = format!("UPDATE veda_memories SET {} WHERE id = ?", sets.join(", "));
@@ -255,22 +282,31 @@ impl MemoryStore for MysqlStore {
         if let Some(e) = patch.expires_at {
             q = q.bind(e.naive_utc());
         }
+        if let Some((st, sid)) = scope_move {
+            q = q.bind(st.as_str()).bind(sid);
+        }
         q = q.bind(updated_by).bind(id);
         match q.execute(&mut *tx).await {
             Ok(_) => {}
             Err(e) if is_mysql_duplicate(&e) => {
                 return Err(VedaError::AlreadyExists(
-                    "an identical memory already exists in this scope".into(),
+                    "an identical memory already exists in the target scope".into(),
                 ))
             }
             Err(e) => return Err(storage_err(e)),
         }
-        // Content changed → the vector must follow; the task commits with
-        // the row change so no failure or crash window can lose it.
-        if patch.content.is_some() {
+        // Content or scope changed → the vector row must follow. The event
+        // carries the POST-update scope: the worker rereads under the
+        // event's scope filter, so an old-scope event after a move would
+        // miss the row and leave stale Milvus scalars (M3a R6).
+        if patch.content.is_some() || scope_move.is_some() {
+            let (sync_type, sync_id) = match scope_move {
+                Some((st, sid)) => (*st, sid.clone()),
+                None => (scope_type, scope_id.clone()),
+            };
             insert_outbox_conn(
                 &mut *tx,
-                &memory_sync_event(scope_type, &scope_id, id, "upsert"),
+                &memory_sync_event(sync_type, &sync_id, id, "upsert"),
             )
             .await?;
         }
@@ -364,60 +400,178 @@ impl MemoryStore for MysqlStore {
         Ok(())
     }
 
-    async fn ensure_principal(
+    async fn get_principal_by_identity(
+        &self,
+        source: PrincipalSource,
+        external_id: &str,
+    ) -> Result<Option<Principal>> {
+        let row = sqlx::query(&format!(
+            "SELECT {PRINCIPAL_COLS} FROM veda_principal_identities i \
+             JOIN veda_principals p ON p.id = i.principal_id \
+             WHERE i.source = ? AND i.external_id = ?"
+        ))
+        .bind(source.as_str())
+        .bind(external_id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(storage_err)?;
+        row.as_ref().map(row_to_principal).transpose()
+    }
+
+    async fn ensure_principal_for_identity(
         &self,
         source: PrincipalSource,
         external_id: &str,
         kind: PrincipalKind,
-        display_name: Option<&str>,
+        profile: Option<&PersonProfile>,
     ) -> Result<Principal> {
-        const COLS: &str = "id, kind, source, external_id, display_name, created_at";
-        let get = |pool: MySqlPool| async move {
-            let row = sqlx::query(&format!(
-                "SELECT {COLS} FROM veda_principals WHERE source = ? AND external_id = ?"
-            ))
-            .bind(source.as_str())
-            .bind(external_id)
-            .fetch_optional(&pool)
-            .await
-            .map_err(storage_err)?;
-            row.map(|r| -> Result<Principal> {
-                let k: String = r.try_get("kind").map_err(storage_err)?;
-                let s: String = r.try_get("source").map_err(storage_err)?;
-                Ok(Principal {
-                    id: r.try_get("id").map_err(storage_err)?,
-                    kind: db_enum("principal_kind", &k)?,
-                    source: db_enum("principal_source", &s)?,
-                    external_id: r.try_get("external_id").map_err(storage_err)?,
-                    display_name: r.try_get("display_name").map_err(storage_err)?,
-                    created_at: r.try_get("created_at").map_err(storage_err)?,
-                })
-            })
-            .transpose()
-        };
-        if let Some(p) = get(self.pool.clone()).await? {
-            return Ok(p);
+        if let Some(p) = self.get_principal_by_identity(source, external_id).await? {
+            return match profile {
+                Some(prof) => self.apply_profile(p, prof).await,
+                None => Ok(p),
+            };
+        }
+        // New identity. A profile naming an already-known emp_no attaches
+        // the identity to that principal — the cross-entrance merge.
+        if let Some(prof) = profile {
+            if let Some(owner) = self.get_principal_by_emp_no(&prof.emp_no).await? {
+                self.insert_identity(source, external_id, &owner.id).await?;
+                return self.apply_profile(owner, prof).await;
+            }
         }
         let id = uuid::Uuid::new_v4().to_string();
         let res = sqlx::query(
-            "INSERT INTO veda_principals (id, kind, source, external_id, display_name) \
-             VALUES (?, ?, ?, ?, ?)",
+            "INSERT INTO veda_principals \
+             (id, kind, emp_no, display_name, dept_id, dept_name, profile_synced_at) \
+             VALUES (?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(&id)
         .bind(kind.as_str())
-        .bind(source.as_str())
-        .bind(external_id)
-        .bind(display_name)
+        .bind(profile.map(|p| p.emp_no.as_str()))
+        .bind(profile.and_then(|p| p.display_name.as_deref()))
+        .bind(profile.and_then(|p| p.dept_id.as_deref()))
+        .bind(profile.and_then(|p| p.dept_name.as_deref()))
+        .bind(profile.map(|_| Utc::now().naive_utc()))
         .execute(&self.pool)
         .await;
         match res {
-            Ok(_) => {}
-            // Lost the first-sighting race — the winner's row is what we want.
-            Err(e) if is_mysql_duplicate(&e) => {}
+            Ok(_) => {
+                self.insert_identity(source, external_id, &id).await?;
+            }
+            // Lost an emp_no race: another entrance created the person
+            // between our lookup and insert — attach to the winner.
+            Err(e) if is_mysql_duplicate(&e) => {
+                if let Some(prof) = profile {
+                    if let Some(owner) = self.get_principal_by_emp_no(&prof.emp_no).await? {
+                        self.insert_identity(source, external_id, &owner.id).await?;
+                    }
+                }
+            }
             Err(e) => return Err(storage_err(e)),
         }
-        get(self.pool.clone())
+        self.get_principal_by_identity(source, external_id)
             .await?
             .ok_or_else(|| VedaError::Storage("principal vanished after ensure".into()))
+    }
+}
+
+const PRINCIPAL_COLS: &str = "p.id, p.kind, p.emp_no, p.display_name, p.dept_id, p.dept_name, \
+     p.profile_synced_at, p.created_at";
+
+fn row_to_principal(r: &sqlx::mysql::MySqlRow) -> Result<Principal> {
+    let k: String = r.try_get("kind").map_err(storage_err)?;
+    Ok(Principal {
+        id: r.try_get("id").map_err(storage_err)?,
+        kind: db_enum("principal_kind", &k)?,
+        emp_no: r.try_get("emp_no").map_err(storage_err)?,
+        display_name: r.try_get("display_name").map_err(storage_err)?,
+        dept_id: r.try_get("dept_id").map_err(storage_err)?,
+        dept_name: r.try_get("dept_name").map_err(storage_err)?,
+        profile_synced_at: r.try_get("profile_synced_at").map_err(storage_err)?,
+        created_at: r.try_get("created_at").map_err(storage_err)?,
+    })
+}
+
+impl MysqlStore {
+    async fn get_principal_by_emp_no(&self, emp_no: &str) -> Result<Option<Principal>> {
+        let row = sqlx::query(&format!(
+            "SELECT {PRINCIPAL_COLS} FROM veda_principals p WHERE p.emp_no = ?"
+        ))
+        .bind(emp_no)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(storage_err)?;
+        row.as_ref().map(row_to_principal).transpose()
+    }
+
+    /// Idempotent identity insert: a duplicate means a racer attached this
+    /// identity first — its binding wins, per the no-repoint rule.
+    async fn insert_identity(
+        &self,
+        source: PrincipalSource,
+        external_id: &str,
+        principal_id: &str,
+    ) -> Result<()> {
+        let res = sqlx::query(
+            "INSERT INTO veda_principal_identities (source, external_id, principal_id) \
+             VALUES (?, ?, ?)",
+        )
+        .bind(source.as_str())
+        .bind(external_id)
+        .bind(principal_id)
+        .execute(&self.pool)
+        .await;
+        match res {
+            Ok(_) => Ok(()),
+            Err(e) if is_mysql_duplicate(&e) => Ok(()),
+            Err(e) => Err(storage_err(e)),
+        }
+    }
+
+    /// Refresh directory-derived fields. dept/name/synced_at always follow
+    /// the directory (调岗 takes effect here); emp_no only fills in when
+    /// free — a taken emp_no keeps the principals split with a warn, never
+    /// repoints (M3a §1.2: merges are in-place backfills only).
+    async fn apply_profile(&self, p: Principal, prof: &PersonProfile) -> Result<Principal> {
+        sqlx::query(
+            "UPDATE veda_principals SET display_name = ?, dept_id = ?, dept_name = ?, \
+             profile_synced_at = ? WHERE id = ?",
+        )
+        .bind(prof.display_name.as_deref())
+        .bind(prof.dept_id.as_deref())
+        .bind(prof.dept_name.as_deref())
+        .bind(Utc::now().naive_utc())
+        .bind(&p.id)
+        .execute(&self.pool)
+        .await
+        .map_err(storage_err)?;
+        if p.emp_no.is_none() {
+            let res = sqlx::query(
+                "UPDATE veda_principals SET emp_no = ? WHERE id = ? AND emp_no IS NULL",
+            )
+            .bind(&prof.emp_no)
+            .bind(&p.id)
+            .execute(&self.pool)
+            .await;
+            match res {
+                Ok(_) => {}
+                Err(e) if is_mysql_duplicate(&e) => {
+                    tracing::warn!(
+                        principal = %p.id,
+                        emp_no = %prof.emp_no,
+                        "emp_no already owned by another principal; keeping identities split"
+                    );
+                }
+                Err(e) => return Err(storage_err(e)),
+            }
+        }
+        let row = sqlx::query(&format!(
+            "SELECT {PRINCIPAL_COLS} FROM veda_principals p WHERE p.id = ?"
+        ))
+        .bind(&p.id)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(storage_err)?;
+        row_to_principal(&row)
     }
 }

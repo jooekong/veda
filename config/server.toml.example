@@ -134,6 +134,16 @@ max_concurrency = 8                      # VEDA_EMBEDDING_MAX_CONCURRENCY
 # burn LLM budget. Excess requests get 429 THROTTLED immediately, no queue.
 # answer_concurrency = 2
 
+# External person directory (company SSO/HR) behind operator identity
+# resolution (X-Veda-Operator, M3a). Absent = identity-only mode: operators
+# resolve per-entrance, no 工号 merge, no dept memory domain. The request
+# shape lives in veda-server/src/people.rs::build_request (adjust there when
+# the SSO contract lands). TOML-only.
+# [people]
+# base_url = "https://sso.example.com/api"
+# token = "xxx"
+# timeout_secs = 2      # per-lookup; cache misses only, callers degrade
+
 # Outbox consumer (chunk / embed / summarize / extract). TOML-only, no env
 # overrides. IMPORTANT: the outbox assumes a SINGLE writer — host:pid fencing
 # was removed in the 2026-07 single-pod simplification. Never point two

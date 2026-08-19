@@ -268,6 +268,13 @@ async fn mcp_post(
         Ok(Some(triple)) => triple,
     };
 
+    // Operator assertion rides the MCP HTTP request's headers (one client =
+    // one operator, configured alongside the wk_ key). Same parse as REST.
+    let operator = match crate::auth::parse_operator(&headers) {
+        Ok(op) => op,
+        Err(m) => return rpc_error_response(id, -32602, &m),
+    };
+
     // Metric labels come only from fixed strings / the tool whitelist —
     // request-supplied method or tool names must never become label values,
     // or arbitrary clients could explode the metrics cardinality.
@@ -278,7 +285,7 @@ async fn mcp_post(
         "tools/call" => {
             let tool = params.get("name").and_then(Value::as_str).unwrap_or("");
             let label = tool_metric_label(tool);
-            (label, tools_call(&state, &auth, &params).await)
+            (label, tools_call(&state, &auth, operator.as_ref(), &params).await)
         }
         other => ("unknown", Err(RpcError::method_not_found(other))),
     };
@@ -525,7 +532,7 @@ fn tool_specs() -> Vec<Value> {
                     "content": { "type": "string", "description": "The fact, one line, self-contained. Max 4096 chars." },
                     "kind": { "type": "string", "enum": ["fact", "preference", "decision", "procedure"],
                         "description": "What kind of knowledge this is. Default 'fact'. 'preference' follows the person across workspaces." },
-                    "scope": { "type": "string", "enum": ["mine", "team", "self"],
+                    "scope": { "type": "string", "enum": ["mine", "team", "dept", "self"],
                         "description": "Where it lives. Default 'mine'. Use 'team' for shared-resource knowledge." },
                     "topic": { "type": "string", "description": "Grouping label, like a wiki page name (e.g. 'testing', 'deploy'). Omit to join the nearest existing topic." },
                     "source_ref": { "type": "object", "description": "Evidence pointers: {\"files\": [\"/path\"], \"qa_log_ids\": [], \"memory_ids\": []}. Attach when the fact came from somewhere citable." },
@@ -549,7 +556,9 @@ fn tool_specs() -> Vec<Value> {
                     "content": { "type": "string", "description": "New content. Omit to keep." },
                     "topic": { "type": "string", "description": "New topic. Omit to keep." },
                     "source_ref": { "type": "object", "description": "New evidence pointers. Omit to keep." },
-                    "expires_at": { "type": "string", "description": "New RFC3339 expiry. Omit to keep." }
+                    "expires_at": { "type": "string", "description": "New RFC3339 expiry. Omit to keep." },
+                    "scope": { "type": "string", "enum": ["mine", "team", "dept", "self"],
+                        "description": "Move the memory to another domain (e.g. promote a personal note to team). Same row, id and authorship preserved. Omit to keep." }
                 },
                 "required": ["id"]
             }
@@ -580,7 +589,7 @@ fn tool_specs() -> Vec<Value> {
                 "type": "object",
                 "properties": {
                     "query": { "type": "string", "description": "What to look for." },
-                    "scope": { "type": "string", "enum": ["mine", "team", "self"],
+                    "scope": { "type": "string", "enum": ["mine", "team", "dept", "self"],
                         "description": "Restrict to one domain. Omit = team + personal together." },
                     "limit": { "type": "integer", "description": "Max memories, default 10, cap 50." }
                 },
@@ -595,6 +604,7 @@ fn tool_specs() -> Vec<Value> {
 async fn tools_call(
     state: &Arc<AppState>,
     auth: &AuthWorkspace,
+    operator: Option<&(veda_types::PrincipalSource, String)>,
     params: &Value,
 ) -> Result<Value, RpcError> {
     let Some(name) = params.get("name").and_then(Value::as_str) else {
@@ -607,7 +617,7 @@ async fn tools_call(
     } else {
         TOOL_TIMEOUT
     };
-    match tokio::time::timeout(timeout, run_tool(state, auth, name, &args)).await {
+    match tokio::time::timeout(timeout, run_tool(state, auth, operator, name, &args)).await {
         Ok(Ok(text)) => Ok(tool_result(text, false)),
         Ok(Err(ToolError::Rpc(e))) => Err(e),
         Ok(Err(ToolError::Domain(text))) => Ok(tool_result(text, true)),
@@ -625,6 +635,7 @@ fn tool_result(text: String, is_error: bool) -> Value {
 async fn run_tool(
     state: &Arc<AppState>,
     auth: &AuthWorkspace,
+    operator: Option<&(veda_types::PrincipalSource, String)>,
     name: &str,
     args: &Value,
 ) -> Result<String, ToolError> {
@@ -635,12 +646,12 @@ async fn run_tool(
         "read_file" => tool_read_file(state, auth, args).await,
         "list_dir" => tool_list_dir(state, auth, args).await,
         "overview" => tool_overview(state, auth, args).await,
-        "ask" => tool_ask(state, auth, args).await,
-        "memory_save" => tool_memory_save(state, auth, args).await,
-        "memory_update" => tool_memory_update(state, auth, args).await,
-        "memory_delete" => tool_memory_delete(state, auth, args).await,
-        "memory_search" => tool_memory_search(state, auth, args).await,
-        "memory_context" => tool_memory_context(state, auth, args).await,
+        "ask" => tool_ask(state, auth, operator, args).await,
+        "memory_save" => tool_memory_save(state, auth, operator, args).await,
+        "memory_update" => tool_memory_update(state, auth, operator, args).await,
+        "memory_delete" => tool_memory_delete(state, auth, operator, args).await,
+        "memory_search" => tool_memory_search(state, auth, operator, args).await,
+        "memory_context" => tool_memory_context(state, auth, operator, args).await,
         other => Err(RpcError::invalid_params(format!("unknown tool: {other}")).into()),
     }
 }
@@ -915,6 +926,7 @@ async fn tool_overview(
 async fn tool_ask(
     state: &Arc<AppState>,
     auth: &AuthWorkspace,
+    operator: Option<&(veda_types::PrincipalSource, String)>,
     args: &Value,
 ) -> Result<String, ToolError> {
     let question = required_str(args, "question")?.trim();
@@ -930,6 +942,21 @@ async fn tool_ask(
         return Err(ToolError::Domain(
             "ask is disabled on this server (no LLM configured); use search instead".into(),
         ));
+    };
+
+    // MCP is a single-user surface: the operator (when asserted) is the
+    // audience, so full-context injection applies. Unresolvable degrades
+    // to team-only, same as the REST answer route.
+    let answer_operator = match operator {
+        Some((source, external_id)) => state
+            .memory_service
+            .resolve_operator_actor(&auth.workspace_id, *source, external_id)
+            .await
+            .unwrap_or_else(|e| {
+                tracing::warn!(err = %e, "mcp ask: operator resolution failed, team-only");
+                None
+            }),
+        None => None,
     };
 
     // Same per-workspace gate as POST /v1/answer: one LLM concurrency budget
@@ -951,6 +978,7 @@ async fn tool_ask(
             path_prefix.as_deref(),
             ASK_LIMIT,
             None,
+            answer_operator,
         ),
     )
     .await;
@@ -1017,15 +1045,38 @@ fn require_memory_write(auth: &AuthWorkspace) -> Result<(), ToolError> {
     Ok(())
 }
 
+/// Same resolution ladder as the REST memory routes (routes/memory.rs):
+/// operator when present (key principal kept for scope=self), team-only
+/// collapse when the operator can't resolve — the service enforces the
+/// degraded semantics.
 async fn memory_actor(
     state: &Arc<AppState>,
     auth: &AuthWorkspace,
+    operator: Option<&(veda_types::PrincipalSource, String)>,
 ) -> Result<veda_core::service::memory::MemoryActor, ToolError> {
-    state
+    let key_actor = state
         .memory_service
         .resolve_key_actor(&auth.workspace_id, &auth.key_id)
         .await
-        .map_err(domain)
+        .map_err(domain)?;
+    let Some((source, external_id)) = operator else {
+        return Ok(key_actor);
+    };
+    match state
+        .memory_service
+        .resolve_operator_actor(&auth.workspace_id, *source, external_id)
+        .await
+        .map_err(domain)?
+    {
+        Some(mut a) => {
+            a.self_principal_id = Some(key_actor.principal_id);
+            Ok(a)
+        }
+        None => Ok(veda_core::service::memory::MemoryActor {
+            team_only: true,
+            ..key_actor
+        }),
+    }
 }
 
 fn memory_item_json(item: veda_types::api::MemoryItem) -> Value {
@@ -1035,11 +1086,12 @@ fn memory_item_json(item: veda_types::api::MemoryItem) -> Value {
 async fn tool_memory_save(
     state: &Arc<AppState>,
     auth: &AuthWorkspace,
+    operator: Option<&(veda_types::PrincipalSource, String)>,
     args: &Value,
 ) -> Result<String, ToolError> {
     require_memory_write(auth)?;
     let req: veda_types::api::SaveMemoryApiRequest = parse_args(args)?;
-    let actor = memory_actor(state, auth).await?;
+    let actor = memory_actor(state, auth, operator).await?;
     let out = state
         .memory_service
         .save(
@@ -1077,6 +1129,7 @@ async fn tool_memory_save(
 async fn tool_memory_update(
     state: &Arc<AppState>,
     auth: &AuthWorkspace,
+    operator: Option<&(veda_types::PrincipalSource, String)>,
     args: &Value,
 ) -> Result<String, ToolError> {
     require_memory_write(auth)?;
@@ -1089,7 +1142,7 @@ async fn tool_memory_update(
         o.remove("id");
     }
     let req: veda_types::api::UpdateMemoryApiRequest = parse_args(&rest)?;
-    let actor = memory_actor(state, auth).await?;
+    let actor = memory_actor(state, auth, operator).await?;
     let m = state
         .memory_service
         .update(
@@ -1100,6 +1153,7 @@ async fn tool_memory_update(
                 topic: req.topic,
                 source_ref: req.source_ref,
                 expires_at: req.expires_at,
+                scope: req.scope,
             },
         )
         .await
@@ -1114,6 +1168,7 @@ async fn tool_memory_update(
 async fn tool_memory_delete(
     state: &Arc<AppState>,
     auth: &AuthWorkspace,
+    operator: Option<&(veda_types::PrincipalSource, String)>,
     args: &Value,
 ) -> Result<String, ToolError> {
     require_memory_write(auth)?;
@@ -1121,7 +1176,7 @@ async fn tool_memory_delete(
         .get("id")
         .and_then(Value::as_i64)
         .ok_or_else(|| RpcError::invalid_params("missing integer 'id'"))?;
-    let actor = memory_actor(state, auth).await?;
+    let actor = memory_actor(state, auth, operator).await?;
     state
         .memory_service
         .delete(&actor, id)
@@ -1156,10 +1211,11 @@ fn memory_hits_json(hits: Vec<veda_core::service::memory::MemoryHit>) -> Value {
 async fn tool_memory_search(
     state: &Arc<AppState>,
     auth: &AuthWorkspace,
+    operator: Option<&(veda_types::PrincipalSource, String)>,
     args: &Value,
 ) -> Result<String, ToolError> {
     let q: MemoryQueryArgs = parse_args(args)?;
-    let actor = memory_actor(state, auth).await?;
+    let actor = memory_actor(state, auth, operator).await?;
     let hits = state
         .memory_service
         .search(&actor, &q.query, q.scope, q.limit.unwrap_or(10))
@@ -1171,10 +1227,11 @@ async fn tool_memory_search(
 async fn tool_memory_context(
     state: &Arc<AppState>,
     auth: &AuthWorkspace,
+    operator: Option<&(veda_types::PrincipalSource, String)>,
     args: &Value,
 ) -> Result<String, ToolError> {
     let q: MemoryQueryArgs = parse_args(args)?;
-    let actor = memory_actor(state, auth).await?;
+    let actor = memory_actor(state, auth, operator).await?;
     let hits = state
         .memory_service
         .context(&actor, &q.query, q.limit.unwrap_or(10))

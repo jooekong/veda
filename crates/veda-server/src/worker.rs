@@ -849,6 +849,7 @@ impl Worker {
                 scope_type: memory.scope_type,
                 scope_id: memory.scope_id.clone(),
                 origin_workspace_id: memory.origin_workspace_id.clone().unwrap_or_default(),
+                content: memory.content.clone(),
                 vector,
             }])
             .await

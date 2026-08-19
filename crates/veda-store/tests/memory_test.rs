@@ -89,14 +89,14 @@ async fn mysql_memory_crud_scoping_and_expiry() {
     // resolves to the same row.
     let key_id = Uuid::new_v4().to_string();
     let p1 = store
-        .ensure_principal(PrincipalSource::Key, &key_id, PrincipalKind::Human, None)
+        .ensure_principal_for_identity(PrincipalSource::Key, &key_id, PrincipalKind::Human, None)
         .await
         .expect("ensure principal");
     let p2 = store
-        .ensure_principal(PrincipalSource::Key, &key_id, PrincipalKind::Human, None)
+        .ensure_principal_for_identity(PrincipalSource::Key, &key_id, PrincipalKind::Human, None)
         .await
         .expect("ensure principal again");
-    assert_eq!(p1.id, p2.id, "ensure_principal must be idempotent");
+    assert_eq!(p1.id, p2.id, "ensure_principal_for_identity must be idempotent");
 
     let team_scope = (MemoryScopeType::Workspace, ws.clone());
     let personal_scope = (MemoryScopeType::Principal, p1.id.clone());
@@ -183,6 +183,7 @@ async fn mysql_memory_crud_scoping_and_expiry() {
     let ctx = MemoryScopeFilter::Context {
         workspace_id: ws.clone(),
         principal_id: p1.id.clone(),
+        dept_id: None,
     };
     let got = store
         .get_memories_by_ids(&all_ids, &ctx)
@@ -480,6 +481,7 @@ async fn milvus_memory_index_scope_filter_and_delete() {
             scope_type,
             scope_id: scope_id.to_string(),
             origin_workspace_id: origin.to_string(),
+            content: format!("memory row {off}"),
             vector: v,
         }
     };
@@ -497,6 +499,7 @@ async fn milvus_memory_index_scope_filter_and_delete() {
     // Single-scope filter sees only the team row.
     let team_only = store
         .search_memory_candidates(
+            "memory row",
             &probe,
             &MemoryScopeFilter::Scope {
                 scope_type: MemoryScopeType::Workspace,
@@ -513,10 +516,12 @@ async fn milvus_memory_index_scope_filter_and_delete() {
     // origin note stays invisible.
     let ctx = store
         .search_memory_candidates(
+            "memory row",
             &probe,
             &MemoryScopeFilter::Context {
                 workspace_id: ws.clone(),
                 principal_id: principal.clone(),
+                dept_id: None,
             },
             10,
         )
@@ -537,10 +542,12 @@ async fn milvus_memory_index_scope_filter_and_delete() {
         .expect("delete vectors");
     let after = store
         .search_memory_candidates(
+            "memory row",
             &probe,
             &MemoryScopeFilter::Context {
                 workspace_id: ws.clone(),
                 principal_id: principal.clone(),
+                dept_id: None,
             },
             10,
         )

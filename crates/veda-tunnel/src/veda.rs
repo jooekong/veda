@@ -119,6 +119,10 @@ pub struct AnswerCitation {
 pub struct MemoryCitation {
     #[serde(default)]
     pub content: String,
+    /// Domain label (M3a): "team" / "dept" / "mine". Absent on pre-M3a
+    /// servers — renders as the undecorated 记忆 line.
+    #[serde(default)]
+    pub scope: Option<String>,
 }
 
 /// Distinguishes "key is dead" (don't drop the WeCom connection, just flag
@@ -276,14 +280,19 @@ impl VedaClient {
         veda_key: &str,
         query: &str,
         prompt: Option<&str>,
+        operator: Option<&str>,
     ) -> Result<AnswerData, SearchError> {
         let url = format!("{}/v1/answer", self.base_url.trim_end_matches('/'));
-        let resp = self
+        let mut req = self
             .http
             .post(&url)
             .bearer_auth(veda_key)
             .json(&AnswerReq { query, prompt })
-            .timeout(ANSWER_TIMEOUT)
+            .timeout(ANSWER_TIMEOUT);
+        if let Some(op) = operator {
+            req = req.header("X-Veda-Operator", op);
+        }
+        let resp = req
             .send()
             .await
             .map_err(|e| SearchError::Unavailable(e.to_string()))?;
@@ -325,16 +334,21 @@ impl VedaClient {
         veda_key: &str,
         query: &str,
         prompt: Option<&str>,
+        operator: Option<&str>,
     ) -> Result<tokio::sync::mpsc::Receiver<AnswerStreamItem>, SearchError> {
         use futures_util::StreamExt;
 
         let url = format!("{}/v1/answer/stream", self.base_url.trim_end_matches('/'));
-        let resp = self
+        let mut req = self
             .http
             .post(&url)
             .bearer_auth(veda_key)
             .json(&AnswerReq { query, prompt })
-            .timeout(ANSWER_TIMEOUT)
+            .timeout(ANSWER_TIMEOUT);
+        if let Some(op) = operator {
+            req = req.header("X-Veda-Operator", op);
+        }
+        let resp = req
             .send()
             .await
             .map_err(|e| SearchError::Unavailable(e.to_string()))?;

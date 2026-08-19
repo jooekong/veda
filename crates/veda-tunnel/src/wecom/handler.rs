@@ -126,9 +126,21 @@ pub async fn handle_message(ctx: HandlerCtx, req_id: String, body: MsgCallbackBo
         s.msg_count += 1;
     });
 
+    // Operator assertion (M3a §2 audience rule): only private chats carry
+    // the asker's identity — a group answer is visible to the whole group,
+    // so injecting personal/dept memories there would leak them. Fail
+    // closed: the header rides only an explicitly verified `single` chat
+    // with no chatid — a missing or unknown chattype (or a stray chatid)
+    // is treated as group-visible (Codex M3a-impl R4).
+    let operator = if chat_type == "single" && body.chatid.is_none() && !user_id.is_empty() {
+        Some(format!("wecom:{user_id}"))
+    } else {
+        None
+    };
+
     let started = std::time::Instant::now();
     let reply = if ctx.answer_enabled {
-        answer_reply_stream(&ctx, &req_id, &stream_id, &query, started).await
+        answer_reply_stream(&ctx, &req_id, &stream_id, &query, operator.as_deref(), started).await
     } else {
         search_reply(&ctx, &query, started).await
     };
@@ -304,10 +316,15 @@ fn answer_error_to_reply(ctx: &HandlerCtx, e: SearchError) -> Reply {
 /// Answer path: veda's `/v1/answer` RAG endpoint — body + a verifiable
 /// citation list, with per-error fallbacks (§8). Used directly when the
 /// server has no streaming endpoint yet, and as the streaming fallback.
-async fn answer_reply(ctx: &HandlerCtx, query: &str, started: std::time::Instant) -> Reply {
+async fn answer_reply(
+    ctx: &HandlerCtx,
+    query: &str,
+    operator: Option<&str>,
+    started: std::time::Instant,
+) -> Reply {
     match ctx
         .veda
-        .answer(&ctx.bot.veda_key, query, ctx.bot.prompt.as_deref())
+        .answer(&ctx.bot.veda_key, query, ctx.bot.prompt.as_deref(), operator)
         .await
     {
         Ok(data) => {
@@ -336,17 +353,18 @@ async fn answer_reply_stream(
     req_id: &str,
     stream_id: &str,
     query: &str,
+    operator: Option<&str>,
     started: std::time::Instant,
 ) -> Reply {
     let mut rx = match ctx
         .veda
-        .answer_stream(&ctx.bot.veda_key, query, ctx.bot.prompt.as_deref())
+        .answer_stream(&ctx.bot.veda_key, query, ctx.bot.prompt.as_deref(), operator)
         .await
     {
         Ok(rx) => rx,
         Err(SearchError::StreamUnsupported) => {
             info!(bot = %ctx.bot.name, "server has no /v1/answer/stream, falling back");
-            return answer_reply(ctx, query, started).await;
+            return answer_reply(ctx, query, operator, started).await;
         }
         Err(e) => return answer_error_to_reply(ctx, e),
     };
@@ -509,7 +527,7 @@ fn render_answer(data: &AnswerData) -> String {
     /// passages) or a team-memory line (M2a).
     enum Entry<'a> {
         File(&'a str, Vec<usize>),
-        Memory(&'a str, usize),
+        Memory(&'a str, Option<&'a str>, usize),
     }
     // Group file citations by path, preserving first-appearance order;
     // memory citations are one entry each (one memory = one citation).
@@ -524,7 +542,7 @@ fn render_answer(data: &AnswerData) -> String {
                 _ => entries.push(Entry::File(path, vec![c.index])),
             }
         } else if let Some(m) = &c.memory {
-            entries.push(Entry::Memory(&m.content, c.index));
+            entries.push(Entry::Memory(&m.content, m.scope.as_deref(), c.index));
         }
     }
     if entries.is_empty() {
@@ -547,8 +565,14 @@ fn render_answer(data: &AnswerData) -> String {
                 let marks: String = idxs.iter().map(|i| format!("[{i}]")).collect();
                 out.push_str(&format!("\n{marks} `{}`", if dup { *path } else { name }));
             }
-            Entry::Memory(content, idx) => {
-                out.push_str(&format!("\n[{idx}] 记忆：{}", truncate(content, 60)));
+            Entry::Memory(content, scope, idx) => {
+                let label = match *scope {
+                    Some("team") => "记忆(团队)",
+                    Some("dept") => "记忆(部门)",
+                    Some("mine") | Some("self") => "记忆(个人)",
+                    _ => "记忆",
+                };
+                out.push_str(&format!("\n[{idx}] {label}：{}", truncate(content, 60)));
             }
         }
     }
@@ -791,6 +815,7 @@ mod tests {
                     path: None,
                     memory: Some(crate::veda::MemoryCitation {
                         content: "发布窗口定在每周四晚 8 点".to_string(),
+                        scope: None,
                     }),
                 },
                 AnswerCitation {
@@ -801,8 +826,30 @@ mod tests {
             ],
         };
         let out = render_answer(&data);
+        // Pre-M3a servers send no scope — the undecorated label.
         assert!(out.contains("\n[1] 记忆：发布窗口定在每周四晚 8 点"), "{out}");
         assert!(out.contains("\n[2] `发布流程.md`"), "{out}");
+    }
+
+    #[test]
+    fn render_answer_memory_scope_labels() {
+        let mem = |scope: &str| crate::veda::MemoryCitation {
+            content: "x".to_string(),
+            scope: Some(scope.to_string()),
+        };
+        let data = AnswerData {
+            hit_count: 3,
+            answer: "a[1]b[2]c[3]".to_string(),
+            citations: vec![
+                AnswerCitation { index: 1, path: None, memory: Some(mem("team")) },
+                AnswerCitation { index: 2, path: None, memory: Some(mem("dept")) },
+                AnswerCitation { index: 3, path: None, memory: Some(mem("mine")) },
+            ],
+        };
+        let out = render_answer(&data);
+        assert!(out.contains("[1] 记忆(团队)："), "{out}");
+        assert!(out.contains("[2] 记忆(部门)："), "{out}");
+        assert!(out.contains("[3] 记忆(个人)："), "{out}");
     }
 
     #[test]

@@ -196,6 +196,13 @@ ssh -o ServerAliveInterval=20 <node> '
   ```
   任一 > 0 → **只能 roll-forward**(发修复版),不能退 pre-blob。`veda_file_blobs` 表留着无害,致命的是**数据格式**旧码不认。
 
+**memory M3a 门禁(含 M3a 的构建,双向都要动手,拍板零迁移 2026-08-18)**:M3a 改了
+principal 表定义(拆 identities)并把 memory collection 重建为 v2(content+BM25)。
+- **升级到 M3a 前**:目标库执行 `DROP TABLE IF EXISTS veda_principals, veda_principal_identities;`
+  + `TRUNCATE veda_memories;` + Milvus `POST /v2/vectordb/collections/drop {"collectionName":"veda_memories"}`,
+  重启后自建(存量记忆为 dogfood 级,拍板不保留)。
+- **从 M3a 回滚**:反向同样三 DROP,让旧 binary 自建旧定义;另跑下方 memory_sync dead 化。
+
 **memory 门禁(0.1.26 之后的 memory 构建 → 回滚到 0.1.26 及以前)**:memory 写入会在
 outbox 常态产生 `memory_sync` 事件,0.1.26 及以前的 claim 对未知 event_type 是整批
 反序列化失败——一行 pending `memory_sync` 就能卡死旧 binary 的**整个 outbox**

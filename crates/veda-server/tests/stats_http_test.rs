@@ -184,6 +184,7 @@ async fn build_app() -> TestApp {
             mysql.clone(),
             milvus.clone(),
             embedding.clone(),
+            None,
         )),
         summary_enabled: false,
         answer_service: None,

@@ -19,29 +19,59 @@ use veda_types::{
 };
 
 use crate::checksum::sha256_hex;
-use crate::store::{EmbeddingService, MemoryStore, MemoryVectorStore};
+use crate::store::{EmbeddingService, MemoryStore, MemoryVectorStore, PersonDirectory};
 
 /// Memories are one-liners; anything longer belongs in a document.
 const MAX_CONTENT_CHARS: usize = 4096;
 const MAX_TOPIC_CHARS: usize = 128;
 /// Neighbors returned by save (guides the agent toward update-vs-new).
 const NEIGHBOR_LIMIT: usize = 3;
-/// Candidate over-fetch: the MySQL recheck drops deleted/expired rows, so
-/// under-fetching would return fewer than `limit` live hits.
-const OVERFETCH: usize = 2;
+/// Candidate over-fetch: the MySQL recheck drops deleted/expired rows and
+/// cross-domain hash duplicates (a fact can live in up to three domains),
+/// so under-fetching would return fewer than `limit` live hits.
+const OVERFETCH: usize = 3;
 /// A topicless save inherits the top neighbor's topic only above this
 /// cosine score — below it the memory is genuinely new, leave topic unset.
 const TOPIC_INHERIT_MIN_SCORE: f32 = 0.75;
 /// Evidence pointers are references, not payloads.
 const MAX_SOURCE_REF_BYTES: usize = 4096;
+/// Directory profile freshness window: within it a cached principal row is
+/// authoritative and no directory call happens (调岗 lag upper bound).
+const PROFILE_TTL_HOURS: i64 = 24;
 
-/// Server-resolved identities for one call. `principal_id` comes from the
-/// request identity (M1: the wk_ key), never from client input — that rule
-/// is what makes the personal domain private.
+/// Server-resolved identities for one call. `principal_id`/`dept_id` come
+/// from the request identity (the wk_ key, or the operator the caller
+/// asserted via X-Veda-Operator), never from scope-id client input — that
+/// rule is what keeps domains server-resolved.
 #[derive(Debug, Clone)]
 pub struct MemoryActor {
     pub workspace_id: String,
     pub principal_id: String,
+    /// The wk_ key's own principal when it differs from `principal_id`
+    /// (operator present): `scope=self` targets this — agent state stays
+    /// with the agent while `mine` follows the human. None = no separate
+    /// agent identity (self ≡ mine, M1 semantics).
+    pub self_principal_id: Option<String>,
+    /// Operator's department (directory-resolved). None = no operator, no
+    /// directory, or the directory reports no department.
+    pub dept_id: Option<String>,
+    /// Degraded operator (asserted but unresolvable — directory down on a
+    /// never-seen identity): reads collapse to the team domain and
+    /// personal/dept scopes reject (M3a §1.2). Never set on clean paths.
+    pub team_only: bool,
+}
+
+impl MemoryActor {
+    /// Plain actor: one principal, no operator baggage.
+    pub fn new(workspace_id: String, principal_id: String) -> Self {
+        Self {
+            workspace_id,
+            principal_id,
+            self_principal_id: None,
+            dept_id: None,
+            team_only: false,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -79,6 +109,9 @@ pub struct UpdateMemoryInput {
     pub topic: Option<String>,
     pub source_ref: Option<serde_json::Value>,
     pub expires_at: Option<DateTime<Utc>>,
+    /// Move to another domain (mine → team promotion etc.), resolved
+    /// server-side against the actor like save's scope.
+    pub scope: Option<MemoryScope>,
 }
 
 // Durability note: every store write (insert/update-with-content/delete)
@@ -90,6 +123,9 @@ pub struct MemoryService {
     store: Arc<dyn MemoryStore>,
     vector: Arc<dyn MemoryVectorStore>,
     embedding: Arc<dyn EmbeddingService>,
+    /// None = `[people]` not configured: operators resolve to per-entrance
+    /// principals (emp_no NULL, no departments) — the pre-SSO mode.
+    directory: Option<Arc<dyn PersonDirectory>>,
 }
 
 impl MemoryService {
@@ -97,25 +133,113 @@ impl MemoryService {
         store: Arc<dyn MemoryStore>,
         vector: Arc<dyn MemoryVectorStore>,
         embedding: Arc<dyn EmbeddingService>,
+        directory: Option<Arc<dyn PersonDirectory>>,
     ) -> Self {
         Self {
             store,
             vector,
             embedding,
+            directory,
         }
     }
 
-    /// M1 identity resolution: the wk_ key is the person (one key per human
-    /// or per agent). First sighting lazily creates the principal.
+    /// Key-identity resolution (M1 semantics, still the no-operator path):
+    /// the wk_ key is the person. First sighting lazily creates the
+    /// principal. Keys never resolve through the directory and never carry
+    /// a department.
     pub async fn resolve_key_actor(&self, workspace_id: &str, key_id: &str) -> Result<MemoryActor> {
         let principal = self
             .store
-            .ensure_principal(PrincipalSource::Key, key_id, PrincipalKind::Human, None)
+            .ensure_principal_for_identity(PrincipalSource::Key, key_id, PrincipalKind::Human, None)
             .await?;
-        Ok(MemoryActor {
+        Ok(MemoryActor::new(workspace_id.to_string(), principal.id))
+    }
+
+    /// Operator resolution (M3a §1.2/§1.3). Returns:
+    /// - Ok(Some) — resolved actor (with dept when the directory knows one);
+    /// - Ok(None) — degrade to no-operator: brand-new identity while the
+    ///   directory is unreachable. Callers fall back to key semantics for
+    ///   reads and reject mine/dept writes;
+    /// - Err — the caller's assertion is bad (directory answered "no such
+    ///   person" for a never-seen identity).
+    pub async fn resolve_operator_actor(
+        &self,
+        workspace_id: &str,
+        source: PrincipalSource,
+        external_id: &str,
+    ) -> Result<Option<MemoryActor>> {
+        let cached = self.store.get_principal_by_identity(source, external_id).await?;
+        let fresh = |p: &veda_types::Principal| {
+            p.profile_synced_at
+                .is_some_and(|t| Utc::now() - t < chrono::Duration::hours(PROFILE_TTL_HOURS))
+        };
+        let principal = match (&self.directory, cached) {
+            // Directory not configured: identity-only mode, per-entrance
+            // principals, no profile ever.
+            (None, _) => {
+                self.store
+                    .ensure_principal_for_identity(source, external_id, PrincipalKind::Human, None)
+                    .await?
+            }
+            (Some(_), Some(p)) if fresh(&p) => p,
+            (Some(dir), cached) => match dir.lookup(source, external_id).await {
+                Ok(Some(profile)) => {
+                    self.store
+                        .ensure_principal_for_identity(
+                            source,
+                            external_id,
+                            PrincipalKind::Human,
+                            Some(&profile),
+                        )
+                        .await?
+                }
+                // Directory answered and knows no such person: a stale
+                // known identity keeps its personal notes working, but the
+                // department authorization must not outlive the documented
+                // TTL bound — strip it for this request (Codex M3a-impl R2;
+                // the row stays stale, so every later call re-asks the
+                // directory). A never-seen identity is a bad assertion.
+                Ok(None) => match cached {
+                    Some(p) => {
+                        warn!(
+                            principal = %p.id,
+                            "directory no longer knows this identity; dept dropped"
+                        );
+                        veda_types::Principal {
+                            dept_id: None,
+                            dept_name: None,
+                            ..p
+                        }
+                    }
+                    None => {
+                        return Err(VedaError::InvalidInput(format!(
+                            "operator {}:{external_id} not found in person directory",
+                            source.as_str()
+                        )))
+                    }
+                },
+                // Directory unreachable: cached profile continues (read
+                // fail-open); a brand-new identity degrades to no-operator
+                // rather than minting a half-identity (R4).
+                Err(e) => match cached {
+                    Some(p) => {
+                        warn!(err = %e, "person directory unavailable; using cached profile");
+                        p
+                    }
+                    None => {
+                        warn!(err = %e, "person directory unavailable; unknown operator degrades");
+                        return Ok(None);
+                    }
+                },
+            },
+        };
+        Ok(Some(MemoryActor {
             workspace_id: workspace_id.to_string(),
             principal_id: principal.id,
-        })
+            self_principal_id: None,
+            dept_id: principal.dept_id,
+            team_only: false,
+        }))
     }
 
     pub async fn save(
@@ -141,7 +265,7 @@ impl MemoryService {
             }
         }
 
-        let (scope_type, scope_id) = resolve_scope(actor, input.scope);
+        let (scope_type, scope_id) = resolve_scope(actor, input.scope)?;
         let origin = resolve_origin(actor, input.scope, input.kind, input.origin.as_deref());
 
         let vector = self.embed_one(content).await?;
@@ -150,7 +274,7 @@ impl MemoryService {
             scope_id: scope_id.clone(),
         };
         let neighbors = self
-            .lookup_candidates(&vector, &domain, NEIGHBOR_LIMIT)
+            .lookup_candidates(content, &vector, &domain, NEIGHBOR_LIMIT)
             .await?;
 
         // Topicless writes join the nearest existing topic when the
@@ -216,7 +340,7 @@ impl MemoryService {
         let filter = match scope {
             None => context_filter(actor),
             Some(s) => {
-                let (scope_type, scope_id) = resolve_scope(actor, s);
+                let (scope_type, scope_id) = resolve_scope(actor, s)?;
                 MemoryScopeFilter::Scope {
                     scope_type,
                     scope_id,
@@ -262,6 +386,7 @@ impl MemoryService {
             && input.topic.is_none()
             && input.source_ref.is_none()
             && input.expires_at.is_none()
+            && input.scope.is_none()
         {
             return Err(VedaError::InvalidInput("nothing to update".into()));
         }
@@ -294,16 +419,19 @@ impl MemoryService {
             topic: input.topic,
             source_ref: input.source_ref,
             expires_at: input.expires_at,
+            scope: input.scope.map(|s| resolve_scope(actor, s)).transpose()?,
         };
         let memory = self
             .store
             .update_memory(id, &allowed_scopes(actor), &patch, &actor.principal_id)
             .await?;
 
-        if patch.content.is_some() {
-            // Sync re-embed for immediate ranking freshness; the store
-            // committed a MemorySync task with the row change, so failures
-            // here cost latency, not convergence.
+        if patch.content.is_some() || patch.scope.is_some() {
+            // Sync re-embed for immediate freshness — a scope move must
+            // refresh the Milvus scalars even with unchanged content, or
+            // the target domain misses the row until the outbox heals. The
+            // store committed a MemorySync task with the row change, so
+            // failures here cost latency, not convergence.
             match self.embed_one(&memory.content).await {
                 Ok(v) => {
                     if let Err(e) = self
@@ -350,7 +478,7 @@ impl MemoryService {
         let limit = limit.clamp(1, 50);
         let vector = self.embed_one(query).await?;
         let hits = self
-            .lookup_candidates(&vector, filter, limit)
+            .lookup_candidates(query, &vector, filter, limit)
             .await?;
         let ids: Vec<i64> = hits.iter().map(|h| h.memory.id).collect();
         if !ids.is_empty() {
@@ -361,17 +489,21 @@ impl MemoryService {
         Ok(hits)
     }
 
-    /// Candidates from Milvus (over-fetched), rechecked against MySQL under
-    /// the same filter, returned in candidate (similarity) order.
+    /// Candidates from Milvus (hybrid, over-fetched), rechecked against
+    /// MySQL under the same filter, returned in candidate (fused-score)
+    /// order. Cross-domain exact duplicates (same content_hash living in
+    /// several domains, e.g. a personal note later shared to team) collapse
+    /// to the widest domain: team > dept > mine.
     async fn lookup_candidates(
         &self,
+        query_text: &str,
         vector: &[f32],
         filter: &MemoryScopeFilter,
         limit: usize,
     ) -> Result<Vec<MemoryHit>> {
         let candidates = self
             .vector
-            .search_memory_candidates(vector, filter, limit * OVERFETCH)
+            .search_memory_candidates(query_text, vector, filter, limit * OVERFETCH)
             .await?;
         if candidates.is_empty() {
             return Ok(vec![]);
@@ -380,18 +512,28 @@ impl MemoryService {
         let rows = self.store.get_memories_by_ids(&ids, filter).await?;
         let by_id: std::collections::HashMap<i64, Memory> =
             rows.into_iter().map(|m| (m.id, m)).collect();
-        let mut out = Vec::with_capacity(limit);
-        for c in candidates {
-            if let Some(m) = by_id.get(&c.id) {
-                out.push(MemoryHit {
+        // Walk every candidate (bounded by limit×OVERFETCH) so a wider-domain
+        // duplicate ranked lower can still displace a held narrow one, then
+        // truncate. Positions keep the fused-score order of first appearance.
+        let mut out: Vec<MemoryHit> = Vec::with_capacity(limit);
+        for c in &candidates {
+            let Some(m) = by_id.get(&c.id) else { continue };
+            match out
+                .iter_mut()
+                .find(|h| h.memory.content_hash == m.content_hash)
+            {
+                Some(held) => {
+                    if scope_width(m.scope_type) > scope_width(held.memory.scope_type) {
+                        held.memory = m.clone();
+                    }
+                }
+                None => out.push(MemoryHit {
                     memory: m.clone(),
                     score: c.score,
-                });
-                if out.len() >= limit {
-                    break;
-                }
+                }),
             }
         }
+        out.truncate(limit);
         Ok(out)
     }
 
@@ -419,27 +561,46 @@ fn validate_source_ref(source_ref: Option<&serde_json::Value>) -> Result<()> {
     Ok(())
 }
 
-fn resolve_scope(actor: &MemoryActor, scope: MemoryScope) -> (MemoryScopeType, String) {
-    match scope {
-        MemoryScope::Team => (MemoryScopeType::Workspace, actor.workspace_id.clone()),
-        // M1 identity is key-only, so the operator and the agent are the
-        // same principal; Mine and Self diverge once richer identity
-        // sources land (M2 gateway, M3 wecom).
-        MemoryScope::Mine | MemoryScope::SelfScope => {
-            (MemoryScopeType::Principal, actor.principal_id.clone())
-        }
+fn resolve_scope(actor: &MemoryActor, scope: MemoryScope) -> Result<(MemoryScopeType, String)> {
+    if actor.team_only && !matches!(scope, MemoryScope::Team) {
+        return Err(VedaError::InvalidInput(
+            "person directory unavailable; only team-scope memory operations are available"
+                .into(),
+        ));
     }
+    Ok(match scope {
+        MemoryScope::Team => (MemoryScopeType::Workspace, actor.workspace_id.clone()),
+        MemoryScope::Dept => match &actor.dept_id {
+            Some(d) => (MemoryScopeType::Dept, d.clone()),
+            None => {
+                return Err(VedaError::InvalidInput(
+                    "dept scope needs an operator with a directory-resolved department".into(),
+                ))
+            }
+        },
+        MemoryScope::Mine => (MemoryScopeType::Principal, actor.principal_id.clone()),
+        // Self = the agent's own domain. With an operator it targets the
+        // key principal (agent state stays with the agent); without one the
+        // key IS the principal, so Mine and Self coincide (M1 semantics).
+        MemoryScope::SelfScope => (
+            MemoryScopeType::Principal,
+            actor
+                .self_principal_id
+                .clone()
+                .unwrap_or_else(|| actor.principal_id.clone()),
+        ),
+    })
 }
 
 /// Origin defaulting (design §4.2): never validated, only defaulted.
-/// Team memories carry no origin at all.
+/// Team and dept memories carry no origin at all.
 fn resolve_origin(
     actor: &MemoryActor,
     scope: MemoryScope,
     kind: MemoryKind,
     origin: Option<&str>,
 ) -> Option<String> {
-    if matches!(scope, MemoryScope::Team) {
+    if matches!(scope, MemoryScope::Team | MemoryScope::Dept) {
         return None;
     }
     match origin {
@@ -453,20 +614,50 @@ fn resolve_origin(
 }
 
 fn context_filter(actor: &MemoryActor) -> MemoryScopeFilter {
+    if actor.team_only {
+        return MemoryScopeFilter::Scope {
+            scope_type: MemoryScopeType::Workspace,
+            scope_id: actor.workspace_id.clone(),
+        };
+    }
     MemoryScopeFilter::Context {
         workspace_id: actor.workspace_id.clone(),
         principal_id: actor.principal_id.clone(),
+        dept_id: actor.dept_id.clone(),
     }
 }
 
-/// The caller's writable domains: the current workspace's team domain and
-/// their own personal domain. Update/delete WHERE clauses are built from
-/// this — sharing the discipline that no memory write escapes its scopes.
+/// Cross-domain dedup priority (§1.6): the widest audience wins — the
+/// shared copy is the authoritative citation, private drafts yield.
+fn scope_width(t: MemoryScopeType) -> u8 {
+    match t {
+        MemoryScopeType::Workspace => 3,
+        MemoryScopeType::Dept => 2,
+        MemoryScopeType::Principal => 1,
+    }
+}
+
+/// The caller's writable domains: the current workspace's team domain,
+/// their own personal domain, and their department when known.
+/// Update/delete WHERE clauses are built from this — sharing the discipline
+/// that no memory write escapes its scopes.
 fn allowed_scopes(actor: &MemoryActor) -> Vec<(MemoryScopeType, String)> {
-    vec![
+    if actor.team_only {
+        return vec![(MemoryScopeType::Workspace, actor.workspace_id.clone())];
+    }
+    let mut v = vec![
         (MemoryScopeType::Workspace, actor.workspace_id.clone()),
         (MemoryScopeType::Principal, actor.principal_id.clone()),
-    ]
+    ];
+    if let Some(sp) = &actor.self_principal_id {
+        if sp != &actor.principal_id {
+            v.push((MemoryScopeType::Principal, sp.clone()));
+        }
+    }
+    if let Some(d) = &actor.dept_id {
+        v.push((MemoryScopeType::Dept, d.clone()));
+    }
+    v
 }
 
 fn embedding_row(memory: &Memory, vector: Vec<f32>) -> MemoryWithEmbedding {
@@ -475,6 +666,7 @@ fn embedding_row(memory: &Memory, vector: Vec<f32>) -> MemoryWithEmbedding {
         scope_type: memory.scope_type,
         scope_id: memory.scope_id.clone(),
         origin_workspace_id: memory.origin_workspace_id.clone().unwrap_or_default(),
+        content: memory.content.clone(),
         vector,
     }
 }
@@ -516,6 +708,10 @@ mod tests {
         candidates: Vec<MemoryCandidate>,
         fail_vector_upsert: bool,
         duplicate_of: Option<i64>,
+        /// Principal returned by get_principal_by_identity (identity cache).
+        cached_principal: Option<Principal>,
+        /// Profiles passed into ensure_principal_for_identity.
+        ensured_profiles: Vec<Option<veda_types::PersonProfile>>,
     }
 
     #[derive(Default)]
@@ -587,14 +783,33 @@ mod tests {
             Ok(())
         }
 
-        async fn ensure_principal(
+        async fn get_principal_by_identity(
             &self,
             _source: PrincipalSource,
             _external_id: &str,
-            _kind: PrincipalKind,
-            _display_name: Option<&str>,
+        ) -> Result<Option<Principal>> {
+            Ok(self.0.lock().unwrap().cached_principal.clone())
+        }
+
+        async fn ensure_principal_for_identity(
+            &self,
+            _source: PrincipalSource,
+            external_id: &str,
+            kind: PrincipalKind,
+            profile: Option<&veda_types::PersonProfile>,
         ) -> Result<Principal> {
-            unimplemented!()
+            let mut s = self.0.lock().unwrap();
+            s.ensured_profiles.push(profile.cloned());
+            Ok(Principal {
+                id: format!("P-{external_id}"),
+                kind,
+                emp_no: profile.map(|p| p.emp_no.clone()),
+                display_name: profile.and_then(|p| p.display_name.clone()),
+                dept_id: profile.and_then(|p| p.dept_id.clone()),
+                dept_name: profile.and_then(|p| p.dept_name.clone()),
+                profile_synced_at: profile.map(|_| Utc::now()),
+                created_at: Utc::now(),
+            })
         }
     }
 
@@ -617,6 +832,7 @@ mod tests {
         }
         async fn search_memory_candidates(
             &self,
+            _query_text: &str,
             _vector: &[f32],
             _filter: &MemoryScopeFilter,
             _limit: usize,
@@ -637,14 +853,11 @@ mod tests {
     }
 
     fn service(mock: Arc<Mock>) -> MemoryService {
-        MemoryService::new(mock.clone(), mock.clone(), Arc::new(MockEmbed))
+        MemoryService::new(mock.clone(), mock.clone(), Arc::new(MockEmbed), None)
     }
 
     fn actor() -> MemoryActor {
-        MemoryActor {
-            workspace_id: "W1".into(),
-            principal_id: "P1".into(),
-        }
+        MemoryActor::new("W1".into(), "P1".into())
     }
 
     fn save_input(scope: MemoryScope, kind: MemoryKind) -> SaveMemoryInput {
@@ -795,5 +1008,254 @@ mod tests {
         let svc = service(mock.clone());
         svc.delete(&actor(), 9).await.unwrap();
         assert_eq!(mock.0.lock().unwrap().vectors_deleted, vec![9]);
+    }
+
+    fn person(emp: &str, dept: Option<&str>) -> veda_types::PersonProfile {
+        veda_types::PersonProfile {
+            emp_no: emp.into(),
+            display_name: Some("张三".into()),
+            dept_id: dept.map(Into::into),
+            dept_name: dept.map(|_| "基础架构".into()),
+        }
+    }
+
+    struct MockDirectory(std::result::Result<Option<veda_types::PersonProfile>, String>);
+    #[async_trait]
+    impl crate::store::PersonDirectory for MockDirectory {
+        async fn lookup(
+            &self,
+            _source: PrincipalSource,
+            _external_id: &str,
+        ) -> Result<Option<veda_types::PersonProfile>> {
+            match &self.0 {
+                Ok(p) => Ok(p.clone()),
+                Err(e) => Err(VedaError::Internal(e.clone())),
+            }
+        }
+    }
+
+    fn service_with_dir(
+        mock: Arc<Mock>,
+        dir: MockDirectory,
+    ) -> MemoryService {
+        MemoryService::new(mock.clone(), mock.clone(), Arc::new(MockEmbed), Some(Arc::new(dir)))
+    }
+
+    #[tokio::test]
+    async fn dept_save_requires_department() {
+        let mock = Arc::new(Mock::default());
+        let svc = service(mock.clone());
+        // Actor without a dept: dept-scope save is a client error.
+        let err = svc
+            .save(&actor(), save_input(MemoryScope::Dept, MemoryKind::Fact))
+            .await
+            .unwrap_err();
+        assert!(matches!(err, VedaError::InvalidInput(_)), "{err:?}");
+
+        // With a dept: lands in the dept domain, no origin.
+        let with_dept = MemoryActor {
+            dept_id: Some("D9".into()),
+            ..actor()
+        };
+        svc.save(&with_dept, save_input(MemoryScope::Dept, MemoryKind::Fact))
+            .await
+            .unwrap();
+        let s = mock.0.lock().unwrap();
+        let last = s.inserted.last().unwrap();
+        assert_eq!(
+            (last.scope_type, last.scope_id.as_str(), last.origin_workspace_id.as_deref()),
+            (MemoryScopeType::Dept, "D9", None)
+        );
+    }
+
+    #[tokio::test]
+    async fn retrieve_dedups_cross_domain_widest_wins() {
+        let mock = Arc::new(Mock::default());
+        {
+            let mut s = mock.0.lock().unwrap();
+            // Same fact living in personal AND team domains (same hash).
+            let mut personal = mem(1, MemoryScopeType::Principal, "P1", None);
+            personal.content_hash = "h".repeat(64);
+            let mut team = mem(2, MemoryScopeType::Workspace, "W1", None);
+            team.content_hash = "h".repeat(64);
+            let other = mem(3, MemoryScopeType::Workspace, "W1", None);
+            s.rows.extend([personal, team, other]);
+            // Personal ranks higher, team lower — widest must still win.
+            s.candidates = vec![
+                MemoryCandidate { id: 1, score: 0.9 },
+                MemoryCandidate { id: 2, score: 0.8 },
+                MemoryCandidate { id: 3, score: 0.7 },
+            ];
+        }
+        let svc = service(mock.clone());
+        let hits = svc.context(&actor(), "q", 10).await.unwrap();
+        let got: Vec<(i64, MemoryScopeType)> =
+            hits.iter().map(|h| (h.memory.id, h.memory.scope_type)).collect();
+        assert_eq!(
+            got,
+            vec![(2, MemoryScopeType::Workspace), (3, MemoryScopeType::Workspace)],
+            "duplicate collapsed to the team copy, position kept"
+        );
+    }
+
+    #[tokio::test]
+    async fn operator_new_identity_with_directory_down_degrades() {
+        let mock = Arc::new(Mock::default());
+        let svc = service_with_dir(mock.clone(), MockDirectory(Err("boom".into())));
+        let got = svc
+            .resolve_operator_actor("W1", PrincipalSource::Wecom, "u-new")
+            .await
+            .unwrap();
+        assert!(got.is_none(), "unknown identity + directory down must degrade");
+        assert!(
+            mock.0.lock().unwrap().ensured_profiles.is_empty(),
+            "no half-identity principal may be created"
+        );
+    }
+
+    #[tokio::test]
+    async fn operator_known_identity_survives_directory_down() {
+        let mock = Arc::new(Mock::default());
+        mock.0.lock().unwrap().cached_principal = Some(Principal {
+            id: "P-old".into(),
+            kind: PrincipalKind::Human,
+            emp_no: Some("0001".into()),
+            display_name: None,
+            dept_id: Some("D9".into()),
+            dept_name: None,
+            profile_synced_at: Some(Utc::now() - chrono::Duration::hours(48)), // stale
+            created_at: Utc::now(),
+        });
+        let svc = service_with_dir(mock.clone(), MockDirectory(Err("boom".into())));
+        let got = svc
+            .resolve_operator_actor("W1", PrincipalSource::Wecom, "u1")
+            .await
+            .unwrap()
+            .expect("cached identity keeps working");
+        assert_eq!(got.principal_id, "P-old");
+        assert_eq!(got.dept_id.as_deref(), Some("D9"), "stale cache still grants dept");
+    }
+
+    #[tokio::test]
+    async fn operator_fresh_cache_skips_directory() {
+        let mock = Arc::new(Mock::default());
+        mock.0.lock().unwrap().cached_principal = Some(Principal {
+            id: "P-fresh".into(),
+            kind: PrincipalKind::Human,
+            emp_no: Some("0001".into()),
+            display_name: None,
+            dept_id: Some("D9".into()),
+            dept_name: None,
+            profile_synced_at: Some(Utc::now()),
+            created_at: Utc::now(),
+        });
+        // Directory would error if called — fresh cache must not call it.
+        let svc = service_with_dir(mock.clone(), MockDirectory(Err("must not be called".into())));
+        let got = svc
+            .resolve_operator_actor("W1", PrincipalSource::Wecom, "u1")
+            .await
+            .unwrap()
+            .expect("fresh cache resolves");
+        assert_eq!(got.principal_id, "P-fresh");
+    }
+
+    #[tokio::test]
+    async fn operator_directory_lookup_populates_profile() {
+        let mock = Arc::new(Mock::default());
+        let svc = service_with_dir(
+            mock.clone(),
+            MockDirectory(Ok(Some(person("0042", Some("D7"))))),
+        );
+        let got = svc
+            .resolve_operator_actor("W1", PrincipalSource::Emp, "0042")
+            .await
+            .unwrap()
+            .expect("directory-backed resolve");
+        assert_eq!(got.dept_id.as_deref(), Some("D7"));
+        let profiles = mock.0.lock().unwrap().ensured_profiles.clone();
+        assert_eq!(profiles.len(), 1);
+        assert_eq!(profiles[0].as_ref().unwrap().emp_no, "0042");
+    }
+
+    #[tokio::test]
+    async fn operator_without_directory_resolves_per_entrance() {
+        let mock = Arc::new(Mock::default());
+        let svc = service(mock.clone()); // directory = None
+        let got = svc
+            .resolve_operator_actor("W1", PrincipalSource::Wecom, "u9")
+            .await
+            .unwrap()
+            .expect("identity-only mode resolves");
+        assert_eq!(got.principal_id, "P-u9");
+        assert!(got.dept_id.is_none(), "no directory, no dept domain");
+    }
+
+    #[tokio::test]
+    async fn self_scope_targets_key_principal_when_operator_present() {
+        let mock = Arc::new(Mock::default());
+        let svc = service(mock.clone());
+        let a = MemoryActor {
+            principal_id: "P-human".into(),
+            self_principal_id: Some("P-key".into()),
+            ..actor()
+        };
+        let mut inp = save_input(MemoryScope::SelfScope, MemoryKind::Fact);
+        inp.content = "agent state".into();
+        svc.save(&a, inp).await.unwrap();
+        let mut inp = save_input(MemoryScope::Mine, MemoryKind::Fact);
+        inp.content = "human note".into();
+        svc.save(&a, inp).await.unwrap();
+        let s = mock.0.lock().unwrap();
+        assert_eq!(s.inserted[0].scope_id, "P-key", "self follows the agent");
+        assert_eq!(s.inserted[1].scope_id, "P-human", "mine follows the human");
+    }
+
+    #[tokio::test]
+    async fn team_only_actor_rejects_private_scopes_and_reads_team() {
+        let mock = Arc::new(Mock::default());
+        let svc = service(mock.clone());
+        let a = MemoryActor {
+            team_only: true,
+            ..actor()
+        };
+        for scope in [MemoryScope::Mine, MemoryScope::SelfScope, MemoryScope::Dept] {
+            let err = svc.save(&a, save_input(scope, MemoryKind::Fact)).await.unwrap_err();
+            assert!(matches!(err, VedaError::InvalidInput(_)), "{scope:?}: {err:?}");
+        }
+        // Team writes still work, and delete's allowed domains shrink to team.
+        svc.save(&a, save_input(MemoryScope::Team, MemoryKind::Fact)).await.unwrap();
+        assert_eq!(
+            allowed_scopes(&a),
+            vec![(MemoryScopeType::Workspace, "W1".to_string())],
+            "no personal/dept write surface while degraded"
+        );
+        assert!(
+            matches!(context_filter(&a), MemoryScopeFilter::Scope { scope_type: MemoryScopeType::Workspace, .. }),
+            "context collapses to the team domain"
+        );
+    }
+
+    #[tokio::test]
+    async fn operator_dept_dropped_when_directory_forgets_person() {
+        let mock = Arc::new(Mock::default());
+        mock.0.lock().unwrap().cached_principal = Some(Principal {
+            id: "P-left".into(),
+            kind: PrincipalKind::Human,
+            emp_no: Some("0009".into()),
+            display_name: None,
+            dept_id: Some("D9".into()),
+            dept_name: Some("旧部门".into()),
+            profile_synced_at: Some(Utc::now() - chrono::Duration::hours(48)), // stale
+            created_at: Utc::now(),
+        });
+        // Directory answers authoritatively: no such person anymore.
+        let svc = service_with_dir(mock.clone(), MockDirectory(Ok(None)));
+        let got = svc
+            .resolve_operator_actor("W1", PrincipalSource::Wecom, "u-left")
+            .await
+            .unwrap()
+            .expect("known identity keeps resolving");
+        assert_eq!(got.principal_id, "P-left", "personal notes keep working");
+        assert!(got.dept_id.is_none(), "dept authorization must not outlive the TTL");
     }
 }

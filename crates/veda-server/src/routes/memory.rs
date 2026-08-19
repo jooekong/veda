@@ -8,6 +8,7 @@
 use std::sync::Arc;
 
 use axum::extract::{Path, Query, State};
+use axum::http::HeaderMap;
 use axum::routing::{delete, get, patch, post};
 use axum::{Json, Router};
 use serde::Deserialize;
@@ -16,9 +17,9 @@ use veda_types::api::{
     MemoryItem, MemoryListResponse, SaveMemoryApiRequest, SaveMemoryResponse,
     UpdateMemoryApiRequest,
 };
-use veda_types::{ApiResponse, MemoryKind, MemoryScope};
+use veda_types::{ApiResponse, MemoryKind, MemoryScope, VedaError};
 
-use crate::auth::AuthWorkspace;
+use crate::auth::{parse_operator, AuthWorkspace};
 use crate::error::AppError;
 use crate::state::AppState;
 
@@ -31,20 +32,50 @@ pub fn routes() -> Router<Arc<AppState>> {
         .route("/v1/memory/{id}", delete(delete_memory))
 }
 
-async fn actor(state: &Arc<AppState>, auth: &AuthWorkspace) -> Result<MemoryActor, AppError> {
-    Ok(state
+/// Request actor: the asserted operator when the header is present, else the
+/// key (M1 semantics). Operator present → the key principal is resolved too
+/// so `scope=self` keeps targeting agent state. Operator asserted but
+/// unresolvable (directory down, identity never seen) → the actor collapses
+/// to team-only: the service rejects personal/dept scopes and reads stay in
+/// the team domain — degraded humans never touch the shared key's private
+/// rows (M3a §1.2).
+async fn actor(
+    state: &Arc<AppState>,
+    auth: &AuthWorkspace,
+    headers: &HeaderMap,
+) -> Result<MemoryActor, AppError> {
+    let op = parse_operator(headers).map_err(|m| AppError(VedaError::InvalidInput(m)))?;
+    let key_actor = state
         .memory_service
         .resolve_key_actor(&auth.workspace_id, &auth.key_id)
-        .await?)
+        .await?;
+    let Some((source, external_id)) = op else {
+        return Ok(key_actor);
+    };
+    match state
+        .memory_service
+        .resolve_operator_actor(&auth.workspace_id, source, &external_id)
+        .await?
+    {
+        Some(mut a) => {
+            a.self_principal_id = Some(key_actor.principal_id);
+            Ok(a)
+        }
+        None => Ok(MemoryActor {
+            team_only: true,
+            ..key_actor
+        }),
+    }
 }
 
 async fn save_memory(
     State(state): State<Arc<AppState>>,
     auth: AuthWorkspace,
+    headers: HeaderMap,
     Json(req): Json<SaveMemoryApiRequest>,
 ) -> Result<Json<ApiResponse<SaveMemoryResponse>>, AppError> {
     auth.require_write()?;
-    let actor = actor(&state, &auth).await?;
+    let actor = actor(&state, &auth, &headers).await?;
     let out = state
         .memory_service
         .save(
@@ -81,9 +112,10 @@ struct MemoryQuery {
 async fn search_memory(
     State(state): State<Arc<AppState>>,
     auth: AuthWorkspace,
+    headers: HeaderMap,
     Query(q): Query<MemoryQuery>,
 ) -> Result<Json<ApiResponse<MemoryListResponse>>, AppError> {
-    let actor = actor(&state, &auth).await?;
+    let actor = actor(&state, &auth, &headers).await?;
     let hits = state
         .memory_service
         .search(&actor, &q.query, q.scope, q.limit.unwrap_or(10))
@@ -99,9 +131,10 @@ async fn search_memory(
 async fn memory_context(
     State(state): State<Arc<AppState>>,
     auth: AuthWorkspace,
+    headers: HeaderMap,
     Query(q): Query<MemoryQuery>,
 ) -> Result<Json<ApiResponse<MemoryListResponse>>, AppError> {
-    let actor = actor(&state, &auth).await?;
+    let actor = actor(&state, &auth, &headers).await?;
     let hits = state
         .memory_service
         .context(&actor, &q.query, q.limit.unwrap_or(10))
@@ -117,11 +150,12 @@ async fn memory_context(
 async fn update_memory(
     State(state): State<Arc<AppState>>,
     auth: AuthWorkspace,
+    headers: HeaderMap,
     Path(id): Path<i64>,
     Json(req): Json<UpdateMemoryApiRequest>,
 ) -> Result<Json<ApiResponse<MemoryItem>>, AppError> {
     auth.require_write()?;
-    let actor = actor(&state, &auth).await?;
+    let actor = actor(&state, &auth, &headers).await?;
     let m = state
         .memory_service
         .update(
@@ -132,6 +166,7 @@ async fn update_memory(
                 topic: req.topic,
                 source_ref: req.source_ref,
                 expires_at: req.expires_at,
+                scope: req.scope,
             },
         )
         .await?;
@@ -141,10 +176,11 @@ async fn update_memory(
 async fn delete_memory(
     State(state): State<Arc<AppState>>,
     auth: AuthWorkspace,
+    headers: HeaderMap,
     Path(id): Path<i64>,
 ) -> Result<Json<ApiResponse<serde_json::Value>>, AppError> {
     auth.require_write()?;
-    let actor = actor(&state, &auth).await?;
+    let actor = actor(&state, &auth, &headers).await?;
     state.memory_service.delete(&actor, id).await?;
     Ok(Json(ApiResponse::ok(serde_json::json!({ "deleted": id }))))
 }

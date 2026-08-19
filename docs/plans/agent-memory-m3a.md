@@ -30,6 +30,11 @@
    （读路径 fail-open）；**全新身份 + 目录不可用 → 该请求按无操作者处理**——
    检索降级为团队域、写 mine/dept 明确报错（快速失败，不造半身份把个人域
    写进错误的 principal）。目录故障永不阻塞团队域读写。
+   **目录未配置模式**（SSO 接入前的长期形态，Joe 2026-08-18）：`[people]` 缺席时
+   身份 = (source, external_id) 本身，直接建 principal（emp_no NULL、无部门）——
+   Mine 域按入口分立可用，dept 域不可用；SSO 接上后同一 identity 懒查补全 emp_no。
+   **合并只有原地补全一种**：emp_no 已被别的 principal 占（同人两入口在目录可用前
+   各自建了人）→ 保持分立 + warn，不重定向不搬记忆——孤儿路径物理不存在。
 3. **操作者透传**：请求头 `X-Veda-Operator: <source>:<external_id>`
    （v0 source ∈ `wecom` | `emp`），wk_ 鉴权通过后即生效，格式非法 → 400。
    `MemoryActor` 扩展为 `{workspace_id, principal_id, dept_id: Option<String>}`——
@@ -145,3 +150,23 @@ veda_depts 名录表；gateway（passport）操作者源——等平台侧真实
 - **R7 标量下推歧义可致召回黑洞（medium）→ 采纳（文字澄清）**：域过滤恒下推
   hybrid 两个子请求，「不下推」仅指新增过滤维度（§1.5、§5）。
 - 附带建议 list 端点 YAGNI → 采纳，移 M4（§5）。
+
+## 评审记录（2026-08-18 第二轮，Codex 原生 review 实现 diff，4 P1 + 4 P2 全采纳）
+
+- **R1 self 与 mine 未分歧（P1）→ 修**：plan §1.3 写了、实现漏了。`MemoryActor` 加
+  `self_principal_id`（操作者在场时=key principal），`scope=self` 落 agent 域；
+  路由层顺手把 key 解析提到公共路径（本就要 ensure，无额外查询）。
+- **R2 目录明确答「查无此人」仍沿用旧部门（P1）→ 修**：已知身份保个人域可用，
+  但 dept 请求级剥离（不写库——行保持 stale，之后每次都重问目录）；部门授权
+  滞后回到 ≤TTL 承诺内。
+- **R3 降级回落 key 域暴露共享 key 私有行（P1）→ 修**：plan 写的是「检索降级为
+  团队域」，实现却回落 key 语义。改为 `MemoryActor.team_only`：service 层统一
+  收口——私域 scope 全拒、context 塌缩团队域、可写域只剩团队；REST/MCP 的
+  reject_degraded_write 补丁随之删除（服务端单点执法）。
+- **R4 chattype 缺失/未知按私聊处理（P1）→ 修**：fail-closed——只有显式
+  `single` 且无 chatid 才带操作者头，其余一律按群可见处理。
+- **R5 CORS 缺 x-veda-operator（P2）→ 修**：allow_headers 补一项。
+- **R6 目录空 body/204 判成故障（P2）→ 修**：成功空响应=查无此人，不进降级路径。
+- **R7 round-trip 未变的 scope 清掉 origin（P2）→ 修**：store 层比对当前域，
+  scope 未变=非 move（不清 origin、不入 sync）。
+- **R8 三域去重下 OVERFETCH=2 不够（P2）→ 修**：2→3。

@@ -70,9 +70,35 @@ pub fn routes() -> Router<Arc<AppState>> {
         .route("/v1/answer/stream", post(answer_stream))
 }
 
+/// Resolve the asserted operator (X-Veda-Operator) for memory injection.
+/// Err(msg) = malformed header (client bug, 400). Ok(None) = no operator or
+/// unresolvable — answers never block on identity, they degrade to
+/// team-only injection (M3a).
+pub(crate) async fn operator_for_answer(
+    state: &Arc<AppState>,
+    workspace_id: &str,
+    headers: &axum::http::HeaderMap,
+) -> Result<Option<veda_core::service::memory::MemoryActor>, String> {
+    let Some((source, external_id)) = crate::auth::parse_operator(headers)? else {
+        return Ok(None);
+    };
+    match state
+        .memory_service
+        .resolve_operator_actor(workspace_id, source, &external_id)
+        .await
+    {
+        Ok(actor) => Ok(actor),
+        Err(e) => {
+            warn!(err = %e, "answer: operator resolution failed, injecting team-only");
+            Ok(None)
+        }
+    }
+}
+
 async fn answer(
     State(state): State<Arc<AppState>>,
     auth: AuthWorkspace,
+    headers: axum::http::HeaderMap,
     Json(req): Json<AnswerApiRequest>,
 ) -> Result<Response, AppError> {
     // 1. Validate query + prompt (cheap rejections) before any work.
@@ -91,6 +117,10 @@ async fn answer(
             "prompt must be at most 4000 characters",
         ));
     }
+    let operator = match operator_for_answer(&state, &auth.workspace_id, &headers).await {
+        Ok(op) => op,
+        Err(m) => return Ok(err_response(StatusCode::BAD_REQUEST, "INVALID_INPUT", &m)),
+    };
     let limit = clamp_limit(req.limit);
 
     // 2. Feature gate: no [llm] → no AnswerService → 501 + `no-store`, mirroring
@@ -131,6 +161,7 @@ async fn answer(
             req.path_prefix.as_deref(),
             limit,
             req.prompt.as_deref(),
+            operator,
         ),
     )
     .await;
@@ -208,6 +239,7 @@ async fn answer(
 async fn answer_stream(
     State(state): State<Arc<AppState>>,
     auth: AuthWorkspace,
+    headers: axum::http::HeaderMap,
     Json(req): Json<AnswerApiRequest>,
 ) -> Result<Response, AppError> {
     let query = req.query.trim().to_string();
@@ -225,6 +257,10 @@ async fn answer_stream(
             "prompt must be at most 4000 characters",
         ));
     }
+    let operator = match operator_for_answer(&state, &auth.workspace_id, &headers).await {
+        Ok(op) => op,
+        Err(m) => return Ok(err_response(StatusCode::BAD_REQUEST, "INVALID_INPUT", &m)),
+    };
     let limit = clamp_limit(req.limit);
     let Some(svc) = state.answer_service.clone() else {
         return Ok(feature_disabled_response());
@@ -252,6 +288,7 @@ async fn answer_stream(
             req.path_prefix.as_deref(),
             limit,
             req.prompt.as_deref(),
+            operator,
         )
         .await
     {
@@ -428,7 +465,7 @@ pub(crate) fn answer_outcome_label(grounded: bool, answer: &str) -> &'static str
 
 // ── responses ──────────────────────────────────────────
 
-fn err_response(status: StatusCode, code: &'static str, msg: &'static str) -> Response {
+fn err_response(status: StatusCode, code: &'static str, msg: &str) -> Response {
     (status, Json(ApiResponse::<()>::err(code, msg))).into_response()
 }
 

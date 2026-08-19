@@ -1,4 +1,4 @@
-use veda_server::{config, obs, reconciler, routes, state, tunnel_bots, worker};
+use veda_server::{config, obs, people, reconciler, routes, state, tunnel_bots, worker};
 
 use std::sync::Arc;
 
@@ -133,10 +133,21 @@ async fn main() -> anyhow::Result<()> {
     );
     // Interactive embedding (same handle as search): memory save/search are
     // agent-facing calls, not background indexing.
+    let directory: Option<Arc<dyn veda_core::store::PersonDirectory>> = match &cfg.people {
+        Some(p) => {
+            info!(base_url = %p.base_url, "person directory enabled");
+            Some(Arc::new(people::HttpPersonDirectory::new(p)?))
+        }
+        None => {
+            info!("person directory not configured; operator identities run per-entrance");
+            None
+        }
+    };
     let memory_service = Arc::new(veda_core::service::memory::MemoryService::new(
         mysql.clone(),
         milvus.clone(),
         embedding.clone(),
+        directory,
     ));
 
     // Uncounted FsService for the SQL engine: `veda_read()`/`veda_fs()` are
@@ -460,6 +471,9 @@ async fn main() -> anyhow::Result<()> {
                 header::IF_MATCH,
                 header::IF_NONE_MATCH,
                 header::RANGE,
+                // Operator assertion (M3a) — without this a cross-origin
+                // frontend fails the preflight before the parser ever runs.
+                axum::http::HeaderName::from_static("x-veda-operator"),
             ])
     } else if cfg.dev_mode {
         tracing::warn!("dev_mode=true: CORS is permissive — do NOT use in production");

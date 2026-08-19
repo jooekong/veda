@@ -10,6 +10,24 @@ that matters.
 ## [Unreleased]
 
 ### Added
+- **Per-person and per-department memories (memory M3a).** Requests can
+  assert who is asking via `X-Veda-Operator: wecom:<userid>` /
+  `emp:<工号>`; the server resolves the person through the company
+  directory (`[people]` config; without it, identities stay per-entrance)
+  and merges entrances by employee number. Memories gain a third scope
+  `dept`: department memories follow the person across workspaces and
+  transfers take effect automatically. Private-chat WeCom answers (and
+  MCP/CLI callers asserting an operator) now inject team + department +
+  personal memories; group chats stay team-only by design — injection
+  domains never exceed the answer's audience. Memory citations carry a
+  `scope` label (`team`/`dept`/`mine`) rendered by WeCom bots and
+  `veda ask`. Scope moves (`PATCH /v1/memory/{id}` with `scope`) promote
+  a memory between domains in place, keeping id and authorship.
+- **Hybrid memory retrieval.** Memory search/injection now fuses dense
+  semantic search with BM25 keyword matching (jieba tokenization) via
+  Milvus hybrid search — exact tokens like error codes, hostnames, and
+  employee ids recall reliably. Upgrading wipes and recreates the memory
+  index and principal tables (alpha data, no migration by decision).
 - **Team memories ground `/v1/answer` (memory M2a).** The RAG answer now
   retrieves the workspace's team-domain memories alongside document
   search and can cite them: memory citations carry

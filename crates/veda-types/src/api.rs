@@ -320,6 +320,12 @@ pub struct MemoryCitationRef {
     pub content: String,
     pub updated_by: String,
     pub updated_at: DateTime<Utc>,
+    /// Domain of the cited memory as the asker sees it: "team" / "dept" /
+    /// "mine" (M3a). Older consumers ignore unknown fields; `#[serde(default)]`
+    /// keeps decoding of pre-M3a payloads working (defaults to Mine — only
+    /// display labeling rides on this).
+    #[serde(default)]
+    pub scope: crate::MemoryScope,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -577,6 +583,10 @@ pub struct UpdateMemoryApiRequest {
     pub source_ref: Option<serde_json::Value>,
     #[serde(default)]
     pub expires_at: Option<DateTime<Utc>>,
+    /// Move the memory to another domain (e.g. mine → team promotion).
+    /// Same row, same id, authorship preserved.
+    #[serde(default)]
+    pub scope: Option<crate::MemoryScope>,
 }
 
 /// Public view of one memory. `scope` collapses the storage domain to the
@@ -611,6 +621,7 @@ impl MemoryItem {
             scope: match m.scope_type {
                 crate::MemoryScopeType::Workspace => "team",
                 crate::MemoryScopeType::Principal => "mine",
+                crate::MemoryScopeType::Dept => "dept",
             },
             origin_workspace_id: m.origin_workspace_id,
             topic: m.topic,

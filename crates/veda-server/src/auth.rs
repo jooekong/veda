@@ -302,6 +302,38 @@ fn kind_mismatch_err() -> Response {
         .into_response()
 }
 
+/// `X-Veda-Operator: <source>:<external_id>` — the caller's assertion of who
+/// is asking (M3a §1.3; wiki trust model, no gate by decision 2026-08-18).
+/// Only read after wk_ auth. Absent → Ok(None). Malformed / unknown source →
+/// Err with a caller-facing message (surfaces map it to 400).
+pub fn parse_operator(
+    headers: &axum::http::HeaderMap,
+) -> Result<Option<(veda_types::PrincipalSource, String)>, String> {
+    let Some(raw) = headers.get("x-veda-operator") else {
+        return Ok(None);
+    };
+    let raw = raw
+        .to_str()
+        .map_err(|_| "X-Veda-Operator must be ASCII".to_string())?
+        .trim();
+    let Some((src, id)) = raw.split_once(':') else {
+        return Err("X-Veda-Operator must be <source>:<external_id>".to_string());
+    };
+    let id = id.trim();
+    if id.is_empty() || id.len() > 128 {
+        return Err("X-Veda-Operator external_id must be 1-128 chars".to_string());
+    }
+    match veda_types::PrincipalSource::parse(src.trim()) {
+        // Operator sources v0: wecom (tunnel) and emp (direct 工号).
+        // gateway/key identities are minted by the server itself, never
+        // asserted through this header.
+        Some(s @ (veda_types::PrincipalSource::Wecom | veda_types::PrincipalSource::Emp)) => {
+            Ok(Some((s, id.to_string())))
+        }
+        _ => Err(format!("unknown operator source: {src}")),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -337,5 +369,34 @@ mod tests {
         // distinct from None (unrestricted).
         let a = auth(Some(vec![]));
         assert!(a.check_workspace_allowed("ws-a").is_err());
+    }
+
+    #[test]
+    fn parse_operator_absent_and_valid() {
+        let mut h = axum::http::HeaderMap::new();
+        assert!(parse_operator(&h).unwrap().is_none());
+        h.insert("x-veda-operator", "wecom:wo-abc".parse().unwrap());
+        let (s, id) = parse_operator(&h).unwrap().unwrap();
+        assert_eq!(s, veda_types::PrincipalSource::Wecom);
+        assert_eq!(id, "wo-abc");
+        h.insert("x-veda-operator", "emp:0001234".parse().unwrap());
+        let (s, id) = parse_operator(&h).unwrap().unwrap();
+        assert_eq!(s, veda_types::PrincipalSource::Emp);
+        assert_eq!(id, "0001234");
+    }
+
+    #[test]
+    fn parse_operator_rejects_malformed() {
+        let cases = [
+            "no-colon",
+            "key:abc",     // server-minted source, never asserted
+            "gateway:joe", // not an operator source in v0
+            "wecom:",      // empty id
+        ];
+        for c in cases {
+            let mut h = axum::http::HeaderMap::new();
+            h.insert("x-veda-operator", c.parse().unwrap());
+            assert!(parse_operator(&h).is_err(), "should reject {c:?}");
+        }
     }
 }

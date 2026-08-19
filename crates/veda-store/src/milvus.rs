@@ -1582,22 +1582,33 @@ fn memory_filter_expr(filter: &MemoryScopeFilter) -> String {
         MemoryScopeFilter::Context {
             workspace_id,
             principal_id,
+            dept_id,
         } => {
             let w = milvus_quote(workspace_id);
             let p = milvus_quote(principal_id);
-            format!(
+            let mut expr = format!(
                 "(scope_type == \"workspace\" && scope_id == {w}) || \
                  (scope_type == \"principal\" && scope_id == {p} && \
                   (origin_workspace_id == \"\" || origin_workspace_id == {w}))"
-            )
+            );
+            if let Some(d) = dept_id {
+                expr.push_str(&format!(
+                    " || (scope_type == \"dept\" && scope_id == {})",
+                    milvus_quote(d)
+                ));
+            }
+            expr
         }
     }
 }
 
-// Index-only memory collection (docs/plans/agent-memory-m1.md §1.3): id +
-// three scope scalars + vector, deliberately NO content/kind/topic — MySQL
-// recheck is the authority, so any Milvus failure can only reduce recall,
-// never surface deleted or cross-domain text.
+// Memory collection v2 (docs/plans/agent-memory-m3a.md §1.5): id + three
+// scope scalars + content + dense/sparse vectors. `content` is stored ONLY
+// to feed the BM25 function's tokenizer — retrieval output stays (id, score)
+// and text is always re-read from MySQL after the recheck, so any Milvus
+// failure can still only reduce recall, never surface deleted or
+// cross-domain text. Upgrading a v1 deployment = DROP the collection first
+// (no migration by decision; the index is derived data).
 #[async_trait]
 impl MemoryVectorStore for MilvusStore {
     async fn init_memory_collection(&self, embedding_dim: u32) -> Result<()> {
@@ -1635,17 +1646,48 @@ impl MemoryVectorStore for MilvusStore {
                             "elementTypeParams": { "max_length": 64 }
                         },
                         {
+                            "fieldName": "content",
+                            "dataType": "VarChar",
+                            "elementTypeParams": {
+                                // Memories cap at 4096 chars (service);
+                                // 65535 covers the worst-case UTF-8 bytes,
+                                // same as the fs chunk field.
+                                "max_length": 65535,
+                                "enable_analyzer": true,
+                                // jieba segments Chinese and falls back for
+                                // ASCII — same rationale as the fs chunk
+                                // collection (standard = one token per
+                                // Chinese sentence, useless BM25).
+                                "analyzer_params": { "tokenizer": "jieba" }
+                            }
+                        },
+                        {
                             "fieldName": "vector",
                             "dataType": "FloatVector",
                             "elementTypeParams": { "dim": dim }
+                        },
+                        {
+                            "fieldName": "sparse_vector",
+                            "dataType": "SparseFloatVector"
+                        }
+                    ],
+                    "functions": [
+                        {
+                            "name": "bm25_memory_content",
+                            "type": "BM25",
+                            "inputFieldNames": ["content"],
+                            "outputFieldNames": ["sparse_vector"]
                         }
                     ]
                 }
             });
             self.post_no_retry("/v2/vectordb/collections/create", body)
                 .await?;
-
-            let idx = json!({
+        }
+        // Index creation is idempotent and runs outside the create branch so
+        // a crash between create and index heals on the next boot.
+        for idx in [
+            json!({
                 "collectionName": MEMORY_COLLECTION,
                 "indexParams": [{
                     "index_type": "AUTOINDEX",
@@ -1653,7 +1695,17 @@ impl MemoryVectorStore for MilvusStore {
                     "fieldName": "vector",
                     "indexName": "vector"
                 }]
-            });
+            }),
+            json!({
+                "collectionName": MEMORY_COLLECTION,
+                "indexParams": [{
+                    "index_type": "SPARSE_INVERTED_INDEX",
+                    "metricType": "BM25",
+                    "fieldName": "sparse_vector",
+                    "indexName": "sparse_vector"
+                }]
+            }),
+        ] {
             match self.post("/v2/vectordb/indexes/create", idx).await {
                 Ok(_) => {}
                 Err(e) => {
@@ -1687,6 +1739,7 @@ impl MemoryVectorStore for MilvusStore {
                     "scope_type": m.scope_type.as_str(),
                     "scope_id": m.scope_id,
                     "origin_workspace_id": m.origin_workspace_id,
+                    "content": m.content,
                     "vector": m.vector
                 })
             })
@@ -1718,22 +1771,45 @@ impl MemoryVectorStore for MilvusStore {
 
     async fn search_memory_candidates(
         &self,
+        query_text: &str,
         vector: &[f32],
         filter: &MemoryScopeFilter,
         limit: usize,
     ) -> Result<Vec<MemoryCandidate>> {
         let lim = limit.min(16_383).max(1);
-        let body = json!({
-            "collectionName": MEMORY_COLLECTION,
+        // Hybrid dense+BM25 fused by RRF, mirroring the db-vector v2 path:
+        // sub-requests over-fetch ×5 so RRF can see rows that rank mid-list
+        // in one ranker but high in the other; the top-level limit truncates.
+        // The domain filter rides BOTH sub-requests. Sparse sub-request
+        // carries no metricType (BM25 is inferred from the sparse index; the
+        // raw query string goes in `data`).
+        let fetch = (lim * 5).min(16_383);
+        let expr = memory_filter_expr(filter);
+        let dense = json!({
             "data": [vector],
             "annsField": "vector",
-            "filter": memory_filter_expr(filter),
+            "filter": expr,
+            "limit": fetch,
+            "metricType": "COSINE",
+        });
+        let sparse = json!({
+            "data": [query_text],
+            "annsField": "sparse_vector",
+            "filter": expr,
+            "limit": fetch,
+        });
+        let body = json!({
+            "collectionName": MEMORY_COLLECTION,
+            "search": [dense, sparse],
+            "rerank": { "strategy": "rrf", "params": { "k": 60 } },
             "limit": lim,
             "outputFields": ["id"],
-            "searchParams": { "metricType": "COSINE" },
             "consistencyLevel": "Strong"
         });
-        let v = self.post("/v2/vectordb/entities/search", body).await?;
+        // No fallback-to-dense on error (same D4 decision as db vectors):
+        // transient failures are absorbed by the retry layer; what reaches
+        // here is a deterministic body/index bug and must surface.
+        let v = self.post("/v2/vectordb/entities/hybrid_search", body).await?;
         let rows = flatten_entity_rows(v.get("data"));
         let out = rows
             .iter()

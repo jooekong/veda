@@ -12,6 +12,7 @@ path = "src/main.rs"
 veda-types.workspace = true
 veda-core.workspace = true
 veda-store.workspace = true
+async-trait.workspace = true
 veda-pipeline.workspace = true
 veda-sql.workspace = true
 tokio.workspace = true

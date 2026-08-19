@@ -195,11 +195,21 @@ impl MysqlStore {
             r#"CREATE TABLE IF NOT EXISTS veda_principals (
     id VARCHAR(36) PRIMARY KEY,
     kind VARCHAR(16) NOT NULL,
+    emp_no VARCHAR(32) NULL,
+    display_name VARCHAR(128) NULL,
+    dept_id VARCHAR(64) NULL,
+    dept_name VARCHAR(128) NULL,
+    profile_synced_at TIMESTAMP NULL,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE INDEX uq_emp_no (emp_no)
+)"#,
+            r#"CREATE TABLE IF NOT EXISTS veda_principal_identities (
     source VARCHAR(16) NOT NULL,
     external_id VARCHAR(128) NOT NULL,
-    display_name VARCHAR(128) NULL,
+    principal_id VARCHAR(36) NOT NULL,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    UNIQUE INDEX uq_source_ext (source, external_id)
+    PRIMARY KEY (source, external_id),
+    INDEX idx_principal (principal_id)
 )"#,
         ];
         for s in stmts {

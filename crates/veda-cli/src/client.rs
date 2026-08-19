@@ -363,14 +363,20 @@ impl Client {
         if let Some(p) = path_prefix {
             body["path_prefix"] = serde_json::Value::String(p.to_string());
         }
-        let resp = self
+        let mut req = self
             .http
             .post(format!("{}/v1/answer", self.base))
             .timeout(std::time::Duration::from_secs(100))
             .bearer_auth(ws_key)
-            .json(&body)
-            .send()
-            .await?;
+            .json(&body);
+        // Operator assertion (M3a): VEDA_OPERATOR="wecom:<id>" or "emp:<no>"
+        // unlocks personal/dept memory injection for this asker.
+        if let Ok(op) = std::env::var("VEDA_OPERATOR") {
+            if !op.trim().is_empty() {
+                req = req.header("X-Veda-Operator", op.trim());
+            }
+        }
+        let resp = req.send().await?;
         Self::check(resp).await
     }
 

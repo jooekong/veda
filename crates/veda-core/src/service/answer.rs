@@ -25,7 +25,7 @@ use veda_types::api::{AnswerCitation, ChunkSpan, MemoryCitationRef};
 use veda_types::{DetailLevel, SearchHit, SearchMode, VedaError};
 
 use crate::service::fs::FsService;
-use crate::service::memory::{MemoryHit, MemoryService};
+use crate::service::memory::{MemoryActor, MemoryHit, MemoryService};
 use crate::service::search::SearchService;
 use crate::store::{ChatMsg, ChatStreamItem, LlmService, ToolCall, ToolSpec};
 
@@ -253,8 +253,11 @@ impl AnswerService {
         path_prefix: Option<&str>,
         limit: usize,
         bot_prompt: Option<&str>,
+        operator: Option<MemoryActor>,
     ) -> Result<AnswerResult, AnswerError> {
-        let mut rx = self.answer_stream(workspace_id, query, path_prefix, limit, bot_prompt).await?;
+        let mut rx = self
+            .answer_stream(workspace_id, query, path_prefix, limit, bot_prompt, operator)
+            .await?;
         let mut terminal: Option<Result<AnswerResult, AnswerError>> = None;
         while let Some(ev) = rx.recv().await {
             match ev {
@@ -276,6 +279,10 @@ impl AnswerService {
     /// "no context" early return — an empty pre-search enters the loop with
     /// an instruction to self-search, and "nothing found" is expressed by
     /// the model as the fixed refusal phrase.
+    /// `operator`: the asker's resolved identity, present only on surfaces
+    /// whose audience is that person (private chats, single-user CLIs) —
+    /// injection domains follow the answer's audience (M3a §2). None keeps
+    /// the M2a behavior: team domain only.
     pub async fn answer_stream(
         &self,
         workspace_id: &str,
@@ -283,6 +290,7 @@ impl AnswerService {
         path_prefix: Option<&str>,
         limit: usize,
         bot_prompt: Option<&str>,
+        operator: Option<MemoryActor>,
     ) -> Result<mpsc::Receiver<AnswerStreamEvent>, AnswerError> {
         // Single choke point for every surface (REST sync + stream, MCP
         // ask): fold the caller's prefix through the same lenient
@@ -321,22 +329,27 @@ impl AnswerService {
         // workspace answer permit, so an unbounded wait on the shared
         // embedding gate would pin the permit and starve the workspace.
         let memories = match &self.memory {
-            Some(svc) => match tokio::time::timeout(
-                Duration::from_secs(15),
-                svc.team_memories(workspace_id, query, MEMORY_INJECT_LIMIT),
-            )
-            .await
-            {
-                Ok(Ok(hits)) => hits,
-                Ok(Err(e)) => {
-                    warn!(err = %e, "answer: memory retrieve failed, continuing without");
-                    Vec::new()
+            Some(svc) => {
+                // With an operator, one retrieve over the full context union
+                // (team + dept + personal); without, team only (M2a).
+                let fut = async {
+                    match &operator {
+                        Some(actor) => svc.context(actor, query, MEMORY_INJECT_LIMIT).await,
+                        None => svc.team_memories(workspace_id, query, MEMORY_INJECT_LIMIT).await,
+                    }
+                };
+                match tokio::time::timeout(Duration::from_secs(15), fut).await {
+                    Ok(Ok(hits)) => hits,
+                    Ok(Err(e)) => {
+                        warn!(err = %e, "answer: memory retrieve failed, continuing without");
+                        Vec::new()
+                    }
+                    Err(_elapsed) => {
+                        warn!("answer: memory retrieve timed out, continuing without");
+                        Vec::new()
+                    }
                 }
-                Err(_elapsed) => {
-                    warn!("answer: memory retrieve timed out, continuing without");
-                    Vec::new()
-                }
-            },
+            }
             None => Vec::new(),
         };
         debug!(memories = memories.len(), "answer: memory injection");
@@ -376,7 +389,7 @@ fn build_system_prompt(bot_prompt: Option<&str>) -> String {
     format!("{TOOL_PROTOCOL}\n\n{persona}")
 }
 
-/// First user message: the question, injected team memories (when any), and
+/// First user message: the question, injected memories (when any), and
 /// the pre-search evidence (or, when empty, an instruction to self-search).
 fn initial_user_msg(
     query: &str,
@@ -387,7 +400,7 @@ fn initial_user_msg(
     let mut out = format!("问题:{query}\n");
     if !memory_evidence.is_empty() {
         out.push_str(&format!(
-            "\n以下是团队记忆(成员显式记录的一句话事实,可作为回答依据并用 [n] 引用):\n{memory_evidence}"
+            "\n以下是相关记忆(成员显式记录的一句话事实,每条标注了域·类别·日期·作者,可作为回答依据并用 [n] 引用):\n{memory_evidence}"
         ));
     }
     if hits.is_empty() {
@@ -730,23 +743,29 @@ fn render_file(registry: &mut BlockRegistry, path: &str, full: &str, offset: usi
     out
 }
 
-/// Render injected team memories as evidence blocks — the design's
-/// "injection template": tag(kind) · date · author framing around the
+/// Render injected memories as evidence blocks — the design's "injection
+/// template": domain · tag(kind) · date · author framing around the
 /// content. Memory content is capped like search snippets; the full line
 /// still travels in the citation.
 fn render_memories(registry: &mut BlockRegistry, hits: &[MemoryHit]) -> String {
     let mut out = String::new();
     for h in hits {
         let m = &h.memory;
+        let (scope, scope_label) = match m.scope_type {
+            veda_types::MemoryScopeType::Workspace => (veda_types::MemoryScope::Team, "团队"),
+            veda_types::MemoryScopeType::Dept => (veda_types::MemoryScope::Dept, "部门"),
+            veda_types::MemoryScopeType::Principal => (veda_types::MemoryScope::Mine, "个人"),
+        };
         let n = registry.register_memory(MemoryCitationRef {
             id: m.id,
             content: m.content.clone(),
             updated_by: m.updated_by.clone(),
             updated_at: m.updated_at,
+            scope,
         });
         let snippet = truncate_chars(&m.content, HIT_SNIPPET_CHARS);
         out.push_str(&format!(
-            "[{n}] 记忆({kind}·{date}·{author}) <<<{snippet}>>>\n",
+            "[{n}] 记忆({scope_label}·{kind}·{date}·{author}) <<<{snippet}>>>\n",
             kind = m.kind.as_str(),
             date = m.updated_at.format("%Y-%m-%d"),
             author = m.updated_by,
@@ -1037,6 +1056,7 @@ mod tests {
             content: content.into(),
             updated_by: "p1".into(),
             updated_at: chrono::Utc::now(),
+            scope: veda_types::MemoryScope::Team,
         }
     }
 
@@ -1072,16 +1092,16 @@ mod tests {
         };
         let mut r = BlockRegistry::default();
         let text = render_memories(&mut r, &[MemoryHit { memory: mem, score: 0.9 }]);
-        // Template: [n] 记忆(kind·date·author) <<<content>>>
-        assert!(text.contains("[1] 记忆(decision·"), "{text}");
+        // Template: [n] 记忆(域·kind·date·author) <<<content>>>
+        assert!(text.contains("[1] 记忆(团队·decision·"), "{text}");
         assert!(text.contains("·p2)"), "author is the last signer: {text}");
         assert!(text.contains("<<<发布窗口定在周四晚 8 点>>>"), "{text}");
 
         let msg = initial_user_msg("啥时候发布?", &text, &[], "");
-        assert!(msg.contains("团队记忆"), "{msg}");
+        assert!(msg.contains("相关记忆"), "{msg}");
         assert!(msg.contains("初检没有命中任何资料"), "empty hits keep the self-search nudge");
         let msg2 = initial_user_msg("啥时候发布?", "", &[], "");
-        assert!(!msg2.contains("团队记忆"), "no memory section when nothing injected");
+        assert!(!msg2.contains("相关记忆"), "no memory section when nothing injected");
     }
 
     // ── align_citations ────────────────────────────────
@@ -1115,6 +1135,7 @@ mod tests {
             content: "上线窗口是周四晚".into(),
             updated_by: "p1".into(),
             updated_at: chrono::Utc::now(),
+            scope: veda_types::MemoryScope::Team,
         };
         let blocks = vec![
             Block { index: 1, source: BlockSource::Memory(mem.clone()) },
@@ -1341,7 +1362,7 @@ mod engine_tests {
         query: &str,
     ) -> Vec<AnswerStreamEvent> {
         let svc = AnswerService::new(tools, llm, params, None);
-        let mut rx = svc.answer_stream("ws", query, None, 12, None).await.unwrap();
+        let mut rx = svc.answer_stream("ws", query, None, 12, None, None).await.unwrap();
         let mut out = Vec::new();
         while let Some(ev) = rx.recv().await {
             out.push(ev);
@@ -1576,7 +1597,7 @@ mod engine_tests {
         ])]));
         let tools = Arc::new(StubTools::hits(vec![("/a", 0, "x")]));
         let svc = AnswerService::new(tools, llm, fast_params(4), None);
-        let r = svc.answer("ws", "q", None, 12, None).await.unwrap();
+        let r = svc.answer("ws", "q", None, 12, None, None).await.unwrap();
         assert_eq!(r.answer, "流式答案[1]");
         assert!(r.grounded);
     }
@@ -1594,7 +1615,7 @@ mod engine_tests {
         ]));
         let tools = Arc::new(StubTools { hits: vec![("/docs/a.md", 0, "x")], files });
         let svc = AnswerService::new(tools, Arc::clone(&llm) as Arc<dyn LlmService>, fast_params(4), None);
-        let mut rx = svc.answer_stream("ws", "q", Some(prefix), 12, None).await.unwrap();
+        let mut rx = svc.answer_stream("ws", "q", Some(prefix), 12, None, None).await.unwrap();
         while rx.recv().await.is_some() {}
         let msg = llm.calls.lock().unwrap()[1].last_msg.content.clone();
         msg
@@ -1736,7 +1757,7 @@ mod engine_tests {
         ]));
         let tools = Arc::new(StubTools::hits(vec![("/a", 0, "x")]));
         let svc = AnswerService::new(tools, Arc::clone(&llm) as Arc<dyn LlmService>, fast_params(4), None);
-        let rx = svc.answer_stream("ws", "q", None, 12, None).await.unwrap();
+        let rx = svc.answer_stream("ws", "q", None, 12, None, None).await.unwrap();
         drop(rx);
         tokio::time::sleep(Duration::from_millis(100)).await;
         let calls = llm.calls.lock().unwrap().len();

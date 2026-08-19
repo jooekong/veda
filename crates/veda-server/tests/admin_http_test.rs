@@ -168,6 +168,7 @@ async fn build_admin_app(
             mysql.clone(),
             milvus.clone(),
             embedding.clone(),
+            None,
         )),
         summary_enabled: false,
         answer_service: None,

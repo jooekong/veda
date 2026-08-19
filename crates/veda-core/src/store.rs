@@ -585,15 +585,44 @@ pub trait MemoryStore: Send + Sync {
     /// (edit audit).
     async fn touch_memories(&self, ids: &[i64]) -> Result<()>;
 
-    /// Lazy principal creation, ensure_account-style: first sighting of
-    /// (source, external_id) inserts a row, races resolve to the winner.
-    async fn ensure_principal(
+    /// Identity lookup: the (source, external_id) row in
+    /// veda_principal_identities joined to its principal. None = never seen.
+    async fn get_principal_by_identity(
+        &self,
+        source: PrincipalSource,
+        external_id: &str,
+    ) -> Result<Option<Principal>>;
+
+    /// Lazy principal creation + profile merge (M3a §1.2). Semantics:
+    /// - identity exists → return its principal, applying `profile` when
+    ///   given (dept/name/synced_at always; emp_no only when free — a taken
+    ///   emp_no keeps the principals split with a warn, never repoints).
+    /// - identity new + profile names an emp_no already owned → attach the
+    ///   identity to that principal (the cross-entrance merge).
+    /// - otherwise insert principal (+profile) and the identity row.
+    /// Races resolve to the winner, ensure_account-style.
+    async fn ensure_principal_for_identity(
         &self,
         source: PrincipalSource,
         external_id: &str,
         kind: PrincipalKind,
-        display_name: Option<&str>,
+        profile: Option<&PersonProfile>,
     ) -> Result<Principal>;
+}
+
+/// External person directory (company SSO/HR). One lookup per unknown or
+/// stale identity; results are cached on the principal row. Absent config →
+/// the service runs in identity-only mode (per-entrance principals, no
+/// departments).
+#[async_trait]
+pub trait PersonDirectory: Send + Sync {
+    /// Ok(None) = the directory answered and knows no such person.
+    /// Err = the directory is unreachable/broken (callers degrade).
+    async fn lookup(
+        &self,
+        source: PrincipalSource,
+        external_id: &str,
+    ) -> Result<Option<PersonProfile>>;
 }
 
 /// Vector side of the memory index. Separate from `VectorStore` so the fs
@@ -605,8 +634,13 @@ pub trait MemoryVectorStore: Send + Sync {
     async fn init_memory_collection(&self, embedding_dim: u32) -> Result<()>;
     async fn upsert_memory_vectors(&self, items: &[MemoryWithEmbedding]) -> Result<()>;
     async fn delete_memory_vectors(&self, ids: &[i64]) -> Result<()>;
+    /// Hybrid retrieve (M3a): dense ANN + BM25 over `query_text`, RRF-fused.
+    /// The scope filter is pushed into BOTH sub-requests — dropping it on
+    /// either lane would let foreign-domain rows crowd the fused pool
+    /// (recheck keeps that safe but turns it into silent empty results).
     async fn search_memory_candidates(
         &self,
+        query_text: &str,
         vector: &[f32],
         filter: &MemoryScopeFilter,
         limit: usize,

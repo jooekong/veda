@@ -653,8 +653,12 @@ pub enum MemoryScope {
     /// Current workspace's team domain.
     #[serde(rename = "team")]
     Team,
+    /// The operator's department domain (M3a). Requires a resolved operator
+    /// with a department — otherwise save/search with this scope errors.
+    #[serde(rename = "dept")]
+    Dept,
     /// The agent's own domain — meaningful for shared/unattended agents;
-    /// identical to Mine under M1's key-only identity.
+    /// identical to Mine when no operator identity is present.
     #[serde(rename = "self")]
     SelfScope,
 }
@@ -666,6 +670,8 @@ pub enum MemoryScopeType {
     Workspace,
     /// Personal domain — scope_id is a principal id.
     Principal,
+    /// Department domain — scope_id is the external directory dept id.
+    Dept,
 }
 
 impl MemoryScopeType {
@@ -673,6 +679,7 @@ impl MemoryScopeType {
         match self {
             Self::Workspace => "workspace",
             Self::Principal => "principal",
+            Self::Dept => "dept",
         }
     }
 
@@ -680,6 +687,7 @@ impl MemoryScopeType {
         match s {
             "workspace" => Some(Self::Workspace),
             "principal" => Some(Self::Principal),
+            "dept" => Some(Self::Dept),
             _ => None,
         }
     }
@@ -730,6 +738,8 @@ impl PrincipalKind {
 pub enum PrincipalSource {
     Gateway,
     Wecom,
+    /// Employee number asserted directly (X-Veda-Operator: emp:<no>).
+    Emp,
     Key,
 }
 
@@ -738,7 +748,18 @@ impl PrincipalSource {
         match self {
             Self::Gateway => "gateway",
             Self::Wecom => "wecom",
+            Self::Emp => "emp",
             Self::Key => "key",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "gateway" => Some(Self::Gateway),
+            "wecom" => Some(Self::Wecom),
+            "emp" => Some(Self::Emp),
+            "key" => Some(Self::Key),
+            _ => None,
         }
     }
 }
@@ -766,14 +787,29 @@ pub struct Memory {
     pub updated_at: DateTime<Utc>,
 }
 
+/// A person (or agent). Entrance identities live in
+/// veda_principal_identities; this row is the merge target keyed by emp_no
+/// for humans resolved through the person directory. emp_no NULL = directory
+/// not configured / not yet resolved / agent.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Principal {
     pub id: String,
     pub kind: PrincipalKind,
-    pub source: PrincipalSource,
-    pub external_id: String,
+    pub emp_no: Option<String>,
     pub display_name: Option<String>,
+    pub dept_id: Option<String>,
+    pub dept_name: Option<String>,
+    pub profile_synced_at: Option<DateTime<Utc>>,
     pub created_at: DateTime<Utc>,
+}
+
+/// One person as the external directory reports them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PersonProfile {
+    pub emp_no: String,
+    pub display_name: Option<String>,
+    pub dept_id: Option<String>,
+    pub dept_name: Option<String>,
 }
 
 /// Insert payload — id/timestamps assigned by the store.
@@ -810,6 +846,11 @@ pub struct MemoryPatch {
     pub topic: Option<String>,
     pub source_ref: Option<serde_json::Value>,
     pub expires_at: Option<DateTime<Utc>>,
+    /// Scope move (升域/降域): the memory row relocates in place — same id,
+    /// same authorship history. Clears origin_workspace_id (only personal
+    /// rows carry one). The store MUST enqueue MemorySync with the
+    /// post-update scope even when content is unchanged.
+    pub scope: Option<(MemoryScopeType, String)>,
 }
 
 /// Read-side domain filter. Every memory read goes through a query carrying
@@ -824,15 +865,18 @@ pub enum MemoryScopeFilter {
     },
     /// The context union (design §8): team domain of `workspace_id` plus
     /// the personal domain of `principal_id` restricted to
-    /// origin ∈ {workspace_id, none}.
+    /// origin ∈ {workspace_id, none}, plus the operator's department domain
+    /// when known (M3a).
     Context {
         workspace_id: String,
         principal_id: String,
+        dept_id: Option<String>,
     },
 }
 
-/// Index-only Milvus row: no content, no kind — MySQL recheck is the
-/// authority for everything but the vector.
+/// Milvus row for the memory index. `content` feeds the BM25 function's
+/// tokenizer only — retrieval output stays (id, score) and text is always
+/// re-read from MySQL after the recheck.
 #[derive(Debug, Clone)]
 pub struct MemoryWithEmbedding {
     pub id: i64,
@@ -841,6 +885,7 @@ pub struct MemoryWithEmbedding {
     /// Empty string = none (Milvus VarChar has no NULL with dynamic
     /// fields disabled).
     pub origin_workspace_id: String,
+    pub content: String,
     pub vector: Vec<f32>,
 }
 

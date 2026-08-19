@@ -155,6 +155,7 @@ async fn build_test_app() -> App {
         mysql.clone(),
         milvus.clone(),
         embedding.clone(),
+        None,
     ));
     let answer_service = Some(Arc::new(AnswerService::new(
         tools,
@@ -637,3 +638,132 @@ async fn answer_memory_dual_source_and_isolation() {
         "no citations for B: {data}"
     );
 }
+
+/// M3a audience rule at the answer surface, identity-only mode (no person
+/// directory — the pre-SSO deployment shape):
+/// - WITH an operator (private surface) the asker's personal memory is
+///   injected and cited, with `scope: "mine"` on the citation;
+/// - WITHOUT one (group surface) the same question gets zero evidence —
+///   asserted structurally, independent of LLM behaviour.
+#[tokio::test]
+#[ignore = "needs real MySQL + Milvus + embedding + airouter (config/test.toml); run with --ignored"]
+async fn answer_operator_gates_personal_injection() {
+    let app = build_test_app().await;
+    let (ws, key) = provision_memory_ws(&app, "op").await;
+    let operator = format!("wecom:u-{}", &ws[..8]);
+
+    let marker = format!("P{}", &ws[..8]);
+    let fact = format!("我的服务 {marker} 的调试端口是 59217");
+    let (status, saved) = post_json_as(
+        &app.router,
+        "/v1/memory",
+        &key,
+        Some(&operator),
+        serde_json::json!({ "content": fact, "scope": "mine", "origin": "" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "save: {saved}");
+    let mem_id = saved["data"]["memory"]["id"].as_i64().expect("memory id");
+
+    let query = format!("{marker} 的调试端口是多少?");
+    // Poll retrievability through the operator's own context.
+    for i in 0..20 {
+        let actor = app
+            .state
+            .memory_service
+            .resolve_operator_actor(&ws, veda_types::PrincipalSource::Wecom, &operator["wecom:".len()..])
+            .await
+            .unwrap()
+            .expect("identity-only mode resolves");
+        let hits = app
+            .state
+            .memory_service
+            .context(&actor, &query, 5)
+            .await
+            .unwrap_or_default();
+        if !hits.is_empty() {
+            break;
+        }
+        assert!(i < 19, "seeded personal memory never became retrievable");
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    }
+
+    // ── without operator: personal domain must not inject ──
+    let (status, resp) =
+        post_answer_retry(&app.router, &key, serde_json::json!({ "query": query })).await;
+    assert_eq!(status, StatusCode::OK, "no-operator answer: {resp}");
+    assert_eq!(
+        resp["data"]["hit_count"].as_u64().unwrap_or(99),
+        0,
+        "group-audience answer must not see personal memories: {}",
+        resp["data"]
+    );
+
+    // ── with operator: injected and cited as scope=mine ──
+    let (status, resp) = post_answer_retry_as(
+        &app.router,
+        &key,
+        Some(&operator),
+        serde_json::json!({ "query": query }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "operator answer: {resp}");
+    let data = &resp["data"];
+    assert!(
+        data["hit_count"].as_u64().unwrap_or(0) >= 1,
+        "personal memory injected for its owner: {data}"
+    );
+    let citations = data["citations"].as_array().cloned().unwrap_or_default();
+    let mem_cite = citations
+        .iter()
+        .find(|c| c["memory"]["id"].as_i64() == Some(mem_id))
+        .unwrap_or_else(|| panic!("answer cites the personal memory: {citations:?}"));
+    assert_eq!(
+        mem_cite["memory"]["scope"].as_str(),
+        Some("mine"),
+        "citation carries the domain label: {mem_cite}"
+    );
+}
+
+async fn post_json_as(
+    router: &axum::Router,
+    path: &str,
+    key: &str,
+    operator: Option<&str>,
+    body: Value,
+) -> (StatusCode, Value) {
+    let mut b = Request::builder()
+        .method("POST")
+        .uri(path)
+        .header("authorization", format!("Bearer {key}"))
+        .header("content-type", "application/json");
+    if let Some(op) = operator {
+        b = b.header("x-veda-operator", op);
+    }
+    let req = b.body(Body::from(body.to_string())).unwrap();
+    let resp = router.clone().oneshot(req).await.unwrap();
+    let status = resp.status();
+    let bytes = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+    let v: Value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
+    (status, v)
+}
+
+async fn post_answer_retry_as(
+    router: &axum::Router,
+    key: &str,
+    operator: Option<&str>,
+    body: Value,
+) -> (StatusCode, Value) {
+    for attempt in 0..3 {
+        let (status, v) = post_json_as(router, "/v1/answer", key, operator, body.clone()).await;
+        let llm_blip = status == StatusCode::BAD_GATEWAY
+            && v["error_code"].as_str() == Some("LLM_UNAVAILABLE");
+        if !llm_blip || attempt == 2 {
+            return (status, v);
+        }
+        eprintln!("answer attempt {attempt}: LLM upstream blip, retrying");
+        tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+    }
+    unreachable!()
+}
+

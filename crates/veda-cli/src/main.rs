@@ -1923,8 +1923,15 @@ async fn main() -> anyhow::Result<()> {
                                 println!("  {p}");
                             }
                         } else if let Some(m) = c["memory"]["content"].as_str() {
-                            // Team-memory citation (M2a): no path, show the line.
-                            println!("  记忆: {m}");
+                            // Memory citation: no path, show the line with
+                            // its domain label (scope absent on old servers).
+                            let label = match c["memory"]["scope"].as_str() {
+                                Some("team") => "记忆(团队)",
+                                Some("dept") => "记忆(部门)",
+                                Some("mine") | Some("self") => "记忆(个人)",
+                                _ => "记忆",
+                            };
+                            println!("  {label}: {m}");
                         }
                     }
                 }

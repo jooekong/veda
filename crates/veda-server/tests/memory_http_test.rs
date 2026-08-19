@@ -82,6 +82,12 @@ struct TestApp {
 }
 
 async fn build_app() -> TestApp {
+    build_app_with(None).await
+}
+
+async fn build_app_with(
+    directory: Option<Arc<dyn veda_core::store::PersonDirectory>>,
+) -> TestApp {
     let cfg = load_config();
     let mysql = Arc::new(
         MysqlStore::with_pool_config(
@@ -165,6 +171,7 @@ async fn build_app() -> TestApp {
             mysql.clone(),
             milvus.clone(),
             embedding.clone(),
+            directory,
         )),
         summary_enabled: false,
         answer_service: None,
@@ -272,10 +279,25 @@ async fn send(
     token: &str,
     body: Option<Value>,
 ) -> (StatusCode, Value) {
-    let b = Request::builder()
+    send_as(router, method, uri, token, None, body).await
+}
+
+/// Like `send` but with an `X-Veda-Operator` assertion (M3a).
+async fn send_as(
+    router: Router,
+    method: &str,
+    uri: &str,
+    token: &str,
+    operator: Option<&str>,
+    body: Option<Value>,
+) -> (StatusCode, Value) {
+    let mut b = Request::builder()
         .method(method)
         .uri(uri)
         .header("authorization", format!("Bearer {token}"));
+    if let Some(op) = operator {
+        b = b.header("x-veda-operator", op);
+    }
     let request = match body {
         Some(v) => b
             .header("content-type", "application/json")
@@ -643,4 +665,205 @@ async fn memory_rest_mcp_and_gatemem_assertions() {
             .execute(pool)
             .await;
     }
+}
+
+// ── M3a: operator identity / dept domain / hybrid / scope move ──
+
+/// Query-string encoding for CJK test payloads (percent-encoding is already
+/// a veda-server dependency; no extra dev-dep).
+fn enc(s: &str) -> String {
+    percent_encoding::utf8_percent_encode(s, percent_encoding::NON_ALPHANUMERIC).to_string()
+}
+
+/// Trait-level directory stub: everything except people.rs's HTTP glue runs
+/// real (the SSO contract isn't final; the glue is Joe's to wire).
+struct StaticDirectory(std::collections::HashMap<(String, String), veda_types::PersonProfile>);
+
+#[async_trait::async_trait]
+impl veda_core::store::PersonDirectory for StaticDirectory {
+    async fn lookup(
+        &self,
+        source: veda_types::PrincipalSource,
+        external_id: &str,
+    ) -> veda_types::Result<Option<veda_types::PersonProfile>> {
+        Ok(self
+            .0
+            .get(&(source.as_str().to_string(), external_id.to_string()))
+            .cloned())
+    }
+}
+
+fn profile(emp: &str, name: &str, dept: &str) -> veda_types::PersonProfile {
+    veda_types::PersonProfile {
+        emp_no: emp.into(),
+        display_name: Some(name.into()),
+        dept_id: Some(dept.into()),
+        dept_name: Some(format!("dept-{dept}")),
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore]
+async fn operator_identity_merge_and_dept_domain() {
+    let _ = tracing_subscriber::fmt().with_env_filter("info").try_init();
+    let mut dir = std::collections::HashMap::new();
+    let run = Uuid::new_v4().simple().to_string()[..8].to_string();
+    let dept_a = format!("DA-{run}");
+    let dept_b = format!("DB-{run}");
+    let (zhang_wecom, zhang_emp) = (format!("wz-{run}"), format!("e1-{run}"));
+    let li_wecom = format!("wl-{run}");
+    dir.insert(("wecom".into(), zhang_wecom.clone()), profile(&zhang_emp, "张三", &dept_a));
+    dir.insert(("emp".into(), zhang_emp.clone()), profile(&zhang_emp, "张三", &dept_a));
+    dir.insert(("wecom".into(), li_wecom.clone()), profile(&format!("e2-{run}"), "李四", &dept_b));
+    // emp_no is VARCHAR(32) — the {run} suffix keeps every id under that.
+    let app = build_app_with(Some(Arc::new(StaticDirectory(dir)))).await;
+    let ws = provision(&app.state).await;
+    let zhang_op = format!("wecom:{zhang_wecom}");
+    let zhang_emp_op = format!("emp:{zhang_emp}");
+    let li_op = format!("wecom:{li_wecom}");
+
+    // 1) 身份合并: a mine-scope save through the wecom entrance …
+    let fact = format!("张三的个人笔记 merge-{run}");
+    let (st, v) = send_as(
+        app.router.clone(), "POST", "/v1/memory", &ws.wk, Some(&zhang_op),
+        Some(json!({ "content": fact, "scope": "mine", "origin": "" })),
+    ).await;
+    assert_eq!(st, StatusCode::OK, "save via wecom entrance: {v}");
+    // … is visible through the emp entrance: two identities, one principal.
+    let (st, v) = send_as(
+        app.router.clone(), "GET",
+        &format!("/v1/memory/search?query={}&scope=mine", enc(&fact)),
+        &ws.wk, Some(&zhang_emp_op), None,
+    ).await;
+    assert_eq!(st, StatusCode::OK);
+    assert!(
+        contents(&v).iter().any(|c| c == &fact),
+        "emp entrance must see the wecom-entrance personal memory: {v}"
+    );
+
+    // 2) dept domain: 张三 seeds a dept-A memory.
+    let dept_fact = format!("部门约定 dept-{run}: 周会挪到周二上午");
+    let (st, _) = send_as(
+        app.router.clone(), "POST", "/v1/memory", &ws.wk, Some(&zhang_op),
+        Some(json!({ "content": dept_fact, "scope": "dept" })),
+    ).await;
+    assert_eq!(st, StatusCode::OK);
+
+    // GateMem extension: same workspace, other dept — invisible in both
+    // explicit dept search and the context union.
+    for uri in [
+        format!("/v1/memory/search?query={}&scope=dept", enc(&dept_fact)),
+        format!("/v1/memory/context?query={}", enc(&dept_fact)),
+    ] {
+        let (st, v) = send_as(app.router.clone(), "GET", &uri, &ws.wk, Some(&li_op), None).await;
+        assert_eq!(st, StatusCode::OK);
+        assert!(
+            !contents(&v).iter().any(|c| c == &dept_fact),
+            "dept-B operator must not see dept-A memory via {uri}: {v}"
+        );
+    }
+
+    // Dept memories follow the person across workspaces.
+    let ws2 = provision(&app.state).await;
+    let (st, v) = send_as(
+        app.router.clone(), "GET",
+        &format!("/v1/memory/search?query={}&scope=dept", enc(&dept_fact)),
+        &ws2.wk, Some(&zhang_op), None,
+    ).await;
+    assert_eq!(st, StatusCode::OK);
+    assert!(
+        contents(&v).iter().any(|c| c == &dept_fact),
+        "dept memory must be visible from another workspace: {v}"
+    );
+
+    // 3) dept save without a resolvable dept (no directory entry) → 400.
+    let (st, _) = send_as(
+        app.router.clone(), "POST", "/v1/memory", &ws.wk, Some(&format!("wecom:ghost-{run}")),
+        Some(json!({ "content": "x", "scope": "dept" })),
+    ).await;
+    assert_eq!(st, StatusCode::BAD_REQUEST, "ghost operator has no dept");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore]
+async fn hybrid_keyword_recall_and_scope_move() {
+    let app = build_app().await;
+    let ws = provision(&app.state).await;
+    let run = Uuid::new_v4().simple().to_string();
+
+    // BM25 lane: a rare exact token buried in an otherwise generic line.
+    let token = format!("XK9Q7Z{}", &run[..6]);
+    let fact = format!("内部代号 {token} 的服务经 .85 的 SSH 隧道访问生产 MySQL");
+    let (st, _) = send(
+        app.router.clone(), "POST", "/v1/memory", &ws.wk,
+        Some(json!({ "content": fact, "scope": "team" })),
+    ).await;
+    assert_eq!(st, StatusCode::OK);
+    let (st, v) = send(
+        app.router.clone(), "GET",
+        &format!("/v1/memory/search?query={token}&scope=team"),
+        &ws.wk, None,
+    ).await;
+    assert_eq!(st, StatusCode::OK);
+    assert!(
+        contents(&v).iter().any(|c| c.contains(&token)),
+        "exact-token query must recall via the BM25 lane: {v}"
+    );
+
+    // Scope move (mine → team), content unchanged: the target domain must
+    // see it immediately and the source domain must not (Milvus scalars
+    // refreshed — the R6 regression).
+    let note = format!("个人踩坑 move-{run}: k6 要加 SALT");
+    let (st, v) = send(
+        app.router.clone(), "POST", "/v1/memory", &ws.wk,
+        Some(json!({ "content": note, "scope": "mine", "origin": "" })),
+    ).await;
+    assert_eq!(st, StatusCode::OK);
+    let id = v["data"]["memory"]["id"].as_i64().expect("memory id");
+    let (st, v) = send(
+        app.router.clone(), "PATCH", &format!("/v1/memory/{id}"), &ws.wk,
+        Some(json!({ "scope": "team" })),
+    ).await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    assert_eq!(v["data"]["scope"].as_str(), Some("team"), "{v}");
+    let (_, team) = send(
+        app.router.clone(), "GET",
+        &format!("/v1/memory/search?query={}&scope=team", enc(&note)),
+        &ws.wk, None,
+    ).await;
+    assert!(
+        items(&team).iter().any(|i| i["id"].as_i64() == Some(id)),
+        "moved memory must be searchable in the target domain: {team}"
+    );
+    let (_, mine) = send(
+        app.router.clone(), "GET",
+        &format!("/v1/memory/search?query={}&scope=mine", enc(&note)),
+        &ws.wk, None,
+    ).await;
+    assert!(
+        !items(&mine).iter().any(|i| i["id"].as_i64() == Some(id)),
+        "moved memory must leave the source domain: {mine}"
+    );
+
+    // Round-tripping an UNCHANGED scope is not a move: a workspace-pinned
+    // personal note must keep its origin (R7 regression — clearing it would
+    // leak the note into every other workspace's context).
+    let pinned = format!("个人钉住 keep-{run}: 本 ws 的私货");
+    let (st, v) = send(
+        app.router.clone(), "POST", "/v1/memory", &ws.wk,
+        Some(json!({ "content": pinned, "scope": "mine" })),
+    ).await;
+    assert_eq!(st, StatusCode::OK);
+    let pid = v["data"]["memory"]["id"].as_i64().unwrap();
+    assert_eq!(v["data"]["memory"]["origin_workspace_id"].as_str(), Some(ws.ws_id.as_str()));
+    let (st, v) = send(
+        app.router.clone(), "PATCH", &format!("/v1/memory/{pid}"), &ws.wk,
+        Some(json!({ "scope": "mine", "topic": "keep" })),
+    ).await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    assert_eq!(
+        v["data"]["origin_workspace_id"].as_str(),
+        Some(ws.ws_id.as_str()),
+        "unchanged scope must not clear origin: {v}"
+    );
 }
