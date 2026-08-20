@@ -698,9 +698,10 @@ M1 就能自己用起来：coding agent 通过 MCP 记 repo 的坑，企微场�
 
 ---
 
-## 18. 业界调研结论（2026-08-07 初查，2026-08-11 增补核查）
+## 18. 业界调研结论（2026-08-07 初查，2026-08-11 增补核查，2026-08-19 OpenViking 源码级深挖）
 
-三轮 fan-out 调研含代码级核实（08-07），加二轮机制深挖与新项目扫描（08-11）。
+三轮 fan-out 调研含代码级核实（08-07），加二轮机制深挖与新项目扫描（08-11），
+加一轮 OpenViking 单项源码级深挖（08-19，六路 fan-out + 主线交叉验证）。
 
 ### 各家怎么做的（08-07）
 
@@ -729,6 +730,8 @@ M1 就能自己用起来：coding agent 通过 MCP 记 repo 的坑，企微场�
   但无仲裁无治理闭环——媒体评语「stores, doesn't adjudicate」
 - **OpenViking**（字节，2026-01 开源，28k star）：`viking://` 文件系统心智 +
   写入时 L0/L1/L2 分层摘要，与 veda 文档三层最接近的活项目，**持续对标对象**；摘要无校验
+  （↑ 08-19 深挖后两处修正：摘要现在带 `freshness` 采样覆盖度元数据；L0/L1 是**目录级
+  sidecar** 不是每文件分层。详见下方小节）
 - **cognee**（29.9k star）：content-hash 去重、dataset 级 ACL 业界最完整；图管线定位，不动摇不做图的结论
 - **ReMe**（MemoryScope 已改名重定向）：Markdown 文件即记忆，「Memory as File」阵营
 - **文件阵营先例**（支撑 08-11「可编辑」拍板）：Claude Code 自身记忆（一条一文件，
@@ -743,21 +746,84 @@ M1 就能自己用起来：coding agent 通过 MCP 记 repo 的坑，企微场�
   写边界 + 来源标签 + 隔离。veda 取来源标签、资料块注入、分域、人人可删四样；
   **写边界（审批）明确不取**，是 §13 写明的赌注
 
+### 08-19 OpenViking 源码级深挖（HEAD `dc39985`，v0.4.15）
+
+六路 fan-out + 交叉验证，完整报告见 [`openviking-benchmark-2026-08.md`](openviking-benchmark-2026-08.md)。
+它这三个月的主线是 **session→memory 自动抽取** 和 **服务端 context 组装（原 MCP `recall`）**。
+只记对 veda 决策有影响的部分：
+
+**三条实证支持既有拍板**
+
+1. **记忆是表不是文件**（§2.3 拍板 4）：它的文件路线税已经显性化——记忆更新 = 全文件
+   read-modify-write + `pathlock` 批量租约（300s 超时），锁集要包含每个目录的 `.overview.md`
+   否则 Rust 侧拒绝写入；LLM 用 SEARCH/REPLACE patch 编辑正文，为此专门写了三篇 spec
+   （逐块顺序校验定位首个真失败块、`plain_content` 与渲染链接不一致导致合法 patch 误拒、
+   overview 锁覆盖）。veda 整条替换一行，这些问题全部不存在。
+2. **不做图**（§17）：三重独立印证——resource relation 边**两步死亡**（06-10 检索侧先摘成
+   恒空，拖 10 周后 08-19 连 3 个 SDK/CLI/双语文档一起铲掉，109 文件 −2449 行，幸存的同源
+   机制只剩一个 `active_count` 整型）；memory link/backlink 造了 3 个月、`link_enabled`
+   **默认 False 从没翻过**、设计文档仍 Draft；`graph_view.py` 688 行**零调用方**。
+3. **不做写时 confidence / LLM 决策**（§17）：它算了 `confidence`（四行启发式），
+   **下游从不做阈值判断**，0.1 和 0.9 一视同仁地被应用。
+
+**祛魅：宣传 ≠ 实现**
+
+- README 卖的 "every retrieval leaves a trajectory you can watch and debug"：`ThinkingTrace`
+  定义了 10 种事件类型 + 线程安全队列 + 统计聚合，**`add_event()` 在检索路径一次都没被调用**
+  （已 grep 验证）；`match_reason` 恒空；`searched_directories` 返回的是规划起点不是实际走过的路。
+- "self-evolving"：线上 reward = `passed = bool(trajectories)`——「抽取 LLM 吐出了至少一个
+  trajectory 文件」即成功。全仓**无任何 `RolloutEvaluator` 实现**，`Case.rubric` 提取了但从不评估。
+- 衰减：`memory_lifecycle.py` 整个文件 64 行一个纯函数，`hotness_alpha` **默认 0.0**——
+  衰减打分默认根本不参与排序。→ 加强 §17「不设 confidence 列」和 mem0 那条 `last_used_at`
+  只调序的判断。
+
+**值得抄的都在 recall 下游，不在上游**
+
+- 抄：**召回不做 level 过滤、层只决定返回粒度**（它恒 `level=None` 召回，`detail` 只管返回）；
+  **token 预算 = 广度优先 floor（`per_entry_cap = 平均份额×2`）+ 剩余预算加深**，注释理由
+  「分数扎堆，把预算全押 top-1 是坏赌注」；**超预算降级绝不截断**（降到底是 bare URI，
+  因为半截 markdown 比一个 URI 更糟）；CJK-aware token 估算；**引用白名单强校验**
+  （先截断再提 URI，越界整条丢——veda §10 的机械校验思路，它在 digest 侧独立收敛到同一答案）；
+  证据块标签转义防伪造兄弟节点；每级过滤 in/out 的 `stats` block。
+- 不抄：query rewrite / intent analysis（串行 +1 次 LLM + 5s 熔断 + 检索 fan-out ×3，
+  而 planner 输出的 `context_type` 在该路径上被整个丢弃）；trajectory 事件流（它自己没实现）；
+  hotness 反馈（默认关 + read-modify-write 无 CAS 会丢计数）。
+
+**被放弃的方向（信噪比最高）**：self/peer 各自独立的 memory type 过滤器合入 **88 秒**后被整体
+revert，重来版明确砍掉退回单一 allowlist；`data_version` 记忆多版本 time-travel 的 RFC 写得很
+完整但**从未实现**，最终用「内容哈希快照 + read 消费记录」近似——对应 §17「不做编辑历史表」。
+
+**它比 veda 弱的地方**（避免误判形势）：记忆**没有共享/团队域**（account 内只共享 resources 和
+skills，记忆明确不共享）；`peer_scope` 默认 `"all"` 只降权 0.02~0.1 不隔离，且 workspace peer
+从 `cwd` 派生（共享 runner 上 A 的记忆会进 B 的会话，官方自己在 README 末尾警告）；15 个 MCP
+工具**零 annotation**（含不可逆的 `forget`）；outbox 无 dead-letter、transient 失败无限 requeue；
+自动 commit 服务端默认全关，全靠客户端插件阈值——进程被 `kill -9` 就没有任何集成会 commit。
+
 ### 跨项目的共同结论
 
 1. **写路径在退火不在加码**——mem0 亲手砍掉自己发明的复杂写路径，腾讯只检测冲突不自动合并
-2. **图数据库在退场**——mem0 从开源版删光，腾讯用 SQLite，Zep 的核心创新可以用列近似
+2. **图数据库在退场**——mem0 从开源版删光，腾讯用 SQLite，Zep 的核心创新可以用列近似；
+   08-19 再加一家：OpenViking 的资源关系边先变成只写不读、10 周后连同 SDK/CLI/文档整体铲除
 3. **分层检索是共识**——高层铺底、按需下钻，和 veda 的文档三层同构
 4. **写入时归属是主流**——MIRIX/memU/OpenViking/ReMe/basic-memory 全是写入时定归属，事后聚类是少数派
 5. **巩固都是后台低频任务**——形态就是 veda 的 outbox worker + 防抖
 6. **共享域的可见性控制已有多家在做**（腾讯 v2.0 四档 ACL、cognee dataset ACL、MemOS cube
    读写列表），但**治理闭环——删除全链路传播、可测的遗忘、矛盾有人管——没有任何一家做完整**
-7. **拼装式 digest + 引用机械校验没有任何一家做**（11 家复核，0 家）——veda 真正的差异化
+7. ~~**拼装式 digest + 引用机械校验没有任何一家做**（11 家复核，0 家）~~
+   **08-19 修正**：「引用机械校验」这半条已被证伪——OpenViking 的 digest 做了，而且做法比
+   预想的细（`normalize_digest`：每条 bullet 先截断到 500 字符**再**提取 URI，因为 URI 在句尾、
+   被截掉就等于这条没引用；然后对照本轮实际返回的 entry URI 白名单，越界整条丢弃，全丢则
+   回落未改写文本）。**仍然无人做的是「拼装式」那半条**——它的 digest 是 LLM 二次改写
+   （`retrieval.recall_rewrite`），veda §10 的「只挑选和拼装，不做二次总结」依然是独一份。
+   差异化收窄但没消失，而且对方的校验实现值得直接抄。
 
 ### 选型总结
 
 **没有一家能整体照搬。** 最终配方：**mem0 v3 的存储骨架和读时融合 + 文件阵营的可编辑模型 +
 Letta 的接口哲学 + 腾讯的产品形态和注入预算 + Zep 的时序零件，轻治理自研。**
+08-19 追加一味：**OpenViking 的 recall 下游**（token 预算的广度优先填充、超预算降级不截断、
+引用白名单校验、每级过滤的 stats）——注意只取下游，它的上游 query rewrite / intent analysis
+是包装大于实质。
 
 ---
 
