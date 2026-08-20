@@ -22,7 +22,9 @@ SQL 三件套 / revoke scope / platform authz+timeout / TimeoutLayer+CatchPanic 
 
 | 计划 | 状态 |
 | --- | --- |
-| [`agent-memory-m3a.md`](../plans/agent-memory-m3a.md) | **待实施**（2026-08-18 定稿，Codex 对抗评审 7 findings 已裁决入档）：操作者透传 + 工号/部门域 + Milvus hybrid 检索升级；无历史数据迁移（拍板）；qa_log 摄入留 M3b |
+| [`agent-memory-m3a.md`](../plans/agent-memory-m3a.md) | **已实现、e2e 全绿待部署**（2026-08-18 定稿+实现，Codex 两轮评审入档）：操作者透传 + 工号/部门域 + Milvus hybrid 检索升级；尾巴=测试环境部署+冒烟+归档 |
+| [`agent-memory-m4a.md`](../plans/agent-memory-m4a.md) | **待实施**（2026-08-20 定稿）：记忆浏览页最小版——`GET /v1/memory/list`/topics + console 三页签 wiki + admin 团队域清理；**先于 m3b 执行**（对调 design §16 顺序，理由见其 §0） |
+| [`agent-memory-m3b.md`](../plans/agent-memory-m3b.md) | **待实施**（2026-08-20 定稿）：qa_log 自动摄入——server 进程内水位扫描 + LLM 窄口径抽取（**只抽用户断言不抽 bot 答案**），一律落提问人个人域；默认关，测试环境 dogfood 后翻生产；依赖 m4a 质检面 |
 | [`veda-tunnel-plan.md`](../plans/veda-tunnel-plan.md) | **生产运行中**（专用机 .95）：企微长连接 + RAG 问答 + 三入口 bot 管理 + 平台 API（§18）；方向池见 `design/tunnel-directions.md`；尾巴=server 白名单改动未部署 |
 | [`veda-answer-agentic.md`](../plans/veda-answer-agentic.md) | **Stage 1 已实现 e2e 全绿**：`/v1/answer` agentic 多次召回(tool loop)+ prompt 分层;Stage 2 bot prompt 三入口贯通进行中 |
 | [`onepaas-api-alignment.md`](../plans/onepaas-api-alignment.md) | OnePaaS 接口规范对齐（分页 / 错误三件套 / 响应信封） |
@@ -36,7 +38,8 @@ SQL 三件套 / revoke scope / platform authz+timeout / TimeoutLayer+CatchPanic 
   （tigerfs / drive9 / agent-memory 赛道七家对标；候选：operation log + 版本历史（D1）、
   `veda skill install`（D2）、agent/团队记忆（D3））
 - Agent / 团队记忆完整设计提案：[`agent-memory.md`](agent-memory.md)
-  （架构定稿；M1 三节点 + M2a 测试环境已上线，施工图均已归档；下一步 M3 操作者身份透传）
+  （架构定稿；M1 三节点 + M2a 测试环境已上线；M3a 已实现待部署；下一步
+  M4a 浏览页 → M3b qa_log 摄入，再往后 M3c 提名双任务——对账 §9.2 + 收敛 §13）
 
 ## Phase 历史
 

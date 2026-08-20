@@ -2,7 +2,8 @@
 
 > **状态：M1 已上线三节点（0.1.27，施工图归档 [`../archive/plans/agent-memory-m1.md`](../archive/plans/agent-memory-m1.md)）；
 > M2a answer 双源已上线测试环境（2026-08-14，生产随下次发版窗口；施工图归档 [`../archive/plans/agent-memory-m2a.md`](../archive/plans/agent-memory-m2a.md)）；
-> M3a 操作者身份 + 工号/部门域 + hybrid 检索已实现、e2e 全绿待部署（2026-08-18，施工图 [`../plans/agent-memory-m3a.md`](../plans/agent-memory-m3a.md)——含两拍板：无历史数据迁移、操作者头不加信任闸；SSO 目录契约待接，`[people]` 未配置前跑 identity-only 模式）。**
+> M3a 操作者身份 + 工号/部门域 + hybrid 检索已实现、e2e 全绿待部署（2026-08-18，施工图 [`../plans/agent-memory-m3a.md`](../plans/agent-memory-m3a.md)——含两拍板：无历史数据迁移、操作者头不加信任闸；SSO 目录契约待接，`[people]` 未配置前跑 identity-only 模式）；
+> M4a 浏览页最小版 + M3b qa_log 摄入施工图已开（2026-08-20，[`../plans/agent-memory-m4a.md`](../plans/agent-memory-m4a.md) / [`../plans/agent-memory-m3b.md`](../plans/agent-memory-m3b.md)）——两处对本文的偏离已拍板并记录在各施工图 §0：执行顺序对调为浏览页先行（§16 是 M3→M4），摄入口径收窄为只抽用户断言不抽 bot 答案（§3 初稿是宽口径）。**
 > 2026-08-07 业界调研 + 方案初稿；2026-08-11 二轮对标核查
 > （§18 增补）+ Claude/Codex 双评审后修订，两批拍板：第一批——**记忆可编辑（零状态机）、
 > 团队域无审批（wiki 式轻治理）、principal 只做归属标识（不新增鉴权）**；第二批——
