@@ -14,8 +14,8 @@ use axum::{Json, Router};
 use serde::Deserialize;
 use veda_core::service::memory::{MemoryActor, SaveMemoryInput, UpdateMemoryInput};
 use veda_types::api::{
-    MemoryItem, MemoryListResponse, SaveMemoryApiRequest, SaveMemoryResponse,
-    UpdateMemoryApiRequest,
+    MemoryItem, MemoryListResponse, MemoryPageResponse, MemoryTopicCount, MemoryTopicsResponse,
+    SaveMemoryApiRequest, SaveMemoryResponse, UpdateMemoryApiRequest,
 };
 use veda_types::{ApiResponse, MemoryKind, MemoryScope, VedaError};
 
@@ -28,6 +28,8 @@ pub fn routes() -> Router<Arc<AppState>> {
         .route("/v1/memory", post(save_memory))
         .route("/v1/memory/search", get(search_memory))
         .route("/v1/memory/context", get(memory_context))
+        .route("/v1/memory/list", get(list_memory))
+        .route("/v1/memory/topics", get(memory_topics))
         .route("/v1/memory/{id}", patch(update_memory))
         .route("/v1/memory/{id}", delete(delete_memory))
 }
@@ -145,6 +147,74 @@ async fn memory_context(
             .map(|h| MemoryItem::from_memory(h.memory, Some(h.score)))
             .collect(),
     })))
+}
+
+#[derive(Debug, Deserialize)]
+struct MemoryBrowseQuery {
+    tab: MemoryScope,
+    /// Exact topic; "" selects the uncategorized bucket; absent = all.
+    topic: Option<String>,
+    kind: Option<MemoryKind>,
+    page: Option<u32>,
+    size: Option<u32>,
+}
+
+/// The personal/dept tabs are meaningless without an operator identity — a
+/// bare shared key would browse the agent's own domain as "mine". Reject
+/// loudly instead of showing the wrong domain (m4a §1.2).
+fn require_operator_for_private_tab(
+    tab: MemoryScope,
+    headers: &HeaderMap,
+) -> Result<(), AppError> {
+    match parse_operator(headers).map_err(|m| AppError(VedaError::InvalidInput(m)))? {
+        None if !matches!(tab, MemoryScope::Team) => Err(AppError(VedaError::InvalidInput(
+            "this tab needs an operator identity — send X-Veda-Operator: <source>:<id>".into(),
+        ))),
+        _ => Ok(()),
+    }
+}
+
+async fn list_memory(
+    State(state): State<Arc<AppState>>,
+    auth: AuthWorkspace,
+    headers: HeaderMap,
+    Query(q): Query<MemoryBrowseQuery>,
+) -> Result<Json<ApiResponse<MemoryPageResponse>>, AppError> {
+    require_operator_for_private_tab(q.tab, &headers)?;
+    let actor = actor(&state, &auth, &headers).await?;
+    let page = q.page.unwrap_or(1).max(1);
+    let size = q.size.unwrap_or(50).clamp(1, 100);
+    let (rows, total) = state
+        .memory_service
+        .list(&actor, q.tab, q.topic.as_deref(), q.kind, page, size)
+        .await?;
+    Ok(Json(ApiResponse::ok(MemoryPageResponse {
+        items: rows
+            .into_iter()
+            .map(|m| MemoryItem::from_memory(m, None))
+            .collect(),
+        total,
+        page,
+        size,
+    })))
+}
+
+async fn memory_topics(
+    State(state): State<Arc<AppState>>,
+    auth: AuthWorkspace,
+    headers: HeaderMap,
+    Query(q): Query<MemoryBrowseQuery>,
+) -> Result<Json<ApiResponse<MemoryTopicsResponse>>, AppError> {
+    require_operator_for_private_tab(q.tab, &headers)?;
+    let actor = actor(&state, &auth, &headers).await?;
+    let topics = state
+        .memory_service
+        .topics(&actor, q.tab)
+        .await?
+        .into_iter()
+        .map(|(topic, count)| MemoryTopicCount { topic, count })
+        .collect();
+    Ok(Json(ApiResponse::ok(MemoryTopicsResponse { topics })))
 }
 
 async fn update_memory(

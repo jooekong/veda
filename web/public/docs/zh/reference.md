@@ -337,6 +337,8 @@ fs workspace 的第三类资产：**一句话一条**的事实（决策、坑、
 - `POST /v1/memory`：`{ content（≤4096 字符）, scope?（`mine` 缺省 / `team` / `dept`）, kind?（`fact` 缺省 / `decision` / `procedure` / `preference`）, topic?, source_ref?, expires_at? }`。响应 `{ memory, duplicate, neighbors }`——`duplicate: true` 表示同域已有一字不差的一条（幂等返回既有行）；`neighbors` 是同域最近邻 top-3，**语义很近时应改旧条（PATCH）而不是再存一条**。
 - `GET /v1/memory/search?query=…&scope=&limit=`：混合检索（语义+关键词）。`scope` 缺省 = 团队 + 个人域（带操作者头时再并入部门域）。
 - `GET /v1/memory/context?query=…&limit=`：开工引导面——一次调用拿「与当前任务相关」的记忆，agent 会话开始时调一次。
+- `GET /v1/memory/list?tab=team|dept|mine&topic=&kind=&page=&size=`：浏览态枚举（wiki 视图，web console 记忆页的数据源）。按**单个域**列出，`updated_at` 倒序分页（`size` 1–100 缺省 50），响应 `{ items, total, page, size }`。`tab=mine` 只含 origin ∈ {当前 workspace, 随身} 的行（与检索所见一致）；`topic` 精确过滤、传空串 `topic=` 表示「未分类」；`kind` 按类型过滤。`tab=dept`/`mine` **必须带操作者头**，缺头返回 400（不静默给错域）。
+- `GET /v1/memory/topics?tab=`：主题目录——该域未过期行按主题计数，响应 `{ topics: [{topic, count}] }`，`topic: null` 为「未分类」。
 - `PATCH /v1/memory/{id}`：`{ content? / topic? / source_ref? / expires_at? / scope? }` 任给其一；改内容会重嵌向量并更新署名（`updated_by`）。`scope` 实现**升域/搬家**（如个人 → 团队）：同一条原地改域，id 与署名历史保留；目标域已有一字不差的一条时返回冲突，删旧条后重试。
 - `DELETE /v1/memory/{id}`：硬删，立即从检索消失。跨域操作（改/删别人个人域）一律 `404`（不泄露存在性）。
 - 条目形状：`{ id, scope: "team"|"mine", kind, content, topic?, origin_workspace_id?, source_ref?, expires_at?, created_by, created_at, updated_by, updated_at }`；检索响应条目多一个 `score`。

@@ -19,7 +19,9 @@ use veda_types::{
 };
 
 use crate::checksum::sha256_hex;
-use crate::store::{EmbeddingService, MemoryStore, MemoryVectorStore, PersonDirectory};
+use crate::store::{
+    EmbeddingService, MemoryListOrder, MemoryStore, MemoryVectorStore, PersonDirectory,
+};
 
 /// Memories are one-liners; anything longer belongs in a document.
 const MAX_CONTENT_CHARS: usize = 4096;
@@ -451,7 +453,11 @@ impl MemoryService {
     }
 
     pub async fn delete(&self, actor: &MemoryActor, id: i64) -> Result<()> {
-        let deleted = self.store.delete_memory(id, &allowed_scopes(actor)).await?;
+        self.delete_in(id, &allowed_scopes(actor)).await
+    }
+
+    async fn delete_in(&self, id: i64, allowed: &[(MemoryScopeType, String)]) -> Result<()> {
+        let deleted = self.store.delete_memory(id, allowed).await?;
         if !deleted {
             return Err(VedaError::NotFound(format!("memory {id}")));
         }
@@ -463,6 +469,66 @@ impl MemoryService {
             warn!(memory_id = id, err = %e, "sync memory vector delete failed; outbox task will cover");
         }
         Ok(())
+    }
+
+    /// Browse-page enumeration (M4a): one domain per tab — a governance
+    /// view wants crisp boundaries, so no context union here. `self` is
+    /// deliberately not a tab.
+    pub async fn list(
+        &self,
+        actor: &MemoryActor,
+        tab: MemoryScope,
+        topic: Option<&str>,
+        kind: Option<MemoryKind>,
+        page: u32,
+        size: u32,
+    ) -> Result<(Vec<Memory>, i64)> {
+        self.store
+            .list_memories(
+                &browse_filter(actor, tab)?,
+                topic,
+                kind,
+                MemoryListOrder::UpdatedAt,
+                page,
+                size.clamp(1, 100),
+            )
+            .await
+    }
+
+    /// Topic directory for one browse tab: (topic, live count).
+    pub async fn topics(
+        &self,
+        actor: &MemoryActor,
+        tab: MemoryScope,
+    ) -> Result<Vec<(Option<String>, i64)>> {
+        self.store.topic_counts(&browse_filter(actor, tab)?).await
+    }
+
+    /// Admin cleanup surface (M4a): TEAM domain only, with the workspace as
+    /// an explicit parameter instead of a key/operator identity. Personal
+    /// domains stay out of the admin view (design: owner-only visibility).
+    /// Shares the scoped store primitives — this is a parameterized domain,
+    /// not a bypass query.
+    pub async fn admin_list_team(
+        &self,
+        workspace_id: &str,
+        kind: Option<MemoryKind>,
+        order: MemoryListOrder,
+        page: u32,
+        size: u32,
+    ) -> Result<(Vec<Memory>, i64)> {
+        let filter = MemoryScopeFilter::Scope {
+            scope_type: MemoryScopeType::Workspace,
+            scope_id: workspace_id.to_string(),
+        };
+        self.store
+            .list_memories(&filter, None, kind, order, page, size.clamp(1, 100))
+            .await
+    }
+
+    pub async fn admin_delete_team(&self, workspace_id: &str, id: i64) -> Result<()> {
+        self.delete_in(id, &[(MemoryScopeType::Workspace, workspace_id.to_string())])
+            .await
     }
 
     async fn retrieve(
@@ -660,6 +726,30 @@ fn allowed_scopes(actor: &MemoryActor) -> Vec<(MemoryScopeType, String)> {
     v
 }
 
+/// Tab → single-domain filter. Mirrors resolve_scope's rules (team_only
+/// degradation, dept needs a department), except the mine tab uses the
+/// origin-restricted Personal filter: the browse page shows what context
+/// retrieval can surface in THIS workspace (portable + pinned-here), not
+/// the full cross-project personal domain.
+fn browse_filter(actor: &MemoryActor, tab: MemoryScope) -> Result<MemoryScopeFilter> {
+    if matches!(tab, MemoryScope::SelfScope) {
+        return Err(VedaError::InvalidInput(
+            "self is not a browse tab — use team, dept, or mine".into(),
+        ));
+    }
+    if matches!(tab, MemoryScope::Mine) && !actor.team_only {
+        return Ok(MemoryScopeFilter::Personal {
+            principal_id: actor.principal_id.clone(),
+            workspace_id: actor.workspace_id.clone(),
+        });
+    }
+    let (scope_type, scope_id) = resolve_scope(actor, tab)?;
+    Ok(MemoryScopeFilter::Scope {
+        scope_type,
+        scope_id,
+    })
+}
+
 fn embedding_row(memory: &Memory, vector: Vec<f32>) -> MemoryWithEmbedding {
     MemoryWithEmbedding {
         id: memory.id,
@@ -706,6 +796,10 @@ mod tests {
         vectors_upserted: Vec<MemoryWithEmbedding>,
         vectors_deleted: Vec<i64>,
         candidates: Vec<MemoryCandidate>,
+        /// Filters passed into list_memories/topic_counts (browse assertions).
+        list_filters: Vec<MemoryScopeFilter>,
+        /// Allowed-domain sets passed into delete_memory.
+        deleted_allowed: Vec<Vec<(MemoryScopeType, String)>>,
         fail_vector_upsert: bool,
         duplicate_of: Option<i64>,
         /// Principal returned by get_principal_by_identity (identity cache).
@@ -760,8 +854,9 @@ mod tests {
         async fn delete_memory(
             &self,
             _id: i64,
-            _allowed: &[(MemoryScopeType, String)],
+            allowed: &[(MemoryScopeType, String)],
         ) -> Result<bool> {
+            self.0.lock().unwrap().deleted_allowed.push(allowed.to_vec());
             Ok(true)
         }
 
@@ -781,6 +876,29 @@ mod tests {
         async fn touch_memories(&self, ids: &[i64]) -> Result<()> {
             self.0.lock().unwrap().touched.extend_from_slice(ids);
             Ok(())
+        }
+
+        async fn list_memories(
+            &self,
+            filter: &MemoryScopeFilter,
+            _topic: Option<&str>,
+            _kind: Option<MemoryKind>,
+            _order: MemoryListOrder,
+            _page: u32,
+            _size: u32,
+        ) -> Result<(Vec<Memory>, i64)> {
+            let mut s = self.0.lock().unwrap();
+            s.list_filters.push(filter.clone());
+            let n = s.rows.len() as i64;
+            Ok((s.rows.clone(), n))
+        }
+
+        async fn topic_counts(
+            &self,
+            filter: &MemoryScopeFilter,
+        ) -> Result<Vec<(Option<String>, i64)>> {
+            self.0.lock().unwrap().list_filters.push(filter.clone());
+            Ok(vec![])
         }
 
         async fn get_principal_by_identity(
@@ -1233,6 +1351,61 @@ mod tests {
             matches!(context_filter(&a), MemoryScopeFilter::Scope { scope_type: MemoryScopeType::Workspace, .. }),
             "context collapses to the team domain"
         );
+    }
+
+    #[tokio::test]
+    async fn browse_tabs_resolve_to_single_domain_filters() {
+        let mock = Arc::new(Mock::default());
+        let svc = service(mock.clone());
+        let mut a = actor();
+        a.dept_id = Some("D1".into());
+
+        svc.list(&a, MemoryScope::Mine, None, None, 1, 20).await.unwrap();
+        svc.list(&a, MemoryScope::Team, None, None, 1, 20).await.unwrap();
+        svc.topics(&a, MemoryScope::Dept).await.unwrap();
+
+        let filters = mock.0.lock().unwrap().list_filters.clone();
+        assert!(
+            matches!(&filters[0], MemoryScopeFilter::Personal { principal_id, workspace_id }
+                if principal_id == "P1" && workspace_id == "W1"),
+            "mine tab must be origin-restricted, got {:?}",
+            filters[0]
+        );
+        assert!(matches!(&filters[1], MemoryScopeFilter::Scope { scope_type: MemoryScopeType::Workspace, scope_id } if scope_id == "W1"));
+        assert!(matches!(&filters[2], MemoryScopeFilter::Scope { scope_type: MemoryScopeType::Dept, scope_id } if scope_id == "D1"));
+    }
+
+    #[tokio::test]
+    async fn browse_rejects_self_tab_missing_dept_and_degraded_private() {
+        let mock = Arc::new(Mock::default());
+        let svc = service(mock.clone());
+        let err = svc.list(&actor(), MemoryScope::SelfScope, None, None, 1, 20).await.unwrap_err();
+        assert!(matches!(err, VedaError::InvalidInput(_)));
+        // No department on the actor → dept tab errors instead of silently empty.
+        let err = svc.topics(&actor(), MemoryScope::Dept).await.unwrap_err();
+        assert!(matches!(err, VedaError::InvalidInput(_)));
+        // Degraded operator: private tabs reject, team still lists.
+        let degraded = MemoryActor {
+            team_only: true,
+            ..actor()
+        };
+        let err = svc.list(&degraded, MemoryScope::Mine, None, None, 1, 20).await.unwrap_err();
+        assert!(matches!(err, VedaError::InvalidInput(_)));
+        svc.list(&degraded, MemoryScope::Team, None, None, 1, 20).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn admin_delete_scopes_to_team_domain_only() {
+        let mock = Arc::new(Mock::default());
+        let svc = service(mock.clone());
+        svc.admin_delete_team("W1", 42).await.unwrap();
+        let s = mock.0.lock().unwrap();
+        assert_eq!(
+            s.deleted_allowed[0],
+            vec![(MemoryScopeType::Workspace, "W1".to_string())],
+            "admin cleanup must not reach personal/dept domains"
+        );
+        assert_eq!(s.vectors_deleted, vec![42], "vector goes with the row");
     }
 
     #[tokio::test]

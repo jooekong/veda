@@ -372,16 +372,23 @@ async function renderDetail(app: HTMLElement, id: string) {
   const statsSection =
     w.kind === "fs" ? section("文档热度", `<div id="adm-stats" class="text-sm">加载中…</div>`) : "";
 
+  // Team-memory cleanup view (M4a). Team domain only — personal/dept
+  // memories stay owner-visible even for the admin.
+  const memSection =
+    w.kind === "fs" ? section("团队记忆", `<div id="adm-memories" class="text-sm">加载中…</div>`) : "";
+
   app.innerHTML = `${header("#/admin", w.name)}
     ${info}
     ${datasetsSection}
     ${statsSection}
+    ${memSection}
     ${toolSection}
     ${keysSection}`;
   bindLogout();
 
   if (w.kind === "fs") {
     initDocStats(id);
+    initMemoryAdmin(id);
     initFilesBrowser(id);
   } else initVectorConsole(id);
 }
@@ -1196,4 +1203,107 @@ function openBotForm(app: HTMLElement, bot?: TunnelBot) {
       msg.className = "text-xs text-red-600";
     }
   });
+}
+
+// ── team-memory cleanup (M4a) ───────────────────────────
+interface AdminMemoryItem {
+  id: number;
+  topic?: string | null;
+  kind: string;
+  content: string;
+  updated_by: string;
+  updated_at: string;
+}
+
+function initMemoryAdmin(wsId: string) {
+  const root = document.getElementById("adm-memories");
+  if (!root) return;
+  let order: "updated_at" | "last_used_at" = "updated_at";
+  let kind = "";
+  let page = 1;
+
+  async function load() {
+    root!.innerHTML = `<div class="px-3 py-2 text-slate-500">加载中…</div>`;
+    let data: { items: AdminMemoryItem[]; total: number; page: number; size: number };
+    try {
+      let q = `workspace=${encodeURIComponent(wsId)}&order=${order}&page=${page}&size=50`;
+      if (kind) q += `&kind=${kind}`;
+      data = await adminApi(`/admin/v1/memories?${q}`);
+    } catch (e: any) {
+      root!.innerHTML = `<div class="px-3 py-2 text-red-600">${esc(e.message)}</div>`;
+      return;
+    }
+    const lastPage = Math.max(1, Math.ceil(data.total / data.size));
+    const rows = data.items.length
+      ? `<table class="w-full text-left text-sm">
+          <thead class="text-xs uppercase tracking-wide text-slate-500">
+            <tr><th class="px-3 py-2">内容</th><th class="px-3 py-2">类型</th><th class="px-3 py-2">主题</th><th class="px-3 py-2">署名 · 时间</th><th class="px-3 py-2"></th></tr>
+          </thead>
+          <tbody>${data.items
+            .map(
+              (m) => `<tr class="border-t border-slate-100">
+                <td class="px-3 py-2 max-w-md"><span class="font-mono text-xs text-slate-400">[mem:${m.id}]</span> ${esc(m.content)}</td>
+                <td class="px-3 py-2 text-xs">${esc(m.kind)}</td>
+                <td class="px-3 py-2 text-xs">${esc(m.topic) || "—"}</td>
+                <td class="px-3 py-2 text-xs text-slate-500 whitespace-nowrap">${esc(m.updated_by.slice(0, 8))} · ${fmtTime(m.updated_at)}</td>
+                <td class="px-3 py-2 text-right"><button data-mem-del="${m.id}" class="text-xs text-red-600 hover:underline">删除</button></td>
+              </tr>`,
+            )
+            .join("")}</tbody>
+        </table>`
+      : `<p class="text-sm text-slate-500 px-3 py-2">没有团队记忆。</p>`;
+    root!.innerHTML = `
+      <div class="flex items-center gap-2 px-3 py-2 border-b border-slate-100 text-xs">
+        <select id="adm-mem-order" class="border border-slate-300 rounded px-1 py-0.5">
+          <option value="updated_at"${order === "updated_at" ? " selected" : ""}>最近编辑</option>
+          <option value="last_used_at"${order === "last_used_at" ? " selected" : ""}>最近被检索（热度）</option>
+        </select>
+        <select id="adm-mem-kind" class="border border-slate-300 rounded px-1 py-0.5">
+          <option value="">全部类型</option>
+          ${["fact", "preference", "decision", "procedure", "derived"]
+            .map((k) => `<option value="${k}"${kind === k ? " selected" : ""}>${k}</option>`)
+            .join("")}
+        </select>
+        <span class="text-slate-500">共 ${data.total} 条</span>
+        <div class="grow"></div>
+        ${page > 1 ? `<button id="adm-mem-prev" class="border border-slate-300 px-2 py-0.5 rounded">上一页</button>` : ""}
+        <span class="text-slate-500">${data.page}/${lastPage}</span>
+        ${page < lastPage ? `<button id="adm-mem-next" class="border border-slate-300 px-2 py-0.5 rounded">下一页</button>` : ""}
+      </div>
+      ${rows}`;
+    document.getElementById("adm-mem-order")!.addEventListener("change", (e) => {
+      order = (e.target as HTMLSelectElement).value as typeof order;
+      page = 1;
+      load();
+    });
+    document.getElementById("adm-mem-kind")!.addEventListener("change", (e) => {
+      kind = (e.target as HTMLSelectElement).value;
+      page = 1;
+      load();
+    });
+    document.getElementById("adm-mem-prev")?.addEventListener("click", () => {
+      page -= 1;
+      load();
+    });
+    document.getElementById("adm-mem-next")?.addEventListener("click", () => {
+      page += 1;
+      load();
+    });
+    root!.querySelectorAll("[data-mem-del]").forEach((el) =>
+      el.addEventListener("click", async (e) => {
+        const id = (e.currentTarget as HTMLElement).dataset.memDel!;
+        if (!confirm("删除这条团队记忆？不可恢复，全组检索立即消失。")) return;
+        try {
+          await adminApi(`/admin/v1/memories/${id}?workspace=${encodeURIComponent(wsId)}`, {
+            method: "DELETE",
+          });
+          load();
+        } catch (err: any) {
+          alert(`删除失败：${err.message}`);
+        }
+      }),
+    );
+  }
+
+  load();
 }

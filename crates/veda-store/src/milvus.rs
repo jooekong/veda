@@ -1599,6 +1599,15 @@ fn memory_filter_expr(filter: &MemoryScopeFilter) -> String {
             }
             expr
         }
+        MemoryScopeFilter::Personal {
+            principal_id,
+            workspace_id,
+        } => format!(
+            "scope_type == \"principal\" && scope_id == {} && \
+             (origin_workspace_id == \"\" || origin_workspace_id == {})",
+            milvus_quote(principal_id),
+            milvus_quote(workspace_id)
+        ),
     }
 }
 

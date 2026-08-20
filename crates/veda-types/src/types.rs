@@ -872,6 +872,13 @@ pub enum MemoryScopeFilter {
         principal_id: String,
         dept_id: Option<String>,
     },
+    /// One personal domain restricted to origin ∈ {workspace_id, none} —
+    /// the Context union's personal arm alone. Browse page "mine" tab
+    /// (M4a): what you see is what context retrieval can surface here.
+    Personal {
+        principal_id: String,
+        workspace_id: String,
+    },
 }
 
 /// Milvus row for the memory index. `content` feeds the BM25 function's

@@ -22,7 +22,7 @@ SQL 三件套 / revoke scope / platform authz+timeout / TimeoutLayer+CatchPanic 
 
 | 计划 | 状态 |
 | --- | --- |
-| [`agent-memory-m4a.md`](../plans/agent-memory-m4a.md) | **待实施**（2026-08-20 定稿）：记忆浏览页最小版——`GET /v1/memory/list`/topics + console 三页签 wiki + admin 团队域清理；**先于 m3b 执行**（对调 design §16 顺序，理由见其 §0） |
+| [`agent-memory-m4a.md`](../plans/agent-memory-m4a.md) | **已实现、e2e 全绿待部署**（2026-08-20 当天定稿+实现）：记忆浏览页最小版——`GET /v1/memory/list`/topics + console 三页签 wiki + admin 团队域清理；先于 m3b 执行（对调 design §16 顺序，理由见其 §0）；尾巴=测试环境部署+冒烟+归档 |
 | [`agent-memory-m3b.md`](../plans/agent-memory-m3b.md) | **待实施**（2026-08-20 定稿）：qa_log 自动摄入——server 进程内水位扫描 + LLM 窄口径抽取（**只抽用户断言不抽 bot 答案**），一律落提问人个人域；默认关，测试环境 dogfood 后翻生产；依赖 m4a 质检面 |
 | [`veda-tunnel-plan.md`](../plans/veda-tunnel-plan.md) | **生产运行中**（专用机 .95）：企微长连接 + RAG 问答 + 三入口 bot 管理 + 平台 API（§18）；方向池见 `design/tunnel-directions.md`；尾巴=server 白名单改动未部署 |
 | [`veda-answer-agentic.md`](../plans/veda-answer-agentic.md) | **Stage 1 已实现 e2e 全绿**：`/v1/answer` agentic 多次召回(tool loop)+ prompt 分层;Stage 2 bot prompt 三入口贯通进行中 |

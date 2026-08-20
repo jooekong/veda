@@ -1,6 +1,6 @@
 use super::conn::insert_outbox_conn;
 use super::*;
-use veda_core::store::MemoryStore;
+use veda_core::store::{MemoryListOrder, MemoryStore};
 use veda_types::{
     Memory, MemoryInsert, MemoryKind, MemoryPatch, MemoryScopeFilter, MemoryScopeType, NewMemory,
     PersonProfile, Principal, PrincipalKind, PrincipalSource,
@@ -95,6 +95,10 @@ fn filter_expr(filter: &MemoryScopeFilter) -> &'static str {
                   AND (origin_workspace_id IS NULL OR origin_workspace_id = ?)) \
               OR (scope_type = 'dept' AND scope_id = ?))"
         }
+        MemoryScopeFilter::Personal { .. } => {
+            "(scope_type = 'principal' AND scope_id = ? \
+              AND (origin_workspace_id IS NULL OR origin_workspace_id = ?))"
+        }
     }
 }
 
@@ -118,6 +122,41 @@ fn bind_filter<'q>(
                 None => q,
             }
         }
+        MemoryScopeFilter::Personal {
+            principal_id,
+            workspace_id,
+        } => q.bind(principal_id).bind(workspace_id),
+    }
+}
+
+/// Shared WHERE tail for the browse queries: live rows only, plus the
+/// optional topic/kind narrowing. Returns the SQL fragment; the caller
+/// binds in the same order via `bind_browse`.
+fn browse_where(topic: Option<&str>, kind: Option<MemoryKind>) -> String {
+    let mut w = String::from(" AND (expires_at IS NULL OR expires_at > NOW())");
+    match topic {
+        Some("") => w.push_str(" AND topic IS NULL"),
+        Some(_) => w.push_str(" AND topic = ?"),
+        None => {}
+    }
+    if kind.is_some() {
+        w.push_str(" AND kind = ?");
+    }
+    w
+}
+
+fn bind_browse<'q>(
+    q: sqlx::query::Query<'q, sqlx::MySql, sqlx::mysql::MySqlArguments>,
+    topic: Option<&'q str>,
+    kind: Option<MemoryKind>,
+) -> sqlx::query::Query<'q, sqlx::MySql, sqlx::mysql::MySqlArguments> {
+    let q = match topic {
+        Some(t) if !t.is_empty() => q.bind(t),
+        _ => q,
+    };
+    match kind {
+        Some(k) => q.bind(k.as_str()),
+        None => q,
     }
 }
 
@@ -398,6 +437,68 @@ impl MemoryStore for MysqlStore {
         }
         q.execute(&self.pool).await.map_err(storage_err)?;
         Ok(())
+    }
+
+    async fn list_memories(
+        &self,
+        filter: &MemoryScopeFilter,
+        topic: Option<&str>,
+        kind: Option<MemoryKind>,
+        order: MemoryListOrder,
+        page: u32,
+        size: u32,
+    ) -> Result<(Vec<Memory>, i64)> {
+        let where_sql = format!("{}{}", filter_expr(filter), browse_where(topic, kind));
+
+        let count_sql = format!("SELECT COUNT(*) AS n FROM veda_memories WHERE {where_sql}");
+        let q = bind_browse(bind_filter(sqlx::query(&count_sql), filter), topic, kind);
+        let total: i64 = q
+            .fetch_one(&self.pool)
+            .await
+            .map_err(storage_err)?
+            .try_get("n")
+            .map_err(storage_err)?;
+
+        let order_sql = match order {
+            MemoryListOrder::UpdatedAt => "updated_at DESC, id DESC",
+            MemoryListOrder::LastUsedAt => "last_used_at DESC, id DESC",
+        };
+        // u64 arithmetic: a huge `page` must not overflow u32 in release
+        // builds (same guard as the qa_log pager).
+        let offset = (u64::from(page.max(1)) - 1) * u64::from(size);
+        let page_sql = format!(
+            "SELECT {MEMORY_COLS} FROM veda_memories WHERE {where_sql} \
+             ORDER BY {order_sql} LIMIT ? OFFSET ?"
+        );
+        let q = bind_browse(bind_filter(sqlx::query(&page_sql), filter), topic, kind)
+            .bind(size)
+            .bind(offset);
+        let rows = q.fetch_all(&self.pool).await.map_err(storage_err)?;
+        Ok((rows.iter().map(row_to_memory).collect::<Result<_>>()?, total))
+    }
+
+    async fn topic_counts(
+        &self,
+        filter: &MemoryScopeFilter,
+    ) -> Result<Vec<(Option<String>, i64)>> {
+        let sql = format!(
+            "SELECT topic, COUNT(*) AS n FROM veda_memories \
+             WHERE {} AND (expires_at IS NULL OR expires_at > NOW()) \
+             GROUP BY topic ORDER BY n DESC, topic ASC",
+            filter_expr(filter)
+        );
+        let rows = bind_filter(sqlx::query(&sql), filter)
+            .fetch_all(&self.pool)
+            .await
+            .map_err(storage_err)?;
+        rows.iter()
+            .map(|r| {
+                Ok((
+                    r.try_get("topic").map_err(storage_err)?,
+                    r.try_get("n").map_err(storage_err)?,
+                ))
+            })
+            .collect()
     }
 
     async fn get_principal_by_identity(

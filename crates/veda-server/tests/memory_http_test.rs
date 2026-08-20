@@ -69,6 +69,9 @@ fn load_config() -> TestConfig {
     toml::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap()
 }
 
+/// Fixed admin bearer for this suite (the admin memory-cleanup routes).
+const ADMIN_TOKEN: &str = "memory-test-admin-token";
+
 fn test_metrics() -> veda_server::obs::MetricsHandle {
     use std::sync::OnceLock;
     static METRICS: OnceLock<veda_server::obs::MetricsHandle> = OnceLock::new();
@@ -166,7 +169,7 @@ async fn build_app_with(
         sql_engine,
         metrics: test_metrics(),
         metrics_token: None,
-        admin_token: None,
+        admin_token: Some(ADMIN_TOKEN.to_string()),
         memory_service: Arc::new(veda_core::service::memory::MemoryService::new(
             mysql.clone(),
             milvus.clone(),
@@ -866,4 +869,146 @@ async fn hybrid_keyword_recall_and_scope_move() {
         Some(ws.ws_id.as_str()),
         "unchanged scope must not clear origin: {v}"
     );
+}
+
+/// Browse surface (docs/plans/agent-memory-m4a.md): list/topics tabs are
+/// single-domain governance views with the GateMem discipline extended to
+/// enumeration — another person's mine tab shows nothing, deleted rows
+/// vanish immediately — plus the admin team-domain cleanup path.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore]
+async fn browse_list_topics_and_admin_cleanup() {
+    let run = Uuid::new_v4().simple().to_string()[..8].to_string();
+    let mut dir = std::collections::HashMap::new();
+    let (zhang, li) = (format!("bz-{run}"), format!("bl-{run}"));
+    dir.insert(("wecom".into(), zhang.clone()), profile(&format!("e3-{run}"), "张三", &format!("DA-{run}")));
+    dir.insert(("wecom".into(), li.clone()), profile(&format!("e4-{run}"), "李四", &format!("DB-{run}")));
+    let app = build_app_with(Some(Arc::new(StaticDirectory(dir)))).await;
+    let ws = provision(&app.state).await;
+    let wk_ro = mint_key(&app.state, &ws.acct_id, &ws.ws_id, KeyPermission::Read).await;
+    let (zhang_op, li_op) = (format!("wecom:{zhang}"), format!("wecom:{li}"));
+
+    let team_fact = format!("[{run}] 团队事实：发布走 runbook");
+    let team_note = format!("[{run}] 团队未分类速记");
+    let my_note = format!("[{run}] 张三的本项目笔记");
+    let foreign_note = format!("[{run}] 张三的别处项目笔记");
+    let dept_fact = format!("[{run}] A 部门约定：周会周二");
+
+    for (content, body_extra, op) in [
+        (&team_fact, json!({ "scope": "team", "topic": "发布", "kind": "fact" }), None),
+        (&team_note, json!({ "scope": "team" }), None),
+        (&my_note, json!({ "scope": "mine" }), Some(zhang_op.as_str())),
+        (&foreign_note, json!({ "scope": "mine", "origin": format!("elsewhere-{run}") }), Some(zhang_op.as_str())),
+        (&dept_fact, json!({ "scope": "dept" }), Some(zhang_op.as_str())),
+    ] {
+        let mut body = body_extra.clone();
+        body["content"] = json!(content);
+        let (st, v) = send_as(app.router.clone(), "POST", "/v1/memory", &ws.wk, op, Some(body)).await;
+        assert_eq!(st, StatusCode::OK, "seed {content}: {v}");
+    }
+
+    // Team tab: both team rows, personal/dept rows absent, total exact.
+    let (st, v) = send(app.router.clone(), "GET", "/v1/memory/list?tab=team", &ws.wk, None).await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    let got = contents(&v);
+    assert!(got.contains(&team_fact) && got.contains(&team_note), "{v}");
+    assert!(!got.contains(&my_note) && !got.contains(&dept_fact), "team tab must stay team-only: {v}");
+    assert_eq!(v["data"]["total"], json!(2), "{v}");
+
+    // Topic narrowing + the "" uncategorized bucket + the topics directory.
+    let (_, v) = send(
+        app.router.clone(), "GET",
+        &format!("/v1/memory/list?tab=team&topic={}", enc("发布")),
+        &ws.wk, None,
+    ).await;
+    assert_eq!(contents(&v), vec![team_fact.clone()], "{v}");
+    let (_, v) = send(app.router.clone(), "GET", "/v1/memory/list?tab=team&topic=", &ws.wk, None).await;
+    assert_eq!(contents(&v), vec![team_note.clone()], "{v}");
+    let (st, v) = send(app.router.clone(), "GET", "/v1/memory/topics?tab=team", &ws.wk, None).await;
+    assert_eq!(st, StatusCode::OK);
+    let topics = v["data"]["topics"].as_array().expect("topics");
+    assert!(
+        topics.contains(&json!({ "topic": "发布", "count": 1 }))
+            && topics.contains(&json!({ "topic": null, "count": 1 })),
+        "{v}"
+    );
+
+    // Private tabs demand an operator header — loud, not silently wrong.
+    for uri in ["/v1/memory/list?tab=mine", "/v1/memory/list?tab=dept", "/v1/memory/topics?tab=mine"] {
+        let (st, v) = send(app.router.clone(), "GET", uri, &ws.wk, None).await;
+        assert_eq!(st, StatusCode::BAD_REQUEST, "{uri} without operator: {v}");
+    }
+
+    // Mine tab: origin-restricted to this workspace, and the GateMem browse
+    // extension — another person's mine tab here is empty, no leak.
+    let (_, v) = send_as(app.router.clone(), "GET", "/v1/memory/list?tab=mine", &ws.wk, Some(&zhang_op), None).await;
+    let got = contents(&v);
+    assert!(got.contains(&my_note), "{v}");
+    assert!(!got.contains(&foreign_note), "foreign-origin note must not list here: {v}");
+    let (st, v) = send_as(app.router.clone(), "GET", "/v1/memory/list?tab=mine", &ws.wk, Some(&li_op), None).await;
+    assert_eq!(st, StatusCode::OK);
+    assert_eq!(v["data"]["total"], json!(0), "browse leak must be zero: {v}");
+
+    // Dept tab: A-dept operator sees the row; B-dept operator sees nothing.
+    let (_, v) = send_as(app.router.clone(), "GET", "/v1/memory/list?tab=dept", &ws.wk, Some(&zhang_op), None).await;
+    assert!(contents(&v).contains(&dept_fact), "{v}");
+    let (_, v) = send_as(app.router.clone(), "GET", "/v1/memory/list?tab=dept", &ws.wk, Some(&li_op), None).await;
+    assert_eq!(v["data"]["total"], json!(0), "cross-dept browse must be empty: {v}");
+
+    // Read-only keys browse (list is a read), and deleted rows vanish from
+    // the enumeration immediately (deleted recall = 0, browse edition).
+    let (st, _) = send(app.router.clone(), "GET", "/v1/memory/list?tab=team", &wk_ro, None).await;
+    assert_eq!(st, StatusCode::OK);
+    let (_, v) = send(app.router.clone(), "GET", "/v1/memory/list?tab=team&topic=", &ws.wk, None).await;
+    let note_id = items(&v)[0]["id"].as_i64().unwrap();
+    let (st, _) = send(app.router.clone(), "DELETE", &format!("/v1/memory/{note_id}"), &ws.wk, None).await;
+    assert_eq!(st, StatusCode::OK);
+    let (_, v) = send(app.router.clone(), "GET", "/v1/memory/list?tab=team", &ws.wk, None).await;
+    assert!(!contents(&v).contains(&team_note), "deleted row must leave the list: {v}");
+    assert_eq!(v["data"]["total"], json!(1), "{v}");
+
+    // Admin surface: team domain only, explicit workspace, audited delete.
+    let admin_uri = format!("/admin/v1/memories?workspace={}", ws.ws_id);
+    let (st, v) = send(app.router.clone(), "GET", &admin_uri, ADMIN_TOKEN, None).await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    let got = contents(&v);
+    assert!(got.contains(&team_fact), "{v}");
+    assert!(
+        !got.contains(&my_note) && !got.contains(&dept_fact),
+        "admin view must not reach personal/dept domains: {v}"
+    );
+    let (st, _) = send(
+        app.router.clone(), "GET",
+        &format!("{admin_uri}&order=last_used_at&kind=fact"), ADMIN_TOKEN, None,
+    ).await;
+    assert_eq!(st, StatusCode::OK);
+    let (st, _) = send(app.router.clone(), "GET", &format!("{admin_uri}&order=hotness"), ADMIN_TOKEN, None).await;
+    assert_eq!(st, StatusCode::BAD_REQUEST, "unknown order must reject");
+    let (st, _) = send(app.router.clone(), "GET", &admin_uri, "wrong-admin-token", None).await;
+    assert_eq!(st, StatusCode::UNAUTHORIZED);
+
+    let fact_id = items(&send(app.router.clone(), "GET", &admin_uri, ADMIN_TOKEN, None).await.1)[0]["id"]
+        .as_i64()
+        .unwrap();
+    let (st, v) = send(
+        app.router.clone(), "DELETE",
+        &format!("/admin/v1/memories/{fact_id}?workspace={}", ws.ws_id),
+        ADMIN_TOKEN, None,
+    ).await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    // Gone from the browse list AND from retrieval (row + vector).
+    let (_, v) = send(app.router.clone(), "GET", "/v1/memory/list?tab=team", &ws.wk, None).await;
+    assert_eq!(v["data"]["total"], json!(0), "{v}");
+    let (_, v) = send(
+        app.router.clone(), "GET",
+        &format!("/v1/memory/search?query={}&scope=team", enc(&team_fact)),
+        &ws.wk, None,
+    ).await;
+    assert!(!contents(&v).contains(&team_fact), "admin-deleted memory must not recall: {v}");
+    let (st, _) = send(
+        app.router.clone(), "DELETE",
+        &format!("/admin/v1/memories/{fact_id}?workspace={}", ws.ws_id),
+        ADMIN_TOKEN, None,
+    ).await;
+    assert_eq!(st, StatusCode::NOT_FOUND, "double delete is NotFound");
 }

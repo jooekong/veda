@@ -654,6 +654,28 @@ pub struct MemoryListResponse {
     pub items: Vec<MemoryItem>,
 }
 
+/// One browse page (M4a). `total` counts every live row under the same
+/// tab + filters, for the pager; `size` echoes the clamped page size.
+#[derive(Debug, Serialize)]
+pub struct MemoryPageResponse {
+    pub items: Vec<MemoryItem>,
+    pub total: i64,
+    pub page: u32,
+    pub size: u32,
+}
+
+#[derive(Debug, Serialize)]
+pub struct MemoryTopicsResponse {
+    pub topics: Vec<MemoryTopicCount>,
+}
+
+/// `topic: null` = the uncategorized bucket (rows saved without a topic).
+#[derive(Debug, Serialize)]
+pub struct MemoryTopicCount {
+    pub topic: Option<String>,
+    pub count: i64,
+}
+
 #[cfg(test)]
 mod tests {
     use crate::types::SearchHit;

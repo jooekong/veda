@@ -46,7 +46,7 @@ veda-tunnel     外部 IM 接入（企微长连接）             (已上生产 
   - Writeback 模式（`--write-mode=writeback`）：`ShadowStore` 缓冲 FUSE 写入到内存（per-file 10MB / total 50MB cap，超 per-file 自动降级到 sync flush，超 total 返 ENOSPC）；`CommitQueue` 单线程 worker（std::thread + mpsc + min-heap deadline，token-based 合并同 path 的 Touch），默认 5s 静默期；create() defer 不打 server，蛋黄到第一次真正的 Touch 才上传；lookup/getattr/readdir/readdirplus 在 writeback 下走 shadow overlay（tombstone 隐藏，pending_children 追加，dedup by basename）；unlink 把 LocalOnly 直接干掉不打 server，Dirty/Clean 才下 DELETE；rename 先打 server 后改 shadow，old_path 自动 tombstone 防止 in-flight PUT 漏到 server；destroy() unmount 时 drain 所有 pending commit
   - 其他：statfs 返回合理值
 - `veda-server`：新增 `GET /v1/events` SSE 端点（轮询 veda_fs_events 表，cursor-based）；`GET /v1/fs/{path}` 支持 `Range` header 返回 206 Partial Content
-- `web`：Vite 文档站 + 内置 Console；fs workspace 的 `#/console/fs/{workspace_id}` 支持目录浏览、单文件原始上传和下载。数据面 `wk_` 仅存当前浏览器标签页，直接调用原生 `/v1/fs/*`，文本与二进制均可用。
+- `web`：Vite 文档站 + 内置 Console；fs workspace 的 `#/console/fs/{workspace_id}` 支持目录浏览、单文件原始上传和下载，`#/console/memory/{workspace_id}` 是记忆浏览页（三页签 wiki + 身份栏，M4a）。数据面 `wk_` 仅存当前浏览器标签页，直接调用原生 `/v1/fs/*` 与 `/v1/memory/*`，文本与二进制均可用。
 - v0.1.5 批：
   - 搜索：真 BM25 hybrid（dense + sparse RRF via Milvus 2.5 `hybrid_search`），fulltext 改为 BM25 sparse，jieba 分词中文，自动 schema 迁移（drop+rebuild + 全量 ChunkSync 入队）；`SearchHit.score_type` 标 `rrf` / `bm25` / `cosine`；`/v1/search` 路由响应剥离内部字段（vector / workspace_id）
   - Worker：paginated chunk read（chunk_sync + summary_sync 共享 `load_full_content`），`catch_unwind` 隔离 task panic；summary debounce 30s + burst window 5min（`veda_summary_enqueue_total{burst=...}` 计数）；L1 prompt 结构化 + 输出语言策略仅 zh-CN / en（中文或中文+英语→中文，其余→英语）
@@ -119,7 +119,13 @@ fs workspace 的第三类资产：一句话一条的原子记忆，个人/团队
   - **部门域**：`MemoryScopeType::Dept`（scope_id=目录 dept_id，MySQL/Milvus 零 DDL），Context filter 三臂（团队∪个人(origin 门控)∪部门），部门记忆跨 workspace 跟人走、调岗随缓存刷新自动生效、无 origin；`allowed_scopes` 含操作者 dept（wiki 同款可改可删）。升域=`MemoryPatch.scope` 同行 UPDATE（move 不 copy，origin 清空，目标域撞 hash 报 AlreadyExists）+ **MemorySync 事件必须带更新后 scope、纯 move 也入队并同步重嵌**（防旧标量残留漏召回）。
   - **检索升级**：memory collection 重建为 v2——`content(enable_analyzer, jieba) + vector + sparse_vector + BM25 function`，检索走 `hybrid_search`（dense COSINE + BM25，RRF k=60，子请求 5× 超采，域过滤恒下推两个子请求），复用 fs/db 的 schema v2 模式；content 进 Milvus 只喂分词，输出仍 (id, score) + MySQL 复核重读——index-only 的安全性质不变。复核层新增**跨域 content_hash 去重（宽域优先 team>dept>mine）**。升级/回滚零迁移：DROP `veda_principals`/`veda_principal_identities`/`veda_memories` 表与 collection 后重启自建（拍板：存量 dogfood 数据不保留）。
   - **answer 三域**：请求带操作者时注入 团队+部门+个人（一条 Context 检索共池 top-5），无操作者维持 M2a 团队域；注入模板与 citation 带域标签——`MemoryCitationRef` 加 `scope`（team/dept/mine，旧消费者忽略），tunnel 出处行 `[n] 记忆(团队|部门|个人)：…`，CLI 同步。
-- **边界**：qa_log 自动摄入+收敛提名（M3b）、digest/画像、浏览页（M4）、排序乘子/域配额（等 dogfood 数据）、组织树上卷、`GET /v1/memory/list`（随 M4）未做；CLI 无 memory 子命令。
+- **M4a 记忆浏览页最小版（2026-08-20 实现）**：施工图 `docs/plans/agent-memory-m4a.md`（执行顺序对调到 M3b 摄入之前——治理前提「人人看得见才人人能改」需要入口，自动摄入需要质检面；两处对 design §16 的偏离记录在施工图 §0）。
+  - **枚举原语**：`MemoryStore::list_memories`/`topic_counts`——与 `get_memories_by_ids` 同族的带 scope 条件读原语（枚举归 MySQL，Milvus 不掺和），SQL 侧过滤过期行；`MemoryListOrder` 两档（updated_at=wiki 视图 / last_used_at=热度视图，MySQL NULL 最小 → 没被检索过的行在热度视图沉底）。`MemoryScopeFilter` 新增 **`Personal` 变体**（principal + origin ∈ {W, 空}，即 Context 个人臂单独成域）：mine 页签所见 = context 检索在本 workspace 能召回的个人域，跨项目全量个人视图不做。
+  - **REST**：`GET /v1/memory/list?tab=team|dept|mine&topic=&kind=&page=&size=`（`MemoryPageResponse` 带 total；`topic=` 空串 = 未分类桶）+ `GET /v1/memory/topics?tab=`。页签 = **单域治理视图**，不做 context 合并；dept/mine 页签无操作者头 → 400（防共享 key 把 agent 域当「我的」展示）；read-only `wk_` 可读。
+  - **console**：`#/console/memory/{ws}`（workspace 列表「记忆」入口；wk_ 复用 fs 页 per-tab 存储，一把 key 两页通用）——身份栏手填 `wecom:`/`emp:`（per-tab sessionStorage，互信模型延伸，未填时 dept/mine 页签置灰）+ 三页签 + 主题目录（计数）+ 行内改/删 + 添一条（save 返回近邻非空时提示改旧条）+ 页签内搜索；「我的」按 origin 分「随身 / 本项目」两组；行元数据 `[mem:id] 日期 署名 kind` 对齐 digest 拼装格式（将来 digest 落地 UI 只换数据源，§10.4 双消费者锁保留）。
+  - **admin**：`GET/DELETE /admin/v1/memories?workspace=`（既有 admin token；**仅团队域**、workspace 显式传参——个人域不进 admin 面；删除复用 service 链路含向量清理，admin_audit 日志）+ admin.ts fs 详情页「团队记忆」区块（编辑/热度排序切换、kind 筛选、删除）。
+  - **测试**：store 集成 `mysql_memory_browse_list_and_topics`（分页/topic/kind/过期/Personal 双向隔离/热度排序）+ http e2e `browse_list_topics_and_admin_cleanup`（GateMem 浏览延伸：他人 mine 页签 total=0、删除即从枚举消失；admin 团队域边界、未知 order 400、错 token 401）+ service 3 单测（tab→filter 解析、降级/缺部门拒绝、admin 删除域收窄）。
+- **边界**：qa_log 自动摄入+收敛提名（M3b）、digest/画像、待办区与提名渲染（随 M3c）、排序乘子/域配额（等 dogfood 数据）、组织树上卷未做；CLI 无 memory 子命令；浏览页署名显示 principal id 原文（人名解析等 `[people]` 接入后随引用态一起统一做）。
 
 ## RAG 问答 `/v1/answer`（2026-07-14 改造为 Agentic）
 

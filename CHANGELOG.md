@@ -10,6 +10,19 @@ that matters.
 ## [Unreleased]
 
 ### Added
+- **Memory browse page (memory M4a).** Every fs workspace gets a
+  wiki-style memory view in the web console (`#/console/memory/{id}`):
+  team / department / mine tabs, a topic directory with counts, inline
+  edit/delete, add-a-memory with nearest-neighbor hints, and per-tab
+  search. Identity is typed into the page's identity bar and sent as
+  `X-Veda-Operator` (kept per browser tab). New REST:
+  `GET /v1/memory/list?tab=&topic=&kind=&page=&size=` (single-domain
+  pagination with totals; `topic=` empty selects the uncategorized
+  bucket) and `GET /v1/memory/topics?tab=` — the dept/mine tabs require
+  an operator header and fail loudly without one. Admins get a
+  team-domain-only cleanup view in the workspace detail page
+  (`GET`/`DELETE /admin/v1/memories`, sortable by recent edits or
+  retrieval heat); personal domains stay owner-visible even for admins.
 - **Per-person and per-department memories (memory M3a).** Requests can
   assert who is asking via `X-Veda-Operator: wecom:<userid>` /
   `emp:<工号>`; the server resolves the person through the company

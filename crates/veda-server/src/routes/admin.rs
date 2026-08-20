@@ -19,16 +19,18 @@ use axum::extract::{FromRequestParts, Path, Query, State};
 use axum::http::request::Parts;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
-use axum::routing::{get, post};
+use axum::routing::{delete, get, post};
 use axum::{Json, Router};
 use chrono::{DateTime, Utc};
 use serde::Deserialize;
 use serde_json::json;
 use uuid::Uuid;
+use veda_core::store::MemoryListOrder;
 use veda_store::milvus_quote;
+use veda_types::api::{MemoryItem, MemoryPageResponse};
 use veda_types::{
-    validate, ApiResponse, KeyPermission, KeyStatus, SearchMode, UpsertRecord, VectorSearchQuery,
-    VedaError, Workspace, WorkspaceKind,
+    validate, ApiResponse, KeyPermission, KeyStatus, MemoryKind, SearchMode, UpsertRecord,
+    VectorSearchQuery, VedaError, Workspace, WorkspaceKind,
 };
 
 use crate::error::AppError;
@@ -41,6 +43,8 @@ pub fn routes() -> Router<Arc<AppState>> {
         .route("/admin/v1/workspaces/{id}/files", get(list_files))
         .route("/admin/v1/workspaces/{id}/file", get(read_file))
         .route("/admin/v1/workspaces/{id}/stats/docs", get(doc_stats))
+        .route("/admin/v1/memories", get(list_team_memories))
+        .route("/admin/v1/memories/{id}", delete(delete_team_memory))
         .route(
             "/admin/v1/workspaces/{id}/vectors/search",
             post(search_vectors),
@@ -616,4 +620,72 @@ async fn upsert_vectors(
         id: rec_id,
         commit_ts,
     })))
+}
+
+#[derive(Debug, Deserialize)]
+struct AdminMemoryQuery {
+    /// Explicit team domain — the admin surface reaches ONLY workspace
+    /// (team) memories; personal/dept domains stay owner-visible.
+    workspace: String,
+    kind: Option<MemoryKind>,
+    /// "updated_at" (default) = wiki recency, "last_used_at" = heat view.
+    order: Option<String>,
+    page: Option<u32>,
+    size: Option<u32>,
+}
+
+/// GET /admin/v1/memories?workspace= — team-domain cleanup list (M4a).
+async fn list_team_memories(
+    State(state): State<Arc<AppState>>,
+    _auth: AdminAuth,
+    Query(q): Query<AdminMemoryQuery>,
+) -> Result<Json<ApiResponse<MemoryPageResponse>>, AppError> {
+    let order = match q.order.as_deref() {
+        None | Some("updated_at") => MemoryListOrder::UpdatedAt,
+        Some("last_used_at") => MemoryListOrder::LastUsedAt,
+        Some(other) => {
+            return Err(AppError(VedaError::InvalidInput(format!(
+                "unknown order '{other}' — use updated_at or last_used_at"
+            ))))
+        }
+    };
+    let page = q.page.unwrap_or(1).max(1);
+    let size = q.size.unwrap_or(50).clamp(1, 100);
+    let (rows, total) = state
+        .memory_service
+        .admin_list_team(&q.workspace, q.kind, order, page, size)
+        .await?;
+    Ok(Json(ApiResponse::ok(MemoryPageResponse {
+        items: rows
+            .into_iter()
+            .map(|m| MemoryItem::from_memory(m, None))
+            .collect(),
+        total,
+        page,
+        size,
+    })))
+}
+
+#[derive(Debug, Deserialize)]
+struct AdminMemoryDeleteQuery {
+    workspace: String,
+}
+
+/// DELETE /admin/v1/memories/{id}?workspace= — the "admin 可清" backstop
+/// (design §13). Scoped to the named workspace's team domain; audited like
+/// the vector upsert (the admin token is cross-tenant).
+async fn delete_team_memory(
+    State(state): State<Arc<AppState>>,
+    _auth: AdminAuth,
+    Path(id): Path<i64>,
+    Query(q): Query<AdminMemoryDeleteQuery>,
+) -> Result<Json<ApiResponse<serde_json::Value>>, AppError> {
+    state.memory_service.admin_delete_team(&q.workspace, id).await?;
+    tracing::info!(
+        target: "admin_audit",
+        workspace_id = %q.workspace,
+        memory_id = id,
+        "admin team memory delete"
+    );
+    Ok(Json(ApiResponse::ok(json!({ "deleted": id }))))
 }

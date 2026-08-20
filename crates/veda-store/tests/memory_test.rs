@@ -331,6 +331,179 @@ async fn mysql_memory_crud_scoping_and_expiry() {
         .await;
 }
 
+/// Browse primitives (docs/plans/agent-memory-m4a.md §1.1): enumeration and
+/// topic counts carry the same scope guard as every other read, filter
+/// expired rows, and page/sort deterministically.
+#[tokio::test]
+#[ignore]
+async fn mysql_memory_browse_list_and_topics() {
+    use veda_core::store::MemoryListOrder;
+
+    let cfg = load_config();
+    let store = MysqlStore::new(&cfg.mysql.database_url)
+        .await
+        .expect("connect");
+    store.migrate().await.expect("migrate");
+
+    let ws = format!("wsm_{}", Uuid::new_v4());
+    let other_ws = format!("wsm_{}", Uuid::new_v4());
+    let p1 = Uuid::new_v4().to_string();
+    let p2 = Uuid::new_v4().to_string();
+
+    let mk = |scope_type: MemoryScopeType,
+              scope_id: &str,
+              origin: Option<&str>,
+              topic: Option<&str>,
+              kind: MemoryKind,
+              content: &str| NewMemory {
+        scope_type,
+        scope_id: scope_id.to_string(),
+        origin_workspace_id: origin.map(str::to_string),
+        topic: topic.map(str::to_string),
+        kind,
+        content: content.to_string(),
+        content_hash: sha256_hex(content),
+        source_ref: None,
+        expires_at: None,
+        created_by: p1.clone(),
+    };
+    let insert = |m: NewMemory| {
+        let store = &store;
+        async move {
+            match store.insert_memory(&m).await.expect("insert") {
+                MemoryInsert::Inserted(m) => m,
+                MemoryInsert::Duplicate(_) => panic!("fresh insert reported duplicate"),
+            }
+        }
+    };
+
+    let a = insert(mk(MemoryScopeType::Workspace, &ws, None, Some("testing"), MemoryKind::Fact, "team fact A")).await;
+    let b = insert(mk(MemoryScopeType::Workspace, &ws, None, Some("deploy"), MemoryKind::Decision, "team decision B")).await;
+    let c = insert(mk(MemoryScopeType::Workspace, &ws, None, None, MemoryKind::Fact, "uncategorized team fact C")).await;
+    let mut expired = mk(MemoryScopeType::Workspace, &ws, None, Some("testing"), MemoryKind::Fact, "expired team fact");
+    expired.expires_at = Some(Utc::now() - Duration::hours(1));
+    let _x = insert(expired).await;
+    let n = insert(mk(MemoryScopeType::Principal, &p1, Some(&ws), Some("notes"), MemoryKind::Fact, "project note")).await;
+    let p = insert(mk(MemoryScopeType::Principal, &p1, None, None, MemoryKind::Preference, "portable pref")).await;
+    let f = insert(mk(MemoryScopeType::Principal, &p1, Some(&other_ws), None, MemoryKind::Fact, "other project note")).await;
+    let s = insert(mk(MemoryScopeType::Principal, &p2, None, None, MemoryKind::Fact, "stranger note")).await;
+
+    let team = MemoryScopeFilter::Scope {
+        scope_type: MemoryScopeType::Workspace,
+        scope_id: ws.clone(),
+    };
+
+    // Plain team list: live rows only, expired excluded, total matches.
+    let (rows, total) = store
+        .list_memories(&team, None, None, MemoryListOrder::UpdatedAt, 1, 50)
+        .await
+        .expect("team list");
+    let mut ids: Vec<i64> = rows.iter().map(|m| m.id).collect();
+    ids.sort();
+    assert_eq!(ids, {
+        let mut v = vec![a.id, b.id, c.id];
+        v.sort();
+        v
+    }, "expired row must not list");
+    assert_eq!(total, 3);
+
+    // Topic narrowing: exact, and "" = the uncategorized bucket.
+    let (rows, total) = store
+        .list_memories(&team, Some("testing"), None, MemoryListOrder::UpdatedAt, 1, 50)
+        .await
+        .expect("topic list");
+    assert_eq!((rows.len(), total), (1, 1));
+    assert_eq!(rows[0].id, a.id, "live testing row only");
+    let (rows, _) = store
+        .list_memories(&team, Some(""), None, MemoryListOrder::UpdatedAt, 1, 50)
+        .await
+        .expect("uncategorized list");
+    assert_eq!(rows.iter().map(|m| m.id).collect::<Vec<_>>(), vec![c.id]);
+
+    // Kind narrowing.
+    let (rows, _) = store
+        .list_memories(&team, None, Some(MemoryKind::Decision), MemoryListOrder::UpdatedAt, 1, 50)
+        .await
+        .expect("kind list");
+    assert_eq!(rows.iter().map(|m| m.id).collect::<Vec<_>>(), vec![b.id]);
+
+    // Pagination: size 1 walks all three, total stays 3 on every page.
+    let mut seen = vec![];
+    for page in 1..=3u32 {
+        let (rows, total) = store
+            .list_memories(&team, None, None, MemoryListOrder::UpdatedAt, page, 1)
+            .await
+            .expect("page");
+        assert_eq!((rows.len(), total), (1, 3), "page {page}");
+        seen.push(rows[0].id);
+    }
+    seen.sort();
+    assert_eq!(seen, ids, "pages cover every row exactly once");
+
+    // Heat order: the one touched row leads, never-retrieved rows sink.
+    store.touch_memories(&[b.id]).await.expect("touch");
+    let (rows, _) = store
+        .list_memories(&team, None, None, MemoryListOrder::LastUsedAt, 1, 50)
+        .await
+        .expect("heat list");
+    assert_eq!(rows[0].id, b.id, "touched row leads the heat view");
+
+    // Personal filter: origin ∈ {ws, none}; foreign-origin and other
+    // principals' rows are invisible in BOTH directions (leak = 0).
+    let mine = MemoryScopeFilter::Personal {
+        principal_id: p1.clone(),
+        workspace_id: ws.clone(),
+    };
+    let (rows, total) = store
+        .list_memories(&mine, None, None, MemoryListOrder::UpdatedAt, 1, 50)
+        .await
+        .expect("mine list");
+    let mut got: Vec<i64> = rows.iter().map(|m| m.id).collect();
+    got.sort();
+    assert_eq!(got, {
+        let mut v = vec![n.id, p.id];
+        v.sort();
+        v
+    }, "mine = portable + pinned-here, no foreign origin, no strangers");
+    assert_eq!(total, 2);
+    let (rows, _) = store
+        .list_memories(
+            &MemoryScopeFilter::Personal {
+                principal_id: p2.clone(),
+                workspace_id: ws.clone(),
+            },
+            None,
+            None,
+            MemoryListOrder::UpdatedAt,
+            1,
+            50,
+        )
+        .await
+        .expect("stranger mine list");
+    assert_eq!(rows.iter().map(|m| m.id).collect::<Vec<_>>(), vec![s.id]);
+    assert!(!rows.iter().any(|m| m.id == f.id || m.id == n.id));
+
+    // Topic directory: live rows only, uncategorized bucket included.
+    let counts = store.topic_counts(&team).await.expect("topic counts");
+    assert_eq!(counts.len(), 3, "testing/deploy/uncategorized: {counts:?}");
+    for want in [
+        (Some("testing".to_string()), 1i64),
+        (Some("deploy".to_string()), 1),
+        (None, 1),
+    ] {
+        assert!(counts.contains(&want), "missing {want:?} in {counts:?}");
+    }
+
+    // Cleanup.
+    let pool = store.pool();
+    let _ = sqlx::query("DELETE FROM veda_memories WHERE scope_id IN (?, ?, ?)")
+        .bind(&ws)
+        .bind(&p1)
+        .bind(&p2)
+        .execute(pool)
+        .await;
+}
+
 /// Codex review round (2026-08-12): memory writes must commit their
 /// MemorySync heal task in the SAME transaction (the fs write-path
 /// invariant), and an outbox row with an event_type this binary doesn't

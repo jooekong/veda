@@ -43,6 +43,25 @@ function clearFsKey(workspaceId: string) {
   }
 }
 
+// Operator identity for the memory page (`X-Veda-Operator`). One per browser
+// tab and NOT per workspace — it names the person, who is the same everywhere.
+const OPERATOR_KEY = "veda.operator";
+function getOperator(): string | null {
+  try {
+    return sessionStorage.getItem(OPERATOR_KEY);
+  } catch {
+    return null;
+  }
+}
+function setOperator(op: string) {
+  try {
+    if (op) sessionStorage.setItem(OPERATOR_KEY, op);
+    else sessionStorage.removeItem(OPERATOR_KEY);
+  } catch {
+    // The identity bar simply stays empty when session storage is unavailable.
+  }
+}
+
 // ── Language state ────────────────────────────────────────────────────────
 type Lang = "zh" | "en";
 const LANG_KEY = "veda.lang";
@@ -155,6 +174,40 @@ const S = {
     filesDirectory: "目录",
     filesNotFound: "这个 workspace 不存在，或不是文件库。",
     filesTooLarge: "文件超过 50 MB 限制。",
+    btnMemory: "记忆",
+    memTabTeam: "团队记忆",
+    memTabDept: "部门记忆",
+    memTabMine: "我的记忆",
+    memIdentityLabel: "我的身份",
+    memIdentityPlaceholder: "wecom:企微id 或 emp:工号",
+    memIdentityHint: "「部门/我的」页签需要；只存在本浏览器标签页",
+    memIdentityApply: "确定",
+    memNeedIdentity: "先在上方填写身份，这个页签才可用。",
+    memTopics: "主题",
+    memTopicAll: "全部",
+    memUncategorized: "未分类",
+    memSearchPlaceholder: "搜索当前页签…",
+    memSearchBtn: "搜索",
+    memSearchResults: "搜索结果",
+    memClearSearch: "× 清除",
+    memAdd: "+ 添一条",
+    memAddPlaceholder: "一句话一条事实，能独立看懂",
+    memTopicPlaceholder: "主题（可选）",
+    memSave: "保存",
+    memSaved: "已保存。",
+    memDup: "相同内容已存在，未新增。",
+    memNeighborsHint: "已有相似记忆——考虑改旧条，别堆重复：",
+    memEdit: "改",
+    memDelete: "删",
+    memDeleteConfirm: "删除这条记忆？不可恢复。",
+    memEmpty: "这里还没有记忆。",
+    memCount: (n: number) => `共 ${n} 条`,
+    memPrev: "上一页",
+    memNext: "下一页",
+    memPortableGroup: "随身（跨项目生效）",
+    memPinnedGroup: "本项目",
+    memExpiry: "到期日（可选）",
+    memExpiresChip: "到期",
   },
   en: {
     tagline: "A programmable knowledge store.",
@@ -254,6 +307,40 @@ const S = {
     filesDirectory: "Directory",
     filesNotFound: "This workspace does not exist or is not a file workspace.",
     filesTooLarge: "This file exceeds the 50 MB limit.",
+    btnMemory: "Memory",
+    memTabTeam: "Team",
+    memTabDept: "Department",
+    memTabMine: "Mine",
+    memIdentityLabel: "My identity",
+    memIdentityPlaceholder: "wecom:<userid> or emp:<number>",
+    memIdentityHint: "Needed for the Department/Mine tabs; kept in this browser tab only",
+    memIdentityApply: "Apply",
+    memNeedIdentity: "Fill in your identity above to use this tab.",
+    memTopics: "Topics",
+    memTopicAll: "All",
+    memUncategorized: "Uncategorized",
+    memSearchPlaceholder: "Search this tab…",
+    memSearchBtn: "Search",
+    memSearchResults: "Search results",
+    memClearSearch: "× Clear",
+    memAdd: "+ Add one",
+    memAddPlaceholder: "One self-contained fact per memory",
+    memTopicPlaceholder: "Topic (optional)",
+    memSave: "Save",
+    memSaved: "Saved.",
+    memDup: "An identical memory already exists; nothing was added.",
+    memNeighborsHint: "Similar memories exist — consider updating one instead of piling duplicates:",
+    memEdit: "Edit",
+    memDelete: "Del",
+    memDeleteConfirm: "Delete this memory? This cannot be undone.",
+    memEmpty: "No memories here yet.",
+    memCount: (n: number) => `${n} total`,
+    memPrev: "Prev",
+    memNext: "Next",
+    memPortableGroup: "Portable (all projects)",
+    memPinnedGroup: "This project",
+    memExpiry: "Expiry date (optional)",
+    memExpiresChip: "expires",
   },
 } as const;
 
@@ -366,6 +453,63 @@ const datasetsApi = {
     api<Page<Dataset>>(`/v1/workspaces/${wsId}/datasets`, {}, vk).then(
       (p) => p.items,
     ),
+};
+
+// ── Memory API (browse page, docs/plans/agent-memory-m4a.md) ─────────────
+type MemoryItem = {
+  id: number;
+  scope: string;
+  origin_workspace_id?: string | null;
+  topic?: string | null;
+  kind: string;
+  content: string;
+  created_by: string;
+  created_at: string;
+  updated_by: string;
+  updated_at: string;
+  expires_at?: string | null;
+  score?: number | null;
+};
+type MemoryPage = { items: MemoryItem[]; total: number; page: number; size: number };
+type MemoryTopics = { topics: { topic: string | null; count: number }[] };
+
+function opHeaders(): Record<string, string> {
+  const op = getOperator();
+  return op ? { "X-Veda-Operator": op } : {};
+}
+
+const memoryApi = {
+  list: (wk: string, tab: string, topic: string | null, page: number) => {
+    let q = `tab=${tab}&page=${page}&size=50`;
+    if (topic !== null) q += `&topic=${encodeURIComponent(topic)}`;
+    return api<MemoryPage>(`/v1/memory/list?${q}`, { headers: opHeaders() }, wk);
+  },
+  topics: (wk: string, tab: string) =>
+    api<MemoryTopics>(`/v1/memory/topics?tab=${tab}`, { headers: opHeaders() }, wk),
+  search: (wk: string, tab: string, query: string) =>
+    api<{ items: MemoryItem[] }>(
+      `/v1/memory/search?query=${encodeURIComponent(query)}&scope=${tab}`,
+      { headers: opHeaders() },
+      wk,
+    ),
+  save: (wk: string, tab: string, content: string, topic: string, expiresAt?: string) =>
+    api<{ memory: MemoryItem; duplicate: boolean; neighbors: MemoryItem[] }>(
+      "/v1/memory",
+      {
+        method: "POST",
+        headers: opHeaders(),
+        body: JSON.stringify({ content, scope: tab, topic: topic || null, expires_at: expiresAt }),
+      },
+      wk,
+    ),
+  update: (wk: string, id: number, patch: { content?: string; topic?: string; expires_at?: string }) =>
+    api<MemoryItem>(
+      `/v1/memory/${id}`,
+      { method: "PATCH", headers: opHeaders(), body: JSON.stringify(patch) },
+      wk,
+    ),
+  remove: (wk: string, id: number) =>
+    api<unknown>(`/v1/memory/${id}`, { method: "DELETE", headers: opHeaders() }, wk),
 };
 
 type FsDirEntry = {
@@ -533,7 +677,9 @@ async function render() {
   }
   const r = currentRoute();
   const fsRoute = r.match(/^\/console\/fs\/([^/]+)$/);
+  const memRoute = r.match(/^\/console\/memory\/([^/]+)$/);
   if (fsRoute) await renderFsWorkspace(app, decodeURIComponent(fsRoute[1]));
+  else if (memRoute) await renderMemoryPage(app, decodeURIComponent(memRoute[1]));
   else if (r.startsWith("/console")) await renderConsole(app);
   else if (r.startsWith("/docs")) await renderDocs(app);
   else if (r.startsWith("/admin")) await renderAdmin(app);
@@ -714,6 +860,7 @@ function renderWsList(list: Workspace[], vk: string) {
         ${delBtn}`
         : `${keyBtns}
         <button data-act="files" data-id="${attr(w.id)}" class="text-sm border border-slate-300 px-3 py-1.5 rounded hover:bg-slate-50">${esc(L.btnFiles)}</button>
+        <button data-act="memory" data-id="${attr(w.id)}" class="text-sm border border-slate-300 px-3 py-1.5 rounded hover:bg-slate-50">${esc(L.btnMemory)}</button>
         ${delBtn}`;
       return `
     <div class="bg-white border border-slate-200 rounded-lg p-4 flex justify-between items-center gap-4">
@@ -737,6 +884,7 @@ function renderWsList(list: Workspace[], vk: string) {
       else if (act === "keys") keysModal(vk, id);
       else if (act === "datasets") datasetsModal(vk, id);
       else if (act === "files") location.hash = `#/console/fs/${encodeURIComponent(id)}`;
+      else if (act === "memory") location.hash = `#/console/memory/${encodeURIComponent(id)}`;
       else if (act === "delete") deleteWs(vk, id);
     });
   });
@@ -1380,3 +1528,395 @@ document.addEventListener("DOMContentLoaded", () => {
     render();
   });
 });
+
+// ── Memory browse page (docs/plans/agent-memory-m4a.md §1.3) ──────────────
+type MemTab = "team" | "dept" | "mine";
+
+async function renderMemoryPage(app: HTMLElement, workspaceId: string) {
+  const auth = getAuth();
+  const L = t();
+  if (!auth) {
+    app.innerHTML = `<p class="text-slate-600">${esc(L.noAccountHere)} <a href="#/" class="text-blue-600 underline">${esc(L.getStartedArrow)}</a></p>`;
+    return;
+  }
+
+  app.innerHTML = `<p class="text-slate-500">${esc(L.loading)}</p>`;
+  let workspace: Workspace | undefined;
+  try {
+    workspace = (await workspaces.list(auth.vk)).find((w) => w.id === workspaceId && w.kind === "fs");
+  } catch (e: any) {
+    app.innerHTML = `<p class="text-red-600">${esc(L.errorPrefix + e.message)}</p>`;
+    return;
+  }
+  if (!workspace) {
+    app.innerHTML = `<p class="text-red-600">${esc(L.filesNotFound)}</p>`;
+    return;
+  }
+
+  const key = getFsKey(workspaceId);
+  if (!key) {
+    // Same per-tab wk_ prompt as the files page — one key opens both.
+    app.innerHTML = `
+      <div class="max-w-lg mx-auto mt-10">
+        <a href="#/console" class="text-sm text-blue-600 hover:underline">${esc(L.filesBack)}</a>
+        <h1 class="text-xl font-bold mt-5 mb-1">${esc(L.filesKeyTitle)}</h1>
+        <p class="text-sm text-slate-500 mb-5">${esc(workspace.name)} · ${esc(L.btnMemory)}</p>
+        <p class="text-sm text-slate-600 mb-4">${esc(L.filesKeyHint)}</p>
+        <form id="mem-key-form">
+          <input id="mem-key" type="password" autocomplete="off" placeholder="${attr(L.filesKeyPlaceholder)}"
+            class="w-full border border-slate-300 rounded px-3 py-2 mb-3 focus:outline-none focus:border-slate-500">
+          <button class="w-full bg-slate-900 text-white px-4 py-2 rounded font-medium hover:bg-slate-700">${esc(L.filesOpen)}</button>
+        </form>
+      </div>`;
+    document.getElementById("mem-key-form")!.addEventListener("submit", (event) => {
+      event.preventDefault();
+      const entered = (document.getElementById("mem-key") as HTMLInputElement).value.trim();
+      if (!entered) return;
+      setFsKey(workspaceId, entered);
+      render();
+    });
+    return;
+  }
+
+  // Page state. topic: null = all, "" = the uncategorized bucket.
+  let tab: MemTab = "team";
+  let topic: string | null = null;
+  let page = 1;
+  let searchQuery: string | null = null;
+  // Close-neighbor hint from the last save, rendered inside the (rebuilt)
+  // add form so a successful save can still refresh the list (Codex F2).
+  let addHint = "";
+
+  app.innerHTML = `
+    <div class="flex flex-wrap justify-between items-start gap-3 mb-4">
+      <div>
+        <a href="#/console" class="text-sm text-blue-600 hover:underline">${esc(L.filesBack)}</a>
+        <h1 class="text-2xl font-bold mt-3">${esc(workspace.name)} · ${esc(L.btnMemory)}</h1>
+      </div>
+      <button id="mem-change-key" class="text-sm border border-slate-300 px-3 py-1.5 rounded hover:bg-slate-50">${esc(L.filesChangeKey)}</button>
+    </div>
+    <div class="flex flex-wrap items-center gap-2 mb-4 text-sm">
+      <label class="text-slate-600">${esc(L.memIdentityLabel)}</label>
+      <input id="mem-op" value="${attr(getOperator() || "")}" placeholder="${attr(L.memIdentityPlaceholder)}"
+        class="border border-slate-300 rounded px-2 py-1 w-64 font-mono text-xs focus:outline-none focus:border-slate-500">
+      <button id="mem-op-apply" class="border border-slate-300 px-2 py-1 rounded hover:bg-slate-50">${esc(L.memIdentityApply)}</button>
+      <span class="text-xs text-slate-400">${esc(L.memIdentityHint)}</span>
+    </div>
+    <div class="flex flex-wrap items-center gap-2 mb-4">
+      <div id="mem-tabs" class="flex gap-1"></div>
+      <div class="grow"></div>
+      <form id="mem-search-form" class="flex gap-1">
+        <input id="mem-search" placeholder="${attr(L.memSearchPlaceholder)}"
+          class="border border-slate-300 rounded px-2 py-1 text-sm w-56 focus:outline-none focus:border-slate-500">
+        <button class="text-sm border border-slate-300 px-3 py-1 rounded hover:bg-slate-50">${esc(L.memSearchBtn)}</button>
+      </form>
+    </div>
+    <div class="flex gap-4 items-start">
+      <nav id="mem-topics" class="w-44 shrink-0 bg-white border border-slate-200 rounded-lg p-2 text-sm"></nav>
+      <section class="grow bg-white border border-slate-200 rounded-lg min-w-0">
+        <div id="mem-body" class="text-sm"></div>
+      </section>
+    </div>
+  `;
+
+  document.getElementById("mem-change-key")!.addEventListener("click", () => {
+    clearFsKey(workspaceId);
+    render();
+  });
+  document.getElementById("mem-op-apply")!.addEventListener("click", () => {
+    setOperator((document.getElementById("mem-op") as HTMLInputElement).value.trim());
+    topic = null;
+    page = 1;
+    searchQuery = null;
+    addHint = "";
+    refresh();
+  });
+  document.getElementById("mem-search-form")!.addEventListener("submit", (e) => {
+    e.preventDefault();
+    const q = (document.getElementById("mem-search") as HTMLInputElement).value.trim();
+    if (!q) return;
+    searchQuery = q;
+    refresh();
+  });
+
+  const tabLabel = (x: MemTab) =>
+    x === "team" ? L.memTabTeam : x === "dept" ? L.memTabDept : L.memTabMine;
+
+  function renderTabs() {
+    const root = document.getElementById("mem-tabs")!;
+    root.innerHTML = (["team", "dept", "mine"] as MemTab[])
+      .map((x) => {
+        const needsOp = x !== "team" && !getOperator();
+        const active = x === tab;
+        const cls = active
+          ? "bg-slate-900 text-white"
+          : needsOp
+            ? "text-slate-400 border border-slate-200"
+            : "border border-slate-300 hover:bg-slate-50";
+        return `<button data-tab="${x}" class="text-sm px-3 py-1 rounded ${cls}">${esc(tabLabel(x))}</button>`;
+      })
+      .join("");
+    root.querySelectorAll("[data-tab]").forEach((el) =>
+      el.addEventListener("click", (e) => {
+        tab = (e.currentTarget as HTMLElement).dataset.tab as MemTab;
+        topic = null;
+        page = 1;
+        searchQuery = null;
+        addHint = "";
+        refresh();
+      }),
+    );
+  }
+
+  function fmtMeta(m: MemoryItem): string {
+    const by = m.updated_by.length > 12 ? m.updated_by.slice(0, 8) : m.updated_by;
+    const extra: string[] = [];
+    if (m.topic) extra.push(`<span class="px-1 rounded bg-slate-100">${esc(m.topic)}</span>`);
+    if (m.expires_at)
+      extra.push(
+        `<span class="px-1 rounded bg-amber-50 text-amber-700">${esc(L.memExpiresChip)} ${esc(m.expires_at.slice(0, 10))}</span>`,
+      );
+    if (typeof m.score === "number") extra.push(`<span>${m.score.toFixed(2)}</span>`);
+    return `<span class="font-mono">[mem:${m.id}]</span>
+      <span>${esc((m.updated_at || "").slice(0, 10))}</span>
+      <span>${esc(by)}</span>
+      <span class="px-1 rounded bg-slate-100">${esc(m.kind)}</span>
+      ${extra.join("\n")}`;
+  }
+
+  function rowHtml(m: MemoryItem): string {
+    return `
+      <div class="border-b border-slate-100 last:border-0 py-2 px-3" data-mid="${m.id}">
+        <div class="mem-view">
+          <div class="whitespace-pre-wrap break-words">${esc(m.content)}</div>
+          <div class="text-xs text-slate-400 mt-1 flex flex-wrap gap-x-2 items-center">
+            ${fmtMeta(m)}
+            <button data-act="edit" class="text-blue-600 hover:underline">${esc(L.memEdit)}</button>
+            <button data-act="del" class="text-red-600 hover:underline">${esc(L.memDelete)}</button>
+          </div>
+        </div>
+      </div>`;
+  }
+
+  function wireRows(container: HTMLElement, byId: Map<number, MemoryItem>) {
+    container.querySelectorAll("[data-mid]").forEach((rowEl) => {
+      const id = Number((rowEl as HTMLElement).dataset.mid);
+      const m = byId.get(id)!;
+      rowEl.querySelector('[data-act="del"]')?.addEventListener("click", async () => {
+        if (!confirm(L.memDeleteConfirm)) return;
+        try {
+          await memoryApi.remove(key!, id);
+          refresh();
+        } catch (e: any) {
+          alert(L.errorPrefix + e.message);
+        }
+      });
+      rowEl.querySelector('[data-act="edit"]')?.addEventListener("click", () => {
+        const view = rowEl.querySelector(".mem-view") as HTMLElement;
+        view.innerHTML = `
+          <textarea class="mem-edit-content w-full border border-slate-300 rounded px-2 py-1 text-sm" rows="2">${esc(m.content)}</textarea>
+          <div class="flex gap-2 mt-1 items-center">
+            <input class="mem-edit-topic border border-slate-300 rounded px-2 py-1 text-xs w-40" placeholder="${attr(L.memTopicPlaceholder)}" value="${attr(m.topic || "")}">
+            <input type="date" class="mem-edit-expiry border border-slate-300 rounded px-2 py-1 text-xs" title="${attr(L.memExpiry)}" value="${attr((m.expires_at || "").slice(0, 10))}">
+            <button class="mem-edit-save text-xs bg-slate-900 text-white px-2 py-1 rounded">${esc(L.memSave)}</button>
+            <button class="mem-edit-cancel text-xs border border-slate-300 px-2 py-1 rounded">${esc(L.cancel)}</button>
+          </div>`;
+        view.querySelector(".mem-edit-cancel")!.addEventListener("click", () => refresh());
+        view.querySelector(".mem-edit-save")!.addEventListener("click", async () => {
+          const content = (view.querySelector(".mem-edit-content") as HTMLTextAreaElement).value.trim();
+          const newTopic = (view.querySelector(".mem-edit-topic") as HTMLInputElement).value.trim();
+          const newExpiry = (view.querySelector(".mem-edit-expiry") as HTMLInputElement).value;
+          const patch: { content?: string; topic?: string; expires_at?: string } = {};
+          if (content && content !== m.content) patch.content = content;
+          if (newTopic && newTopic !== (m.topic || "")) patch.topic = newTopic;
+          // Set/change only — clearing expiry via PATCH is out by M1 decision.
+          if (newExpiry && newExpiry !== (m.expires_at || "").slice(0, 10))
+            patch.expires_at = `${newExpiry}T00:00:00Z`;
+          if (!Object.keys(patch).length) return refresh();
+          try {
+            await memoryApi.update(key!, id, patch);
+            refresh();
+          } catch (e: any) {
+            alert(L.errorPrefix + e.message);
+          }
+        });
+      });
+    });
+  }
+
+  function addFormHtml(): string {
+    return `
+      <form id="mem-add-form" class="border-b border-slate-200 p-3 bg-slate-50 rounded-t-lg">
+        <textarea id="mem-add-content" rows="2" placeholder="${attr(L.memAddPlaceholder)}"
+          class="w-full border border-slate-300 rounded px-2 py-1 text-sm focus:outline-none focus:border-slate-500"></textarea>
+        <div class="flex gap-2 mt-1 items-center">
+          <input id="mem-add-topic" placeholder="${attr(L.memTopicPlaceholder)}"
+            class="border border-slate-300 rounded px-2 py-1 text-xs w-40">
+          <input type="date" id="mem-add-expiry" title="${attr(L.memExpiry)}"
+            class="border border-slate-300 rounded px-2 py-1 text-xs">
+          <button class="text-xs bg-slate-900 text-white px-3 py-1 rounded">${esc(L.memAdd)}</button>
+          <span id="mem-add-msg" class="text-xs text-slate-500"></span>
+        </div>
+        <div id="mem-add-neighbors" class="text-xs text-amber-700 mt-1">${addHint}</div>
+      </form>`;
+  }
+
+  function wireAddForm() {
+    const form = document.getElementById("mem-add-form");
+    form?.addEventListener("submit", async (e) => {
+      e.preventDefault();
+      const contentEl = document.getElementById("mem-add-content") as HTMLTextAreaElement;
+      const topicEl = document.getElementById("mem-add-topic") as HTMLInputElement;
+      const msg = document.getElementById("mem-add-msg")!;
+      const content = contentEl.value.trim();
+      if (!content) return;
+      const expiryEl = document.getElementById("mem-add-expiry") as HTMLInputElement;
+      try {
+        const out = await memoryApi.save(
+          key!,
+          tab,
+          content,
+          topicEl.value.trim(),
+          expiryEl.value ? `${expiryEl.value}T00:00:00Z` : undefined,
+        );
+        if (out.duplicate) {
+          // Nothing changed — keep the typed text so the writer can rework it.
+          msg.textContent = L.memDup;
+          return;
+        }
+        // Always refresh so the new row is visible (save returns top-3
+        // neighbors unconditionally — suppressing the refresh on any
+        // neighbor would hide almost every save). Only CLOSE neighbors are
+        // worth the "update the old row instead" hint; the rebuilt form
+        // renders it from `addHint`.
+        const close = out.neighbors.filter((n) => (n.score ?? 0) >= 0.85);
+        addHint = close.length
+          ? `${esc(L.memNeighborsHint)}<br>` +
+            close
+              .map((n) => `<span class="font-mono">[mem:${n.id}]</span> ${esc(n.content)}`)
+              .join("<br>")
+          : "";
+        refresh();
+      } catch (e: any) {
+        msg.textContent = L.errorPrefix + e.message;
+      }
+    });
+  }
+
+  async function refreshTopics() {
+    const root = document.getElementById("mem-topics")!;
+    try {
+      const { topics } = await memoryApi.topics(key!, tab);
+      const item = (label: string, value: string | null, count: number | null) => {
+        const active = value === topic;
+        return `<button data-topic="${value === null ? "*all*" : attr(value)}"
+          class="block w-full text-left px-2 py-1 rounded ${active ? "bg-slate-900 text-white" : "hover:bg-slate-50"}">
+          ${esc(label)}${count === null ? "" : ` <span class="text-xs opacity-60">(${count})</span>`}</button>`;
+      };
+      root.innerHTML =
+        `<div class="text-xs text-slate-400 px-2 pb-1">${esc(L.memTopics)}</div>` +
+        item(L.memTopicAll, null, null) +
+        topics
+          .map((tc) => item(tc.topic === null ? L.memUncategorized : tc.topic, tc.topic === null ? "" : tc.topic, tc.count))
+          .join("");
+      root.querySelectorAll("[data-topic]").forEach((el) =>
+        el.addEventListener("click", (e) => {
+          const v = (e.currentTarget as HTMLElement).dataset.topic!;
+          topic = v === "*all*" ? null : v;
+          page = 1;
+          searchQuery = null;
+          refresh();
+        }),
+      );
+    } catch (e: any) {
+      root.innerHTML = `<p class="text-xs text-red-600 px-2">${esc(e.message)}</p>`;
+    }
+  }
+
+  function renderList(body: HTMLElement, resp: MemoryPage) {
+    const byId = new Map(resp.items.map((m) => [m.id, m] as [number, MemoryItem]));
+    let rows: string;
+    if (tab === "mine") {
+      // §15.2: portable prefs vs project-pinned notes, grouped by origin.
+      const portable = resp.items.filter((m) => !m.origin_workspace_id);
+      const pinned = resp.items.filter((m) => !!m.origin_workspace_id);
+      const group = (label: string, xs: MemoryItem[]) =>
+        xs.length
+          ? `<div class="text-xs text-slate-400 px-3 pt-2">${esc(label)}</div>` + xs.map(rowHtml).join("")
+          : "";
+      rows = group(L.memPortableGroup, portable) + group(L.memPinnedGroup, pinned);
+    } else {
+      rows = resp.items.map(rowHtml).join("");
+    }
+    if (!resp.items.length) rows = `<p class="text-slate-500 p-4">${esc(L.memEmpty)}</p>`;
+    const lastPage = Math.max(1, Math.ceil(resp.total / resp.size));
+    body.innerHTML =
+      addFormHtml() +
+      rows +
+      `<div class="flex items-center gap-3 p-3 text-xs text-slate-500 border-t border-slate-100">
+        <span>${esc(L.memCount(resp.total))}</span>
+        <div class="grow"></div>
+        ${resp.page > 1 ? `<button id="mem-prev" class="border border-slate-300 px-2 py-1 rounded hover:bg-slate-50">${esc(L.memPrev)}</button>` : ""}
+        <span>${resp.page}/${lastPage}</span>
+        ${resp.page < lastPage ? `<button id="mem-next" class="border border-slate-300 px-2 py-1 rounded hover:bg-slate-50">${esc(L.memNext)}</button>` : ""}
+      </div>`;
+    wireAddForm();
+    wireRows(body, byId);
+    document.getElementById("mem-prev")?.addEventListener("click", () => {
+      page -= 1;
+      refresh();
+    });
+    document.getElementById("mem-next")?.addEventListener("click", () => {
+      page += 1;
+      refresh();
+    });
+  }
+
+  function renderSearch(body: HTMLElement, items: MemoryItem[]) {
+    const byId = new Map(items.map((m) => [m.id, m] as [number, MemoryItem]));
+    body.innerHTML =
+      `<div class="flex items-center gap-2 p-3 border-b border-slate-200 text-xs text-slate-500">
+        <span>${esc(L.memSearchResults)}: ${esc(searchQuery!)}</span>
+        <button id="mem-clear-search" class="text-blue-600 hover:underline">${esc(L.memClearSearch)}</button>
+      </div>` +
+      (items.length ? items.map(rowHtml).join("") : `<p class="text-slate-500 p-4">${esc(L.memEmpty)}</p>`);
+    document.getElementById("mem-clear-search")!.addEventListener("click", () => {
+      searchQuery = null;
+      (document.getElementById("mem-search") as HTMLInputElement).value = "";
+      refresh();
+    });
+    wireRows(body, byId);
+  }
+
+  async function refresh() {
+    renderTabs();
+    const body = document.getElementById("mem-body")!;
+    if (tab !== "team" && !getOperator()) {
+      document.getElementById("mem-topics")!.innerHTML = "";
+      body.innerHTML = `<p class="text-slate-500 p-4">${esc(L.memNeedIdentity)}</p>`;
+      return;
+    }
+    body.innerHTML = `<p class="text-slate-500 p-4">${esc(L.loading)}</p>`;
+    refreshTopics();
+    try {
+      if (searchQuery !== null) {
+        let items = (await memoryApi.search(key!, tab, searchQuery)).items;
+        // `scope=mine` search is the full personal domain by design (agent
+        // semantics, M1). This page's mine tab is a this-workspace view, so
+        // keep search consistent with the list: drop foreign-origin rows.
+        // Own-data filtering only — not a security boundary.
+        if (tab === "mine")
+          items = items.filter(
+            (m) => !m.origin_workspace_id || m.origin_workspace_id === workspaceId,
+          );
+        renderSearch(body, items);
+      } else {
+        renderList(body, await memoryApi.list(key!, tab, topic, page));
+      }
+    } catch (e: any) {
+      body.innerHTML = `<p class="text-red-600 p-4">${esc(L.errorPrefix + e.message)}</p>`;
+    }
+  }
+
+  refresh();
+}

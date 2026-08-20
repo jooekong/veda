@@ -545,6 +545,15 @@ pub trait VectorStore: Send + Sync {
 // no bypass queries), which is what makes the GateMem assertions
 // (cross-domain leak = 0, deleted recall = 0) deterministic.
 
+/// Browse-page sort orders (M4a). Recency of editing for the wiki view,
+/// recency of retrieval for the admin heat view (MySQL sorts NULL smallest,
+/// so never-retrieved rows sink under LastUsedAt DESC).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MemoryListOrder {
+    UpdatedAt,
+    LastUsedAt,
+}
+
 #[async_trait]
 pub trait MemoryStore: Send + Sync {
     /// Insert; on UNIQUE(scope, content_hash) conflict return the existing
@@ -584,6 +593,27 @@ pub trait MemoryStore: Send + Sync {
     /// Bump last_used_at on retrieval hits. Must NOT touch updated_at
     /// (edit audit).
     async fn touch_memories(&self, ids: &[i64]) -> Result<()>;
+
+    /// Browse-page enumeration (M4a): expired rows filtered SQL-side, same
+    /// scope discipline as every other read. `topic` Some("") selects the
+    /// uncategorized bucket (topic IS NULL). Returns one page plus the
+    /// total live count under the same filter.
+    async fn list_memories(
+        &self,
+        filter: &MemoryScopeFilter,
+        topic: Option<&str>,
+        kind: Option<MemoryKind>,
+        order: MemoryListOrder,
+        page: u32,
+        size: u32,
+    ) -> Result<(Vec<Memory>, i64)>;
+
+    /// Topic directory for one domain: (topic, live row count), biggest
+    /// first. None = the uncategorized bucket.
+    async fn topic_counts(
+        &self,
+        filter: &MemoryScopeFilter,
+    ) -> Result<Vec<(Option<String>, i64)>>;
 
     /// Identity lookup: the (source, external_id) row in
     /// veda_principal_identities joined to its principal. None = never seen.
