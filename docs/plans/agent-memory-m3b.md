@@ -1,8 +1,9 @@
 # Agent/团队记忆 M3b — qa_log 自动摄入
 
 > 施工图。架构定稿 [`../design/agent-memory.md`](../design/agent-memory.md)
-> §3/§13/§16（M3 摄入规则）；身份前置在 [`agent-memory-m3a.md`](agent-memory-m3a.md)
-> （操作者解析 `wecom:<userid>` → principal）。**执行顺序在 M4a（浏览页）之后**——
+> §3/§13/§16（M3 摄入规则）；身份前置在
+> [`agent-memory-m3a.md`](../archive/plans/agent-memory-m3a.md)
+> （操作者解析 `wecom:<userid>` → principal，已上线测试环境并归档）。**执行顺序在 M4a（浏览页）之后**——
 > 浏览页是摄入质量的质检面，先有质检面再开自动写路径（顺序对调的完整理由见 m4a §0）。
 
 ## 0. 背景与目标

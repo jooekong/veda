@@ -1,8 +1,8 @@
 # Agent/团队记忆 M4a — 记忆浏览页最小版
 
 > 施工图。架构定稿 [`../design/agent-memory.md`](../design/agent-memory.md) §15/§16；
-> 上一篇 [`agent-memory-m3a.md`](agent-memory-m3a.md)（操作者身份 + 部门域 + hybrid，
-> 已实现待部署）。**执行顺序在 M3b（qa_log 摄入）之前**，偏离 design §16 的
+> 上一篇 [`agent-memory-m3a.md`](../archive/plans/agent-memory-m3a.md)（操作者身份 +
+> 部门域 + hybrid，已上线测试环境并归档）。**执行顺序在 M3b（qa_log 摄入）之前**，偏离 design §16 的
 > M3→M4 顺序，理由见 §0。
 
 ## 0. 背景与目标

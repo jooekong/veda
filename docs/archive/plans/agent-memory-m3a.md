@@ -151,6 +151,24 @@ veda_depts 名录表；gateway（passport）操作者源——等平台侧真实
   hybrid 两个子请求，「不下推」仅指新增过滤维度（§1.5、§5）。
 - 附带建议 list 端点 YAGNI → 采纳，移 M4（§5）。
 
+## 执行记录（2026-08-20 归档）
+
+- **实现**：`614a1c7`（feat(memory): M3a），两轮 Codex 评审 findings 全部裁决入档（下方两节）。
+- **部署**：2026-08-19 `.89` build（sha `5350fb47…`，16:49），16:51 `.89` / 16:53 `.161`
+  swap+restart，tunnel `.89` 同批重启；M3a 门禁（DROP principals/identities +
+  TRUNCATE memories + drop collection + purge `memory_sync`）已在 veda_it 执行
+  （runbook 撞号注记即当日实测）。**生产 `.85` 未部署**，随下次发版窗口（连同 M2a）。
+- **冒烟**（2026-08-20，server API 层七项全过，测试环境真实依赖）：
+  操作者头格式非法 → 400；dept 写入按 identity-only 正确拒绝（`[people]` 未配置）；
+  `wecom:`/`emp:` 两入口分立（identity-only 预期）；mine 域 save/search 经 wecom
+  操作者可用；answer 带操作者引用个人记忆（citation `scope:"mine"`）；同问无操作者
+  **零个人域泄露**；团队记忆 citation `scope:"team"`。tunnel 真实流量：2026-08-20
+  私聊三问 `answer ok`（chattype=single 带操作者头路径，零报错）；群聊未有真实流量——
+  server 侧无操作者行为已冒烟，tunnel 侧不带头是 fail-closed 缺省（R4），风险最低方向。
+- **DoD 偏差**：「私聊引用部门记忆」「工号两入口解析为同一人」两项**正向**验证被
+  `[people]` 未配置阻塞（SSO 契约待接，identity-only 是拍板的长期形态）——e2e 已用
+  stub 目录覆盖，真实环境正向验证顺延到 `[people]` 接入时补两条冒烟。
+
 ## 评审记录（2026-08-18 第二轮，Codex 原生 review 实现 diff，4 P1 + 4 P2 全采纳）
 
 - **R1 self 与 mine 未分歧（P1）→ 修**：plan §1.3 写了、实现漏了。`MemoryActor` 加
